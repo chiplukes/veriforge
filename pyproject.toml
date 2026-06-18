@@ -1,0 +1,187 @@
+[project]
+name = "veriforge"
+dynamic = ["version"]
+description = "Parse, analyze, simulate, and generate Verilog/SystemVerilog from Python."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["Verilog", "Lark", "Parse"]
+authors = [
+    {name = "Chip Lukes", email = "34627158+chiplukes@users.noreply.github.com" },
+]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "lark",
+    "rich",
+    "treelib",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "veriforge._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = [".", "src"]
+
+[tool.setuptools.package-data]
+"veriforge.sim.compiled" = ["templates/*.pxi"]
+
+[project.urls]
+Homepage = "https://github.com/chiplukes/veriforge"
+Changelog = "https://github.com/chiplukes/veriforge/releases"
+Issues = "https://github.com/chiplukes/veriforge/issues"
+CI = "https://github.com/chiplukes/veriforge/actions"
+
+[project.optional-dependencies]
+test = ["pytest","pytest-cov","pytest-xdist","filelock"]
+dev = ["pre-commit","vulture"]
+bench = ["cython","setuptools","myhdl","filelock"]
+lsp = [
+    "pygls>=1.3",
+    "intervaltree>=3.1",
+]
+
+[project.scripts]
+veriforge = "veriforge.__main__:main"
+veriforge-lsp = "veriforge_lsp.__main__:main"
+
+
+[tool.pytest.ini_options]
+# Parallel execution: uv run pytest -n auto          (uses all CPU cores)
+#                    uv run pytest -n 4               (use 4 workers)
+# Full slow suite:   uv run pytest --run-slow         (includes TestWideSignalExternalIO ~3800 tests)
+# Combined:          uv run pytest -n auto --run-slow
+# Note: Cython cache is content-hash keyed per module; parallel workers are safe
+#       because each unique parametrize row compiles a distinct module name.
+
+
+[tool.ruff]
+line-length = 120
+exclude = ["third_party", "benchmarks", "examples"]
+
+[tool.ruff.lint]
+select = [
+    "A",   # flake8-builtins
+    "B",   # flake8-bugbear
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort
+    "PL",  # Pylint
+    "RUF", # Ruff-specific rules
+    "S",   # flake8-bandit
+]
+ignore = [
+    "E501",      # line too long (formatter handles this)
+    "I001",      # import sort order
+    # Intentional lazy-import pattern throughout codebase (deferred loading,
+    # circular-import avoidance) — not worth enforcing at module level:
+    "PLC0415",
+    # Re-exports and TYPE_CHECKING conditional imports:
+    "F401",
+    # TYPE_CHECKING guards — ruff cannot resolve these statically:
+    "F821",
+    # Complexity metrics tracked as a separate refactor item (plan Item 4):
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+    "PLR5501", "PLR1730", "PLR2004",
+    # Other pylint patterns — low priority:
+    "PLW2901",   # loop variable overwritten by assignment
+    "PLW0603",   # global statement
+    "PLW1641",   # __eq__ defined without __hash__
+    "PLR1714",   # membership test simplification
+    # Bandit security checks for trusted subprocess/try-except in internal tools:
+    "S101",      # assert (used in internal invariant checks)
+    "S110",      # try/except/pass
+    "S112",      # try/except/continue
+    "S603",      # subprocess untrusted input
+    "S607",      # partial executable path
+    # Style — low priority:
+    "E741",      # ambiguous variable name
+    "F841",      # local variable assigned but never used
+    "RUF002",    # ambiguous docstring character
+    "RUF003",    # ambiguous comment character
+    "RUF100",    # unused noqa (stale after ignores above)
+    "B905",      # zip() without explicit strict=
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py"                       = ["F403"]
+"tests/**/*.py"                     = ["S311", "S101", "PLR0915", "PLR0913", "PLR2004", "RUF012", "RUF059"]
+"tests/test_sim/test_compiled.py"   = ["RUF005", "RUF034", "RUF043", "F811", "E402"]
+"tests/test_sim/test_sim_sv.py"     = ["E402"]
+"tests/test_model/test_module.py"   = ["F811"]
+"tools/**/*.py"                     = ["S603", "S607", "S110", "S112"]
+
+[dependency-groups]
+dev = [
+    "cython>=3.2.4",
+    "filelock>=3.0",
+    "mypy>=2.1.0",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.12.0",
+    "setuptools>=82.0.0",
+]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = false
+exclude = ["tests/", "examples/"]
+
+# Cython-generated and VM glue code — suppress errors; these are auto-generated
+# or have deep C-extension interop that mypy cannot analyse.
+[[tool.mypy.overrides]]
+module = [
+    "veriforge.sim.vm.*",
+    "veriforge.sim.compiled.*",
+]
+ignore_errors = true
+
+# Files that use patterns mypy cannot analyse without a full annotation pass:
+# isinstance dispatch via type() identity checks, DSL operator overloading (<<),
+# and deeply untyped AST traversal that predates type annotations.
+[[tool.mypy.overrides]]
+module = [
+    "veriforge.sim.executor",
+    "veriforge.sim.evaluator",
+    "veriforge.sim.elaborate",
+    "veriforge.sim.event_queue",
+    "veriforge.sim.scheduler",
+    "veriforge.sim.testbench",
+    "veriforge.sim.bench.lowering",
+    "veriforge.sim.step_harness",
+    "veriforge.dsl.builder",
+    "veriforge.dsl.testbench",
+    "veriforge.dsl.ram",
+    "veriforge.dsl.lib.dsp",
+    "veriforge.dsl.lib.codec",
+    "veriforge.dsl.lib.fifo",
+    "veriforge.dsl.lib.cdc",
+    "veriforge.refactor._pull_up_engine",
+    "veriforge.refactor.hierarchy_extract",
+    "veriforge.refactor.hierarchy_boundary",
+    "veriforge.lark_file.parse_metadata",
+    "veriforge.lark_file.gen_tree",
+]
+ignore_errors = true
+
+# veriforge_lsp uses untyped pygls internals — suppress until annotated.
+[[tool.mypy.overrides]]
+module = ["veriforge_lsp.*"]
+ignore_errors = true

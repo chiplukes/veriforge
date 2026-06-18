@@ -1,0 +1,6 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["src", "veriforge_lsp", "tests"],
+  "extraPaths": ["src"]
+}
