@@ -42,6 +42,7 @@ version = {attr = "veriforge._version.__version__"}
 where = [".", "src"]
 
 [tool.setuptools.package-data]
+"veriforge" = ["lark_file/*.lark"]
 "veriforge.sim.compiled" = ["templates/*.pxi"]
 
 [project.urls]
