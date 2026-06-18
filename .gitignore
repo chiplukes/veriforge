@@ -16,6 +16,7 @@ reports
 .copilot_tmp/*
 _vt*
 .vtc*/
+.peovim/*
 
 *.so
 *.pyd

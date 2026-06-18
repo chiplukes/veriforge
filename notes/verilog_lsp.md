@@ -233,10 +233,13 @@ Per-project config at `<workspace_root>/.veriforge_lsp.json`:
 
 ## Requirements and entry points
 
-Install the optional LSP dependencies before running the server:
+The LSP server dependencies (`pygls`, `intervaltree`) are included in the main
+package — no extras needed. Install veriforge normally:
 
 ```bash
-uv pip install -e ".[lsp]"
+uv tool install veriforge        # as a standalone tool (recommended for editors)
+# or
+uv pip install veriforge         # into the current environment
 ```
 
 The package exposes two equivalent entry points:
@@ -274,9 +277,6 @@ This enables 2D containment queries without a 2D tree (good for files < 10,000 c
 ## Running
 
 ```bash
-# Install with LSP extras
-uv pip install -e ".[lsp]"
-
 # Start server (stdio mode, used by editor clients)
 uv run python -m veriforge_lsp
 # or
@@ -286,5 +286,5 @@ uv run veriforge-lsp
 ## Tests
 
 ```bash
-uv run --extra test --extra lsp python -m pytest tests/test_lsp/ -q
+uv run --extra test python -m pytest tests/test_lsp/ -q
 ```

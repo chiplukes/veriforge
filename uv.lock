@@ -840,7 +840,9 @@ wheels = [
 name = "veriforge"
 source = { editable = "." }
 dependencies = [
+    { name = "intervaltree" },
     { name = "lark" },
+    { name = "pygls" },
     { name = "rich" },
     { name = "treelib" },
 ]
@@ -855,10 +857,6 @@ bench = [
 dev = [
     { name = "pre-commit" },
     { name = "vulture" },
-]
-lsp = [
-    { name = "intervaltree" },
-    { name = "pygls" },
 ]
 test = [
     { name = "filelock" },
@@ -884,11 +882,11 @@ requires-dist = [
     { name = "cython", marker = "extra == 'bench'" },
     { name = "filelock", marker = "extra == 'bench'" },
     { name = "filelock", marker = "extra == 'test'" },
-    { name = "intervaltree", marker = "extra == 'lsp'", specifier = ">=3.1" },
+    { name = "intervaltree", specifier = ">=3.1" },
     { name = "lark" },
     { name = "myhdl", marker = "extra == 'bench'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pygls", marker = "extra == 'lsp'", specifier = ">=1.3" },
+    { name = "pygls", specifier = ">=1.3" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "pytest-xdist", marker = "extra == 'test'" },

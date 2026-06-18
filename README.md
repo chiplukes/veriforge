@@ -106,6 +106,8 @@ for w in lint_design(design):
 - Lark
 - Rich
 - treelib
+- pygls (LSP server)
+- intervaltree (LSP server)
 
 ### PyPy Support (Optional — ~4x Simulation Speedup)
 
@@ -114,7 +116,7 @@ approximately **4x faster simulation** compared to CPython thanks to JIT
 compilation, with zero code changes required.
 
 1. Install PyPy 3.10+ from https://www.pypy.org/download.html
-2. Install dependencies: `pypy3 -m pip install lark rich treelib`
+2. Install dependencies: `pypy3 -m pip install lark rich treelib pygls intervaltree`
 3. Run: `pypy3 -m veriforge ...`
 
 ### Install with uv (recommended)
