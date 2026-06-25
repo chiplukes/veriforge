@@ -407,6 +407,54 @@ with bench.run():
 
 See [bench_usage.md](simulation/bench_usage.md) for the full `Testbench` proxy API.
 
+### Worked example: AXI-Stream skid buffer
+
+`examples/axis_skid_buffer/` shows the full workflow end-to-end.  The DUT
+(`axis_skid_buf.v`) is a single-register AXI-Stream pipeline stage with one
+slave port (`s_axis`) and one master port (`m_axis`).
+
+**Inspect the plan:**
+
+```bash
+uv run veriforge generate-python-testbench \
+    --file examples/axis_skid_buffer/axis_skid_buf.v \
+    --explain-plan
+```
+
+**Generate the scaffold:**
+
+```bash
+uv run veriforge generate-python-testbench \
+    --file examples/axis_skid_buffer/axis_skid_buf.v \
+    --enhanced --style=bench \
+    --output /tmp/test_skid_scaffold.py
+```
+
+**The filled-in testbench** (`examples/axis_skid_buffer/test_axis_skid_buf.py`)
+demonstrates two patterns:
+
+```python
+# Pre-load all frames first (no clock steps), then drain independently.
+for frame_data in FRAMES:
+    s_axis.put(frame_data)          # queues frame; tlast=1 set automatically on last beat
+for expected_data in FRAMES:
+    m_axis.expect(expected_data, timeout=200)  # steps clock until frame arrives
+
+# Back-pressure: hold tready low ~33% of cycles to stress the DUT.
+m_axis.pause = PauseGenerator(1, 3, seed=42)
+```
+
+**Run it:**
+
+```bash
+uv run python examples/axis_skid_buffer/test_axis_skid_buf.py
+uv run python examples/axis_skid_buffer/test_axis_skid_buf.py --vcd build/skid.vcd
+```
+
+For a step-by-step explanation of each part see
+`examples/axis_skid_buffer/README.md` and
+[user_guide.md §11](user_guide.md#11-testbench-generation).
+
 ## 9) Convert parsed Verilog into DSL code
 
 ```python

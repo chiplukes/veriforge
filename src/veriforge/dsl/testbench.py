@@ -1194,15 +1194,24 @@ def _bench_iface_stub_lines(bindings: list[Any]) -> list[str]:
             [
                 "",
                 "",
-                f"def drive_{ident}(bench: Testbench) -> None:",
+                f"def drive_{ident}(bench: Testbench) -> list[list[int]]:",
                 f'    """Drive the {b.prefix!r} AXI-Stream input (DUT-slave).',
                 "",
                 f"    Domain: {b.domain_name!r}",
+                "",
+                "    Returns the list of frames that were queued so that checkers can",
+                "    derive expected output from the same stimulus data.",
                 '    """',
                 f"    iface = bench.iface({b.prefix!r})",
+                "    # Optional: add random source gaps (hold tvalid low ~25% of cycles).",
+                "    # iface.pause = PauseGenerator(1, 4)",
                 f"    # TODO: replace with real stimulus for {b.prefix!r}.",
-                "    # Sideband kwargs: dest=..., tid=..., user=..., last_user=..., keep=..., last=...",
-                "    iface.put([0x00, 0x01, 0x02, 0x03])",
+                "    # tlast=1 is set on the last beat automatically (override with last=[...] if needed).",
+                "    # Other sideband kwargs: dest=..., tid=..., user=..., last_user=..., keep=...",
+                "    frames = [[0x00, 0x01, 0x02, 0x03]]",
+                "    for f in frames:",
+                "        iface.put(f)",
+                "    return frames",
             ]
         )
 
@@ -1212,15 +1221,31 @@ def _bench_iface_stub_lines(bindings: list[Any]) -> list[str]:
             [
                 "",
                 "",
-                f"def expect_{ident}(bench: Testbench) -> None:",
+                f"def expect_{ident}(bench: Testbench, sent: list[list[int]]) -> None:",
                 f'    """Read and check the {b.prefix!r} AXI-Stream output (DUT-master).',
                 "",
                 f"    Domain: {b.domain_name!r}",
+                "",
+                "    Args:",
+                "        sent: frames that were queued on the source interface(s). Used to",
+                "            compute expected output — replace the identity transform below",
+                "            with whatever function this DUT applies to the data.",
                 '    """',
                 f"    iface = bench.iface({b.prefix!r})",
-                "    # TODO: replace with `iface.expect([...], dest=..., tid=..., user=..., last_user=...)`.",
-                "    frame = iface.get(timeout=200)",
-                f'    print(f"received {b.prefix}:", list(frame.data))',
+                "    # Optional: add random back-pressure (hold tready low ~25% of cycles).",
+                "    # iface.pause = PauseGenerator(1, 4)",
+                "    for sent_frame in sent:",
+                "        # TODO: transform sent_frame into the expected output if the DUT modifies data.",
+                "        # Examples:",
+                "        #   passthrough:    expected = sent_frame",
+                "        #   byte packer:    expected = pack_pixels(sent_frame)",
+                "        #   frame splitter: call get() multiple times per sent_frame",
+                "        expected = sent_frame  # replace with real transform",
+                "        frame = iface.get(timeout=200)",
+                "        assert list(frame.data) == expected, (",
+                f'            f"received {b.prefix}: {{list(frame.data)!r}}, expected {{expected!r}}"',
+                "        )",
+                f'        print(f"received {b.prefix}:", list(frame.data))',
             ]
         )
 
@@ -1321,6 +1346,8 @@ def _bench_iface_stub_lines(bindings: list[Any]) -> list[str]:
                 f"    Domain: {b.domain_name!r}",
                 '    """',
                 f"    iface = bench.iface({b.prefix!r})",
+                "    # Optional: add random source gaps (hold valid low ~25% of cycles).",
+                "    # iface.pause = PauseGenerator(1, 4)",
                 f"    # TODO: replace with real stimulus for {b.prefix!r}.",
                 "    # Pass `sideband={'name': value, ...}` to drive extra bundle signals.",
                 "    iface.write([0x00, 0x01, 0x02, 0x03])",
@@ -1339,6 +1366,8 @@ def _bench_iface_stub_lines(bindings: list[Any]) -> list[str]:
                 f"    Domain: {b.domain_name!r}",
                 '    """',
                 f"    iface = bench.iface({b.prefix!r})",
+                "    # Optional: add random back-pressure (hold ready low ~25% of cycles).",
+                "    # iface.pause = PauseGenerator(1, 4)",
                 "    # TODO: replace with `iface.expect_sequence([...])` for hard checks.",
                 "    for _ in range(4):",
                 "        data, sideband = iface.get(timeout=200)",
@@ -1418,19 +1447,28 @@ def _bench_main_body_lines(  # noqa: PLR0912
         "    parser.add_argument(",
         '        "--vcd",',
         "        type=Path,",
-        "        default=None,",
-        '        help="Optional VCD output path. Captures every top-level DUT signal.",',
+        f"        default=Path({(module_name + '.vcd')!r}),",
+        '        help="VCD output path (default: %(default)s). Set to None in source to disable.",',
+        "    )",
+        "    parser.add_argument(",
+        '        "--engine",',
+        '        default="reference",',
+        '        choices=["reference", "vm", "vm-fast"],',
+        '        help=(',
+        '            "Simulation engine (default: %(default)s). "',
+        '            "\'vm\' is ~5x faster; \'vm-fast\' ~10x (requires Cython build). "',
+        '            "For native speed regenerate with: veriforge generate-python-testbench --engine compiled"',
+        "        ),",
         "    )",
         "    args = parser.parse_args()",
         "",
-        "    bench = build_bench()",
+        "    bench = build_bench(engine=args.engine)",
         '    print("Discovered testbench plan:\\n")',
         "    print(bench.plan.summary())",
         "    print()",
         "",
         "    with bench.run(vcd=args.vcd):",
-        "        if args.vcd is not None:",
-        '            print(f"VCD tracing -> {args.vcd}\\n")',
+        '        print(f"VCD tracing -> {args.vcd}\\n")',
         "        bench.reset_all()",
         "",
         "        # TODO: orchestrate stimulus across domains.",
@@ -1470,10 +1508,66 @@ def _bench_main_body_lines(  # noqa: PLR0912
         lines.append(f"        axi_lite_resp_{_identifier(b.prefix)}(bench)")
     for b in axi4_masters:
         lines.append(f"        axi4_resp_{_identifier(b.prefix)}(bench)")
-    for b in axis_slaves:
-        lines.append(f"        drive_{_identifier(b.prefix)}(bench)")
-    for b in axis_masters:
-        lines.append(f"        expect_{_identifier(b.prefix)}(bench)")
+
+    if axis_slaves:
+        # Declare per-source accumulators that collect what was sent.
+        for b in axis_slaves:
+            lines.append(f"        sent_{_identifier(b.prefix)}: list[list[int]] = []")
+        # Pre-load all input frames (no clock steps yet) and record what was sent.
+        # The source drives beats automatically as the sim clock steps inside get().
+        lines.extend(
+            [
+                "        # TODO: set NUM_FRAMES to the number of input packets to send.",
+                "        NUM_FRAMES = 1",
+                "        for _i in range(NUM_FRAMES):",
+                *[
+                    f"            sent_{_identifier(b.prefix)}.extend(drive_{_identifier(b.prefix)}(bench))"
+                    for b in axis_slaves
+                ],
+            ]
+        )
+        # If there are non-AXIS outputs (AXI4, AXI-Lite, membus) that the stimulus
+        # feeds into, add a commented cross-check block as a starting point.
+        has_non_axis_output = bool(axi4_masters or axi_lite_masters or membus_masters)
+        if has_non_axis_output and not axis_masters:
+            first_slave_var = f"sent_{_identifier(axis_slaves[0].prefix)}"
+            lines.extend(
+                [
+                    "        # Cross-protocol check: compare sent frames against what arrived at the",
+                    "        # non-AXIS output(s). Access the output interface *after* the simulation",
+                    "        # has consumed all inputs (use bench.step(N) to let it drain).",
+                    "        bench.step(500)  # TODO: tune cycle budget",
+                    "        # Example for an AXI4 DMA sink:",
+                    f"        # expected_bytes = list(itertools.chain.from_iterable({first_slave_var}))",
+                    "        # iface = bench.iface('m_axi')  # TODO: replace with real interface name",
+                    "        # for i, b in enumerate(expected_bytes):",
+                    "        #     assert iface.memory[BASE_ADDR + i] == b, (",
+                    "        #         f'DMA mismatch at offset {i}: got {iface.memory[BASE_ADDR+i]:#x}, want {b:#x}'",
+                    "        #     )",
+                ]
+            )
+
+    if axis_slaves and axis_masters:
+        # Wire each master checker to the sent data it needs to derive expected output.
+        # For a single source, all masters receive the same sent frames.
+        # For multiple sources, adjust which sent_* variable(s) are passed.
+        if len(axis_slaves) == 1:
+            sent_arg = f"sent_{_identifier(axis_slaves[0].prefix)}"
+            for b in axis_masters:
+                lines.append(f"        expect_{_identifier(b.prefix)}(bench, {sent_arg})")
+        else:
+            for b in axis_masters:
+                # Default: pass first slave's data. TODO: adjust for your routing logic.
+                sent_arg = f"sent_{_identifier(axis_slaves[0].prefix)}"
+                lines.append(
+                    f"        expect_{_identifier(b.prefix)}(bench, {sent_arg})"
+                    "  # TODO: adjust which sent_* to pass for this checker"
+                )
+    elif axis_masters:
+        # Masters with no AXIS source — produced by some other interface.
+        for b in axis_masters:
+            lines.append(f"        expect_{_identifier(b.prefix)}(bench, [])")
+
     for b in axi_lite_slaves:
         lines.append(f"        axi_lite_{_identifier(b.prefix)}(bench)")
     for b in axi4_slaves:
@@ -1609,6 +1703,8 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
     docstring.extend(f"  {line}" for line in summary_lines)
     docstring.append('"""')
 
+    has_pauseable = any(b.protocol in ("axi_stream", "stream") for b in bindings)
+
     imports = [
         "from __future__ import annotations",
         "",
@@ -1618,6 +1714,8 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         "from veriforge.project import parse_file, parse_files",
         "from veriforge.sim.bench import BenchTimeoutError, PlannerOverrides, Testbench",
     ]
+    if has_pauseable:
+        imports.append("from veriforge.sim.endpoints import PauseGenerator")
 
     module_name = dut.name
 
@@ -1691,7 +1789,7 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         if layout is not None:
             iface_layouts[b.prefix] = layout
 
-    lines.extend(["", "", "def build_bench() -> Testbench:"])
+    lines.extend(["", "", 'def build_bench(engine: str = "reference") -> Testbench:'])
     lines.append('    """Construct the multi-domain Testbench from the parsed DUT."""')
     lines.append("    design, dut = parse_dut()")
     lines.append("    overrides = PlannerOverrides(")
@@ -1707,7 +1805,7 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
             lines.append(f"            {prefix!r}: {{{entries}}},")
         lines.append("        },")
     lines.append("    )")
-    lines.append(f"    return Testbench(dut, design=design, overrides=overrides, engine={engine!r})")
+    lines.append("    return Testbench(dut, design=design, overrides=overrides, engine=engine)")
 
     lines.extend(_bench_iface_stub_lines(bindings))
     lines.extend(

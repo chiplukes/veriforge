@@ -69,6 +69,54 @@ def test_bench_style_emits_per_iface_stubs_and_main():
     assert "BenchTimeoutError" in text
 
 
+def test_bench_style_vcd_default_is_non_none():
+    """--vcd should default to a .vcd file, not None, so waveforms are captured automatically."""
+    text = _generate_for_multi_domain_dut()
+    assert "default=None" not in text.split('parser.add_argument(\n        "--vcd"')[1].split("    )")[0]
+    assert "default=Path(" in text
+    assert ".vcd')" in text
+
+
+def test_bench_style_engine_flag_and_build_bench_parameter():
+    """--engine argparse flag and build_bench(engine=) wiring must be present."""
+    text = _generate_for_multi_domain_dut()
+    assert '"--engine"' in text
+    assert 'choices=["reference", "vm", "vm-fast"]' in text
+    assert 'build_bench(engine=args.engine)' in text
+    assert 'def build_bench(engine: str = "reference") -> Testbench:' in text
+    assert "return Testbench(dut, design=design, overrides=overrides, engine=engine)" in text
+
+
+def test_bench_style_drive_returns_sent_frames():
+    """drive_* returns list[list[int]] so checkers can derive expected output."""
+    text = _generate_for_multi_domain_dut()
+    # Drive stubs must return list[list[int]] and accumulate sent frames
+    assert "def drive_pix_in(bench: Testbench) -> list[list[int]]:" in text
+    assert "def drive_rtr_in(bench: Testbench) -> list[list[int]]:" in text
+    assert "frames = [[0x00, 0x01, 0x02, 0x03]]" in text
+    assert "return frames" in text
+
+
+def test_bench_style_expect_accepts_sent_frames():
+    """expect_* accepts sent frames so it can compute expected output from stimulus data."""
+    text = _generate_for_multi_domain_dut()
+    # Expect stubs must take `sent: list[list[int]]` and use it to derive expected output
+    assert "def expect_pix_out(bench: Testbench, sent: list[list[int]]) -> None:" in text
+    assert "def expect_rtr_out(bench: Testbench, sent: list[list[int]]) -> None:" in text
+    assert "expected = sent_frame  # replace with real transform" in text
+    assert "assert list(frame.data) == expected" in text
+
+
+def test_bench_style_main_body_wires_sent_to_expect():
+    """Main body collects sent frames from drive_ and passes them to expect_."""
+    text = _generate_for_multi_domain_dut()
+    # Sent accumulators must exist and be extended by drive calls
+    assert "sent_pix_in: list[list[int]] = []" in text
+    assert "sent_rtr_in: list[list[int]] = []" in text
+    assert "sent_pix_in.extend(drive_pix_in(bench))" in text
+    assert "sent_rtr_in.extend(drive_rtr_in(bench))" in text
+
+
 def test_bench_style_iface_domains_pre_filled():
     text = _generate_for_multi_domain_dut()
     assert "'pix_in': 'pclk'" in text
@@ -99,6 +147,7 @@ def test_bench_style_generated_scaffold_runs(tmp_path):
         text=True,
         timeout=120,
         check=False,
+        cwd=tmp_path,
     )
     assert proc.returncode == 0, f"scaffold failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "received pix_out:" in proc.stdout
@@ -262,6 +311,7 @@ def _run_scaffold(tmp_path: Path, text: str) -> subprocess.CompletedProcess:
         text=True,
         timeout=120,
         check=False,
+        cwd=tmp_path,
     )
 
 

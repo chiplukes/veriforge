@@ -603,21 +603,169 @@ Runnable examples:
 
 ## 11. Testbench generation
 
-`veriforge` can inspect a DUT and emit a ready-to-run Python testbench.
-See [getting_started.md §8](../getting_started.md#8-generate-a-python-testbench)
-for the full recommended CLI workflow.  Summary:
+`veriforge` can inspect a DUT and emit a ready-to-run Python testbench.  The
+most common use case is a DUT with one or more AXI-Stream interfaces; the
+walkthrough below uses an AXI-Stream register slice (skid buffer) as the
+concrete example.  For the CLI flag reference see
+[getting_started.md §8](getting_started.md#8-generate-a-python-testbench).
+
+A complete, runnable example lives in `examples/axis_skid_buffer/`.
+
+### Full workflow
+
+#### Step 1 — inspect the inferred plan
 
 ```bash
-# Inspect what will be inferred (no code generated):
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --explain-plan
+```
+
+This prints the `TestbenchPlan` — detected clocks, reset polarities, inferred
+domains, and every interface bundle — without writing any code.  Read it
+first so you can catch incorrect inferences before generating.
+
+#### Step 2 — generate the scaffold
+
+```bash
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --enhanced --style=bench \
+    --auto-deps \
+    --output tb/test_my_dut.py
+```
+
+The generated file is a runnable Python script with stub functions for every
+detected interface and a `run_smoke_test()` entry point that you fill in with
+real stimulus and assertions.
+
+#### Step 3 — understand what was generated
+
+For a DUT with one slave AXI-Stream port (`s_axis`) and one master AXI-Stream
+port (`m_axis`), the scaffold looks like this after generation:
+
+```python
+from veriforge.sim.endpoints import PauseGenerator
+
+def drive_s_axis(bench: Testbench) -> None:
+    iface = bench.iface("s_axis")
+    # Optional: add random source gaps (hold tvalid low ~25% of cycles).
+    # iface.pause = PauseGenerator(1, 4)
+    # TODO: replace with real stimulus.
+    # tlast=1 is set on the last beat automatically (override with last=[...] if needed).
+    # Other sideband kwargs: dest=..., tid=..., user=..., last_user=..., keep=...
+    iface.put([0x00, 0x01, 0x02, 0x03])
+
+def expect_m_axis(bench: Testbench) -> None:
+    iface = bench.iface("m_axis")
+    # Optional: add random back-pressure (hold tready low ~25% of cycles).
+    # iface.pause = PauseGenerator(1, 4)
+    frame = iface.get(timeout=200)
+    print("received m_axis:", list(frame.data))
+
+def run_smoke_test(bench: Testbench) -> None:
+    bench.reset_all()
+    # TODO: set NUM_FRAMES to the number of input packets to send.
+    NUM_FRAMES = 1
+    for _i in range(NUM_FRAMES):
+        drive_s_axis(bench)
+    for _i in range(NUM_FRAMES):
+        expect_m_axis(bench)
+```
+
+Key points:
+
+- **`put()` queues a frame — no clock steps happen.**  The frame is buffered
+  in the source endpoint and will be driven beat-by-beat as the simulation
+  clock is stepped.
+- **`tlast=1` is automatic.**  `iface.put([0x10, 0x11, 0x12])` drives
+  `tlast=0` on the first two beats and `tlast=1` on the last beat.  You do
+  not need to set it explicitly.  Override with `last=[0, 0, 1]` only if you
+  need a custom `tlast` pattern within the frame.
+- **`get()` / `expect()` step the clock.**  Each call steps the simulation
+  internally until the sink sees a `tlast=1` beat and the frame is complete.
+- **`expect()` is the assertion form of `get()`.**  It raises `AssertionError`
+  on mismatch, which is more useful than a manual `assert list(frame.data) == ...`.
+
+#### Step 4 — fill in real stimulus
+
+Replace the placeholder `put([0x00, 0x01, 0x02, 0x03])` call with your
+actual test vectors and add assertions to the `expect_m_axis` stub:
+
+```python
+FRAMES = [
+    [0x10, 0x11, 0x12, 0x13],
+    [0xA0, 0xA1, 0xA2],
+    [0xFF],
+]
+
+def drive_s_axis(bench: Testbench) -> None:
+    iface = bench.iface("s_axis")
+    for frame_data in FRAMES:
+        iface.put(frame_data)  # all queued before any clock steps
+
+def expect_m_axis(bench: Testbench) -> None:
+    iface = bench.iface("m_axis")
+    for expected in FRAMES:
+        iface.expect(expected, timeout=200)
+```
+
+The pre-load / drain pattern — queue all sources first, then drain all outputs
+— is important.  It decouples stimulus generation from output checking,
+matching how real hardware behaves.  A tight send-one / receive-one loop
+forces an artificial single-packet cadence that hides pipeline bugs.
+
+In `run_smoke_test`, call `drive_s_axis` once and `expect_m_axis` once
+(the loops are inside those functions now):
+
+```python
+def run_smoke_test(bench: Testbench) -> None:
+    bench.reset_all()
+    drive_s_axis(bench)   # queues all frames; no clock steps yet
+    expect_m_axis(bench)  # drains all output; steps clock internally
+```
+
+#### Step 5 — add back-pressure
+
+`PauseGenerator` adds randomized flow-control events.  On a source it gates
+`tvalid`; on a sink it gates `tready`.
+
+```python
+from veriforge.sim.endpoints import PauseGenerator
+
+def expect_m_axis(bench: Testbench) -> None:
+    iface = bench.iface("m_axis")
+    # Hold tready low ~33% of cycles, stressing back-pressure handling.
+    iface.pause = PauseGenerator(1, 3, seed=42)
+    for expected in FRAMES:
+        iface.expect(expected, timeout=400)  # higher timeout for stalled cycles
+```
+
+`PauseGenerator(num, denom)` pauses with probability `num / denom`.  Common
+values: `(1, 4)` ≈ 25%, `(1, 3)` ≈ 33%, `(1, 2)` ≈ 50%.  Pass `seed=N` for
+reproducible sequences.
+
+`PauseGenerator` is exported from `veriforge.sim.endpoints`, not from
+`veriforge.sim.bench`.
+
+#### Step 6 — run and capture a waveform
+
+```bash
+uv run python tb/test_my_dut.py
+uv run python tb/test_my_dut.py --vcd build/my_dut.vcd
+```
+
+The scaffold's `main()` wires `--vcd` to `bench.run(vcd=...)` automatically.
+
+### Python API
+
+```bash
+# Inspect plan:
 uv run veriforge generate-python-testbench --file rtl/my_dut.v --explain-plan
 
-# Generate the scaffold:
+# Generate scaffold:
 uv run veriforge generate-python-testbench \
     --file rtl/my_dut.v --enhanced --style=bench --auto-deps \
     --output tb/test_my_dut.py
 ```
-
-From Python:
 
 ```python
 from veriforge.scaffold import generate_python_testbench_skeleton
