@@ -386,6 +386,65 @@ endmodule
         assert info.resets == []
 
 
+class TestOutputPortNotReset:
+    """Output ports must never be identified as reset signals (regression for
+    the false-positive where m_axis_tvalid was picked as reset because it
+    appeared in the first if-condition of an always block)."""
+
+    def test_output_port_excluded_from_reset(self):
+        """@(posedge clk) if (out_valid) ... — out_valid is an output, not a reset."""
+        src = """\
+module dut (
+    input  clk, rst, d,
+    output reg out_valid, q
+);
+    always @(posedge clk)
+        if (rst)
+            begin
+            q <= 0;
+            out_valid <= 0;
+            end
+        else
+            q <= d;
+    always @(posedge clk)
+        if (out_valid)
+            q <= 1;
+endmodule
+"""
+        mod = _parse(src)
+        info = extract_clocks_resets(mod)
+        assert "out_valid" not in info.reset_names(), (
+            "output port 'out_valid' should not be detected as reset"
+        )
+        assert "rst" in info.reset_names()
+
+    def test_output_port_excluded_multiple_candidates(self):
+        """When multiple if-conditions are present, only input ports remain."""
+        src = """\
+module pack (
+    input  clk, rst, s_axis_tvalid,
+    output reg m_axis_tvalid, packing_error
+);
+    always @(posedge clk)
+        if (rst)
+            begin
+            m_axis_tvalid <= 0;
+            end
+        else if (s_axis_tvalid)
+            m_axis_tvalid <= 1;
+    always @(posedge clk)
+        if (m_axis_tvalid)
+            packing_error <= 0;
+endmodule
+"""
+        mod = _parse(src)
+        info = extract_clocks_resets(mod)
+        assert "m_axis_tvalid" not in info.reset_names(), (
+            "output port 'm_axis_tvalid' should not be detected as reset"
+        )
+        assert "rst" in info.reset_names()
+
+
 class TestDesignLevel:
     """Test extract_clocks_resets_from_design."""
 

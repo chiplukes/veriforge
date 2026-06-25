@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from veriforge.model.behavioral import AlwaysBlock, SensitivityType
-from veriforge.model.design import Design, Module
+from veriforge.model.design import Design, Module, PortDirection
 from veriforge.model.expressions import BinaryOp, Identifier, UnaryOp
 from veriforge.model.statements import IfStatement, SeqBlock
 
@@ -301,6 +301,17 @@ def extract_clocks_resets(module: Module) -> ClockResetInfo:  # cm:f2b8e7
         if block.sensitivity_type != SensitivityType.SEQUENTIAL:
             continue
         _analyze_sequential_block(block, clocks, resets)
+
+    # A reset signal must be driven from outside the module — a signal that is
+    # an output port of this module (i.e. driven by the DUT itself) can never
+    # be its own reset.  Output ports can appear as the first if-condition in
+    # an always block (e.g. ``if (m_axis_tvalid)``) but are functional enables,
+    # not resets.  We remove them rather than requiring a confirmed input, so
+    # that modules with no port declarations (e.g. synthetic test models) are
+    # unaffected.
+    output_port_names = {p.name for p in module.ports if p.direction == PortDirection.OUTPUT}
+    if output_port_names:
+        resets = {name: r for name, r in resets.items() if name not in output_port_names}
 
     return ClockResetInfo(
         clocks=sorted(clocks.values(), key=lambda c: c.name),

@@ -1720,3 +1720,71 @@ class TestNonZeroBaseRange:
         sim.run(max_time=8)  # after first posedge at t=5
         # After first posedge: addr_q = addr_next = 64+2 = 66, full_addr = 132 = 0x84
         assert sim.read("full_addr") == Value(0x84, width=32)
+
+
+# =====================================================================
+# Regression: LHS descending part-select direction (-:) in always @(*)
+# =====================================================================
+# The Lark Earley parser does not propagate start_pos/end_pos correctly
+# for range_expression nodes inside variable_lvalue (LHS of blocking
+# assign).  The old _extract_part_select_direction used those byte offsets
+# and silently fell back to "+:" for every "-:" LHS part-select, leaving
+# x-bits in the written register.  This test exercises that path.
+
+
+class TestLhsDescendingPartSelect:
+    """LHS -: part-select in always @(*) must produce correct bit ranges."""
+
+    SRC = """\
+module lhs_partsel (
+    input  [39:0] in,
+    output reg [19:0] out
+);
+    integer i;
+    always @(*)
+        for (i = 0; i < 2; i = i + 1)
+            out[i*10+9-:10] = in[i*20+19-:20];
+endmodule
+"""
+
+    def _sim(self, engine, tmp_path):
+        """Parse SRC from a real temp file so _extract_part_select_direction
+        can read it back to recover the direction token."""
+        vfile = tmp_path / "lhs_partsel.v"
+        vfile.write_text(self.SRC)
+        vp = verilog_parser(start="source_text")
+        tree = vp.build_tree(vfile)
+        design = tree_to_design(tree, source_file=str(vfile))
+        link_instances(design)
+        resolve_port_connections(design)
+        return Simulator(design.modules[0], engine=engine, design=design)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_no_x_bits(self, engine, tmp_path):
+        """After driving input=0 and settling, 'out' must have no x/z bits."""
+        sim = self._sim(engine, tmp_path)
+        sim.drive("in", 0)
+        sim.settle()
+        v = sim.read("out")
+        assert v.mask == 0, f"x/z bits in 'out': mask=0x{v.mask:x}"
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_correct_value(self, engine, tmp_path):
+        """Verify bit placement: out[9:0]=in[9:0], out[19:10]=in[29:20].
+
+        The RHS -: select extracts 20 bits; the 10-bit LHS slot keeps the
+        10 LSBs of that value (standard Verilog truncation).
+          i=0: out[9:0]   = truncate(in[19:0],  10) = in[9:0]
+          i=1: out[19:10] = truncate(in[39:20], 10) = in[29:20]
+        """
+        sim = self._sim(engine, tmp_path)
+        # Drive bits 9:0 = 0x155, bits 29:20 = 0x2AA, rest 0
+        in_val = (0x2AA << 20) | 0x155
+        sim.drive("in", in_val)
+        sim.settle()
+        v = sim.read("out")
+        assert v.mask == 0, f"x/z bits: mask=0x{v.mask:x}"
+        lo = in_val & 0x3FF          # in[9:0]   → out[9:0]
+        hi = (in_val >> 20) & 0x3FF  # in[29:20] → out[19:10]
+        expected = (hi << 10) | lo
+        assert int(v) == expected, f"out=0x{int(v):x}, expected=0x{expected:x}"

@@ -1313,7 +1313,31 @@ def _build_wrapped_expression(
 
 
 def _extract_part_select_direction(range_tree: Tree, source_file: str | None) -> str:
-    if not source_file or not hasattr(range_tree.meta, "start_pos") or not hasattr(range_tree.meta, "end_pos"):
+    # With keep_all_tokens=False (Lark default), anonymous terminal tokens like
+    # "+:" and "-:" are dropped from the tree.  If keep_all_tokens=True is ever
+    # enabled this fast path will work; otherwise fall through.
+    for child in range_tree.children:
+        if isinstance(child, Token) and str(child) in ("+:", "-:"):
+            return str(child)
+
+    # Recover direction from source text.
+    #
+    # Lark's start_pos/end_pos on range_expression nodes inside variable_lvalue
+    # (LHS of blocking assign) are unreliable — they point to the start of the
+    # containing statement rather than the range expression itself.  However,
+    # meta.line / meta.column on the width_constant_expression child ARE
+    # correct, so read the 2 characters immediately before it in the source
+    # line to recover the direction token.
+    if not source_file:
+        return "+:"
+
+    width_child = next(
+        (c for c in range_tree.children if isinstance(c, Tree) and str(c.data) == "width_constant_expression"),
+        None,
+    )
+    if width_child is None:
+        return "+:"
+    if not hasattr(width_child.meta, "line") or not hasattr(width_child.meta, "column"):
         return "+:"
 
     source_text = _SOURCE_TEXT_CACHE.get(source_file)
@@ -1321,8 +1345,14 @@ def _extract_part_select_direction(range_tree: Tree, source_file: str | None) ->
         source_text = Path(source_file).read_text()
         _SOURCE_TEXT_CACHE[source_file] = source_text
 
-    segment = source_text[range_tree.meta.start_pos : range_tree.meta.end_pos]
-    return "-:" if "-:" in segment else "+:"
+    lines = source_text.splitlines()
+    line_idx = width_child.meta.line - 1
+    col_idx = width_child.meta.column - 1
+    if 0 <= line_idx < len(lines):
+        before = lines[line_idx][:col_idx].rstrip()
+        if before.endswith("-:") or before.endswith("+:"):
+            return before[-2:]
+    return "+:"
 
 
 def _build_function_call(tree: Tree, source_file: str | None, callbacks: _ExpressionCallbacks) -> Expression:
