@@ -413,9 +413,7 @@ endmodule
 """
         mod = _parse(src)
         info = extract_clocks_resets(mod)
-        assert "out_valid" not in info.reset_names(), (
-            "output port 'out_valid' should not be detected as reset"
-        )
+        assert "out_valid" not in info.reset_names(), "output port 'out_valid' should not be detected as reset"
         assert "rst" in info.reset_names()
 
     def test_output_port_excluded_multiple_candidates(self):
@@ -439,9 +437,7 @@ endmodule
 """
         mod = _parse(src)
         info = extract_clocks_resets(mod)
-        assert "m_axis_tvalid" not in info.reset_names(), (
-            "output port 'm_axis_tvalid' should not be detected as reset"
-        )
+        assert "m_axis_tvalid" not in info.reset_names(), "output port 'm_axis_tvalid' should not be detected as reset"
         assert "rst" in info.reset_names()
 
 

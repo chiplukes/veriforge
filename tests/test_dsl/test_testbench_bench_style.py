@@ -82,7 +82,7 @@ def test_bench_style_engine_flag_and_build_bench_parameter():
     text = _generate_for_multi_domain_dut()
     assert '"--engine"' in text
     assert 'choices=["reference", "vm", "vm-fast"]' in text
-    assert 'build_bench(engine=args.engine)' in text
+    assert "build_bench(engine=args.engine)" in text
     assert 'def build_bench(engine: str = "reference") -> Testbench:' in text
     assert "return Testbench(dut, design=design, overrides=overrides, engine=engine)" in text
 

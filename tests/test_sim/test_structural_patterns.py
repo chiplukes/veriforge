@@ -1784,7 +1784,7 @@ endmodule
         sim.settle()
         v = sim.read("out")
         assert v.mask == 0, f"x/z bits: mask=0x{v.mask:x}"
-        lo = in_val & 0x3FF          # in[9:0]   → out[9:0]
+        lo = in_val & 0x3FF  # in[9:0]   → out[9:0]
         hi = (in_val >> 20) & 0x3FF  # in[29:20] → out[19:10]
         expected = (hi << 10) | lo
         assert int(v) == expected, f"out=0x{int(v):x}, expected=0x{expected:x}"
