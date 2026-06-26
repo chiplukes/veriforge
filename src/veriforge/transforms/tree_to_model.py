@@ -416,8 +416,8 @@ def _extract_ports_from_declarations(tree: Tree, source_file: str | None) -> lis
 def _extract_port_identifiers_with_dimensions(
     tree: Tree,
     source_file: str | None,
-) -> list[tuple[str, list[Range]]]:
-    """Extract port identifiers and unpacked dimensions from a port identifier list."""
+) -> list[tuple[str, list[Range], Expression | None]]:
+    """Extract port identifiers, unpacked dimensions, and optional default values from a port identifier list."""
     return _extract_port_identifiers_with_dimensions_from_tree(tree, source_file, _build_constant_expression)
 
 
