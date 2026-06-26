@@ -302,16 +302,14 @@ def extract_clocks_resets(module: Module) -> ClockResetInfo:  # cm:f2b8e7
             continue
         _analyze_sequential_block(block, clocks, resets)
 
-    # A reset signal must be driven from outside the module — a signal that is
-    # an output port of this module (i.e. driven by the DUT itself) can never
-    # be its own reset.  Output ports can appear as the first if-condition in
-    # an always block (e.g. ``if (m_axis_tvalid)``) but are functional enables,
-    # not resets.  We remove them rather than requiring a confirmed input, so
-    # that modules with no port declarations (e.g. synthetic test models) are
-    # unaffected.
-    output_port_names = {p.name for p in module.ports if p.direction == PortDirection.OUTPUT}
-    if output_port_names:
-        resets = {name: r for name, r in resets.items() if name not in output_port_names}
+    # A reset must be driven from outside the module: it must be an input port.
+    # Internal regs (e.g. ``trig_rise_strobe_int``) and enables that appear as
+    # the first ``if``-condition in an always block are not resets.
+    # Guard: only filter when the module has declared input ports so that
+    # synthetic test models with no ports are left unaffected.
+    input_port_names = {p.name for p in module.ports if p.direction == PortDirection.INPUT}
+    if input_port_names:
+        resets = {name: r for name, r in resets.items() if name in input_port_names}
 
     return ClockResetInfo(
         clocks=sorted(clocks.values(), key=lambda c: c.name),

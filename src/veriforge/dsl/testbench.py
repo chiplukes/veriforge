@@ -1486,7 +1486,21 @@ def _bench_main_body_lines(  # noqa: PLR0912
         or membus_slaves
         or membus_masters
     ):
-        lines.append("        # No protocol bundles were detected; drive raw signals via bench.sim.")
+        lines.extend(
+            [
+                "        # No protocol bundles were detected; drive raw signals via bench.sim.",
+                "        #",
+                "        # bench.step(N)  — advance N complete clock cycles (signals settle before returning).",
+                "        # Drive:  bench.sim.signal('name').value = val  (takes effect on the next step)",
+                "        # Read:   int(bench.sim.signal('name').value)   (int() converts from Value)",
+                "        #",
+                "        # Typical pattern:",
+                "        #   bench.sim.signal('en').value = 1        # drive input",
+                "        #   bench.step(10)                          # advance 10 cycles",
+                "        #   out = int(bench.sim.signal('q').value)  # sample output",
+                "        #   assert out == expected, f'got {out}'",
+            ]
+        )
         clock_reset_names: set[str] = set()
         for dom in plan.domains:  # type: ignore[attr-defined]
             clock_reset_names.add(dom.clock.name)
@@ -1495,14 +1509,14 @@ def _bench_main_body_lines(  # noqa: PLR0912
         input_ports = [p for p in dut.input_ports() if p.name not in clock_reset_names]
         output_ports = [p for p in dut.output_ports() if p.name not in clock_reset_names]
         if input_ports:
-            lines.append("        # Drive DUT inputs (example — replace with real values):")
+            lines.append("        # Drive DUT inputs (example — replace with real stimulus):")
             for p in input_ports[:4]:
                 lines.append(f"        bench.sim.signal({p.name!r}).value = 0")
         if output_ports:
-            lines.append("        bench.step(1)")
-            lines.append("        # Sample DUT outputs (example):")
+            lines.append("        bench.step(10)  # advance 10 cycles — tune as needed")
+            lines.append("        # Sample DUT outputs (example — replace with assertions):")
             for p in output_ports[:4]:
-                lines.append(f"        print({p.name!r}, '=', bench.sim.signal({p.name!r}).value)")
+                lines.append(f"        print({p.name!r}, '=', int(bench.sim.signal({p.name!r}).value))")
 
     for b in axi_lite_masters:
         lines.append(f"        axi_lite_resp_{_identifier(b.prefix)}(bench)")
@@ -1754,12 +1768,14 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
             lines.extend(
                 [
                     f"DUT_PATH = Path(r{dut_source_path!r})",
+                    "# Add child-module .v files here if Testbench() fails with",
+                    "# 'Cannot resolve module X' — then re-run or hand-edit.",
                     "DEPS: list[Path] = []",
                     "",
                     "",
                     "def parse_dut():",
                     '    """Parse the DUT module from disk."""',
-                    "    design = parse_file(DUT_PATH)",
+                    "    design = parse_files([*DEPS, DUT_PATH]) if DEPS else parse_file(DUT_PATH)",
                     f"    return design, design.get_module({module_name!r})",
                 ]
             )

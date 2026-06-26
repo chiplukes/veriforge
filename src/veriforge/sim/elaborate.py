@@ -93,6 +93,32 @@ def check_signed_declarations(module: Module) -> None:
     )
 
 
+def check_input_port_init(module: Module, design: Design | None = None) -> None:
+    """Warn about input ports that carry initial/default values.
+
+    This is a synthesis error — FPGAs cannot initialize an externally-driven
+    port — but simulators silently ignore the initial value, so the bug can
+    go undetected until the design is synthesized.  Warn at WARNING level so
+    users see it during simulation without having to run ``veriforge lint``.
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
+    modules_to_check = list(design.modules) if design is not None else [module]
+    seen: set[str] = set()
+    for mod in modules_to_check:
+        if mod.name in seen:
+            continue
+        seen.add(mod.name)
+        for port in mod.ports:
+            if port.direction == PortDirection.INPUT and port.default_value is not None:
+                _log.warning(
+                    "Module '%s': input port '%s' has an initial value — not synthesizable; the simulator ignores it",
+                    mod.name,
+                    port.name,
+                )
+
+
 def is_synthesized_local_name(name: str) -> bool:
     """Return True for synthesized process-local loop or block variables."""
     return name.startswith((SYNTH_LOCAL_LOOP_PREFIX, SYNTH_LOCAL_BLOCK_PREFIX))

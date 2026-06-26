@@ -95,11 +95,17 @@ class VcdTraceSession:
         all_names = signal_names if signal_names is not None else self._sched.signal_names()
         self._signal_names = sorted(n for n in all_names if not is_synthesized_local_name(n))
 
+        module_name: str = getattr(sim._module, "name", "top")
+
         for signal_name in self._signal_names:
             scope, leaf = _split_hierarchy(signal_name)
+            if scope == "top":
+                scope = module_name
+            else:
+                scope = f"{module_name}.{scope}"
             self._writer.add_signal(signal_name, width=sim.read(signal_name).width, scope=scope, vcd_name=leaf)
 
-        self._writer.write_header(scope_modules=sim.hierarchy())
+        self._writer.write_header()
         self._writer.write_initial({signal_name: sim.read(signal_name) for signal_name in self._signal_names})
 
         def _record_callback(sched) -> None:

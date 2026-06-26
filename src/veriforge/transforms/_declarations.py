@@ -209,16 +209,17 @@ def _extract_port_identifiers_with_dimensions(
     tree: Tree,
     source_file: str | None,
     build_constant_expression: BuildConstantExpressionFn,
-) -> list[tuple[str, list[Range]]]:
-    """Extract port identifiers and unpacked dimensions from a port identifier list."""
-    items: list[tuple[str, list[Range]]] = []
+) -> list[tuple[str, list[Range], Expression | None]]:
+    """Extract port identifiers, unpacked dimensions, and optional default values."""
+    items: list[tuple[str, list[Range], Expression | None]] = []
 
     for child in tree.children:
         if isinstance(child, Token) and child.type in ("PORT_IDENTIFIER", "NET_IDENTIFIER"):
-            items.append((str(child), []))
+            items.append((str(child), [], None))
         elif isinstance(child, Tree) and child.data == "port_id_with_dimensions":
             name = ""
             dims: list[Range] = []
+            default_value: Expression | None = None
             for item in child.children:
                 if isinstance(item, Token) and item.type == "PORT_IDENTIFIER":
                     name = str(item)
@@ -226,8 +227,10 @@ def _extract_port_identifiers_with_dimensions(
                     dim = _extract_dimension_range(item, source_file, build_constant_expression)
                     if dim is not None:
                         dims.append(dim)
+                elif isinstance(item, Tree) and item.data == "expression":
+                    default_value = build_constant_expression(item, source_file)
             if name:
-                items.append((name, dims))
+                items.append((name, dims, default_value))
 
     return items
 
@@ -787,7 +790,7 @@ def _extract_port_declaration(  # noqa: PLR0912
             signed = False
             data_type: str | None = None
             declared_dims: list[Range] = []
-            port_items: list[tuple[str, list[Range]]] = []
+            port_items: list[tuple[str, list[Range], Expression | None]] = []
             loc = _loc_from_tree(child, source_file)
 
             for item in child.children:
@@ -797,7 +800,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                     elif item.type == "KW_SIGNED":
                         signed = True
                     elif item.type in ("PORT_IDENTIFIER", "NET_IDENTIFIER"):
-                        port_items.append((str(item), []))
+                        port_items.append((str(item), [], None))
                     elif item.type == "IDENTIFIER":
                         data_type = str(item)
                 elif isinstance(item, Tree):
@@ -815,7 +818,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                             _extract_port_identifiers_with_dimensions(item, source_file, build_constant_expression)
                         )
 
-            for name, dims in port_items:
+            for name, dims, default_value in port_items:
                 ports.append(
                     Port(
                         name=name,
@@ -824,6 +827,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                         width=width,
                         dimensions=[*declared_dims, *dims],
                         signed=signed,
+                        default_value=default_value,
                         loc=loc,
                     )
                 )

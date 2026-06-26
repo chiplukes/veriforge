@@ -73,6 +73,7 @@ class LintCode(Enum):
     MIXED_BLOCKING = auto()
     MIXED_NONBLOCKING = auto()
     UNCONNECTED_PORT = auto()
+    INPUT_INIT = auto()
 
 
 @dataclass
@@ -421,6 +422,24 @@ def _check_unconnected_ports(module: Module) -> list[LintWarning]:
     return warnings
 
 
+def _check_input_port_init(module: Module) -> list[LintWarning]:
+    """Check for input ports with initial/default values (synthesis error)."""
+    warnings: list[LintWarning] = []
+    for port in module.ports:
+        if port.direction == PortDirection.INPUT and port.default_value is not None:
+            warnings.append(
+                LintWarning(
+                    code=LintCode.INPUT_INIT,
+                    message=(
+                        f"Input port '{port.name}' has an initial value — not synthesizable; ignored by simulator"
+                    ),
+                    module=module.name,
+                    signal=port.name,
+                )
+            )
+    return warnings
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -471,6 +490,10 @@ def lint_module(
     # Unconnected ports
     if LintCode.UNCONNECTED_PORT not in skip:
         warnings.extend(_check_unconnected_ports(module))
+
+    # Input port initializations
+    if LintCode.INPUT_INIT not in skip:
+        warnings.extend(_check_input_port_init(module))
 
     # Stable sort: code name, then signal
     warnings.sort(key=lambda w: (w.code.name, w.signal or "", w.instance or ""))

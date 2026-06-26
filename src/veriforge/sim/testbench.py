@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from veriforge.model.design import Design, Module
 
 from .elaborate import (
+    check_input_port_init,
     check_signed_declarations,
     flatten_module,
     materialize_process_locals,
@@ -153,6 +154,7 @@ class Simulator:  # cm:a5c8f4
         _resolve_typedef_widths(module)
         materialize_process_locals(module)
         check_signed_declarations(module)
+        check_input_port_init(module, design)
 
         if engine in ("vm", "vm-fast"):
             from .vm.vm_scheduler import VMScheduler as _VMSched

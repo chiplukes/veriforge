@@ -20,6 +20,7 @@ The discovery is intentionally simple and conservative:
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -47,18 +48,24 @@ def _candidate_files(search_dirs: Iterable[Path]) -> list[Path]:
     return files
 
 
-def _module_index(files: Iterable[Path]) -> dict[str, Path]:
-    """Build a ``module_name -> file_path`` map by parsing each candidate file."""
+def _module_index(files: Iterable[Path]) -> tuple[dict[str, Path], list[tuple[Path, str]]]:
+    """Build a ``module_name -> file_path`` map by parsing each candidate file.
+
+    Returns ``(index, parse_failures)`` where ``parse_failures`` is a list of
+    ``(path, error_message)`` tuples for files that could not be parsed.
+    """
     index: dict[str, Path] = {}
+    parse_failures: list[tuple[Path, str]] = []
     for f in files:
         try:
             d = parse_file(f)
-        except Exception:
+        except Exception as exc:
             log.debug("Failed to index %s for dep discovery", f, exc_info=True)
+            parse_failures.append((f, str(exc).splitlines()[0]))
             continue
         for name in (m.name for m in d.modules):
             index.setdefault(name, f)
-    return index
+    return index, parse_failures
 
 
 def discover_sv_dependencies(  # noqa: PLR0912, PLR0915
@@ -88,7 +95,18 @@ def discover_sv_dependencies(  # noqa: PLR0912, PLR0915
         search_dirs_list = [Path(d) for d in search_dirs]
 
     candidates = [p for p in _candidate_files(search_dirs_list) if p.resolve() != dut_path.resolve()]
-    name_to_path = _module_index(candidates)
+    name_to_path, parse_failures = _module_index(candidates)
+
+    # Warn immediately about any candidate files that failed to parse — they
+    # cannot appear in DEPS, so the user needs to fix them.
+    for failed_path, err_msg in parse_failures:
+        print(
+            f"Warning (--auto-deps): could not parse {failed_path.name!r} — "
+            f"it will be omitted from DEPS.\n"
+            f"  Fix the parse error and re-run generate-python-testbench.\n"
+            f"  Error: {err_msg}",
+            file=sys.stderr,
+        )
 
     dut_design = parse_file(dut_path)
     if top_module is None:
@@ -122,6 +140,15 @@ def discover_sv_dependencies(  # noqa: PLR0912, PLR0915
         if module is None:
             src = name_to_path.get(modname)
             if src is None:
+                # Module not found in any parseable file — may be a parse failure
+                # or genuinely missing (vendor IP / tech cell).
+                hint = " (its source file may have failed to parse — see warnings above)" if parse_failures else ""
+                print(
+                    f"Warning (--auto-deps): module {modname!r} required by "
+                    f"{top_module!r} was not found in any dependency file{hint}.\n"
+                    f"  Add its source file to --include-dir or populate DEPS manually.",
+                    file=sys.stderr,
+                )
                 continue
             rp = src.resolve()
             if rp not in deps_seen:

@@ -77,13 +77,8 @@ class VcdWriter:
         ident = _make_id(self._id_counter)
         self._signals[name] = _VcdSignal(vcd_name if vcd_name is not None else name, width, ident, scope)
 
-    def write_header(self, *, scope_modules: dict[str, str] | None = None) -> None:
-        """Write the VCD header (must be called after all add_signal calls).
-
-        *scope_modules* optionally maps hierarchical scope paths to their
-        original module type names (e.g. ``{"core.if_stage_i": "ibex_if_stage"}``).
-        When provided, ``$scope`` lines include the module type.
-        """
+    def write_header(self) -> None:
+        """Write the VCD header (must be called after all add_signal calls)."""
         f = self._file
         now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -98,7 +93,7 @@ class VcdWriter:
                 scopes[sig.scope] = []
             scopes[sig.scope].append(sig)
 
-        _write_scopes(f, scopes, scope_modules)
+        _write_scopes(f, scopes)
 
         f.write("$enddefinitions $end\n")
         self._header_written = True
@@ -212,13 +207,8 @@ def _make_id(n: int) -> str:
 def _write_scopes(
     f: io.TextIOBase,
     scopes: dict[str, list[_VcdSignal]],
-    scope_modules: dict[str, str] | None = None,
 ) -> None:
-    """Emit nested ``$scope`` blocks from a flat ``{scope_path: signals}`` map.
-
-    *scope_modules* maps dotted scope paths to their original module type
-    names, producing ``$scope module <type> <instance> $end`` lines.
-    """
+    """Emit nested ``$scope`` blocks from a flat ``{scope_path: signals}`` map."""
     root: dict[str, dict] = {}
     for scope_name, sigs in scopes.items():
         node = root
@@ -226,18 +216,13 @@ def _write_scopes(
             node = node.setdefault(segment, {})
         node["_sig"] = sigs  # type: ignore[assignment]
 
-    def _emit(node: dict[str, dict], path: str = "") -> None:
+    def _emit(node: dict[str, dict]) -> None:
         for segment in sorted(k for k in node if k != "_sig"):
             child = node[segment]
-            full_path = f"{path}.{segment}" if path else segment
-            module_type = scope_modules.get(full_path) if scope_modules else None
-            if module_type:
-                f.write(f"$scope module {module_type} {segment} $end\n")
-            else:
-                f.write(f"$scope module {segment} $end\n")
+            f.write(f"$scope module {segment} $end\n")
             for sig in child.get("_sig", []):
                 f.write(f"$var wire {sig.width} {sig.ident} {sig.name} $end\n")
-            _emit(child, full_path)
+            _emit(child)
             f.write("$upscope $end\n")
 
     _emit(root)
