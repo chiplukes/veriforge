@@ -663,6 +663,14 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         """Propagate pending external drives through combinational logic at the current time."""
         if not self._has_drive_snapshot:
             return
+        # Refresh the data snapshot so non-clock signals driven before the clock
+        # edge (e.g. rst=0, i_sum=160 driven before clk=1) are visible in sv[]
+        # when seq process bodies evaluate their RHS — matching reference engine
+        # behavior where ctx._signals holds post-drive values.  The clock signal's
+        # pre-edge value is preserved by refresh_data_snapshot() for correct
+        # posedge/negedge detection.
+        if hasattr(self._sim, "refresh_data_snapshot"):
+            self._sim.refresh_data_snapshot()
         self._sim.step()
         self._drain_compiled_output()
         self._has_drive_snapshot = False
