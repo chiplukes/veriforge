@@ -15,7 +15,7 @@ import pytest
 
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
-from veriforge.model.design import Module
+from veriforge.model.design import Design, Module
 from veriforge.model.expressions import (
     BinaryOp,
     BitSelect,
@@ -25,12 +25,14 @@ from veriforge.model.expressions import (
     RangeSelect,
     StringLiteral,
 )
+from veriforge.model.instances import Instance, PortConnection
 from veriforge.model.nets import Net, NetKind
 from veriforge.model.ports import Port, PortDirection
 from veriforge.model.statements import (
     BlockingAssign,
     NonblockingAssign,
     SeqBlock,
+    SensitivityEdge,
     SystemTaskCall,
 )
 from veriforge.model.variables import Variable, VariableKind
@@ -1935,3 +1937,139 @@ endmodule
         assert any(
             "struct_array_nested_read_combo2 out_data=a5 out_tag=3 out_kind=1" in line.lower() for line in lines
         ), f"Struct array nested dynamic whole-element combo second read failed ({engine}): {lines}"
+
+
+# ── Bit-select on instance-connected wire ────────────────────────────
+#
+# Regression for a bug where mem[port[N:0]] (RangeSelect as memory index)
+# returned X in the compiled engine when the indexed signal was wired via
+# a port connection rather than driven directly.  Root cause: the compiled
+# engine's data snapshot (sv[]) was not refreshed with post-drive / post-CA
+# values before seq process bodies ran.  Fixed in veriforge commit 627a245.
+#
+# Both standalone and flattened scenarios are tested across all engines so
+# that any regression in NBA snapshot handling is caught immediately.
+
+
+def _build_bram_dsl(depth: int = 4):
+    """Build a simple BRAM module using the DSL (matches the real context_buffer pattern).
+
+    The always block uses RangeSelect as the memory index:
+      rd_data <= mem[rd_addr[addr_width-1:0]]
+      mem[wr_addr[addr_width-1:0]] <= wr_data
+
+    This is the exact pattern that triggered the compiled-engine NBA snapshot bug.
+    """
+    from veriforge.dsl import Module as DslModule, posedge  # noqa: PLC0415
+
+    addr_width = (depth - 1).bit_length()
+    m = DslModule("bram_dut")
+    clk = m.input("clk")
+    rst = m.input("rst")
+    wr_en = m.input("wr_en")
+    wr_addr = m.input("wr_addr", width=addr_width)
+    wr_data = m.input("wr_data", width=32)
+    rd_addr = m.input("rd_addr", width=addr_width)
+    rd_data = m.output_reg("rd_data", width=32)
+    mem = m.reg("mem", width=32, depth=depth)
+
+    with m.always(posedge(clk)):
+        with m.if_(rst):
+            rd_data <<= 0
+        with m.else_():
+            # RangeSelect as memory index — the pattern that triggered the bug
+            rd_data <<= mem[rd_addr[addr_width - 1 : 0]]
+            with m.if_(wr_en):
+                mem[wr_addr[addr_width - 1 : 0]] <<= wr_data
+
+    return m.build()
+
+
+def _build_bram_wrapper_dsl(depth: int = 4):
+    """Wrapper that instantiates bram_dut 1:1, adding a hierarchy level."""
+    from veriforge.dsl import Module as DslModule  # noqa: PLC0415
+
+    addr_width = (depth - 1).bit_length()
+    m = DslModule("bram_wrapper")
+    clk = m.input("clk")
+    rst = m.input("rst")
+    wr_en = m.input("wr_en")
+    wr_addr = m.input("wr_addr", width=addr_width)
+    wr_data = m.input("wr_data", width=32)
+    rd_addr = m.input("rd_addr", width=addr_width)
+    rd_data = m.output("rd_data", width=32)
+
+    m.instance("bram_dut", "u_bram", ports={
+        "clk": clk, "rst": rst,
+        "wr_en": wr_en, "wr_addr": wr_addr, "wr_data": wr_data,
+        "rd_addr": rd_addr, "rd_data": rd_data,
+    })
+    return m.build()
+
+
+def _bram_write_read(sim, wr_addr_val: int, wr_data_val: int, rd_addr_val: int):
+    """Drive a clock-edge write followed by a clock-edge read; return rd_data."""
+
+    def step():
+        sim.drive("clk", 1)
+        sim.settle()
+        sim.drive("clk", 0)
+        sim.settle()
+
+    # Reset
+    sim.drive("clk", 0)
+    sim.drive("rst", 1)
+    sim.drive("wr_en", 0)
+    sim.drive("wr_addr", 0)
+    sim.drive("wr_data", 0)
+    sim.drive("rd_addr", 0)
+    step()
+    sim.drive("rst", 0)
+    step()
+
+    # Write
+    sim.drive("wr_en", 1)
+    sim.drive("wr_addr", wr_addr_val)
+    sim.drive("wr_data", wr_data_val)
+    sim.drive("rd_addr", 0)
+    step()
+
+    # Read back
+    sim.drive("wr_en", 0)
+    sim.drive("rd_addr", rd_addr_val)
+    step()
+
+    return sim.read("rd_data")
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_bram_range_select_index_standalone(engine):
+    """mem[rd_addr[N:0]] write-then-read works in standalone mode across all engines.
+
+    Regression for the compiled engine's NBA snapshot bug (veriforge commit 627a245):
+    signals driven before the clock edge must be visible in seq process bodies.
+    """
+    dut = _build_bram_dsl(depth=4)
+    sim = Simulator(dut, engine=engine)
+    result = _bram_write_read(sim, wr_addr_val=2, wr_data_val=0xBEEF, rd_addr_val=2)
+    assert int(result) == 0xBEEF, (
+        f"[{engine}] standalone mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"
+    )
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_bram_range_select_index_flattened(engine):
+    """mem[rd_addr[N:0]] write-then-read works in flattened (hierarchical) mode across all engines.
+
+    Regression for the compiled engine's NBA snapshot bug: in the flattened module,
+    rd_addr is driven via a port-connection CA (assign u_bram.rd_addr = rd_addr).
+    The seq process must see this CA-propagated value, not a stale snapshot.
+    """
+    inner = _build_bram_dsl(depth=4)
+    outer = _build_bram_wrapper_dsl(depth=4)
+    design = Design(modules=[outer, inner])
+    sim = Simulator(outer, engine=engine, design=design)
+    result = _bram_write_read(sim, wr_addr_val=2, wr_data_val=0xBEEF, rd_addr_val=2)
+    assert int(result) == 0xBEEF, (
+        f"[{engine}] flattened mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"
+    )
