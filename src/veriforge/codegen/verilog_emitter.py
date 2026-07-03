@@ -686,6 +686,28 @@ def _emit_port_connections(connections: list[PortConnection]) -> str:
     return ", ".join(strs)
 
 
+# Verilog operator precedence (IEEE 1800-2012 §11.3.2). Higher value = tighter binding.
+# Unary operators have the highest precedence (not listed; they never need parens as parents).
+_BINARY_PREC: dict[str, int] = {
+    "**": 12,
+    "*": 10, "/": 10, "%": 10,
+    "+": 9, "-": 9,
+    "<<": 8, ">>": 8, "<<<": 8, ">>>": 8,
+    "<": 7, "<=": 7, ">": 7, ">=": 7,
+    "==": 6, "!=": 6, "===": 6, "!==": 6,
+    "&": 5,
+    "^": 4, "~^": 4, "^~": 4,
+    "|": 3,
+    "&&": 2,
+    "||": 1,
+}
+
+
+def _prec(op: str) -> int:
+    """Return Verilog precedence for a binary operator (higher = tighter)."""
+    return _BINARY_PREC.get(op, 0)
+
+
 def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
     """Emit an Expression as Verilog text.
 
@@ -693,7 +715,11 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         expr: The expression to emit.
 
     Returns:
-        Verilog expression text.
+        Verilog expression text, with parentheses inserted wherever operator
+        precedence in Verilog would differ from the expression tree structure.
+        Python and Verilog share most precedence rankings but diverge for
+        relational operators vs. bitwise operators (e.g. != has higher
+        precedence than & in Verilog but lower in Python).
     """
     if isinstance(expr, Literal):
         return _emit_literal(expr)
@@ -702,12 +728,36 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
             return ".".join(expr.hierarchy) + "." + expr.name
         return expr.name
     if isinstance(expr, UnaryOp):
-        return f"{expr.op}{emit_expression(expr.operand)}"
+        operand_str = emit_expression(expr.operand)
+        # Unary ops bind tighter than all binary ops, but a BinaryOp operand
+        # still needs parens: ~(a & b) not ~a & b.
+        if isinstance(expr.operand, (BinaryOp, TernaryOp)):
+            operand_str = f"({operand_str})"
+        return f"{expr.op}{operand_str}"
     if isinstance(expr, BinaryOp):
-        return f"{emit_expression(expr.left)} {expr.op} {emit_expression(expr.right)}"
+        this_prec = _prec(expr.op)
+        left_str = emit_expression(expr.left)
+        right_str = emit_expression(expr.right)
+        # Left operand: parenthesize only if it has strictly lower precedence.
+        # Equal-precedence on the left is fine for left-associative operators.
+        if isinstance(expr.left, TernaryOp) or (
+            isinstance(expr.left, BinaryOp) and _prec(expr.left.op) < this_prec
+        ):
+            left_str = f"({left_str})"
+        # Right operand: parenthesize if equal or lower precedence to handle
+        # non-associativity (a - (b - c) differs from a - b - c).
+        if isinstance(expr.right, TernaryOp) or (
+            isinstance(expr.right, BinaryOp) and _prec(expr.right.op) <= this_prec
+        ):
+            right_str = f"({right_str})"
+        return f"{left_str} {expr.op} {right_str}"
     if isinstance(expr, TernaryOp):
+        cond_str = emit_expression(expr.condition)
+        # Nested ternary as condition is ambiguous (right-associative in Verilog).
+        if isinstance(expr.condition, TernaryOp):
+            cond_str = f"({cond_str})"
         return (
-            f"{emit_expression(expr.condition)} ? "
+            f"{cond_str} ? "
             f"{emit_expression(expr.true_expr)} : "
             f"{emit_expression(expr.false_expr)}"
         )
