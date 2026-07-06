@@ -424,6 +424,16 @@ class Scheduler:  # cm:9a7f2c
         for task in module.tasks:
             self.executor._task_map[task.name] = task
 
+        # Bootstrap: evaluate all continuous assigns until stable so that
+        # zero-sensitivity assigns (e.g. constant literals in instance port
+        # connections) are initialised before any settle() call.
+        # settle() uses _run_dirty_continuous_assigns which skips assigns
+        # with empty sensitivity sets; without this they stay X forever in
+        # step-based sims that never call run().
+        for _ in range(self.delta_limit):
+            if not self._run_continuous_assigns():
+                break
+
     def _eval_initial_value(self, init_expr: object, width: int) -> Value:
         """Evaluate an initial_value expression, returning Value.x if absent."""
         if init_expr is None:

@@ -1138,3 +1138,121 @@ endmodule
                     vals.append(part.split("=", 1)[1])
         # After rst deasserts, count should become 0 (hierarchical ref resolved)
         assert "0" in vals, f"Expected count=0 after reset, got {vals}"
+
+
+# ── Constant port bootstrap regression ──────────────────────────────
+
+
+def _make_top_with_const_port() -> tuple[Module, Module, Design]:
+    """Top module wiring a literal constant to a submodule input.
+
+    module const_child(input [7:0] const_in, output [7:0] const_out);
+        assign const_out = const_in;
+    endmodule
+
+    module top_const(output [7:0] out);
+        const_child u_child (.const_in(8'd5), .const_out(out));
+    endmodule
+    """
+    child = Module(
+        "const_child",
+        ports=[
+            Port("const_in", PortDirection.INPUT, width=_w(8)),
+            Port("const_out", PortDirection.OUTPUT, width=_w(8)),
+        ],
+        nets=[
+            Net("const_in", NetKind.WIRE, width=_w(8)),
+            Net("const_out", NetKind.WIRE, width=_w(8)),
+        ],
+        continuous_assigns=[
+            ContinuousAssign(Identifier("const_out"), Identifier("const_in")),
+        ],
+    )
+    top = Module(
+        "top_const",
+        ports=[
+            Port("out", PortDirection.OUTPUT, width=_w(8)),
+        ],
+        nets=[
+            Net("out", NetKind.WIRE, width=_w(8)),
+        ],
+        instances=[
+            Instance(
+                "const_child",
+                "u_child",
+                port_connections=[
+                    PortConnection(
+                        port_name="const_in",
+                        expression=Literal(5, width=8),
+                        is_named=True,
+                    ),
+                    PortConnection(
+                        port_name="const_out",
+                        expression=Identifier("out"),
+                        is_named=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+    design = Design(modules=[top, child])
+    link_instances(design)
+    resolve_port_connections(design)
+
+    return top, child, design
+
+
+class TestConstantPortBootstrap:
+    """Regression: constant literal port connections must be initialised before settle().
+
+    When an instance port is driven by a literal (e.g. `Literal(5)`), the
+    resulting continuous assign has an empty sensitivity set.  Before the
+    bootstrap fix, settle() skipped these assigns so the port stayed X in
+    step-based sims that never called run().
+    """
+
+    def test_const_port_initialised_reference(self):
+        """Constant input port reads its value immediately after Simulator() (reference)."""
+        top, _child, design = _make_top_with_const_port()
+        sim = Simulator(top, engine="reference", design=design)
+        # No run(), no drive() — bootstrap must have resolved the constant.
+        assert int(sim.read("u_child.const_in")) == 5, (
+            f"u_child.const_in should be 5, got {sim.read('u_child.const_in')!r}"
+        )
+
+    def test_const_port_propagates_reference(self):
+        """Constant propagates through child's continuous assign (reference engine)."""
+        top, _child, design = _make_top_with_const_port()
+        sim = Simulator(top, engine="reference", design=design)
+        # const_out = const_in, so out should also be 5 after bootstrap.
+        assert int(sim.read("out")) == 5, (
+            f"out should be 5 after constant propagation, got {sim.read('out')!r}"
+        )
+
+    def test_const_port_survives_settle_reference(self):
+        """Constant remains correct after a drive()+settle() cycle (reference engine)."""
+        top, _child, design = _make_top_with_const_port()
+        sim = Simulator(top, engine="reference", design=design)
+        # Drive an unrelated signal and settle — the constant must not regress to X.
+        sim.settle()
+        assert int(sim.read("u_child.const_in")) == 5, (
+            f"u_child.const_in should still be 5 after settle, got {sim.read('u_child.const_in')!r}"
+        )
+
+    @pytest.mark.parametrize("engine", ["vm", "vm-fast"])
+    def test_const_port_initialised_vm(self, engine):
+        """Constant input port reads its value immediately after Simulator() (VM engines)."""
+        top, _child, design = _make_top_with_const_port()
+        sim = Simulator(top, engine=engine, design=design)
+        assert int(sim.read("u_child.const_in")) == 5, (
+            f"[{engine}] u_child.const_in should be 5, got {sim.read('u_child.const_in')!r}"
+        )
+
+    @pytest.mark.parametrize("engine", ["vm", "vm-fast"])
+    def test_const_port_propagates_vm(self, engine):
+        """Constant propagates through child's continuous assign (VM engines)."""
+        top, _child, design = _make_top_with_const_port()
+        sim = Simulator(top, engine=engine, design=design)
+        assert int(sim.read("out")) == 5, (
+            f"[{engine}] out should be 5, got {sim.read('out')!r}"
+        )

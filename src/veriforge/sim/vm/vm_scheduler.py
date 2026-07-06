@@ -412,6 +412,28 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         self._ref_ctx._struct_types.update(struct_signal_map)
         self._sync_ref_ctx()
 
+        # Bootstrap: evaluate all continuous assigns until stable so that
+        # zero-sensitivity assigns (e.g. constant literals in instance port
+        # connections) are initialised before any settle() call.
+        # settle() propagates only dirty signals and cannot trigger assigns
+        # with empty sensitivity sets; without this they stay X forever in
+        # step-based sims that never call run().
+        for _ in range(self.delta_limit):
+            if self._cy_ctx is not None:
+                snap = self._cy_ctx.snapshot_signals()
+            else:
+                snap = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
+            if self.interpreter:
+                self.interpreter.dirty.clear()
+            self._run_continuous_assigns()
+            if self._cy_ctx is not None:
+                cur = self._cy_ctx.snapshot_signals()
+            else:
+                cur = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
+            if cur == snap and not (self.interpreter and self.interpreter.dirty):
+                break
+        self._sync_ref_ctx()
+
     def _sync_ref_ctx(self, names: set[str] | None = None) -> None:  # noqa: PLR0912
         """Sync reference EvalContext from VM signal storage.
 
