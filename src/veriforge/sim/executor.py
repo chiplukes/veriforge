@@ -827,6 +827,8 @@ class StatementExecutor:  # cm:c2f9a1
                             else:
                                 self.nba_queue.append(MemRangeNbaEntry(base_name, base_index, m, l, wval))
                     return
+                if "[" in name:
+                    return
                 if msb_val.is_defined and lsb_val.is_defined:
                     m, l = int(msb_val), int(lsb_val)
                     # Adjust for non-zero base offset
@@ -906,6 +908,8 @@ class StatementExecutor:  # cm:c2f9a1
                                 self.nba_queue.append(StructFieldNbaEntry(base_name, abs_m, abs_l, wval))
                             else:
                                 self.nba_queue.append(MemRangeNbaEntry(base_name, base_index, abs_m, abs_l, wval))
+                    return
+                if "[" in name:
                     return
                 if base_val.is_defined and width_val.is_defined:
                     base_i = int(base_val)
