@@ -670,6 +670,11 @@ class StatementExecutor:  # cm:c2f9a1
                         else:
                             self.nba_queue.append(MemRangeNbaEntry(base_name, base_index, msb, lsb, fval))
                     return
+                # Name contains '[' — looks like a memory-element struct-field
+                # access (e.g. "mem[addr].data") whose index resolved to X.
+                # Don't create a spurious ctx._signals entry; drop silently.
+                if "[" in name:
+                    return
                 current = Value.x(value.width)
             if current.width != value.width:
                 value = value.resize(current.width)
