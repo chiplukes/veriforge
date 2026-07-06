@@ -1225,9 +1225,7 @@ class TestConstantPortBootstrap:
         top, _child, design = _make_top_with_const_port()
         sim = Simulator(top, engine="reference", design=design)
         # const_out = const_in, so out should also be 5 after bootstrap.
-        assert int(sim.read("out")) == 5, (
-            f"out should be 5 after constant propagation, got {sim.read('out')!r}"
-        )
+        assert int(sim.read("out")) == 5, f"out should be 5 after constant propagation, got {sim.read('out')!r}"
 
     def test_const_port_survives_settle_reference(self):
         """Constant remains correct after a drive()+settle() cycle (reference engine)."""
@@ -1253,6 +1251,4 @@ class TestConstantPortBootstrap:
         """Constant propagates through child's continuous assign (VM engines)."""
         top, _child, design = _make_top_with_const_port()
         sim = Simulator(top, engine=engine, design=design)
-        assert int(sim.read("out")) == 5, (
-            f"[{engine}] out should be 5, got {sim.read('out')!r}"
-        )
+        assert int(sim.read("out")) == 5, f"[{engine}] out should be 5, got {sim.read('out')!r}"

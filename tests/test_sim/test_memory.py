@@ -1999,11 +1999,19 @@ def _build_bram_wrapper_dsl(depth: int = 4):
     rd_addr = m.input("rd_addr", width=addr_width)
     rd_data = m.output("rd_data", width=32)
 
-    m.instance("bram_dut", "u_bram", ports={
-        "clk": clk, "rst": rst,
-        "wr_en": wr_en, "wr_addr": wr_addr, "wr_data": wr_data,
-        "rd_addr": rd_addr, "rd_data": rd_data,
-    })
+    m.instance(
+        "bram_dut",
+        "u_bram",
+        ports={
+            "clk": clk,
+            "rst": rst,
+            "wr_en": wr_en,
+            "wr_addr": wr_addr,
+            "wr_data": wr_data,
+            "rd_addr": rd_addr,
+            "rd_data": rd_data,
+        },
+    )
     return m.build()
 
 
@@ -2052,9 +2060,7 @@ def test_bram_range_select_index_standalone(engine):
     dut = _build_bram_dsl(depth=4)
     sim = Simulator(dut, engine=engine)
     result = _bram_write_read(sim, wr_addr_val=2, wr_data_val=0xBEEF, rd_addr_val=2)
-    assert int(result) == 0xBEEF, (
-        f"[{engine}] standalone mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"
-    )
+    assert int(result) == 0xBEEF, f"[{engine}] standalone mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -2070,6 +2076,4 @@ def test_bram_range_select_index_flattened(engine):
     design = Design(modules=[outer, inner])
     sim = Simulator(outer, engine=engine, design=design)
     result = _bram_write_read(sim, wr_addr_val=2, wr_data_val=0xBEEF, rd_addr_val=2)
-    assert int(result) == 0xBEEF, (
-        f"[{engine}] flattened mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"
-    )
+    assert int(result) == 0xBEEF, f"[{engine}] flattened mem[rd_addr[N:0]]: expected 0xBEEF, got {result!r}"

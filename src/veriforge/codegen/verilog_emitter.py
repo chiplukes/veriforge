@@ -690,13 +690,27 @@ def _emit_port_connections(connections: list[PortConnection]) -> str:
 # Unary operators have the highest precedence (not listed; they never need parens as parents).
 _BINARY_PREC: dict[str, int] = {
     "**": 12,
-    "*": 10, "/": 10, "%": 10,
-    "+": 9, "-": 9,
-    "<<": 8, ">>": 8, "<<<": 8, ">>>": 8,
-    "<": 7, "<=": 7, ">": 7, ">=": 7,
-    "==": 6, "!=": 6, "===": 6, "!==": 6,
+    "*": 10,
+    "/": 10,
+    "%": 10,
+    "+": 9,
+    "-": 9,
+    "<<": 8,
+    ">>": 8,
+    "<<<": 8,
+    ">>>": 8,
+    "<": 7,
+    "<=": 7,
+    ">": 7,
+    ">=": 7,
+    "==": 6,
+    "!=": 6,
+    "===": 6,
+    "!==": 6,
     "&": 5,
-    "^": 4, "~^": 4, "^~": 4,
+    "^": 4,
+    "~^": 4,
+    "^~": 4,
     "|": 3,
     "&&": 2,
     "||": 1,
@@ -740,9 +754,7 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         right_str = emit_expression(expr.right)
         # Left operand: parenthesize only if it has strictly lower precedence.
         # Equal-precedence on the left is fine for left-associative operators.
-        if isinstance(expr.left, TernaryOp) or (
-            isinstance(expr.left, BinaryOp) and _prec(expr.left.op) < this_prec
-        ):
+        if isinstance(expr.left, TernaryOp) or (isinstance(expr.left, BinaryOp) and _prec(expr.left.op) < this_prec):
             left_str = f"({left_str})"
         # Right operand: parenthesize if equal or lower precedence to handle
         # non-associativity (a - (b - c) differs from a - b - c).
@@ -756,11 +768,7 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         # Nested ternary as condition is ambiguous (right-associative in Verilog).
         if isinstance(expr.condition, TernaryOp):
             cond_str = f"({cond_str})"
-        return (
-            f"{cond_str} ? "
-            f"{emit_expression(expr.true_expr)} : "
-            f"{emit_expression(expr.false_expr)}"
-        )
+        return f"{cond_str} ? {emit_expression(expr.true_expr)} : {emit_expression(expr.false_expr)}"
     if isinstance(expr, Concatenation):
         parts = ", ".join(emit_expression(p) for p in expr.parts)
         return "{" + parts + "}"

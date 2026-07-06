@@ -140,9 +140,7 @@ def test_mask_extraction_inner_shift_parens() -> None:
 # With parens:    acc_sum * 16 + (acc_cnt >> 1)  CORRECT
 # ---------------------------------------------------------------------------
 def test_shift_right_of_add_rounding() -> None:
-    expr = BinaryOp(
-        "+", BinaryOp("*", _id("acc_sum"), _lit(16)), BinaryOp(">>", _id("acc_cnt"), _lit(1))
-    )
+    expr = BinaryOp("+", BinaryOp("*", _id("acc_sum"), _lit(16)), BinaryOp(">>", _id("acc_cnt"), _lit(1)))
     assert emit_expression(expr) == "acc_sum * 16 + (acc_cnt >> 1)"
 
 
