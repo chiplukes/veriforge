@@ -1462,6 +1462,77 @@ class CythonCodegen(
         ]
         return "\n\n".join(sections) + "\n"
 
+    def generate_to_file(self, module: Module, path: str, *, delta_limit: int = 10_000) -> str:
+        """Generate a complete .pyx source for *module* and write it to *path*.
+
+        Unlike :meth:`generate`, this method never holds the entire ``.pyx``
+        string in memory simultaneously.  Each section is written to *path*
+        incrementally as it is generated, and the process-function section is
+        streamed one function at a time so that peak memory is bounded by the
+        largest single process function rather than the total output size.
+
+        Returns the SHA-256 hex digest of the generated source bytes.  Pass
+        this to :meth:`~.compiler.CythonCompiler.compile_pyx_file` as the
+        ``source_sha256_hex`` argument.
+        """
+        import hashlib
+
+        self._module = module
+        self._delta_limit = delta_limit
+
+        if module.instances:
+            raise NotImplementedError(
+                "Compiled engine does not support module instantiation / hierarchy. Use engine='vm' instead."
+            )
+        if module.generate_blocks:
+            raise NotImplementedError(
+                "Generate constructs must be elaborated before compilation. "
+                "Call flatten_module() or elaborate_generates() first."
+            )
+
+        self._register_signals(module)
+        self._function_map = {f.name: f for f in module.functions}
+        self._task_map = {t.name: t for t in module.tasks}
+        self._register_func_task_signals(module)
+        self._validate_wide_transport_only(module)
+        self._compile_continuous_assigns(module)
+        self._compile_always_blocks(module)
+        self._compile_initial_blocks(module)
+        self._timing_diagnostics = self._collect_timing_diagnostics(module)
+
+        hasher = hashlib.sha256()
+
+        with open(path, "wb") as fh:
+            def _write(text: str) -> None:
+                encoded = text.encode("utf-8")
+                fh.write(encoded)
+                hasher.update(encoded)
+
+            small_sections = [
+                self._gen_header,
+                self._gen_constants,
+                self._gen_struct,
+                self._gen_wmask,
+                self._gen_wide_primitives,
+                self._gen_wide_adapters,
+                self._gen_wide_mem_helpers,
+                self._gen_user_functions,
+            ]
+            for gen_fn in small_sections:
+                _write(gen_fn())
+                _write("\n\n")
+
+            # Process functions streamed one function at a time to cap peak memory.
+            self._gen_process_functions_to(_write)
+
+            for gen_fn in (self._gen_delta_loop, self._gen_compiled_sim):
+                _write("\n\n")
+                _write(gen_fn())
+
+            _write("\n")
+
+        return hasher.hexdigest()
+
     # ΓöÇΓöÇ Signal registration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     def _register_signal(self, name: str, width: int, signed: bool = False) -> int:

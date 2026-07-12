@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+import os
+import tempfile
 import warnings
 import logging
 from pathlib import Path
@@ -25,7 +27,14 @@ from veriforge.sim.executor import StatementExecutor, StopExecution
 from veriforge.sim.value import Value
 
 from .codegen import CythonCodegen
-from .compiler import CythonCompiler, _CACHE_VERSION, _cython_version, _keyed_module_name, _platform_tag
+from .compiler import (
+    CythonCompiler,
+    _CACHE_VERSION,
+    _cache_key_from_source_hash,
+    _cython_version,
+    _keyed_module_name,
+    _platform_tag,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -399,18 +408,29 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                     self._setup_fallback(module)
                     return
 
-        # Cache miss — run full codegen + compile
+        # Cache miss — run full codegen + compile (streaming path to cap peak memory)
         self._codegen = CythonCodegen()
-        pyx_source = self._codegen.generate(module, delta_limit=self.delta_limit)
-
+        tmp_fd, tmp_pyx_path = tempfile.mkstemp(suffix=".pyx", prefix="veriforge_")
+        os.close(tmp_fd)
         try:
-            mod = self._compiler.compile_pyx(pyx_source, f"compiled_{module.name}")
-        except Exception as exc:
-            raise RuntimeError(
-                f"Failed to compile Cython extension for module '{module.name}'. "
-                f"Ensure a C compiler is available or use engine='vm'. "
-                f"Original error: {exc}"
-            ) from exc
+            source_hash = self._codegen.generate_to_file(
+                module, tmp_pyx_path, delta_limit=self.delta_limit
+            )
+            try:
+                mod = self._compiler.compile_pyx_file(
+                    tmp_pyx_path, source_hash, f"compiled_{module.name}"
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to compile Cython extension for module '{module.name}'. "
+                    f"Ensure a C compiler is available or use engine='vm'. "
+                    f"Original error: {exc}"
+                ) from exc
+        finally:
+            try:
+                os.unlink(tmp_pyx_path)
+            except FileNotFoundError:
+                pass
 
         self._sim = mod.CompiledSim()
         self._signal_map = dict(self._codegen.signal_map)
@@ -420,9 +440,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
         # Save to codegen cache
         if elab_hash is not None:
-            from .compiler import _cache_key
-
-            pyx_key = _cache_key(pyx_source)
+            pyx_key = _cache_key_from_source_hash(source_hash)
             keyed_name = _keyed_module_name(f"compiled_{module.name}", pyx_key)
             _save_elab_cache(
                 self._compiler.cache_dir,

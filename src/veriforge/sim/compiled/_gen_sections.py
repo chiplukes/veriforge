@@ -33,6 +33,42 @@ from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
 _BLOCKING_WRITE_RE = re.compile(r"^\s*c\.val\[(\d+)\]\s*=(?!=)")
 _NARROW_LHS_RE = re.compile(r"^\s*_set_(?:val|mask)_word\s*\(\s*c\s*,\s*(\d+)\s*,")
 
+# Maximum number of trigger[] terms to inline on a single sensitivity check line.
+# Longer sensitivity sets are split across multiple shorter lines using parenthesised
+# continuation so no individual line grows beyond ~120 characters.
+_MAX_INLINE_SENS = 6
+
+
+def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
+    """Return one or more Cython if-condition lines for a sensitivity check.
+
+    For small sensitivity sets emits a single inline ``if`` line.  For large
+    sets (> ``_MAX_INLINE_SENS`` signals) spreads the condition across multiple
+    short lines using parenthesised continuation so that no single generated
+    line exceeds roughly 120 characters.
+    """
+    if len(sorted_sids) <= _MAX_INLINE_SENS:
+        cond = " or ".join(f"trigger[{s}]" for s in sorted_sids)
+        return [f"{indent}if {cond}:"]
+    cont = indent + "        "
+    chunks = [
+        sorted_sids[i : i + _MAX_INLINE_SENS]
+        for i in range(0, len(sorted_sids), _MAX_INLINE_SENS)
+    ]
+    lines: list[str] = []
+    for ci, chunk in enumerate(chunks):
+        terms = " or ".join(f"trigger[{s}]" for s in chunk)
+        is_last = ci == len(chunks) - 1
+        if ci == 0 and is_last:
+            lines.append(f"{indent}if {terms}:")
+        elif ci == 0:
+            lines.append(f"{indent}if ({terms}")
+        elif is_last:
+            lines.append(f"{cont}or {terms}):")
+        else:
+            lines.append(f"{cont}or {terms}")
+    return lines
+
 
 def _seq_body_to_sv_reads(body_lines: list[str], async_sids: set[int] | None = None) -> list[str]:
     """Rewrite a seq proc body so that signal reads use sv[]/sm[] (pre-posedge snapshot).
@@ -503,6 +539,96 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         return "\n".join(parts)
 
+    def _gen_process_functions_to(self, write_fn) -> None:
+        """Stream process functions one at a time via *write_fn*.
+
+        Produces byte-for-byte identical output to ``_gen_process_functions()``
+        but never accumulates more than one process function's body lines in
+        memory simultaneously.  Suitable for designs where the total process
+        function section would otherwise require tens of GB to build as a
+        single string.
+
+        *write_fn* is called with successive ``str`` fragments whose
+        concatenation equals the full section text.
+        """
+        if not self._processes and not self._combo_processes and not self._seq_processes:
+            write_fn("# No process functions")
+            return
+
+        seq_negedge_sids = [
+            {sid for sid, et in edges.items() if et == "negedge"} for edges, _, _ in self._seq_processes
+        ]
+
+        process_groups = (
+            ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
+            ("combo", (body_lines for _sens, body_lines in self._combo_processes), True, False),
+            ("seq", (body_lines for _edges, _sens, body_lines in self._seq_processes), True, True),
+        )
+        first_func = True
+        for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
+            for i, body_lines in enumerate(body_groups):
+                func_parts: list[str] = []
+                if use_sv:
+                    func_parts.append(
+                        f"cdef inline void {prefix}_{i}(SimCtx *c, long long *sv, long long *sm) noexcept nogil:"
+                    )
+                else:
+                    func_parts.append(f"cdef inline void {prefix}_{i}(SimCtx *c) noexcept nogil:")
+
+                if body_lines:
+                    decls: list[str] = []
+                    if use_sv:
+                        async_sids = seq_negedge_sids[i] if prefix == "seq" else None
+                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids)
+                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
+                    decls.extend(hoisted_cdefs)
+                    joined = "\n".join(body_lines)
+                    if "_clhs" in joined:
+                        decls.append("    cdef long long _clhs")
+                    if "_cdv" in joined:
+                        decls.append("    cdef long long _cdv")
+                    if "_sfv" in joined:
+                        decls.append("    cdef long long _sfv")
+                    if "_mchg" in joined:
+                        decls.append("    cdef int _mchg")
+                    if "_mwi" in joined:
+                        decls.append("    cdef long long _mwi")
+                    if "_mwv" in joined:
+                        decls.append("    cdef long long _mwv, _mwm")
+                    if "_mwvu" in joined:
+                        decls.append("    cdef unsigned long long _mwvu, _mwmu")
+                    if "_rmw_msb" in joined:
+                        decls.append("    cdef int _rmw_msb, _rmw_lsb")
+                        decls.append("    cdef long long _rmw_mask")
+                    if "_ps_lsb" in joined:
+                        decls.append("    cdef int _ps_lsb")
+                        decls.append("    cdef long long _ps_mask")
+                    for m in re.findall(r"\b(_lv_\w+)\b", joined):
+                        decl = f"    cdef long long {m}"
+                        if decl not in decls:
+                            decls.append(decl)
+                    sc_indices = sorted({int(s) for s in re.findall(r"_sc(\d+)_[vm]", joined)})
+                    if sc_indices:
+                        max_words = self._module_max_wide_words()
+                        for sc_i in range(sc_indices[-1] + 1):
+                            decls.append(f"    cdef unsigned long long _sc{sc_i}_v[{max_words}]")
+                            decls.append(f"    cdef unsigned long long _sc{sc_i}_m[{max_words}]")
+                    func_parts.extend(decls)
+                    func_parts.extend(body_lines)
+                elif emit_pass_when_empty:
+                    func_parts.append("    pass")
+
+                func_parts.append("")  # trailing blank line (matches _gen_process_functions)
+                chunk = "\n".join(func_parts)
+                # Between functions: write a leading \n so that the trailing \n
+                # from the previous chunk and this \n together form the blank line
+                # separator, matching "\n".join(all_parts) with "" elements.
+                if first_func:
+                    write_fn(chunk)
+                    first_func = False
+                else:
+                    write_fn("\n" + chunk)
+
     def _gen_delta_loop(self) -> str:  # noqa: PLR0912, PLR0915
         has_seq = bool(self._seq_processes)
         lines = [
@@ -677,8 +803,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # Invoke each continuous assign guarded by trigger flags
         for i, (sens, _body) in enumerate(self._processes):
             if sens:
-                cond = " or ".join(f"trigger[{s}]" for s in sorted(sens))
-                lines.append(f"        if {cond}:")
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        "))
                 lines.append(f"            cont_{i}(c)")
                 lines.append("            if c.finished:")
                 lines.append("                return it")
@@ -694,8 +819,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # Invoke combinational always blocks guarded by trigger flags
         for i, (sens, _body) in enumerate(self._combo_processes):
             if sens:
-                cond = " or ".join(f"trigger[{s}]" for s in sorted(sens))
-                lines.append(f"        if {cond}:")
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        "))
                 lines.append(f"            combo_{i}(c)")
                 lines.append("            if c.finished:")
                 lines.append("                return it")

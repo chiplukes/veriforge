@@ -120,6 +120,23 @@ def _cache_key(source: str) -> str:
     return h.hexdigest()[:16]
 
 
+def _cache_key_from_source_hash(source_sha256_hex: str) -> str:
+    """Compute a cache key from a pre-computed source SHA-256 hex digest.
+
+    This is the streaming-codegen equivalent of :func:`_cache_key`: it takes
+    the raw SHA-256 of the ``.pyx`` source bytes (as returned by
+    :meth:`~.codegen.CythonCodegen.generate_to_file`) and mixes in the same
+    environment fingerprint so that recompilation is triggered whenever Cython,
+    the platform, or the cache schema changes.
+    """
+    h = hashlib.sha256()
+    h.update(bytes.fromhex(source_sha256_hex))
+    h.update(_cython_version().encode("utf-8"))
+    h.update(_platform_tag().encode("utf-8"))
+    h.update(_CACHE_VERSION.encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def _module_name_key(module_name: str) -> str:
     """Return a compact stable token for *module_name*.
 
@@ -255,6 +272,97 @@ class CythonCompiler:  # cm:3d7f4a
 
             mod = self._import_extension(ext_path, keyed_name)
             if needs_compiled_sim and not hasattr(mod, "CompiledSim"):
+                raise RuntimeError(
+                    f"Compiled module {keyed_name} is missing CompiledSim. "
+                    f"The Cython source may have been truncated during translation. "
+                    f"Try deleting {build_dir!r} and rerunning."
+                )
+            return mod
+
+    def compile_pyx_file(self, pyx_path: str, source_sha256_hex: str, module_name: str) -> object:
+        """Compile a .pyx file already on disk; return the imported extension module.
+
+        This is the streaming-codegen counterpart of :meth:`compile_pyx`.  The
+        caller has already written the ``.pyx`` to *pyx_path* (e.g. via
+        :meth:`~.codegen.CythonCodegen.generate_to_file`) and computed its
+        SHA-256 digest.  The same cache logic as :meth:`compile_pyx` applies.
+
+        On a cache miss the file at *pyx_path* is **copied** into the build
+        directory (the caller retains the original and is responsible for any
+        cleanup).
+
+        Args:
+            pyx_path:          Path to the ``.pyx`` file on disk.
+            source_sha256_hex: Hex SHA-256 digest of the source, as returned
+                               by :meth:`~.codegen.CythonCodegen.generate_to_file`.
+            module_name:       Python module name for the extension.
+
+        Returns:
+            The imported extension module.
+
+        Raises:
+            RuntimeError: If Cython or a C compiler is not available, or if
+                          compilation fails.
+        """
+        no_cache = os.environ.get("VERILOG_TOOLS_NO_COMPILE_CACHE", "") == "1"
+
+        key = _cache_key_from_source_hash(source_sha256_hex)
+        keyed_name = _keyed_module_name(module_name, key)
+        build_dir = os.path.join(self._cache_dir, keyed_name)
+
+        lock_path = build_dir + ".lock"
+        os.makedirs(self._cache_dir, exist_ok=True)
+        lock_ctx = _FileLock(lock_path) if _FileLock is not None else None
+
+        with lock_ctx if lock_ctx is not None else _nullctx():
+            if not no_cache:
+                cached = _find_extension(build_dir, keyed_name)
+                if cached is not None:
+                    try:
+                        mod = self._import_extension(cached, keyed_name)
+                        if not hasattr(mod, "CompiledSim"):
+                            raise AttributeError(
+                                f"Cached module {keyed_name} is missing CompiledSim "
+                                f"— cache entry is corrupt, forcing recompile"
+                            )
+                        log.debug("Cache hit: %s", cached)
+                        return mod
+                    except Exception as e:
+                        log.warning(
+                            "Stale/corrupt cache entry %s — removing and recompiling: %s", keyed_name, e
+                        )
+                        self._remove_build_dir(build_dir)
+
+            log.info("Compiling %s (cache key %s)", module_name, key)
+            self._remove_build_dir(build_dir)
+            os.makedirs(build_dir, exist_ok=True)
+
+            dest_pyx = os.path.join(build_dir, f"{keyed_name}.pyx")
+            shutil.copy2(pyx_path, dest_pyx)
+
+            c_path = os.path.join(build_dir, f"{keyed_name}.c")
+            if os.path.exists(c_path):
+                try:
+                    os.remove(c_path)
+                except OSError:
+                    pass
+
+            setup_source = self._generate_setup_py(keyed_name)
+            setup_path = os.path.join(build_dir, "setup.py")
+            with open(setup_path, "w", encoding="utf-8") as f:
+                f.write(setup_source)
+
+            self._run_build(build_dir)
+
+            ext_path = _find_extension(build_dir, keyed_name)
+            if ext_path is None:
+                raise RuntimeError(
+                    f"Compilation succeeded but no extension found in {build_dir}. "
+                    f"Expected {keyed_name}.pyd or {keyed_name}*.so"
+                )
+
+            mod = self._import_extension(ext_path, keyed_name)
+            if not hasattr(mod, "CompiledSim"):
                 raise RuntimeError(
                     f"Compiled module {keyed_name} is missing CompiledSim. "
                     f"The Cython source may have been truncated during translation. "

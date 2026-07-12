@@ -592,6 +592,53 @@ documented in `../gfwx-fpga/notes/plans/veriforge_load_memory_api.md`.
 
 ---
 
+## Codegen Scalability
+
+### Streaming Codegen (`generate_to_file`)
+
+For large designs the `generate()` method can require significant RAM because
+it builds the entire `.pyx` string in memory before writing it to disk.
+`CythonCodegen.generate_to_file(module, path)` is the streaming alternative:
+
+- Writes each section to disk as it is generated.
+- Streams the process-function section **one function at a time**, so peak
+  memory is bounded by the largest single process function rather than the
+  entire file.
+- Returns a SHA-256 hex digest of the source bytes for use as a cache key.
+- The compiled-scheduler `_elaborate_inner` path uses this method exclusively
+  since the streaming path was adopted.
+
+Callers that need the source as a string (e.g. tests, tooling) continue to use
+`generate()` unchanged.
+
+### Long Sensitivity Conditions
+
+The delta loop emits one sensitivity check per cont/combo process.  For designs
+with many-signal sensitivity sets the naive `trigger[0] or trigger[1] or …`
+pattern creates very long single lines.  Lines above `_MAX_INLINE_SENS` (6)
+signals are automatically split across multiple short continuation lines:
+
+```cython
+# 270-signal sensitivity set: 45 lines ≤ 113 chars each instead of one 3.2 KB line
+if (trigger[0] or trigger[1] or trigger[2] or trigger[3] or trigger[4] or trigger[5]
+        or trigger[6] or trigger[7] or trigger[8] or trigger[9] or trigger[10] or trigger[11]
+        ...
+        or trigger[264] or trigger[265] or trigger[266] or trigger[267] or trigger[268] or trigger[269]):
+    cont_0(c)
+```
+
+### Known Remaining Limitation
+
+For designs where individual process function bodies contain deeply nested
+arithmetic chains (e.g. a sum of many signals), `_emit_binary` for `+`/`-`
+generates O(k²) inline expression strings for chains of k operands.  This can
+produce lines that are hundreds of KB in the extreme case.  The fix (introducing
+named temporaries in the emitter) is tracked in the design plan at
+`../gfwx-fpga/notes/plans/veriforge_compiled_engine_scaling.md`.  The streaming
+codegen path reduces but does not eliminate the memory impact of this issue.
+
+---
+
 ## Memory Arrays
 
 Memory arrays (`reg [7:0] mem [0:255]`) are handled with the same layout
