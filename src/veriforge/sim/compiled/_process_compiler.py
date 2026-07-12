@@ -1430,6 +1430,8 @@ class _ProcessCompilerMixin:
                                         f"in the compiled engine"
                                     )
                                 edges[sid] = edge.edge
+            self._et_count = 0
+            self._et_node_masks = {}
             body_lines = self._emit_stmt(block.body, indent=1)
 
             if block.sensitivity_type == SensitivityType.COMBINATIONAL:

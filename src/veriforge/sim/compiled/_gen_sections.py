@@ -420,6 +420,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 local_names.update(local_var.name for local_var in func.locals)
                 local_names.add(func.name)
                 self._remap_local_identifiers(body_copy, local_names, prefix)
+                self._et_count = 0
+                self._et_node_masks = {}
                 body_lines = self._emit_stmt(body_copy, indent=1)
                 joined = "\n".join(body_lines)
                 if any("_cdv" in ln for ln in body_lines):

@@ -388,20 +388,24 @@ class _StmtEmittersMixin:
             if lines is not None:
                 return lines
 
+            old_et = self._et_pending
+            self._et_pending = []
             rhs_val = self._emit_expr(rhs, assign_width)
+            et_lines = [f"{pad}{t}" for t in self._et_pending]
+            self._et_pending = old_et
             assign_rhs = (
                 f"({rhs_val})"
                 if sid in self._unmasked_signal_ids
                 else f"({rhs_val}) & wmask({self._signal_widths[sid]})"
             )
             if is_nba:
-                return [
+                return et_lines + [
                     f"{pad}c.nba_val[{sid}] = {assign_rhs}",
                     f"{pad}c.nba_mask[{sid}] = 0",
                     f"{pad}c.nba_dirty[{sid}] = 1",
                     f"{pad}c.nba_pending = 1",
                 ]
-            return [
+            return et_lines + [
                 f"{pad}_cdv = {assign_rhs}",
                 f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
                 f"{pad}    c.val[{sid}] = _cdv",
@@ -1832,8 +1836,12 @@ class _StmtEmittersMixin:
     def _emit_if(self, stmt: IfStatement, indent: int, *, context: str = "process") -> list[str]:
         """Emit if/else as Cython if/else."""
         pad = "    " * indent
+        old_et = self._et_pending
+        self._et_pending = []
         cond = self._emit_expr(stmt.condition, 1)
-        lines = [f"{pad}if ({cond}):"]
+        et_lines = [f"{pad}{t}" for t in self._et_pending]
+        self._et_pending = old_et
+        lines = et_lines + [f"{pad}if ({cond}):"]
 
         if stmt.then_body:
             body = self._emit_stmt(stmt.then_body, indent + 1, context=context)

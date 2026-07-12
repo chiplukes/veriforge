@@ -60769,3 +60769,78 @@ class TestSignedDeclarationsCrossEngine:
             s.drive("a", Value(0, width=8))
 
         self._run_all(_make_signed_uneg_module, setup, ["y"])
+
+
+# ─── Expression temporaries (O(k²) → O(k) fix) ─────────────────────────────
+
+
+def _make_add_chain_module(k: int):
+    """k inputs a0..a(k-1), one reg result = a0 + a1 + ... + a(k-1)."""
+    from veriforge.dsl import Module, posedge
+
+    m = Module(f"add_chain_{k}")
+    clk = m.input("clk")
+    rst = m.input("rst")
+    operands = [m.input(f"a{i}", width=16) for i in range(k)]
+    result = m.reg("result", width=16)
+    with m.always(posedge(clk)):
+        with m.if_(rst):
+            result <<= 0
+        with m.else_():
+            s = operands[0]
+            for i in range(1, k):
+                s = s + operands[i]
+            result <<= s
+    return m.build()
+
+
+class TestExpressionTemporaries:
+    """Verify that expression temporaries produce correct results and keep line
+    lengths bounded (O(k) instead of O(k²)) for addition chains."""
+
+    def _run(self, mod, operand_values, expected):
+        from veriforge.sim.testbench import Simulator
+
+        for engine in ("reference", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            for name, val in operand_values.items():
+                sim.run(lambda s, n=name, v=val: s.drive(n, Value(v, width=16)), max_time=0)
+            sim.run(lambda s: s.drive("clk", 0), max_time=0)
+            sim.run(lambda s: s.drive("rst", 1), max_time=0)
+            sim.run(lambda s: s.drive("clk", 1), max_time=1)
+            sim.run(lambda s: s.drive("rst", 0), max_time=0)
+            sim.run(lambda s: s.drive("clk", 0), max_time=0)
+            sim.run(lambda s: s.drive("clk", 1), max_time=1)
+            got = sim.read("result")
+            assert got == expected, (
+                f"engine={engine} k={len(operand_values)}: got {got!r}, expected {expected}"
+            )
+
+    def test_add_chain_3(self):
+        """3-term addition: a0+a1+a2."""
+        mod = _make_add_chain_module(3)
+        vals = {f"a{i}": i + 1 for i in range(3)}
+        self._run(mod, vals, sum(vals.values()) & 0xFFFF)
+
+    def test_add_chain_5(self):
+        """5-term addition: a0+...+a4."""
+        mod = _make_add_chain_module(5)
+        vals = {f"a{i}": i + 1 for i in range(5)}
+        self._run(mod, vals, sum(vals.values()) & 0xFFFF)
+
+    def test_add_chain_10(self):
+        """10-term addition: a0+...+a9."""
+        mod = _make_add_chain_module(10)
+        vals = {f"a{i}": i + 1 for i in range(10)}
+        self._run(mod, vals, sum(vals.values()) & 0xFFFF)
+
+    def test_add_chain_max_line_length(self):
+        """Expression temps keep the max generated line length bounded (O(k), not O(k²))."""
+        for k in [5, 10, 20]:
+            mod = _make_add_chain_module(k)
+            cg = CythonCodegen()
+            pyx = cg.generate(mod)
+            max_len = max(len(line) for line in pyx.split("\n"))
+            assert max_len < 500, (
+                f"k={k}: max line length {max_len} exceeds 500 — O(k²) growth not fixed"
+            )

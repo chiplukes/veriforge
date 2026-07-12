@@ -627,15 +627,25 @@ if (trigger[0] or trigger[1] or trigger[2] or trigger[3] or trigger[4] or trigge
     cont_0(c)
 ```
 
-### Known Remaining Limitation
+### Expression Temporaries (O(k²) → O(k) fix)
 
-For designs where individual process function bodies contain deeply nested
-arithmetic chains (e.g. a sum of many signals), `_emit_binary` for `+`/`-`
-generates O(k²) inline expression strings for chains of k operands.  This can
-produce lines that are hundreds of KB in the extreme case.  The fix (introducing
-named temporaries in the emitter) is tracked in the design plan at
-`../gfwx-fpga/notes/plans/veriforge_compiled_engine_scaling.md`.  The streaming
-codegen path reduces but does not eliminate the memory impact of this issue.
+For designs with deeply nested arithmetic chains (`a + b + c + … + z` with k
+terms), `_emit_binary` for `+`/`-` would previously generate O(k²) inline
+expression strings.  This has been fixed by introducing named C temporaries
+(`_et{n}_v`, `_et{n}_m`) for intermediate sub-expressions:
+
+- When `_emit_binary` sees `expr.op in {'+','-'}` and the left operand is itself
+  a `+`/`-` chain, it hoists the left value+mask pair to named temps in
+  `self._et_pending`.
+- `_emit_mask_expr` checks `self._et_node_masks` (keyed by node identity) to
+  return the already-hoisted temp name instead of re-expanding the mask tree.
+- Statement emitters (`_emit_lhs_write`, `_emit_if`) open a temp context before
+  calling `_emit_expr`, then drain and prepend the accumulated prep lines.
+- `_hoist_inline_cdefs` (existing) moves `cdef long long _et{n}_v = …` lines to
+  function level so they are never inside an `if`/`elif` block.
+- Result: max line length stays O(1) per level; total generated code is O(k).
+
+The fix is tested in `TestExpressionTemporaries` in `test_compiled.py`.
 
 ---
 

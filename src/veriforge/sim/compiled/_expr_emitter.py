@@ -983,6 +983,21 @@ class _ExprEmitterMixin:
         if expr.op in {"+", "-"}:
             left_mask = self._emit_mask_expr(expr.left, op_width)
             right_mask = self._emit_mask_expr(expr.right, op_width)
+            # Hoist the left sub-expression to named temps when inside a temp
+            # context and the left operand is itself a +/- chain.  This converts
+            # O(k²) inline string growth for k-term addition chains into O(k).
+            if (
+                self._et_pending is not None
+                and isinstance(expr.left, BinaryOp)
+                and expr.left.op in {"+", "-"}
+            ):
+                n = self._et_count
+                self._et_count += 1
+                self._et_pending.append(f"cdef long long _et{n}_v = {left}")
+                self._et_pending.append(f"cdef long long _et{n}_m = {left_mask}")
+                self._et_node_masks[id(expr.left)] = f"_et{n}_m"
+                left = f"_et{n}_v"
+                left_mask = f"_et{n}_m"
             core = f"(({left}) {c_op} ({right}))"
             return f"(0 if (({left_mask}) | ({right_mask})) else (({core}) & wmask({width})))"
 
@@ -1561,6 +1576,12 @@ class _ExprEmitterMixin:
                 op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
             else:
                 op_width = width
+            if expr.op in {"+", "-"}:
+                # If this node's mask was hoisted to a named temp, return it
+                # directly instead of recomputing to keep the mask path O(k).
+                cached_m = self._et_node_masks.get(id(expr))
+                if cached_m is not None:
+                    return cached_m
             lm = self._emit_mask_expr(expr.left, op_width)
             rm = self._emit_mask_expr(expr.right, op_width)
             if expr.op in {"+", "-"}:
