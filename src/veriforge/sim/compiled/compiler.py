@@ -270,7 +270,8 @@ from Cython.Build import cythonize
 
 setup(
     ext_modules=cythonize(
-        [Extension("{module_name}", ["{module_name}.pyx"])],
+        [Extension("{module_name}", ["{module_name}.pyx"],
+                   extra_compile_args=["-O0"])],
         compiler_directives={{
             "language_level": "3",
             "boundscheck": False,

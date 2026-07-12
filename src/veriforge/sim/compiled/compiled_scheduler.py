@@ -1022,6 +1022,41 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
         return False
 
+    # ── Bulk memory I/O ──────────────────────────────────────────────
+
+    def load_memory(self, name: str, data) -> None:
+        """Bulk-load a named DSL memory from a sequence or numpy array."""
+        if self._codegen is None:
+            raise RuntimeError("CompiledScheduler not yet elaborated.")
+        mid = self._codegen.mem_map.get(name)
+        if mid is None:
+            raise ValueError(
+                f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}"
+            )
+        ew, _depth = self._codegen.mem_info[mid]
+        mask = (1 << ew) - 1
+        for i, v in enumerate(data):
+            v = int(v) & mask
+            if ew > 64:
+                self._sim.mem_write_wide(mid, i, v, mask)
+            else:
+                self._sim.mem_write(mid, i, _to_i64(v), _to_i64(mask))
+
+    def dump_memory(self, name: str, count: int) -> list[int]:
+        """Read *count* elements from a named DSL memory and return as a list."""
+        if self._codegen is None:
+            raise RuntimeError("CompiledScheduler not yet elaborated.")
+        mid = self._codegen.mem_map.get(name)
+        if mid is None:
+            raise ValueError(
+                f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}"
+            )
+        result = []
+        for i in range(count):
+            v, _ = self._sim.mem_read(mid, i)
+            result.append(int(v))
+        return result
+
     def batch_run(
         self,
         cycles: int,

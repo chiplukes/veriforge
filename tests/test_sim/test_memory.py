@@ -2050,6 +2050,106 @@ def _bram_write_read(sim, wr_addr_val: int, wr_data_val: int, rd_addr_val: int):
     return sim.read("rd_data")
 
 
+# ── load_memory / dump_memory / memory_names ─────────────────────────
+
+
+_compiled_only = pytest.mark.skipif(
+    "compiled" not in ENGINES,
+    reason="compiled engine not available (no C compiler or Cython)",
+)
+
+
+@_compiled_only
+class TestLoadDumpMemory:
+    """Simulator.load_memory / dump_memory / memory_names (compiled engine only)."""
+
+    def test_load_then_dump_roundtrip(self):
+        """Values written via load_memory are readable via dump_memory."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        payload = [0x11, 0x22, 0x33, 0x44]
+        sim.load_memory("mem", payload)
+        result = sim.dump_memory("mem", 4)
+        assert result == payload
+
+    def test_load_affects_sim_read(self):
+        """load_memory sets values that are visible to in-sim combinational logic."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        sim.load_memory("mem", [0xAA, 0xBB, 0xCC, 0xDD])
+        sim.drive("addr", 2)
+        sim.settle()
+        assert int(sim.read("out")) == 0xCC
+
+    def test_partial_load(self):
+        """load_memory with fewer elements than depth only touches written addresses."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        sim.load_memory("mem", [0x01, 0x02])
+        result = sim.dump_memory("mem", 2)
+        assert result == [0x01, 0x02]
+
+    def test_value_masking(self):
+        """Values wider than element width are silently truncated to element width."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        sim.load_memory("mem", [0x1FF])  # 9-bit value into 8-bit memory
+        result = sim.dump_memory("mem", 1)
+        assert result == [0xFF]
+
+    def test_memory_names_property(self):
+        """memory_names returns the flat name of every DSL memory."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        names = sim.memory_names
+        assert "mem" in names
+
+    def test_memory_names_non_compiled_returns_empty(self):
+        """memory_names returns [] for non-compiled engines."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="reference")
+        assert sim.memory_names == []
+
+    def test_load_memory_wrong_engine_raises(self):
+        """load_memory raises NotImplementedError for non-compiled engines."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="reference")
+        with pytest.raises(NotImplementedError):
+            sim.load_memory("mem", [1, 2, 3])
+
+    def test_dump_memory_wrong_engine_raises(self):
+        """dump_memory raises NotImplementedError for non-compiled engines."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="reference")
+        with pytest.raises(NotImplementedError):
+            sim.dump_memory("mem", 4)
+
+    def test_load_memory_unknown_name_raises(self):
+        """load_memory raises ValueError for an unknown memory name."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        with pytest.raises(ValueError, match="Unknown memory"):
+            sim.load_memory("no_such_mem", [1, 2])
+
+    def test_dump_memory_unknown_name_raises(self):
+        """dump_memory raises ValueError for an unknown memory name."""
+        m = _make_mem_module()
+        sim = Simulator(m, engine="compiled")
+        with pytest.raises(ValueError, match="Unknown memory"):
+            sim.dump_memory("no_such_mem", 4)
+
+    def test_load_overrides_initial_block_values(self):
+        """load_memory called after elaboration overrides values set by initial blocks."""
+        m = _make_mem_write_module()  # initial block sets mem={AA,BB,CC,DD}
+        sim = Simulator(m, engine="compiled")
+        # Run initial blocks so the default values land in the compiled arrays
+        sim.run(max_time=0)
+        # Now override with new values
+        sim.load_memory("mem", [0x01, 0x02, 0x03, 0x04])
+        result = sim.dump_memory("mem", 4)
+        assert result == [0x01, 0x02, 0x03, 0x04]
+
+
 @pytest.mark.parametrize("engine", ENGINES)
 def test_bram_range_select_index_standalone(engine):
     """mem[rd_addr[N:0]] write-then-read works in standalone mode across all engines.

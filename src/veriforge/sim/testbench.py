@@ -416,6 +416,48 @@ class Simulator:  # cm:a5c8f4
         """Read a signal by name (convenience method)."""
         return self._sched.read_signal(name)
 
+    @property
+    def memory_names(self) -> list[str]:
+        """Names of all DSL memories in the compiled design (compiled engine only)."""
+        if self._engine != "compiled":
+            return []
+        codegen = getattr(self._sched, "_codegen", None)
+        return list(codegen.mem_map) if codegen else []
+
+    def load_memory(self, name: str, data) -> None:
+        """Bulk-load a named DSL memory from a sequence or numpy array (compiled engine only).
+
+        Raises:
+            NotImplementedError: If the engine is not ``"compiled"``.
+            ValueError: If *name* is not a known memory in the compiled design.
+        """
+        if self._engine != "compiled":
+            raise NotImplementedError(
+                f"load_memory() requires engine='compiled', got {self._engine!r}"
+            )
+        from .compiled.compiled_scheduler import CompiledScheduler as _CSched
+
+        sched = self._sched
+        assert isinstance(sched, _CSched)  # noqa: S101
+        sched.load_memory(name, data)
+
+    def dump_memory(self, name: str, count: int) -> list[int]:
+        """Read *count* elements from a named DSL memory (compiled engine only).
+
+        Raises:
+            NotImplementedError: If the engine is not ``"compiled"``.
+            ValueError: If *name* is not a known memory in the compiled design.
+        """
+        if self._engine != "compiled":
+            raise NotImplementedError(
+                f"dump_memory() requires engine='compiled', got {self._engine!r}"
+            )
+        from .compiled.compiled_scheduler import CompiledScheduler as _CSched
+
+        sched = self._sched
+        assert isinstance(sched, _CSched)  # noqa: S101
+        return sched.dump_memory(name, count)
+
     def batch_run(
         self,
         cycles: int,

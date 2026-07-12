@@ -80,6 +80,8 @@ src/veriforge/sim/compiled/
 | `drive_signal(name, value)` | Drive a signal from the testbench |
 | `read_signal(name)` | Read a signal value |
 | `schedule_at(time, proc)` | Schedule a process at a given time |
+| `load_memory(name, data)` | Bulk-write a DSL memory from a sequence or numpy array |
+| `dump_memory(name, count)` | Read `count` elements from a DSL memory into a list |
 | `time` (property) | Current simulation time |
 | `display_output` (property) | Collected $display output |
 
@@ -497,6 +499,68 @@ endmodule
 
 See `examples/darkriscv/run_fast.py` for a complete working example that
 achieves 512x speedup over the event-loop path on the DarkRISCV SoC.
+
+---
+
+## Bulk Memory I/O: `load_memory` / `dump_memory`
+
+For testbenches that use DSL memories as stimulus ROMs or output capture
+buffers (the typical `batch_run` pattern), two convenience methods let
+Python pre-load and post-read memory contents without per-element
+`drive("mem[i]", v)` calls.
+
+### API
+
+```python
+sim.load_memory(name: str, data) -> None
+```
+
+Writes `data[0]..data[len(data)-1]` into the compiled memory named
+`name` starting at address 0. `data` may be any sequence or numpy array
+of integers; each element is truncated to the memory's element width.
+
+```python
+sim.dump_memory(name: str, count: int) -> list[int]
+```
+
+Reads addresses `0..count-1` from the compiled memory named `name` and
+returns them as a Python `list[int]`.
+
+```python
+sim.memory_names -> list[str]
+```
+
+Returns the flat names of all DSL memories in the compiled design.
+Returns `[]` for non-compiled engines.
+
+All three raise `NotImplementedError` if called on a non-compiled engine,
+and `ValueError` (with a list of available names) if the memory name is
+not found.
+
+### Typical pattern
+
+```python
+sim = Simulator(top, engine="compiled", design=design)
+
+# Pre-load stimulus ROM
+sim.load_memory("tb_src__rom", pixels)
+
+# Run entirely in C — no Python per cycle
+sim.batch_run(n_cycles, "clk")
+
+# Read output buffer
+n_words = int(sim.read("tb_sink__word_count"))
+encoded = sim.dump_memory("tb_sink__buf", n_words)
+```
+
+### Implementation note
+
+`load_memory` calls `mem_write` (or `mem_write_wide` for >64-bit elements)
+once per element via the compiled `CompiledSim` Cython object. For most
+realistic ROM sizes (< 10M elements) this loop is fast enough to be
+negligible compared to `batch_run`. A true zero-overhead bulk-copy path
+(passing a typed memoryview into Cython) is a future enhancement and is
+documented in `../gfwx-fpga/notes/plans/veriforge_load_memory_api.md`.
 
 ---
 
