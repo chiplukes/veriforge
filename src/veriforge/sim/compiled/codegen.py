@@ -199,6 +199,8 @@ class CythonCodegen(
         "_param_env",
         "_param_init",
         "_processes",
+        "_py_mask_cache",
+        "_py_val_cache",
         "_scratch_peak",
         "_scratch_slot_count",
         "_seq_processes",
@@ -252,6 +254,8 @@ class CythonCodegen(
         self._et_count: int = 0
         self._et_node_masks: dict[int, str] = {}
         self._et_node_vals: dict[int, str] = {}
+        self._py_val_cache: dict[int, str] = {}
+        self._py_mask_cache: dict[int, str] = {}
 
     # ── Wide scratch allocator ────────────────────────────────────────────
     # Used by _emit_wide_expr_to_scratch (Phase 1) to manage temporary

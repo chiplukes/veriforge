@@ -711,6 +711,12 @@ class _ExprEmitterMixin:
             right = self._emit_py_expr(expr.right, op_width)
             if left is None or right is None:
                 return None
+            # Cache operand value strings so _emit_py_mask_expr for + or |/&
+            # can reuse them without re-expanding the same sub-tree.
+            if left is not None:
+                self._py_val_cache.setdefault(id(expr.left), left)
+            if right is not None:
+                self._py_val_cache.setdefault(id(expr.right), right)
             width_mask = self._emit_py_width_mask(width)
             if expr.op in {"+", "-"}:
                 lm = self._emit_py_mask_expr(expr.left, op_width)
@@ -747,9 +753,17 @@ class _ExprEmitterMixin:
             return None
 
         if etype is TernaryOp:
+            # Check cache — populated below or by _emit_py_mask_expr (whichever
+            # runs first) so that a right-recursive TernaryOp chain does not
+            # produce 2^k calls via _emit_ternary_value_mask_exprs.
+            cached_v = self._py_val_cache.get(id(expr))
+            if cached_v is not None:
+                return cached_v
             ternary_exprs = self._emit_ternary_value_mask_exprs(expr, width, py=True)
             if ternary_exprs is None:
                 return None
+            self._py_val_cache[id(expr)] = ternary_exprs[0]
+            self._py_mask_cache[id(expr)] = ternary_exprs[1]
             return ternary_exprs[0]
 
         return None
@@ -920,16 +934,34 @@ class _ExprEmitterMixin:
             ):
                 return f"({width_mask} if (({lm}) | ({rm})) else 0)"
             if expr.op == "|":
-                lv = self._emit_py_expr(expr.left, op_width)
-                rv = self._emit_py_expr(expr.right, op_width)
-                if lv is None or rv is None:
-                    return None
+                # Use cached value strings if available — avoids re-expanding the
+                # left sub-tree that _emit_py_mask_expr(left) already traversed.
+                lv = self._py_val_cache.get(id(expr.left))
+                if lv is None:
+                    lv = self._emit_py_expr(expr.left, op_width)
+                    if lv is None:
+                        return None
+                    self._py_val_cache[id(expr.left)] = lv
+                rv = self._py_val_cache.get(id(expr.right))
+                if rv is None:
+                    rv = self._emit_py_expr(expr.right, op_width)
+                    if rv is None:
+                        return None
+                    self._py_val_cache[id(expr.right)] = rv
                 return f"(((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm}))) & {width_mask})"
             if expr.op == "&":
-                lv = self._emit_py_expr(expr.left, op_width)
-                rv = self._emit_py_expr(expr.right, op_width)
-                if lv is None or rv is None:
-                    return None
+                lv = self._py_val_cache.get(id(expr.left))
+                if lv is None:
+                    lv = self._emit_py_expr(expr.left, op_width)
+                    if lv is None:
+                        return None
+                    self._py_val_cache[id(expr.left)] = lv
+                rv = self._py_val_cache.get(id(expr.right))
+                if rv is None:
+                    rv = self._emit_py_expr(expr.right, op_width)
+                    if rv is None:
+                        return None
+                    self._py_val_cache[id(expr.right)] = rv
                 return f"(((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm}))) & {width_mask})"
             if expr.op in {"^"}:
                 return f"((({lm}) | ({rm})) & {width_mask})"
@@ -952,9 +984,15 @@ class _ExprEmitterMixin:
             return None
 
         if etype is TernaryOp:
+            # Symmetric with _emit_py_expr: whichever runs first caches both.
+            cached_m = self._py_mask_cache.get(id(expr))
+            if cached_m is not None:
+                return cached_m
             ternary_exprs = self._emit_ternary_value_mask_exprs(expr, width, py=True)
             if ternary_exprs is None:
                 return None
+            self._py_val_cache[id(expr)] = ternary_exprs[0]
+            self._py_mask_cache[id(expr)] = ternary_exprs[1]
             return ternary_exprs[1]
 
         return None

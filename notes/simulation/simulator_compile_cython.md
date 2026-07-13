@@ -659,6 +659,33 @@ break each chain level into O(1) references.
   The other emitter finds its cache entry on first call and returns immediately.
   This converts O(2^k) recursion to O(k) — verified at k=24 in 0.001s.
 
+**Python path TernaryOp** (`_emit_py_expr` / `_emit_py_mask_expr`):
+- The `py=True` path in `_emit_ternary_value_mask_exprs` has the same 2^k structure.
+- Fix: `_py_val_cache` / `_py_mask_cache` dicts (keyed by `id(expr)`, reset per
+  wide-assign) memoize Python-path ternary results.  Whichever emitter runs first
+  caches both val+mask so the second call returns O(1).
+
+**Python path `|`/`&`** (`_emit_py_mask_expr`):
+- `_emit_py_mask_expr` for `|`/`&` calls `_emit_py_mask_expr(left)` then
+  `_emit_py_expr(left)` independently → O(k²) for a k-deep wide `|`/`&` chain.
+- Fix: check `_py_val_cache` before calling `_emit_py_expr`; `_emit_py_expr` for
+  BinaryOp now populates `_py_val_cache` for both operands via `setdefault`.
+
+**Python path `+`/`-`** (`_emit_py_expr`):
+- `_emit_py_expr` for `+`/`-` calls `_emit_py_expr(left)` then `_emit_py_mask_expr(left)`
+  independently; if left is a TernaryOp chain this was 2^k × 2 = 2^(k+1).
+- Fixed as side-effect: `setdefault` in BinaryOp + TernaryOp memoization handles it.
+
+**`_emit_wide_py_bits_lines` guard** (`_wide_emitter.py`):
+- Called before the Cython fallback for every continuous assign.
+  `_rhs_max_accessed_signal_width(rhs)` can inflate `eval_width` above 64 for a
+  narrow (32-bit) LHS when the mux data path accesses a wide signal, causing the
+  wide Python emitters to run on a TernaryOp chain and OOM.
+- B1 fix: return None immediately when `_signal_widths[dst_sid] <= _WORD_BITS`.
+  Narrow LHS signals are always handled correctly by the Cython fallback.
+- Cache reset: `_py_val_cache = {}; _py_mask_cache = {}` at entry of each wide
+  assign so memoized strings from different assigns don't cross-contaminate via id reuse.
+
 **Continuous assigns** (`_compile_continuous_assigns`):
 - The fallthrough scalar path now opens a `_et_pending = []` context before
   calling `_emit_expr` and `_emit_mask_expr`, then prepends the drained `et_lines`

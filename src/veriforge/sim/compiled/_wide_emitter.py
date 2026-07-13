@@ -1593,6 +1593,15 @@ class _WideEmitterMixin:
     def _emit_wide_py_bits_lines(
         self, dst_sid: int, rhs: Expression, *, eval_width: int, indent: int, is_nba: bool
     ) -> list[str] | None:
+        # B1: narrow LHS is always handled by the Cython fallback below; skip the
+        # Python path so _rhs_max_accessed_signal_width can't inflate eval_width
+        # and accidentally trigger the wide Python emitters on a ≤64-bit signal.
+        if self._signal_widths[dst_sid] <= _WORD_BITS:
+            return None
+        # Reset per-assign Python expression caches so different assigns don't
+        # share memoized strings from different AST nodes that happen to reuse ids.
+        self._py_val_cache = {}
+        self._py_mask_cache = {}
         eval_width = max(eval_width, self._expr_width(rhs), self._rhs_max_accessed_signal_width(rhs))
         if eval_width <= _WORD_BITS:
             return None
