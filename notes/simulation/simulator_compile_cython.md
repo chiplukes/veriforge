@@ -647,6 +647,25 @@ expression strings.  This has been fixed by introducing named C temporaries
 
 The fix is tested in `TestExpressionTemporaries` in `test_compiled.py`.
 
+### Deferred Always-Block Compilation
+
+The remaining scalability bottleneck after the streaming text fix was that
+`_compile_always_blocks` called `_emit_stmt(block.body, indent=1)` for ALL
+always blocks before opening the output file, accumulating the compiled IR
+(lists of code lines) for every block simultaneously in Python heap.  For large
+designs this grows to tens of GB despite the streaming write path.
+
+The fix: `_compile_always_blocks` now stores each block's raw AST body
+(`block.body`, a tiny pointer) rather than the compiled `list[str]`.  The
+actual `_emit_stmt` call is deferred to `_gen_process_functions_to` via the
+new `_compile_always_body(block_body)` helper, which compiles one block at a
+time, emits it to disk immediately, and lets the IR be garbage-collected before
+moving to the next block.
+
+Result: peak Python heap during `generate_to_file` stays at ~1 MB regardless
+of design size (measured at n=20, 40, 80 registers; previously grew linearly
+with design complexity to 27.5 GB before OOM on a 270-signal design).
+
 ---
 
 ## Memory Arrays

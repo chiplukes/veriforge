@@ -1430,12 +1430,10 @@ class _ProcessCompilerMixin:
                                         f"in the compiled engine"
                                     )
                                 edges[sid] = edge.edge
-            self._et_count = 0
-            self._et_node_masks = {}
-            body_lines = self._emit_stmt(block.body, indent=1)
-
+            # Defer body compilation to text-generation time so the IR for all
+            # always blocks is never held in memory simultaneously.
             if block.sensitivity_type == SensitivityType.COMBINATIONAL:
-                self._combo_processes.append((sensitivity, body_lines))
+                self._combo_processes.append((sensitivity, block.body))
             else:
-                # Sequential ΓÇö @(posedge clk), @(negedge clk), etc.
-                self._seq_processes.append((edges, sensitivity, body_lines))
+                # Sequential — @(posedge clk), @(negedge clk), etc.
+                self._seq_processes.append((edges, sensitivity, block.body))

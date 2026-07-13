@@ -462,6 +462,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             return "# No user-defined functions"
         return "\n".join(parts)
 
+    def _compile_always_body(self, block_body) -> list[str]:
+        """Compile one always-block body Statement to code lines on demand.
+
+        Resets the expression-temporary counters so names are unique per function.
+        Called from the process-function generators so the IR for each block is
+        discarded as soon as its text has been written to disk.
+        """
+        self._et_count = 0
+        self._et_node_masks = {}
+        return self._emit_stmt(block_body, indent=1)
+
     def _gen_process_functions(self) -> str:
         parts: list[str] = []
 
@@ -478,8 +489,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
-            ("combo", (body_lines for _sens, body_lines in self._combo_processes), True, False),
-            ("seq", (body_lines for _edges, _sens, body_lines in self._seq_processes), True, True),
+            ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
+            ("seq", (self._compile_always_body(body) for _edges, _sens, body in self._seq_processes), True, True),
         )
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
             for i, body_lines in enumerate(body_groups):
@@ -563,8 +574,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
-            ("combo", (body_lines for _sens, body_lines in self._combo_processes), True, False),
-            ("seq", (body_lines for _edges, _sens, body_lines in self._seq_processes), True, True),
+            ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
+            ("seq", (self._compile_always_body(body) for _edges, _sens, body in self._seq_processes), True, True),
         )
         first_func = True
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:

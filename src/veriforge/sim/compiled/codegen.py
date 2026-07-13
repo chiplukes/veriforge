@@ -223,8 +223,8 @@ class CythonCodegen(
         self._n_sigs: int = 0
         self._unmasked_signal_ids: set[int] = set()
         self._processes: list[tuple[set[int], list[str]]] = []
-        self._combo_processes: list[tuple[set[int], list[str]]] = []
-        self._seq_processes: list[tuple[dict[int, str], set[int], list[str]]] = []
+        self._combo_processes: list[tuple[set[int], object]] = []
+        self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
         self._module: Module | None = None
         self._initial_lines: list[str] = []
         self._mem_map: dict[str, int] = {}
