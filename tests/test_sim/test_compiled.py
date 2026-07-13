@@ -60902,3 +60902,78 @@ class TestOrChainTemporaries:
             assert max_len < 500, (
                 f"k={k}: max line length {max_len} exceeds 500 — OR mask O(k²) not fixed"
             )
+
+
+# ─── Ternary-chain expression temporaries (2^k → O(k) fix) ──────────────────
+
+
+def _make_ternary_chain_module(k: int):
+    """Right-recursive k-deep ternary mux via continuous assign.
+
+    result = a0 ? d0 : (a1 ? d1 : (a2 ? d2 : ... : dk))
+    A right-recursive chain of k ternaries exercises _emit_ternary_value_mask_exprs
+    which without caching recurses 2^k times.
+    """
+    from veriforge.dsl import Module, mux
+
+    m = Module(f"ternary_chain_{k}")
+    sels = [m.input(f"a{i}") for i in range(k)]
+    datas = [m.input(f"d{i}", width=8) for i in range(k + 1)]
+    result = m.output("result", width=8)
+    # Build right-recursive: start from the innermost (default) and work outward
+    expr = datas[k]
+    for i in range(k - 1, -1, -1):
+        expr = mux(sels[i], datas[i], expr)
+    m.assign(result, expr)
+    return m.build()
+
+
+class TestTernaryChainTemporaries:
+    """Verify that ternary-chain expression temporaries produce correct results
+    and keep codegen time O(k) instead of O(2^k)."""
+
+    def _run(self, mod, sel_values, data_values, expected):
+        from veriforge.sim.testbench import Simulator
+
+        for engine in ("reference", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            for name, val in sel_values.items():
+                sim.drive(name, val)
+            for name, val in data_values.items():
+                sim.drive(name, Value(val, width=8))
+            sim.settle()
+            got = sim.read("result")
+            assert got == expected, (
+                f"engine={engine} k={len(sel_values)}: got {got!r}, expected {expected}"
+            )
+
+    def test_ternary_chain_3_first(self):
+        """3-deep ternary: a0=1 selects d0."""
+        mod = _make_ternary_chain_module(3)
+        self._run(
+            mod,
+            {"a0": 1, "a1": 0, "a2": 0},
+            {f"d{i}": i + 10 for i in range(4)},
+            Value(10, width=8),
+        )
+
+    def test_ternary_chain_3_last(self):
+        """3-deep ternary: all a=0 selects default d3."""
+        mod = _make_ternary_chain_module(3)
+        self._run(
+            mod,
+            {"a0": 0, "a1": 0, "a2": 0},
+            {f"d{i}": i + 10 for i in range(4)},
+            Value(13, width=8),
+        )
+
+    def test_ternary_chain_max_line_length(self):
+        """Ternary-chain temps keep generated line length bounded (O(k) not O(2^k))."""
+        for k in [5, 10, 20]:
+            mod = _make_ternary_chain_module(k)
+            cg = CythonCodegen()
+            pyx = cg.generate(mod)
+            max_len = max(len(line) for line in pyx.split("\n"))
+            assert max_len < 800, (
+                f"k={k}: max line length {max_len} exceeds 800 — ternary 2^k not fixed"
+            )

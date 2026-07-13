@@ -212,9 +212,27 @@ class _ExprEmitterMixin:
             return self._emit_unary(expr, width)
 
         if etype is TernaryOp:
+            # Check if this node's value was already hoisted to a named temp.
+            # Both value and mask are cached together (see hoist block below and
+            # the symmetric block in _emit_mask_expr), so whichever emitter runs
+            # first for a given node caches both — preventing 2^k recursion in
+            # right-recursive TernaryOp chains where _emit_ternary_value_mask_exprs
+            # calls both _emit_expr and _emit_mask_expr on the same false branch.
+            cached_v = self._et_node_vals.get(id(expr))
+            if cached_v is not None:
+                return cached_v
             ternary_exprs = self._emit_ternary_value_mask_exprs(expr, width, py=False)
             assert ternary_exprs is not None
-            return ternary_exprs[0]
+            value_str, mask_str = ternary_exprs
+            if self._et_pending is not None:
+                n = self._et_count
+                self._et_count += 1
+                self._et_pending.append(f"cdef long long _et{n}_v = {value_str}")
+                self._et_pending.append(f"cdef long long _et{n}_m = {mask_str}")
+                self._et_node_vals[id(expr)] = f"_et{n}_v"
+                self._et_node_masks[id(expr)] = f"_et{n}_m"
+                return f"_et{n}_v"
+            return value_str
 
         if etype is Concatenation:
             return self._emit_concat(expr, width)
@@ -1645,9 +1663,23 @@ class _ExprEmitterMixin:
             return self._emit_mask_expr(expr.operand, ow)
 
         if etype is TernaryOp:
+            # Check if this node's mask was already hoisted (see symmetric block
+            # in _emit_expr — the first caller caches both value+mask).
+            cached_m = self._et_node_masks.get(id(expr))
+            if cached_m is not None:
+                return cached_m
             ternary_exprs = self._emit_ternary_value_mask_exprs(expr, width, py=False)
             assert ternary_exprs is not None
-            return ternary_exprs[1]
+            value_str, mask_str = ternary_exprs
+            if self._et_pending is not None:
+                n = self._et_count
+                self._et_count += 1
+                self._et_pending.append(f"cdef long long _et{n}_v = {value_str}")
+                self._et_pending.append(f"cdef long long _et{n}_m = {mask_str}")
+                self._et_node_vals[id(expr)] = f"_et{n}_v"
+                self._et_node_masks[id(expr)] = f"_et{n}_m"
+                return f"_et{n}_m"
+            return mask_str
 
         if etype is Concatenation:
             parts = expr.parts

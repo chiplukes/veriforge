@@ -650,11 +650,20 @@ break each chain level into O(1) references.
 - `_emit_expr` checks `_et_node_vals` first, returning the cached temp name
   immediately so the right side of the chain doesn't re-expand the left.
 
+**TernaryOp chains** (`_emit_expr` / `_emit_mask_expr`):
+- For a right-recursive k-deep ternary mux, `_emit_ternary_value_mask_exprs`
+  calls both `_emit_expr(false_branch)` and `_emit_mask_expr(false_branch)`,
+  and each recurses into the same sub-chain independently — giving 2^k calls.
+- Fix: after computing a TernaryOp's value+mask, BOTH are immediately hoisted
+  to `_et{n}_v`/`_et{n}_m` and cached in `_et_node_vals`/`_et_node_masks`.
+  The other emitter finds its cache entry on first call and returns immediately.
+  This converts O(2^k) recursion to O(k) — verified at k=24 in 0.001s.
+
 **Continuous assigns** (`_compile_continuous_assigns`):
 - The fallthrough scalar path now opens a `_et_pending = []` context before
   calling `_emit_expr` and `_emit_mask_expr`, then prepends the drained `et_lines`
-  to the process body.  This activates both `+`/`-` and `|`/`&` hoisting for
-  continuous assigns (previously only active for always-block assignments).
+  to the process body.  This activates `+`/`-`, `|`/`&`, and TernaryOp hoisting
+  for continuous assigns (previously only active for always-block assignments).
 
 **Infrastructure**:
 - `_et_node_masks: dict[int, str]` and `_et_node_vals: dict[int, str]` cache
@@ -667,8 +676,9 @@ break each chain level into O(1) references.
 - Result: max line length stays O(1) per level (measured at 199 chars for all k).
   Total generated code is O(k); number of named temps is O(k).
 
-Tested in `TestExpressionTemporaries` (+/- chains) and `TestOrChainTemporaries`
-(|/& chains in continuous assigns) in `test_compiled.py`.
+Tested in `TestExpressionTemporaries` (+/- chains), `TestOrChainTemporaries`
+(|/& chains), and `TestTernaryChainTemporaries` (right-recursive mux, the
+actual gfwx-fpga assign 255 pattern) in `test_compiled.py`.
 
 ### Deferred Always-Block Compilation
 
