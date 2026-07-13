@@ -50,9 +50,54 @@ class _ProcessCompilerMixin:
     __slots__ = ()
 
     def _compile_continuous_assigns(self, module: Module) -> None:
-        for assign in module.continuous_assigns:
+        import os
+        import sys
+        import time
+
+        _profile = os.environ.get("VERIFORGE_CODEGEN_PROFILE")
+        if _profile:
+            try:
+                import resource as _resource
+                def _rss_mb() -> float:
+                    # ru_maxrss is in KB on Linux, bytes on macOS
+                    ru = _resource.getrusage(_resource.RUSAGE_SELF)
+                    return ru.ru_maxrss / 1024  # → MB on Linux
+            except ImportError:
+                def _rss_mb() -> float:
+                    try:
+                        with open("/proc/self/status") as _f:
+                            for _line in _f:
+                                if _line.startswith("VmRSS:"):
+                                    return int(_line.split()[1]) / 1024
+                    except OSError:
+                        pass
+                    return 0.0
+
+            _total = len(module.continuous_assigns)
+            _t0 = time.monotonic()
+            _interval = max(1, _total // 200)  # ~200 checkpoints
+            print(
+                f"[codegen-profile] _compile_continuous_assigns: {_total} assigns, "
+                f"{self._n_sigs} signals, RSS={_rss_mb():.0f} MB",
+                file=sys.stderr, flush=True,
+            )
+
+        for _ca_idx, assign in enumerate(module.continuous_assigns):
             sensitivity: set[int] = set()
             self._walk_signals(assign.rhs, sensitivity)
+
+            if _profile and _ca_idx % _interval == 0:
+                _text_bytes = sum(
+                    sum(len(l) for l in lines) for _, lines in self._processes
+                )
+                print(
+                    f"[codegen-profile]   assign {_ca_idx:5d}/{_total}"
+                    f"  procs={len(self._processes)}"
+                    f"  text={_text_bytes // 1024}KB"
+                    f"  RSS={_rss_mb():.0f}MB"
+                    f"  t={time.monotonic()-_t0:.1f}s",
+                    file=sys.stderr, flush=True,
+                )
 
             # Concatenation LHS: assign {hi, lo} = x ΓåÆ decompose into multiple simple assigns
             if isinstance(assign.lhs, Concatenation):
@@ -286,10 +331,18 @@ class _ProcessCompilerMixin:
                 self._processes.append((sensitivity, lines))
                 continue
 
+            self._et_count = 0
+            self._et_node_masks = {}
+            self._et_node_vals = {}
+            old_et = self._et_pending
+            self._et_pending = []
             rhs_val = self._emit_expr(assign.rhs, lhs_w)
 
             # Build per-expression mask that tracks x/z through ternaries correctly
             mask_expr = self._emit_mask_expr(assign.rhs, lhs_w)
+
+            et_lines = [f"    {t}" for t in self._et_pending]
+            self._et_pending = old_et
 
             rhs_w = self._expr_width(assign.rhs)
             if isinstance(assign.rhs, Identifier) and self._expr_signed(assign.rhs) and lhs_w > rhs_w:
@@ -297,7 +350,7 @@ class _ProcessCompilerMixin:
             else:
                 v_line = f"    cdef long long v = ({rhs_val}) & wmask({lhs_w})"
 
-            lines = [
+            lines = et_lines + [
                 v_line,
                 f"    cdef long long m = {mask_expr}",
                 "    v = v & ~m",
@@ -307,6 +360,17 @@ class _ProcessCompilerMixin:
                 f"        c.dirty[{lhs_sid}] = 1",
             ]
             self._processes.append((sensitivity, lines))
+
+        if _profile:
+            _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)
+            print(
+                f"[codegen-profile] _compile_continuous_assigns DONE:"
+                f"  procs={len(self._processes)}"
+                f"  text={_text_bytes // 1024}KB"
+                f"  RSS={_rss_mb():.0f}MB"
+                f"  t={time.monotonic()-_t0:.1f}s",
+                file=sys.stderr, flush=True,
+            )
 
     def _compile_struct_field_cont_assign(self, assign, sensitivity: set[int]) -> bool:
         """Compile continuous assign to a packed struct field.

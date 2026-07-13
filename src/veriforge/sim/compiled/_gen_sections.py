@@ -422,6 +422,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 self._remap_local_identifiers(body_copy, local_names, prefix)
                 self._et_count = 0
                 self._et_node_masks = {}
+                self._et_node_vals = {}
                 body_lines = self._emit_stmt(body_copy, indent=1)
                 joined = "\n".join(body_lines)
                 if any("_cdv" in ln for ln in body_lines):
@@ -471,6 +472,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         """
         self._et_count = 0
         self._et_node_masks = {}
+        self._et_node_vals = {}
         return self._emit_stmt(block_body, indent=1)
 
     def _gen_process_functions(self) -> str:

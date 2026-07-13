@@ -183,6 +183,7 @@ class CythonCodegen(
         "_delta_limit",
         "_et_count",
         "_et_node_masks",
+        "_et_node_vals",
         "_et_pending",
         "_function_map",
         "_initial_lines",
@@ -250,6 +251,7 @@ class CythonCodegen(
         self._et_pending: list[str] | None = None
         self._et_count: int = 0
         self._et_node_masks: dict[int, str] = {}
+        self._et_node_vals: dict[int, str] = {}
 
     # ── Wide scratch allocator ────────────────────────────────────────────
     # Used by _emit_wide_expr_to_scratch (Phase 1) to manage temporary

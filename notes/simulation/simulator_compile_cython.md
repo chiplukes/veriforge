@@ -629,23 +629,46 @@ if (trigger[0] or trigger[1] or trigger[2] or trigger[3] or trigger[4] or trigge
 
 ### Expression Temporaries (O(k²) → O(k) fix)
 
-For designs with deeply nested arithmetic chains (`a + b + c + … + z` with k
-terms), `_emit_binary` for `+`/`-` would previously generate O(k²) inline
-expression strings.  This has been fixed by introducing named C temporaries
-(`_et{n}_v`, `_et{n}_m`) for intermediate sub-expressions:
+For designs with deeply nested arithmetic or bitwise chains (`a + b + c + … + z`
+or `a | b | c | … | z` with k terms), the expression emitters would previously
+generate O(k²) inline strings.  Named C temporaries (`_et{n}_v`, `_et{n}_m`)
+break each chain level into O(1) references.
 
+**`+`/`-` chains** (`_emit_binary`):
 - When `_emit_binary` sees `expr.op in {'+','-'}` and the left operand is itself
   a `+`/`-` chain, it hoists the left value+mask pair to named temps in
   `self._et_pending`.
-- `_emit_mask_expr` checks `self._et_node_masks` (keyed by node identity) to
-  return the already-hoisted temp name instead of re-expanding the mask tree.
-- Statement emitters (`_emit_lhs_write`, `_emit_if`) open a temp context before
-  calling `_emit_expr`, then drain and prepend the accumulated prep lines.
-- `_hoist_inline_cdefs` (existing) moves `cdef long long _et{n}_v = …` lines to
-  function level so they are never inside an `if`/`elif` block.
-- Result: max line length stays O(1) per level; total generated code is O(k).
 
-The fix is tested in `TestExpressionTemporaries` in `test_compiled.py`.
+**`|`/`&` chains** (`_emit_mask_expr`):
+- For `|` and `&`, `_emit_mask_expr` must compute both `lm` (mask of left) and
+  `lv` (value of left) to build the 4-state propagation formula.  Without
+  hoisting, each level re-expands the left subtree, giving O(k²) mask strings.
+- When in a temp context and `expr.left` is itself a `|`/`&` BinaryOp,
+  `_emit_mask_expr` hoists both `lv` and `lm` of `expr.left` to `_et{n}_v` /
+  `_et{n}_m`, records them in `_et_node_vals` / `_et_node_masks`, and uses
+  short temp names in the formula.
+- `_emit_expr` checks `_et_node_vals` first, returning the cached temp name
+  immediately so the right side of the chain doesn't re-expand the left.
+
+**Continuous assigns** (`_compile_continuous_assigns`):
+- The fallthrough scalar path now opens a `_et_pending = []` context before
+  calling `_emit_expr` and `_emit_mask_expr`, then prepends the drained `et_lines`
+  to the process body.  This activates both `+`/`-` and `|`/`&` hoisting for
+  continuous assigns (previously only active for always-block assignments).
+
+**Infrastructure**:
+- `_et_node_masks: dict[int, str]` and `_et_node_vals: dict[int, str]` cache
+  temp names by AST node identity.  Both are reset per always-block body
+  (`_compile_always_body`) and per continuous-assign fallthrough.
+- The `_et_node_masks` cache check was generalized from `+`/`-`-only to all
+  BinaryOp so that `|`/`&` hoist targets are also short-circuited.
+- `_hoist_inline_cdefs` moves `cdef long long _et{n}_v = …` lines to function
+  level so they are never inside an `if`/`elif` block (unchanged).
+- Result: max line length stays O(1) per level (measured at 199 chars for all k).
+  Total generated code is O(k); number of named temps is O(k).
+
+Tested in `TestExpressionTemporaries` (+/- chains) and `TestOrChainTemporaries`
+(|/& chains in continuous assigns) in `test_compiled.py`.
 
 ### Deferred Always-Block Compilation
 

@@ -203,6 +203,9 @@ class _ExprEmitterMixin:
             return _cy_lit(lit_val)
 
         if etype is BinaryOp:
+            cached_v = self._et_node_vals.get(id(expr))
+            if cached_v is not None:
+                return cached_v
             return self._emit_binary(expr, width)
 
         if etype is UnaryOp:
@@ -996,6 +999,7 @@ class _ExprEmitterMixin:
                 self._et_pending.append(f"cdef long long _et{n}_v = {left}")
                 self._et_pending.append(f"cdef long long _et{n}_m = {left_mask}")
                 self._et_node_masks[id(expr.left)] = f"_et{n}_m"
+                self._et_node_vals[id(expr.left)] = f"_et{n}_v"
                 left = f"_et{n}_v"
                 left_mask = f"_et{n}_m"
             core = f"(({left}) {c_op} ({right}))"
@@ -1576,12 +1580,12 @@ class _ExprEmitterMixin:
                 op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
             else:
                 op_width = width
-            if expr.op in {"+", "-"}:
-                # If this node's mask was hoisted to a named temp, return it
-                # directly instead of recomputing to keep the mask path O(k).
-                cached_m = self._et_node_masks.get(id(expr))
-                if cached_m is not None:
-                    return cached_m
+            # If this node's mask was already hoisted to a named temp (by
+            # _emit_binary for +/- or by _emit_mask_expr below for |/&),
+            # return it directly to keep the mask path O(k).
+            cached_m = self._et_node_masks.get(id(expr))
+            if cached_m is not None:
+                return cached_m
             lm = self._emit_mask_expr(expr.left, op_width)
             rm = self._emit_mask_expr(expr.right, op_width)
             if expr.op in {"+", "-"}:
@@ -1596,13 +1600,43 @@ class _ExprEmitterMixin:
                 return f"(wmask({width}) if (({lm}) | ({rm})) else 0)"
             # For bitwise OR: known-1 in either input forces result to known-1
             # For bitwise AND: known-0 in either input forces result to known-0
+            # Hoist the left sub-expression's value+mask to named temps when in
+            # a temp context and the left operand is itself a |/& chain.  This
+            # prevents O(k²) inline string growth (both lm and lv would otherwise
+            # re-expand the same left subtree at each level of the chain).
             if expr.op == "|":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
+                if (
+                    self._et_pending is not None
+                    and isinstance(expr.left, BinaryOp)
+                    and expr.left.op in {"|", "&"}
+                ):
+                    n = self._et_count
+                    self._et_count += 1
+                    self._et_pending.append(f"cdef long long _et{n}_v = {lv}")
+                    self._et_pending.append(f"cdef long long _et{n}_m = {lm}")
+                    self._et_node_masks[id(expr.left)] = f"_et{n}_m"
+                    self._et_node_vals[id(expr.left)] = f"_et{n}_v"
+                    lv = f"_et{n}_v"
+                    lm = f"_et{n}_m"
                 return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})))"
             if expr.op == "&":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
+                if (
+                    self._et_pending is not None
+                    and isinstance(expr.left, BinaryOp)
+                    and expr.left.op in {"|", "&"}
+                ):
+                    n = self._et_count
+                    self._et_count += 1
+                    self._et_pending.append(f"cdef long long _et{n}_v = {lv}")
+                    self._et_pending.append(f"cdef long long _et{n}_m = {lm}")
+                    self._et_node_masks[id(expr.left)] = f"_et{n}_m"
+                    self._et_node_vals[id(expr.left)] = f"_et{n}_v"
+                    lv = f"_et{n}_v"
+                    lm = f"_et{n}_m"
                 return f"((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm})))"
             return f"({lm} | {rm})"
 
