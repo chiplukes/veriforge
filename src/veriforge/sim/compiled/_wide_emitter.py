@@ -3954,6 +3954,15 @@ class _WideEmitterMixin:
             self._free_scratch(lslot, rslot, bl_slot, br_slot)
             return lines
 
+        # ── FunctionCall ($signed/$unsigned are transparent in wide context) ──
+        if et is FunctionCall:
+            fname = expr.name.lower()
+            if fname in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
+                return self._emit_wide_expr_to_scratch(
+                    expr.arguments[0], slot, n_words, dst_width, indent
+                )
+            return None
+
         return None
 
     def _rhs_needs_wide_eval(self, rhs: Expression) -> bool:

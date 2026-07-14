@@ -60977,3 +60977,378 @@ class TestTernaryChainTemporaries:
             assert max_len < 800, (
                 f"k={k}: max line length {max_len} exceeds 800 — ternary 2^k not fixed"
             )
+
+
+# ─── Ternary-chain correctness: 32-bit wide chain, cross-engine ──────────────
+
+
+def _make_ternary_chain_32bit_module(k: int, name: str | None = None):
+    """Right-recursive k-deep ternary mux with 32-bit data signals.
+
+    Matches the gfwx-fpga norm_sum pattern: 24-deep chain, 32-bit outputs.
+    """
+    from veriforge.dsl import Module, mux
+
+    m = Module(name or f"ternary_chain_32b_{k}")
+    sels = [m.input(f"sel{i}") for i in range(k)]
+    datas = [m.input(f"d{i}", width=32) for i in range(k + 1)]
+    result = m.output("result", width=32)
+    expr = datas[k]
+    for i in range(k - 1, -1, -1):
+        expr = mux(sels[i], datas[i], expr)
+    m.assign(result, expr)
+    return m.build()
+
+
+def _make_ternary_chain_wide_branch_module(k: int):
+    """k-deep ternary chain where the innermost branch is a wide-signal range-select.
+
+    The last fallthrough data is w[31:0] where w is 128-bit — exercises the B1
+    fix path (narrow LHS, wide RHS signal accessed via range-select).
+    """
+    from veriforge.dsl import Module
+    from veriforge.model.expressions import RangeSelect, Identifier, Literal, TernaryOp
+    from veriforge.model.assignments import ContinuousAssign
+
+    m = Module(f"ternary_chain_wide_{k}")
+    for i in range(k):
+        m.input(f"sel{i}")
+    for i in range(k):
+        m.input(f"d{i}", width=32)
+    m.input("w", width=128)
+    m.output("result", width=32)
+
+    mod = m.build()
+    # Build chain: innermost = w[31:0]
+    wide_slice = RangeSelect(target=Identifier("w"), msb=Literal(31), lsb=Literal(0))
+    expr = wide_slice
+    for i in range(k - 1, -1, -1):
+        expr = TernaryOp(
+            condition=Identifier(f"sel{i}"),
+            true_expr=Identifier(f"d{i}"),
+            false_expr=expr,
+        )
+    mod.continuous_assigns.append(ContinuousAssign(lhs=Identifier("result"), rhs=expr))
+    return mod
+
+
+class TestTernaryChain32bit:
+    """Cross-engine correctness for 32-bit ternary chains (mirrors gfwx-fpga pattern)."""
+
+    def _run_cross(self, mod, drives: dict, expected_val: int, width: int = 32):
+        """Drive inputs, settle, and assert compiled matches vm-fast."""
+        from veriforge.sim.testbench import Simulator
+
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            for name, val in drives.items():
+                if isinstance(val, Value):
+                    sim.drive(name, val)
+                else:
+                    sim.drive(name, Value(val, width=1) if name.startswith("sel") else Value(val, width=width))
+            sim.settle()
+            results[engine] = sim.read("result")
+
+        assert results["compiled"] == results["vm-fast"], (
+            f"compiled={results['compiled']!r} != vm-fast={results['vm-fast']!r}"
+        )
+        assert results["compiled"] == Value(expected_val, width=width), (
+            f"compiled={results['compiled']!r}, expected Value({expected_val:#010x}, width={width})"
+        )
+
+    def test_chain_3_select_first(self):
+        mod = _make_ternary_chain_32bit_module(3)
+        self._run_cross(
+            mod,
+            {"sel0": 1, "sel1": 0, "sel2": 0,
+             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            0x11111111,
+        )
+
+    def test_chain_3_select_last(self):
+        mod = _make_ternary_chain_32bit_module(3)
+        self._run_cross(
+            mod,
+            {"sel0": 0, "sel1": 0, "sel2": 0,
+             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            0x44444444,
+        )
+
+    def test_chain_3_select_middle(self):
+        mod = _make_ternary_chain_32bit_module(3)
+        self._run_cross(
+            mod,
+            {"sel0": 0, "sel1": 0, "sel2": 1,
+             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            0x33333333,
+        )
+
+    def test_chain_24_select_first(self):
+        """24-deep chain (gfwx-fpga depth): selects d0."""
+        k = 24
+        mod = _make_ternary_chain_32bit_module(k, name="ternary_norm_sum_like")
+        drives = {f"sel{i}": (1 if i == 0 else 0) for i in range(k)}
+        drives.update({f"d{i}": 0x0880014C + i for i in range(k + 1)})
+        self._run_cross(mod, drives, 0x0880014C)
+
+    def test_chain_24_select_last(self):
+        """24-deep chain: all selectors 0, selects d24 (innermost fallthrough)."""
+        k = 24
+        mod = _make_ternary_chain_32bit_module(k, name="ternary_norm_sum_last")
+        drives = {f"sel{i}": 0 for i in range(k)}
+        drives.update({f"d{i}": 0x0880014C + i for i in range(k + 1)})
+        # d24 = 0x0880014C + 24 = 0x08800164
+        self._run_cross(mod, drives, 0x0880014C + k)
+
+    def test_chain_24_each_level(self):
+        """24-deep chain: test each selector selecting its branch."""
+        k = 24
+        mod = _make_ternary_chain_32bit_module(k, name="ternary_norm_sum_levels")
+        base_val = 0x10000000
+        for chosen in range(k):
+            drives = {f"sel{i}": (1 if i == chosen else 0) for i in range(k)}
+            drives.update({f"d{i}": base_val + i for i in range(k + 1)})
+            self._run_cross(mod, drives, base_val + chosen)
+
+    def test_chain_wide_branch_select_narrow(self):
+        """Ternary chain with wide-signal fallthrough, sel=1 (picks narrow data)."""
+        mod = _make_ternary_chain_wide_branch_module(3)
+        from veriforge.sim.testbench import Simulator
+
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            sim.drive("sel0", Value(1, width=1))
+            sim.drive("sel1", Value(0, width=1))
+            sim.drive("sel2", Value(0, width=1))
+            sim.drive("d0", Value(0x12345678, width=32))
+            sim.drive("d1", Value(0xABCDEF01, width=32))
+            sim.drive("d2", Value(0xDEADBEEF, width=32))
+            sim.drive("w", Value(0x0880014C, width=128))
+            sim.settle()
+            results[engine] = sim.read("result")
+
+        assert results["compiled"] == results["vm-fast"], (
+            f"wide-branch: compiled={results['compiled']!r} != vm-fast={results['vm-fast']!r}"
+        )
+        assert results["compiled"] == Value(0x12345678, width=32)
+
+    def test_chain_wide_branch_select_wide(self):
+        """Ternary chain with wide-signal fallthrough, all sel=0 (picks w[31:0])."""
+        mod = _make_ternary_chain_wide_branch_module(3)
+        from veriforge.sim.testbench import Simulator
+
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            sim.drive("sel0", Value(0, width=1))
+            sim.drive("sel1", Value(0, width=1))
+            sim.drive("sel2", Value(0, width=1))
+            sim.drive("d0", Value(0x12345678, width=32))
+            sim.drive("d1", Value(0xABCDEF01, width=32))
+            sim.drive("d2", Value(0xDEADBEEF, width=32))
+            sim.drive("w", Value(0x0880014C, width=128))
+            sim.settle()
+            results[engine] = sim.read("result")
+
+        assert results["compiled"] == results["vm-fast"], (
+            f"wide-branch fallthrough: compiled={results['compiled']!r} != vm-fast={results['vm-fast']!r}"
+        )
+        assert results["compiled"] == Value(0x0880014C, width=32)
+
+
+# ─── Or-chain of TernaryOps correctness (Task 6 mask hoisting) ───────────────
+
+
+def _make_or_of_ternaries_module(k: int):
+    """CCA: result = (sel0 ? a0 : b0) | (sel1 ? a1 : b1) | ... | (sel_{k-1} ? a_{k-1} : b_{k-1}).
+
+    This exercises Task 6's mask hoisting for |/& chains containing TernaryOp branches.
+    """
+    from veriforge.dsl import Module, mux
+
+    m = Module(f"or_of_ternaries_{k}")
+    sels = [m.input(f"sel{i}") for i in range(k)]
+    a_sigs = [m.input(f"a{i}", width=32) for i in range(k)]
+    b_sigs = [m.input(f"b{i}", width=32) for i in range(k)]
+    result = m.output("result", width=32)
+
+    # Left-associative: ((sel0?a0:b0) | (sel1?a1:b1)) | ...
+    expr = mux(sels[0], a_sigs[0], b_sigs[0])
+    for i in range(1, k):
+        expr = expr | mux(sels[i], a_sigs[i], b_sigs[i])
+    m.assign(result, expr)
+    return m.build()
+
+
+def _make_or_chain_of_sels_module():
+    """CCA: a multi-level |/& tree followed by comparison to test cross-hoisting.
+
+    result = ((a | b | c | d) == 0) ? 0 : 1  — exercises chain + comparison.
+    """
+    from veriforge.dsl import Module
+
+    m = Module("or_chain_sel")
+    a = m.input("a", width=32)
+    b = m.input("b", width=32)
+    c = m.input("c", width=32)
+    d = m.input("d", width=32)
+    result = m.output("result", width=32)
+    # Build OR-reduction then use as selector
+    or_chain = ((a | b) | c) | d
+    m.assign(result, or_chain)
+    return m.build()
+
+
+class TestOrOfTernaries:
+    """Cross-engine correctness for |/& chains of TernaryOps."""
+
+    def _run_cross(self, mod, drives: dict, expected_val: int, width: int = 32):
+        from veriforge.sim.testbench import Simulator
+
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            for name, val in drives.items():
+                w = 1 if name.startswith("sel") else width
+                sim.drive(name, Value(val, width=w))
+            sim.settle()
+            results[engine] = sim.read("result")
+
+        assert results["compiled"] == results["vm-fast"], (
+            f"compiled={results['compiled']!r} != vm-fast={results['vm-fast']!r}"
+        )
+        assert results["compiled"] == Value(expected_val, width=width), (
+            f"compiled={results['compiled']!r}, expected Value({expected_val:#010x})"
+        )
+
+    def test_or_of_2_ternaries_pick_first(self):
+        mod = _make_or_of_ternaries_module(2)
+        # sel0=1→a0, sel1=1→a1; result = a0 | a1
+        self._run_cross(
+            mod,
+            {"sel0": 1, "sel1": 1,
+             "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0,
+             "a1": 0x00FF00FF, "b1": 0xFF00FF00},
+            0x0F0F0F0F | 0x00FF00FF,
+        )
+
+    def test_or_of_2_ternaries_pick_second(self):
+        mod = _make_or_of_ternaries_module(2)
+        # sel0=0→b0, sel1=0→b1; result = b0 | b1
+        self._run_cross(
+            mod,
+            {"sel0": 0, "sel1": 0,
+             "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0,
+             "a1": 0x00FF00FF, "b1": 0xFF00FF00},
+            0xF0F0F0F0 | 0xFF00FF00,
+        )
+
+    def test_or_of_4_ternaries(self):
+        mod = _make_or_of_ternaries_module(4)
+        drives = {}
+        for i in range(4):
+            drives[f"sel{i}"] = 1
+            drives[f"a{i}"] = 1 << (i * 8)
+            drives[f"b{i}"] = 0xFF << (i * 8)
+        # all sel=1 → OR of all a_i
+        expected = sum(1 << (i * 8) for i in range(4))
+        self._run_cross(mod, drives, expected)
+
+    def test_or_chain(self):
+        mod = _make_or_chain_of_sels_module()
+        self._run_cross(
+            mod,
+            {"a": 0x00FF0000, "b": 0x0000FF00, "c": 0x000000FF, "d": 0x00000000},
+            0x00FF0000 | 0x0000FF00 | 0x000000FF,
+        )
+
+    def test_or_of_ternaries_max_line_length(self):
+        """Or-chain of TernaryOps: mask hoisting keeps line length O(k)."""
+        for k in [5, 10, 20]:
+            mod = _make_or_of_ternaries_module(k)
+            cg = CythonCodegen()
+            pyx = cg.generate(mod)
+            max_len = max(len(line) for line in pyx.split("\n"))
+            assert max_len < 800, (
+                f"k={k}: max line length {max_len} exceeds 800"
+            )
+
+
+# ─── $signed(wide128) >>> N → narrow[31:0] correctness (B1 regression) ───────
+
+
+def _make_signed_wide_shift_module(shift_amt: int, *, name: str | None = None):
+    """CCA: assign result[31:0] = $signed(w) >>> shift_amt (w is 128 bits)."""
+    from veriforge.dsl import Module
+
+    mod_name = name or f"signed_wide_shift_{shift_amt}"
+    m = Module(mod_name)
+    m.input("w", width=128)
+    m.output("result", width=32)
+    mod = m.build()
+    mod.continuous_assigns.append(
+        ContinuousAssign(
+            lhs=Identifier("result"),
+            rhs=BinaryOp(
+                ">>>",
+                FunctionCall("$signed", [Identifier("w")], is_system=True),
+                Literal(str(shift_amt)),
+            ),
+        )
+    )
+    return mod
+
+
+class TestSignedWideShiftNarrow:
+    """Regression: $signed(wide128) >>> N → narrow[31:0] must use full 128-bit path.
+
+    Before the fix, _emit_wide_expr_to_scratch returned None for FunctionCall nodes,
+    causing the B1 early-return in _emit_wide_py_bits_lines to route the assign to the
+    CCA fallthrough, which only sees the low 64 bits via c.val[sid].
+    """
+
+    def _run_cross(self, shift_amt: int, w_val: int, expected_lo32: int):
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            mod = _make_signed_wide_shift_module(shift_amt)
+            sim = Simulator(mod, engine=engine)
+            sim.drive("w", Value(w_val, width=128))
+            sim.settle()
+            results[engine] = sim.read("result")
+
+        assert results["vm-fast"] == Value(expected_lo32 & 0xFFFFFFFF, width=32), (
+            f"vm-fast sanity fail: shift={shift_amt}: got {results['vm-fast']!r}"
+        )
+        assert results["compiled"] == results["vm-fast"], (
+            f"shift={shift_amt}: compiled={results['compiled']!r} != vm-fast={results['vm-fast']!r}"
+        )
+
+    def test_shift64_result_from_word1(self):
+        """Shift=64: result comes from bits [95:64] of w (above low 64)."""
+        # w[95:64] = 0xDEADBEEF, w[63:0] = 0 — positive (bit 127 clear)
+        w = 0xDEADBEEF << 64
+        self._run_cross(64, w, 0xDEADBEEF)
+
+    def test_shift64_sign_extended_negative(self):
+        """Shift=64: negative wide value sign-extends into result."""
+        # w = 0xFFFFFFFFFFFFFFFF_0000000000000000 → signed(w) = -2^64 → >>> 64 = -1
+        w = ((1 << 64) - 1) << 64
+        self._run_cross(64, w, 0xFFFFFFFF)
+
+    def test_shift96_result_from_word2(self):
+        """Shift=96: result comes from bits [127:96] of w."""
+        w = 0x12345678 << 96
+        self._run_cross(96, w, 0x12345678)
+
+    def test_shift64_golden_value(self):
+        """Shift=64: the golden 0x0880014C value from the gfwx correctness test."""
+        w = 0x0880014C << 64
+        self._run_cross(64, w, 0x0880014C)
+
+    def test_shift32_from_low_word(self):
+        """Shift=32: result from low word bits [63:32] — both paths should agree."""
+        # w = 0x...CAFEBABE_00000000 — bits [63:32] should be in result
+        w = 0xCAFEBABE << 32
+        self._run_cross(32, w, 0xCAFEBABE)
