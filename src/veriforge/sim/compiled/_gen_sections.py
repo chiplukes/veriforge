@@ -424,7 +424,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 self._et_node_masks = {}
                 self._et_node_vals = {}
                 body_lines = self._emit_stmt(body_copy, indent=1)
+                hoisted_et_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                 joined = "\n".join(body_lines)
+                parts.extend(hoisted_et_cdefs)
                 if any("_cdv" in ln for ln in body_lines):
                     parts.append("    cdef long long _cdv")
                 if any("_clhs" in ln for ln in body_lines):
@@ -649,6 +651,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines = [
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
             "    cdef int it, i, changed, _j, _stable",
+            "    cdef long long _nbaw",
             f"    cdef int trigger[{max(self._n_sigs, 1)}]",
         ]
 
@@ -751,10 +754,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("                            changed = 1")
             lines.append("                        if changed:")
             lines.append("                            c.dirty[i] = 1")
-            lines.append("                    elif c.nba_val[i] != c.val[i] or c.nba_mask[i] != c.mask[i]:")
-            lines.append("                        c.val[i] = c.nba_val[i]")
-            lines.append("                        c.mask[i] = c.nba_mask[i]")
-            lines.append("                        c.dirty[i] = 1")
+            lines.append("                    else:")
+            lines.append("                        _nbaw = wmask(c.width[i])")
+            lines.append("                        if c.nba_val[i] & _nbaw != c.val[i] or c.nba_mask[i] & _nbaw != c.mask[i]:")
+            lines.append("                            c.val[i] = c.nba_val[i] & _nbaw")
+            lines.append("                            c.mask[i] = c.nba_mask[i] & _nbaw")
+            lines.append("                            c.dirty[i] = 1")
             lines.append("                    c.nba_dirty[i] = 0")
             # Drain NBA memory queue
             if self._n_mems > 0:

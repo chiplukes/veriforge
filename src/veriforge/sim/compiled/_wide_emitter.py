@@ -3744,7 +3744,45 @@ class _WideEmitterMixin:
                 self._free_scratch(lslot, rslot)
                 return lines
 
-            return None  # &&, ||, etc — not yet
+            # ── Logical AND / OR ──────────────────────────────────────────────
+            if op in {"&&", "||"}:
+                lw = self._expr_width(expr.left)
+                rw = self._expr_width(expr.right)
+                ln = max(1, (lw + 63) // 64)
+                rn = max(1, (rw + 63) // 64)
+                lslot = self._alloc_scratch()
+                rslot = self._alloc_scratch()
+                bl_slot = self._alloc_scratch()
+                br_slot = self._alloc_scratch()
+                llines = self._emit_wide_expr_to_scratch(expr.left, lslot, ln, lw, indent)
+                if llines is None:
+                    self._free_scratch(lslot, rslot, bl_slot, br_slot)
+                    return None
+                rlines = self._emit_wide_expr_to_scratch(expr.right, rslot, rn, rw, indent)
+                if rlines is None:
+                    self._free_scratch(lslot, rslot, bl_slot, br_slot)
+                    return None
+                lines = llines + rlines
+                lines.append(f"{pad}wide_reduce_or(_sc{bl_slot}_v, _sc{bl_slot}_m, _sc{lslot}_v, _sc{lslot}_m, {ln})")
+                lines.append(f"{pad}wide_reduce_or(_sc{br_slot}_v, _sc{br_slot}_m, _sc{rslot}_v, _sc{rslot}_m, {rn})")
+                if op == "&&":
+                    lines.append(
+                        f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] & _sc{br_slot}_v[0])"
+                        f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
+                    )
+                else:
+                    lines.append(
+                        f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] | _sc{br_slot}_v[0])"
+                        f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
+                    )
+                lines.append(f"{pad}_sc{slot}_m[0] = _sc{bl_slot}_m[0] | _sc{br_slot}_m[0]")
+                for wi in range(1, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                self._free_scratch(lslot, rslot, bl_slot, br_slot)
+                return lines
+
+            return None  # unhandled binary op
 
         # ── TernaryOp ───────────────────────────────────────────────────────
         if et is TernaryOp:
@@ -3914,46 +3952,6 @@ class _WideEmitterMixin:
             self._free_scratch(pslot)
             return lines
 
-        # ── Logical AND / OR ─────────────────────────────────────────────────
-        # a && b  =  (|a) & (|b),   a || b  =  (|a) | (|b)
-        # Result is 1-bit; both operands OR-reduced to booleans first.
-        if et is BinaryOp and expr.op in {"&&", "||"}:
-            lw = self._expr_width(expr.left)
-            rw = self._expr_width(expr.right)
-            ln = max(1, (lw + 63) // 64)
-            rn = max(1, (rw + 63) // 64)
-            lslot = self._alloc_scratch()
-            rslot = self._alloc_scratch()
-            bl_slot = self._alloc_scratch()
-            br_slot = self._alloc_scratch()
-            llines = self._emit_wide_expr_to_scratch(expr.left, lslot, ln, lw, indent)
-            if llines is None:
-                self._free_scratch(lslot, rslot, bl_slot, br_slot)
-                return None
-            rlines = self._emit_wide_expr_to_scratch(expr.right, rslot, rn, rw, indent)
-            if rlines is None:
-                self._free_scratch(lslot, rslot, bl_slot, br_slot)
-                return None
-            lines = llines + rlines
-            lines.append(f"{pad}wide_reduce_or(_sc{bl_slot}_v, _sc{bl_slot}_m, _sc{lslot}_v, _sc{lslot}_m, {ln})")
-            lines.append(f"{pad}wide_reduce_or(_sc{br_slot}_v, _sc{br_slot}_m, _sc{rslot}_v, _sc{rslot}_m, {rn})")
-            if expr.op == "&&":
-                lines.append(
-                    f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] & _sc{br_slot}_v[0])"
-                    f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
-                )
-            else:
-                lines.append(
-                    f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] | _sc{br_slot}_v[0])"
-                    f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
-                )
-            lines.append(f"{pad}_sc{slot}_m[0] = _sc{bl_slot}_m[0] | _sc{br_slot}_m[0]")
-            for wi in range(1, n_words):
-                lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
-            self._free_scratch(lslot, rslot, bl_slot, br_slot)
-            return lines
-
         # ── FunctionCall ($signed/$unsigned are transparent in wide context) ──
         if et is FunctionCall:
             fname = expr.name.lower()
@@ -3988,6 +3986,8 @@ class _WideEmitterMixin:
             return self._expr_width(rhs.operand) > _WORD_BITS
         if isinstance(rhs, BinaryOp) and rhs.op in {"&&", "||"}:
             return max(self._expr_width(rhs.left), self._expr_width(rhs.right)) > _WORD_BITS
+        if isinstance(rhs, TernaryOp):
+            return max(self._expr_width(rhs.true_expr), self._expr_width(rhs.false_expr)) > _WORD_BITS
         return False
 
     def _emit_wide_lhs_write_new(

@@ -57809,11 +57809,11 @@ class TestWideUnifiedPhase1Emitter:
         assert "wide_stage_signal" in joined
 
     def test_write_new_unknown_rhs_returns_none(self):
-        """RHS with unresolvable memory identifier → None (not yet handled)."""
+        """RHS with unresolvable FunctionCall → None (not yet handled)."""
         cg = self._cg_two(128)
         sid = cg.signal_map["y"]
-        # FunctionCall is not handled by the recursive emitter yet
-        func_call = FunctionCall("$unsigned", [Identifier("a")])
+        # Arbitrary FunctionCall (not $signed/$unsigned) is not handled
+        func_call = FunctionCall("$clog2", [Identifier("a")])
         result = cg._emit_wide_lhs_write_new(sid, func_call, indent=1, is_nba=False)
         assert result is None
 
@@ -57981,7 +57981,8 @@ class TestWideUnifiedPhase1Extended:
     def test_concat_unknown_part_returns_none(self):
         """A concat part not supported by the emitter causes full None return."""
         cg = self._cg(128)
-        func_call = FunctionCall("$unsigned", [Identifier("a")])
+        # Arbitrary FunctionCall (not $signed/$unsigned) is not handled
+        func_call = FunctionCall("$clog2", [Identifier("a")])
         expr = Concatenation([func_call, Identifier("a")])
         lines = self._scratch(cg, expr, dst_width=128)
         assert lines is None
