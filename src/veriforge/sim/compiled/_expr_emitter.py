@@ -1085,13 +1085,25 @@ class _ExprEmitterMixin:
                 lw = self._expr_width(expr.left)
                 rw = self._expr_width(expr.right)
                 return f"(1 if (_sign_ext({left}, {lw}) {c_op} _sign_ext({right}, {rw})) else 0)"
-            # Comparison/logical -> always 1-bit, use int() for boolean
+            # Unsigned relational: cast to unsigned long long so 64-bit values with
+            # MSB=1 (stored as negative long long) compare correctly.
+            if expr.op in ("<", "<=", ">", ">="):
+                return f"(1 if (<unsigned long long>({left}) {c_op} <unsigned long long>({right})) else 0)"
+            # Equality/logical -> sign-neutral, no cast needed
             return f"(1 if (({left}) {c_op} ({right})) else 0)"
 
+        # Logical right shift: Verilog >> is unsigned (zero-fill).  Cython's >>
+        # on long long is arithmetic (sign-extends MSB), so cast to unsigned.
+        if expr.op == ">>":
+            core = f"(<long long>(<unsigned long long>({left}) >> <unsigned long long>({right})))"
         # For left-shift, promote left operand to long long to avoid
         # C int overflow when small literal << large shift (e.g. 4095 << 20).
-        if expr.op in ("<<", "<<<"):
+        elif expr.op in ("<<", "<<<"):
             core = f"((<long long>({left})) {c_op} ({right}))"
+        elif expr.op in ("/", "%") and not self._expr_signed(expr.left) and not self._expr_signed(expr.right):
+            # Unsigned division/modulus: cast both sides to avoid signed C behavior
+            # on 64-bit values with MSB=1 stored as negative long long.
+            core = f"(<long long>(<unsigned long long>({left}) {c_op} <unsigned long long>({right})))"
         else:
             core = f"(({left}) {c_op} ({right}))"
         if needs_mask:

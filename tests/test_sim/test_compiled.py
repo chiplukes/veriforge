@@ -61353,3 +61353,127 @@ class TestSignedWideShiftNarrow:
         # w = 0x...CAFEBABE_00000000 — bits [63:32] should be in result
         w = 0xCAFEBABE << 32
         self._run_cross(32, w, 0xCAFEBABE)
+
+
+# ─── Narrow compiled engine: 64-bit unsigned operator sign-sensitivity ────────
+
+
+def _make_narrow64_binop_module(op: str, *, lhs_width: int = 64, a_width: int = 64, b_width: int = 64, name: str):
+    """CCA: assign result = a <op> b with given port widths."""
+    from veriforge.dsl import Module
+
+    m = Module(name)
+    m.input("a", width=a_width)
+    m.input("b", width=b_width)
+    m.output("result", width=lhs_width)
+    mod = m.build()
+    mod.continuous_assigns.append(
+        ContinuousAssign(
+            lhs=Identifier("result"),
+            rhs=BinaryOp(op, Identifier("a"), Identifier("b")),
+        )
+    )
+    return mod
+
+
+class TestNarrow64BitUnsignedOps:
+    """Compiled engine narrow path (<=64-bit) must treat unsigned signals as unsigned.
+
+    Cython stores signal values as long long.  C's sign-sensitive operators
+    (>>, /, %, <, <=, >, >=) give wrong results when 64-bit unsigned values
+    with MSB=1 are stored as negative long long.  The fix casts to unsigned
+    long long for unsigned Verilog operands.
+
+    Cross-engine tests: vm-fast (Python integers, always unsigned) is the reference.
+    """
+
+    def _cross(self, mod, *, a: int, b: int, a_width: int = 64, b_width: int = 64) -> dict:
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            sim.drive("a", Value(a, width=a_width))
+            sim.drive("b", Value(b, width=b_width))
+            sim.settle()
+            results[engine] = int(sim.read("result"))
+        return results
+
+    # ── Logical right shift (>>) ──────────────────────────────────────────────
+
+    def test_lsr_64bit_ones_shift32(self):
+        """ONES64 >> 32 must zero-fill from MSB (logical), not sign-extend (arithmetic)."""
+        mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_ones32")
+        r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=32)
+        assert r["vm-fast"] == 0x0000_0000_FFFF_FFFF, f"vm-fast sanity: {r['vm-fast']:#018x}"
+        assert r["compiled"] == r["vm-fast"], (
+            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
+        )
+
+    def test_lsr_64bit_msb_only_shift1(self):
+        """0x8000...0000 >> 1 must give 0x4000...0000, not 0xC000...0000."""
+        mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_msb1")
+        r = self._cross(mod, a=0x8000_0000_0000_0000, b=1)
+        assert r["vm-fast"] == 0x4000_0000_0000_0000, f"vm-fast sanity: {r['vm-fast']:#018x}"
+        assert r["compiled"] == r["vm-fast"], (
+            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
+        )
+
+    def test_lsr_64bit_msb_only_shift63(self):
+        """0x8000...0000 >> 63 must give 1, not all-ones from arithmetic sign-extension."""
+        mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_msb63")
+        r = self._cross(mod, a=0x8000_0000_0000_0000, b=63)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']:#018x}"
+        assert r["compiled"] == r["vm-fast"], (
+            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
+        )
+
+    # ── Unsigned division (/) ─────────────────────────────────────────────────
+
+    def test_udiv_64bit_msb_set(self):
+        """0xFFFF...FFFF / 2 must be 0x7FFF...FFFF (unsigned), not 0 (signed -1/2=0)."""
+        mod = _make_narrow64_binop_module("/", name="narrow64_udiv_msb")
+        r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=2)
+        assert r["vm-fast"] == 0x7FFF_FFFF_FFFF_FFFF, f"vm-fast sanity: {r['vm-fast']:#018x}"
+        assert r["compiled"] == r["vm-fast"], (
+            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
+        )
+
+    # ── Unsigned modulus (%) ──────────────────────────────────────────────────
+
+    def test_umod_64bit_msb_set(self):
+        """0xFFFF...FFFF % 7 must be 1 (unsigned), not all-ones (signed -1 % 7 = -1)."""
+        mod = _make_narrow64_binop_module("%", name="narrow64_umod_msb")
+        r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=7)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
+        assert r["compiled"] == r["vm-fast"], (
+            f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
+        )
+
+    # ── Unsigned relational comparisons (<, <=, >, >=) ───────────────────────
+
+    def test_ugt_64bit_msb_set(self):
+        """0xFFFF...FFFF > 1 must be 1 (unsigned), not 0 (signed: -1 > 1 is false)."""
+        mod = _make_narrow64_binop_module(">", lhs_width=1, name="narrow64_ugt_msb")
+        r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=1)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
+
+    def test_ult_64bit_small_less_than_msb(self):
+        """1 < 0xFFFF...FFFF must be 1 (unsigned), not 0 (signed: 1 < -1 is false)."""
+        mod = _make_narrow64_binop_module("<", lhs_width=1, name="narrow64_ult_msb")
+        r = self._cross(mod, a=1, b=0xFFFF_FFFF_FFFF_FFFF)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
+
+    def test_uge_64bit_msb_equal(self):
+        """0x8000...0000 >= 0x8000...0000 must be 1 (equal values)."""
+        mod = _make_narrow64_binop_module(">=", lhs_width=1, name="narrow64_uge_msb_eq")
+        r = self._cross(mod, a=0x8000_0000_0000_0000, b=0x8000_0000_0000_0000)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
+
+    def test_ule_64bit_msb_smaller(self):
+        """0x8000...0000 <= 0xFFFF...FFFF must be 1 (unsigned: 0x8000... < 0xFFFF...)."""
+        mod = _make_narrow64_binop_module("<=", lhs_width=1, name="narrow64_ule_msb_lt")
+        r = self._cross(mod, a=0x8000_0000_0000_0000, b=0xFFFF_FFFF_FFFF_FFFF)
+        assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
