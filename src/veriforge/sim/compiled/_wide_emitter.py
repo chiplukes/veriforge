@@ -3963,6 +3963,40 @@ class _WideEmitterMixin:
 
         return None
 
+    def _expr_uses_wide_signal(self, expr: Expression) -> bool:
+        """True if *expr* reads from any signal wider than _WORD_BITS.
+
+        Used as a catch-all in _rhs_needs_wide_eval to detect cases where the
+        scalar fallback would silently lose X bits (e.g. range-select from a
+        wide signal, or concatenation of wide-signal slices).
+        """
+        et = type(expr)
+        if et is Identifier:
+            name = self._identifier_name(expr)
+            sid = self._signal_map.get(name)
+            return sid is not None and self._signal_widths[sid] > _WORD_BITS
+        if et is Literal:
+            return False
+        if et is UnaryOp:
+            return self._expr_uses_wide_signal(expr.operand)
+        if et is BinaryOp:
+            return self._expr_uses_wide_signal(expr.left) or self._expr_uses_wide_signal(expr.right)
+        if et is TernaryOp:
+            return (
+                self._expr_uses_wide_signal(expr.condition)
+                or self._expr_uses_wide_signal(expr.true_expr)
+                or self._expr_uses_wide_signal(expr.false_expr)
+            )
+        if et is RangeSelect or et is PartSelect:
+            return self._expr_uses_wide_signal(expr.target)
+        if et is FunctionCall:
+            return any(self._expr_uses_wide_signal(a) for a in expr.arguments)
+        if et is Concatenation:
+            return any(self._expr_uses_wide_signal(p) for p in expr.parts)
+        if et is Replication:
+            return self._expr_uses_wide_signal(expr.value)
+        return False
+
     def _rhs_needs_wide_eval(self, rhs: Expression) -> bool:
         """True when a narrow LHS still requires wide-path evaluation.
 
@@ -3993,6 +4027,10 @@ class _WideEmitterMixin:
             return max(self._expr_width(rhs.left), self._expr_width(rhs.right)) > _WORD_BITS
         if isinstance(rhs, TernaryOp):
             return max(self._expr_width(rhs.true_expr), self._expr_width(rhs.false_expr)) > _WORD_BITS
+        # Catch-all: any expression that reads a wide signal needs the wide path
+        # to avoid the scalar fallback silently setting mask=0.
+        if self._expr_uses_wide_signal(rhs):
+            return True
         return False
 
     def _emit_wide_lhs_write_new(

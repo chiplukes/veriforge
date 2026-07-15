@@ -100,6 +100,15 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Simulation
 
+- **Precise X-propagation for wide arithmetic right shift** — the VM's wide
+  `OP_ASHR` path uses "any X in source → all-X result" (conservative, incorrect
+  per IEEE 1800 / Icarus Verilog).  The compiled engine's `wide_ashr` was
+  temporarily aligned to match, masking the discrepancy.  Fix: replace the
+  `has_x` bail-out in `_interp_fast.pyx` `OP_ASHR` with a precise
+  shift-then-sign-fill of both value and mask words; revert the matching
+  workaround in `_gen_wide_section.py`.  Full details, affected tests, and a
+  completion checklist are in `notes/plans/x_prop_work.md`.
+
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

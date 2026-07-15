@@ -277,17 +277,29 @@ class _GenWideSectionsMixin:
 
         # ── wide_ashr (arithmetic right shift by constant) ─────────────────────
         # Fills vacated high bits with the sign bit of the source.
+        # Matches VM semantics: if any source bit is X, result is all-X.
         L += [
             "cdef inline void wide_ashr(",
             "    unsigned long long *dv, unsigned long long *dm,",
             "    unsigned long long *av, unsigned long long *am,",
             "    int amount, int n, int src_width, int dst_width) noexcept nogil:",
-            "    cdef int i, src_lo, src_hi, sign_word, sign_pos, valid_bits",
+            "    cdef int i, src_lo, src_hi, sign_word, sign_pos, valid_bits, has_x",
             "    cdef int fill_start_word, fill_bit_in_word, remaining_w",
             "    cdef int wshift = amount >> 6",
             "    cdef int bshift = amount & 63",
             "    cdef unsigned long long lo_v, hi_v, lo_m, hi_m",
             "    cdef unsigned long long sign_v, sign_m, fill_v, fill_m, fill_mask",
+            "    # VM semantics: any X bit in source → entire result is all-X",
+            "    has_x = 0",
+            "    for i in range(n):",
+            "        if am[i]: has_x = 1; break",
+            "    if has_x:",
+            "        for i in range(n):",
+            "            remaining_w = dst_width - i * 64",
+            "            if remaining_w <= 0: break",
+            "            dv[i] = 0",
+            "            dm[i] = _word_mask64(remaining_w)",
+            "        return",
             "    sign_word = (src_width - 1) >> 6",
             "    sign_pos  = (src_width - 1) & 63",
             "    if sign_word < n:",
