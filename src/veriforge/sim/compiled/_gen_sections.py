@@ -756,7 +756,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("                            c.dirty[i] = 1")
             lines.append("                    else:")
             lines.append("                        _nbaw = wmask(c.width[i])")
-            lines.append("                        if c.nba_val[i] & _nbaw != c.val[i] or c.nba_mask[i] & _nbaw != c.mask[i]:")
+            lines.append("                        if (c.nba_val[i] & _nbaw) != c.val[i] or (c.nba_mask[i] & _nbaw) != c.mask[i]:")
             lines.append("                            c.val[i] = c.nba_val[i] & _nbaw")
             lines.append("                            c.mask[i] = c.nba_mask[i] & _nbaw")
             lines.append("                            c.dirty[i] = 1")

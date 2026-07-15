@@ -3982,6 +3982,11 @@ class _WideEmitterMixin:
                 # Reduction of wide operand: (&wide) << N, (|wide) >> N, etc.
                 if isinstance(rhs.left, UnaryOp) and rhs.left.op in _REDUCTION_OPS:
                     return self._expr_width(rhs.left.operand) > _WORD_BITS
+            if rhs.op in self._WIDE_BINARY_PRIMS:
+                lw = self._expr_width(rhs.left)
+                rw = self._expr_width(rhs.right)
+                if max(lw, rw) > _WORD_BITS:
+                    return True
         if isinstance(rhs, UnaryOp) and rhs.op in {"|", "&", "^", "~|", "~&", "~^", "^~", "!"}:
             return self._expr_width(rhs.operand) > _WORD_BITS
         if isinstance(rhs, BinaryOp) and rhs.op in {"&&", "||"}:
