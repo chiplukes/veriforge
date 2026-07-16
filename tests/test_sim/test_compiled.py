@@ -61477,3 +61477,140 @@ class TestNarrow64BitUnsignedOps:
         r = self._cross(mod, a=0x8000_0000_0000_0000, b=0xFFFF_FFFF_FFFF_FFFF)
         assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
         assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
+
+
+# ─── Bitwise op sub-expression width in conditions ────────────────────────────
+
+
+def _make_bitwise_cond_seq_module(op: str, name: str):
+    """Sequential module: if ((a + b) <op> b) result <= 1 else result <= 0.
+
+    a and b are 3-bit regs so that (a+b) can have bit1 set while the LSB is 0,
+    exposing truncation to 1 bit.
+    """
+    from veriforge.dsl import Module, posedge
+
+    m = Module(name)
+    clk = m.input("clk")
+    a = m.reg("a", width=3)
+    b = m.reg("b", width=3)
+    result = m.reg("result", width=1)
+
+    compound = a + b
+    if op == "&":
+        cond = compound & b
+    elif op == "|":
+        cond = compound | b
+    elif op == "^":
+        cond = compound ^ b
+    else:
+        raise ValueError(op)
+
+    with m.always(posedge(clk)):
+        with m.if_(cond):
+            result <<= 1
+        with m.else_():
+            result <<= 0
+
+    return m.build()
+
+
+def _make_bitwise_cond_ca_module(op: str, name: str):
+    """Combinational module: assign result = ((a + b) <op> b) ? 1 : 0."""
+    from veriforge.dsl import Module, mux
+
+    m = Module(name)
+    a = m.input("a", width=3)
+    b = m.input("b", width=3)
+    result = m.output("result", width=1)
+
+    compound = a + b
+    if op == "&":
+        cond = compound & b
+    elif op == "|":
+        cond = compound | b
+    elif op == "^":
+        cond = compound ^ b
+    else:
+        raise ValueError(op)
+
+    m.assign(result, mux(cond, 1, 0))
+    return m.build()
+
+
+class TestBitwiseCondWidth:
+    """Regression: bitwise &/|/^ in conditions must evaluate sub-expressions at natural width.
+
+    Bug: _emit_binary propagated op_width=1 (if-condition context) into operands of
+    &, |, ^.  Compound sub-expressions like (a+b) applied wmask(1) before the
+    bitwise op, discarding all bits above the LSB.  E.g. (0+2)&2 = 2 → True, but
+    compiled produced ((0+2)&1)&2 = 0&2 = 0 → False.
+
+    Fix: treat &, |, ^ like comparison ops — use natural operand width regardless
+    of surrounding context width.
+    """
+
+    # (a, b) pairs that expose the bug: sum has bits above LSB so LSB-masking
+    # gives the wrong boolean result.
+    _CASES = [(0, 2), (1, 2), (3, 1), (0, 0), (2, 3)]  # noqa: RUF012
+
+    def _cross_seq(self, mod, a_val, b_val):
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            sim.drive("clk", 0)
+            sim.drive("a", a_val)
+            sim.drive("b", b_val)
+            sim.settle()
+            sim.drive("clk", 1)
+            sim.settle()
+            sim.drive("clk", 0)
+            sim.settle()
+            results[engine] = int(sim.read("result"))
+        return results
+
+    def _cross_ca(self, mod, a_val, b_val):
+        results = {}
+        for engine in ("vm-fast", "compiled"):
+            sim = Simulator(mod, engine=engine)
+            sim.drive("a", a_val)
+            sim.drive("b", b_val)
+            sim.settle()
+            results[engine] = int(sim.read("result"))
+        return results
+
+    @pytest.mark.parametrize("a,b", [(0, 2), (1, 2), (3, 1), (0, 0), (2, 3)])
+    def test_and_in_if_cond(self, a, b):
+        """(a+b) & b in if-condition: upper bits of sum must not be discarded."""
+        mod = _make_bitwise_cond_seq_module("&", f"bwcond_and_{a}_{b}")
+        expected = 1 if ((a + b) & b) != 0 else 0
+        r = self._cross_seq(mod, a, b)
+        assert r["vm-fast"] == expected, f"vm-fast sanity a={a} b={b}"
+        assert r["compiled"] == expected, f"compiled a={a} b={b}: got {r['compiled']} expected {expected}"
+
+    @pytest.mark.parametrize("a,b", [(0, 2), (1, 2), (3, 1), (0, 0), (2, 3)])
+    def test_or_in_if_cond(self, a, b):
+        """(a+b) | b in if-condition: upper bits must participate."""
+        mod = _make_bitwise_cond_seq_module("|", f"bwcond_or_{a}_{b}")
+        expected = 1 if ((a + b) | b) != 0 else 0
+        r = self._cross_seq(mod, a, b)
+        assert r["vm-fast"] == expected, f"vm-fast sanity a={a} b={b}"
+        assert r["compiled"] == expected, f"compiled a={a} b={b}: got {r['compiled']} expected {expected}"
+
+    @pytest.mark.parametrize("a,b", [(0, 2), (1, 2), (3, 1), (0, 0), (2, 3)])
+    def test_xor_in_if_cond(self, a, b):
+        """(a+b) ^ b in if-condition: upper bits must participate."""
+        mod = _make_bitwise_cond_seq_module("^", f"bwcond_xor_{a}_{b}")
+        expected = 1 if ((a + b) ^ b) != 0 else 0
+        r = self._cross_seq(mod, a, b)
+        assert r["vm-fast"] == expected, f"vm-fast sanity a={a} b={b}"
+        assert r["compiled"] == expected, f"compiled a={a} b={b}: got {r['compiled']} expected {expected}"
+
+    @pytest.mark.parametrize("a,b", [(0, 2), (1, 2), (3, 1), (0, 0), (2, 3)])
+    def test_and_in_ternary_cond(self, a, b):
+        """(a+b) & b as ternary condition in CA: same bug path via _emit_ternary."""
+        mod = _make_bitwise_cond_ca_module("&", f"bwcond_ternary_{a}_{b}")
+        expected = 1 if ((a + b) & b) != 0 else 0
+        r = self._cross_ca(mod, a, b)
+        assert r["vm-fast"] == expected, f"vm-fast sanity a={a} b={b}"
+        assert r["compiled"] == expected, f"compiled a={a} b={b}: got {r['compiled']} expected {expected}"

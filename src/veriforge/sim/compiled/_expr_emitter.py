@@ -36,6 +36,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _safe_ident,
     _BINARY_VALUE_OP,
     _COMPARISON_OPS,
+    _NATURAL_WIDTH_OPS,
     _UNARY_PREFIX,
     _REDUCTION_OPS,
 )
@@ -1013,9 +1014,11 @@ class _ExprEmitterMixin:
             ):
                 return "0" if expr.op == "===" else "1"
 
-        # For comparison/logical operators, operands must be evaluated at their
-        # own width, not the 1-bit result width.
-        if expr.op in _COMPARISON_OPS:
+        # Comparison and bitwise ops must see all bits of their operands.
+        # Passing the surrounding context width (e.g. 1 for an if-condition)
+        # into compound sub-expressions like (a+b) would mask them to the
+        # context width before the operation, discarding upper bits.
+        if expr.op in _NATURAL_WIDTH_OPS:
             op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
         else:
             op_width = width

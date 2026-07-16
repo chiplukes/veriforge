@@ -40,6 +40,11 @@ _BINARY_VALUE_OP: dict[str, tuple[str, bool]] = {
 
 _COMPARISON_OPS = frozenset({"==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"})
 
+# Bitwise ops must evaluate operands at their natural width (not the surrounding
+# context width) so every bit participates in the operation.  Without this, an
+# if-condition like `(a+b) & c` would mask (a+b) to 1 bit before the &.
+_NATURAL_WIDTH_OPS = _COMPARISON_OPS | frozenset({"&", "|", "^", "~^", "^~"})
+
 _UNARY_PREFIX: dict[str, str] = {
     "~": "~",
     "!": "not ",
