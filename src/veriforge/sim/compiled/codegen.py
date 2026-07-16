@@ -1515,6 +1515,7 @@ class CythonCodegen(
         hasher = hashlib.sha256()
 
         with open(path, "wb") as fh:
+
             def _write(text: str) -> None:
                 encoded = text.encode("utf-8")
                 fh.write(encoded)

@@ -58,11 +58,13 @@ class _ProcessCompilerMixin:
         if _profile:
             try:
                 import resource as _resource
+
                 def _rss_mb() -> float:
                     # ru_maxrss is in KB on Linux, bytes on macOS
                     ru = _resource.getrusage(_resource.RUSAGE_SELF)
                     return ru.ru_maxrss / 1024  # → MB on Linux
             except ImportError:
+
                 def _rss_mb() -> float:
                     try:
                         with open("/proc/self/status") as _f:
@@ -79,7 +81,8 @@ class _ProcessCompilerMixin:
             print(
                 f"[codegen-profile] _compile_continuous_assigns: {_total} assigns, "
                 f"{self._n_sigs} signals, RSS={_rss_mb():.0f} MB",
-                file=sys.stderr, flush=True,
+                file=sys.stderr,
+                flush=True,
             )
 
         for _ca_idx, assign in enumerate(module.continuous_assigns):
@@ -87,16 +90,15 @@ class _ProcessCompilerMixin:
             self._walk_signals(assign.rhs, sensitivity)
 
             if _profile and _ca_idx % _interval == 0:
-                _text_bytes = sum(
-                    sum(len(l) for l in lines) for _, lines in self._processes
-                )
+                _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)
                 print(
                     f"[codegen-profile]   assign {_ca_idx:5d}/{_total}"
                     f"  procs={len(self._processes)}"
                     f"  text={_text_bytes // 1024}KB"
                     f"  RSS={_rss_mb():.0f}MB"
-                    f"  t={time.monotonic()-_t0:.1f}s",
-                    file=sys.stderr, flush=True,
+                    f"  t={time.monotonic() - _t0:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
                 )
 
             # Concatenation LHS: assign {hi, lo} = x ΓåÆ decompose into multiple simple assigns
@@ -350,7 +352,8 @@ class _ProcessCompilerMixin:
             else:
                 v_line = f"    cdef long long v = ({rhs_val}) & wmask({lhs_w})"
 
-            lines = et_lines + [
+            lines = [
+                *et_lines,
                 v_line,
                 f"    cdef long long m = {mask_expr}",
                 "    v = v & ~m",
@@ -368,8 +371,9 @@ class _ProcessCompilerMixin:
                 f"  procs={len(self._processes)}"
                 f"  text={_text_bytes // 1024}KB"
                 f"  RSS={_rss_mb():.0f}MB"
-                f"  t={time.monotonic()-_t0:.1f}s",
-                file=sys.stderr, flush=True,
+                f"  t={time.monotonic() - _t0:.1f}s",
+                file=sys.stderr,
+                flush=True,
             )
 
     def _compile_struct_field_cont_assign(self, assign, sensitivity: set[int]) -> bool:

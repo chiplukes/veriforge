@@ -60813,9 +60813,7 @@ class TestExpressionTemporaries:
             sim.run(lambda s: s.drive("clk", 0), max_time=0)
             sim.run(lambda s: s.drive("clk", 1), max_time=1)
             got = sim.read("result")
-            assert got == expected, (
-                f"engine={engine} k={len(operand_values)}: got {got!r}, expected {expected}"
-            )
+            assert got == expected, f"engine={engine} k={len(operand_values)}: got {got!r}, expected {expected}"
 
     def test_add_chain_3(self):
         """3-term addition: a0+a1+a2."""
@@ -60842,9 +60840,7 @@ class TestExpressionTemporaries:
             cg = CythonCodegen()
             pyx = cg.generate(mod)
             max_len = max(len(line) for line in pyx.split("\n"))
-            assert max_len < 500, (
-                f"k={k}: max line length {max_len} exceeds 500 — O(k²) growth not fixed"
-            )
+            assert max_len < 500, f"k={k}: max line length {max_len} exceeds 500 — O(k²) growth not fixed"
 
 
 # ─── OR-chain expression temporaries (continuous-assign mask path) ───────────
@@ -60877,9 +60873,7 @@ class TestOrChainTemporaries:
                 sim.drive(name, Value(val, width=8))
             sim.settle()
             got = sim.read("result")
-            assert got == expected, (
-                f"engine={engine} k={len(operand_values)}: got {got!r}, expected {expected}"
-            )
+            assert got == expected, f"engine={engine} k={len(operand_values)}: got {got!r}, expected {expected}"
 
     def test_or_chain_3(self):
         """3-term OR chain via continuous assign: a0|a1|a2 == 0b111."""
@@ -60900,9 +60894,7 @@ class TestOrChainTemporaries:
             cg = CythonCodegen()
             pyx = cg.generate(mod)
             max_len = max(len(line) for line in pyx.split("\n"))
-            assert max_len < 500, (
-                f"k={k}: max line length {max_len} exceeds 500 — OR mask O(k²) not fixed"
-            )
+            assert max_len < 500, f"k={k}: max line length {max_len} exceeds 500 — OR mask O(k²) not fixed"
 
 
 # ─── Ternary-chain expression temporaries (2^k → O(k) fix) ──────────────────
@@ -60944,9 +60936,7 @@ class TestTernaryChainTemporaries:
                 sim.drive(name, Value(val, width=8))
             sim.settle()
             got = sim.read("result")
-            assert got == expected, (
-                f"engine={engine} k={len(sel_values)}: got {got!r}, expected {expected}"
-            )
+            assert got == expected, f"engine={engine} k={len(sel_values)}: got {got!r}, expected {expected}"
 
     def test_ternary_chain_3_first(self):
         """3-deep ternary: a0=1 selects d0."""
@@ -60975,9 +60965,7 @@ class TestTernaryChainTemporaries:
             cg = CythonCodegen()
             pyx = cg.generate(mod)
             max_len = max(len(line) for line in pyx.split("\n"))
-            assert max_len < 800, (
-                f"k={k}: max line length {max_len} exceeds 800 — ternary 2^k not fixed"
-            )
+            assert max_len < 800, f"k={k}: max line length {max_len} exceeds 800 — ternary 2^k not fixed"
 
 
 # ─── Ternary-chain correctness: 32-bit wide chain, cross-engine ──────────────
@@ -61062,8 +61050,7 @@ class TestTernaryChain32bit:
         mod = _make_ternary_chain_32bit_module(3)
         self._run_cross(
             mod,
-            {"sel0": 1, "sel1": 0, "sel2": 0,
-             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            {"sel0": 1, "sel1": 0, "sel2": 0, "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
             0x11111111,
         )
 
@@ -61071,8 +61058,7 @@ class TestTernaryChain32bit:
         mod = _make_ternary_chain_32bit_module(3)
         self._run_cross(
             mod,
-            {"sel0": 0, "sel1": 0, "sel2": 0,
-             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            {"sel0": 0, "sel1": 0, "sel2": 0, "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
             0x44444444,
         )
 
@@ -61080,8 +61066,7 @@ class TestTernaryChain32bit:
         mod = _make_ternary_chain_32bit_module(3)
         self._run_cross(
             mod,
-            {"sel0": 0, "sel1": 0, "sel2": 1,
-             "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
+            {"sel0": 0, "sel1": 0, "sel2": 1, "d0": 0x11111111, "d1": 0x22222222, "d2": 0x33333333, "d3": 0x44444444},
             0x33333333,
         )
 
@@ -61229,9 +61214,7 @@ class TestOrOfTernaries:
         # sel0=1→a0, sel1=1→a1; result = a0 | a1
         self._run_cross(
             mod,
-            {"sel0": 1, "sel1": 1,
-             "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0,
-             "a1": 0x00FF00FF, "b1": 0xFF00FF00},
+            {"sel0": 1, "sel1": 1, "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0, "a1": 0x00FF00FF, "b1": 0xFF00FF00},
             0x0F0F0F0F | 0x00FF00FF,
         )
 
@@ -61240,9 +61223,7 @@ class TestOrOfTernaries:
         # sel0=0→b0, sel1=0→b1; result = b0 | b1
         self._run_cross(
             mod,
-            {"sel0": 0, "sel1": 0,
-             "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0,
-             "a1": 0x00FF00FF, "b1": 0xFF00FF00},
+            {"sel0": 0, "sel1": 0, "a0": 0x0F0F0F0F, "b0": 0xF0F0F0F0, "a1": 0x00FF00FF, "b1": 0xFF00FF00},
             0xF0F0F0F0 | 0xFF00FF00,
         )
 
@@ -61272,9 +61253,7 @@ class TestOrOfTernaries:
             cg = CythonCodegen()
             pyx = cg.generate(mod)
             max_len = max(len(line) for line in pyx.split("\n"))
-            assert max_len < 800, (
-                f"k={k}: max line length {max_len} exceeds 800"
-            )
+            assert max_len < 800, f"k={k}: max line length {max_len} exceeds 800"
 
 
 # ─── $signed(wide128) >>> N → narrow[31:0] correctness (B1 regression) ───────
@@ -61404,27 +61383,21 @@ class TestNarrow64BitUnsignedOps:
         mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_ones32")
         r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=32)
         assert r["vm-fast"] == 0x0000_0000_FFFF_FFFF, f"vm-fast sanity: {r['vm-fast']:#018x}"
-        assert r["compiled"] == r["vm-fast"], (
-            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
-        )
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
 
     def test_lsr_64bit_msb_only_shift1(self):
         """0x8000...0000 >> 1 must give 0x4000...0000, not 0xC000...0000."""
         mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_msb1")
         r = self._cross(mod, a=0x8000_0000_0000_0000, b=1)
         assert r["vm-fast"] == 0x4000_0000_0000_0000, f"vm-fast sanity: {r['vm-fast']:#018x}"
-        assert r["compiled"] == r["vm-fast"], (
-            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
-        )
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
 
     def test_lsr_64bit_msb_only_shift63(self):
         """0x8000...0000 >> 63 must give 1, not all-ones from arithmetic sign-extension."""
         mod = _make_narrow64_binop_module(">>", name="narrow64_lsr_msb63")
         r = self._cross(mod, a=0x8000_0000_0000_0000, b=63)
         assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']:#018x}"
-        assert r["compiled"] == r["vm-fast"], (
-            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
-        )
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
 
     # ── Unsigned division (/) ─────────────────────────────────────────────────
 
@@ -61433,9 +61406,7 @@ class TestNarrow64BitUnsignedOps:
         mod = _make_narrow64_binop_module("/", name="narrow64_udiv_msb")
         r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=2)
         assert r["vm-fast"] == 0x7FFF_FFFF_FFFF_FFFF, f"vm-fast sanity: {r['vm-fast']:#018x}"
-        assert r["compiled"] == r["vm-fast"], (
-            f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
-        )
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']:#018x} != vm-fast {r['vm-fast']:#018x}"
 
     # ── Unsigned modulus (%) ──────────────────────────────────────────────────
 
@@ -61444,9 +61415,7 @@ class TestNarrow64BitUnsignedOps:
         mod = _make_narrow64_binop_module("%", name="narrow64_umod_msb")
         r = self._cross(mod, a=0xFFFF_FFFF_FFFF_FFFF, b=7)
         assert r["vm-fast"] == 1, f"vm-fast sanity: {r['vm-fast']}"
-        assert r["compiled"] == r["vm-fast"], (
-            f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
-        )
+        assert r["compiled"] == r["vm-fast"], f"compiled {r['compiled']} != vm-fast {r['vm-fast']}"
 
     # ── Unsigned relational comparisons (<, <=, >, >=) ───────────────────────
 

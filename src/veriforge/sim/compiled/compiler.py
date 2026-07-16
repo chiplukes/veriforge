@@ -328,9 +328,7 @@ class CythonCompiler:  # cm:3d7f4a
                         log.debug("Cache hit: %s", cached)
                         return mod
                     except Exception as e:
-                        log.warning(
-                            "Stale/corrupt cache entry %s — removing and recompiling: %s", keyed_name, e
-                        )
+                        log.warning("Stale/corrupt cache entry %s — removing and recompiling: %s", keyed_name, e)
                         self._remove_build_dir(build_dir)
 
             log.info("Compiling %s (cache key %s)", module_name, key)

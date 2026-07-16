@@ -399,13 +399,15 @@ class _StmtEmittersMixin:
                 else f"({rhs_val}) & wmask({self._signal_widths[sid]})"
             )
             if is_nba:
-                return et_lines + [
+                return [
+                    *et_lines,
                     f"{pad}c.nba_val[{sid}] = {assign_rhs}",
                     f"{pad}c.nba_mask[{sid}] = 0",
                     f"{pad}c.nba_dirty[{sid}] = 1",
                     f"{pad}c.nba_pending = 1",
                 ]
-            return et_lines + [
+            return [
+                *et_lines,
                 f"{pad}_cdv = {assign_rhs}",
                 f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
                 f"{pad}    c.val[{sid}] = _cdv",
@@ -1841,7 +1843,7 @@ class _StmtEmittersMixin:
         cond = self._emit_expr(stmt.condition, 1)
         et_lines = [f"{pad}{t}" for t in self._et_pending]
         self._et_pending = old_et
-        lines = et_lines + [f"{pad}if ({cond}):"]
+        lines = [*et_lines, f"{pad}if ({cond}):"]
 
         if stmt.then_body:
             body = self._emit_stmt(stmt.then_body, indent + 1, context=context)

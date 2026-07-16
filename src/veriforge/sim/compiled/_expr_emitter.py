@@ -1048,11 +1048,7 @@ class _ExprEmitterMixin:
             # Hoist the left sub-expression to named temps when inside a temp
             # context and the left operand is itself a +/- chain.  This converts
             # O(k²) inline string growth for k-term addition chains into O(k).
-            if (
-                self._et_pending is not None
-                and isinstance(expr.left, BinaryOp)
-                and expr.left.op in {"+", "-"}
-            ):
+            if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"+", "-"}:
                 n = self._et_count
                 self._et_count += 1
                 self._et_pending.append(f"cdef long long _et{n}_v = {left}")
@@ -1520,6 +1516,14 @@ class _ExprEmitterMixin:
         if etype is BinaryOp:
             if expr.op in _COMPARISON_OPS:
                 return 1
+            if expr.op in ("<<", "<<<"):
+                # Left-shift result needs left_width + shift bits, not just max().
+                # Without this, pend_is_level_last << 32 in a 32-bit context gets
+                # masked to 0 by wmask(32), corrupting packed tuser fields.
+                lw = self._expr_width(expr.left)
+                if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
+                    return lw + int(expr.right.value)
+                return max(lw, self._expr_width(expr.right))
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
         if etype is UnaryOp:
             if expr.op in _REDUCTION_OPS or expr.op == "!":
@@ -1678,11 +1682,7 @@ class _ExprEmitterMixin:
             if expr.op == "|":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
-                if (
-                    self._et_pending is not None
-                    and isinstance(expr.left, BinaryOp)
-                    and expr.left.op in {"|", "&"}
-                ):
+                if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
                     self._et_pending.append(f"cdef long long _et{n}_v = {lv}")
@@ -1695,11 +1695,7 @@ class _ExprEmitterMixin:
             if expr.op == "&":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
-                if (
-                    self._et_pending is not None
-                    and isinstance(expr.left, BinaryOp)
-                    and expr.left.op in {"|", "&"}
-                ):
+                if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
                     self._et_pending.append(f"cdef long long _et{n}_v = {lv}")

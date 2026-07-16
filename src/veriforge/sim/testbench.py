@@ -432,9 +432,7 @@ class Simulator:  # cm:a5c8f4
             ValueError: If *name* is not a known memory in the compiled design.
         """
         if self._engine != "compiled":
-            raise NotImplementedError(
-                f"load_memory() requires engine='compiled', got {self._engine!r}"
-            )
+            raise NotImplementedError(f"load_memory() requires engine='compiled', got {self._engine!r}")
         from .compiled.compiled_scheduler import CompiledScheduler as _CSched
 
         sched = self._sched
@@ -449,9 +447,7 @@ class Simulator:  # cm:a5c8f4
             ValueError: If *name* is not a known memory in the compiled design.
         """
         if self._engine != "compiled":
-            raise NotImplementedError(
-                f"dump_memory() requires engine='compiled', got {self._engine!r}"
-            )
+            raise NotImplementedError(f"dump_memory() requires engine='compiled', got {self._engine!r}")
         from .compiled.compiled_scheduler import CompiledScheduler as _CSched
 
         sched = self._sched

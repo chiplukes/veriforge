@@ -51,10 +51,7 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
         cond = " or ".join(f"trigger[{s}]" for s in sorted_sids)
         return [f"{indent}if {cond}:"]
     cont = indent + "        "
-    chunks = [
-        sorted_sids[i : i + _MAX_INLINE_SENS]
-        for i in range(0, len(sorted_sids), _MAX_INLINE_SENS)
-    ]
+    chunks = [sorted_sids[i : i + _MAX_INLINE_SENS] for i in range(0, len(sorted_sids), _MAX_INLINE_SENS)]
     lines: list[str] = []
     for ci, chunk in enumerate(chunks):
         terms = " or ".join(f"trigger[{s}]" for s in chunk)
@@ -756,7 +753,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("                            c.dirty[i] = 1")
             lines.append("                    else:")
             lines.append("                        _nbaw = wmask(c.width[i])")
-            lines.append("                        if (c.nba_val[i] & _nbaw) != c.val[i] or (c.nba_mask[i] & _nbaw) != c.mask[i]:")
+            lines.append(
+                "                        if (c.nba_val[i] & _nbaw) != c.val[i] or (c.nba_mask[i] & _nbaw) != c.mask[i]:"
+            )
             lines.append("                            c.val[i] = c.nba_val[i] & _nbaw")
             lines.append("                            c.mask[i] = c.nba_mask[i] & _nbaw")
             lines.append("                            c.dirty[i] = 1")

@@ -413,13 +413,9 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         tmp_fd, tmp_pyx_path = tempfile.mkstemp(suffix=".pyx", prefix="veriforge_")
         os.close(tmp_fd)
         try:
-            source_hash = self._codegen.generate_to_file(
-                module, tmp_pyx_path, delta_limit=self.delta_limit
-            )
+            source_hash = self._codegen.generate_to_file(module, tmp_pyx_path, delta_limit=self.delta_limit)
             try:
-                mod = self._compiler.compile_pyx_file(
-                    tmp_pyx_path, source_hash, f"compiled_{module.name}"
-                )
+                mod = self._compiler.compile_pyx_file(tmp_pyx_path, source_hash, f"compiled_{module.name}")
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to compile Cython extension for module '{module.name}'. "
@@ -1048,9 +1044,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             raise RuntimeError("CompiledScheduler not yet elaborated.")
         mid = self._codegen.mem_map.get(name)
         if mid is None:
-            raise ValueError(
-                f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}"
-            )
+            raise ValueError(f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}")
         ew, _depth = self._codegen.mem_info[mid]
         mask = (1 << ew) - 1
         for i, v in enumerate(data):
@@ -1066,9 +1060,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             raise RuntimeError("CompiledScheduler not yet elaborated.")
         mid = self._codegen.mem_map.get(name)
         if mid is None:
-            raise ValueError(
-                f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}"
-            )
+            raise ValueError(f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}")
         result = []
         for i in range(count):
             v, _ = self._sim.mem_read(mid, i)
