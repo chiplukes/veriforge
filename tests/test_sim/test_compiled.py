@@ -60771,6 +60771,171 @@ class TestSignedDeclarationsCrossEngine:
 
         self._run_all(_make_signed_uneg_module, setup, ["y"])
 
+    # ── $signed() continuous assign to wider target ────────────────
+
+    def test_signed_call_cont_assign_widening(self):
+        """$signed(a) continuous assign: 0xFF → 0xFFFF (sign-extend)."""
+
+        def setup(s):
+            s.drive("a", Value(0xFF, width=8))
+
+        self._run_all(_make_signed_call_cont_assign_widen_module, setup, ["w"])
+
+    def test_signed_call_cont_assign_no_extend(self):
+        """$signed(a) continuous assign: 0x7F → 0x007F (no sign-ext)."""
+
+        def setup(s):
+            s.drive("a", Value(0x7F, width=8))
+
+        self._run_all(_make_signed_call_cont_assign_widen_module, setup, ["w"])
+
+    # ── $unsigned() continuous assign cancels sign extension ───────
+
+    def test_unsigned_call_cont_assign_widening(self):
+        """$unsigned(signed_wire) continuous assign: 0xFF → 0x00FF (zero-extend)."""
+
+        def setup(s):
+            s.drive("a", Value(0xFF, width=8))
+
+        self._run_all(_make_unsigned_call_cont_assign_widen_module, setup, ["w"])
+
+
+# ─── $signed / $unsigned continuous assign widening ─────────────────────────
+
+
+def _make_signed_call_cont_assign_widen_module() -> Module:
+    """assign w = $signed(a);  a unsigned 8-bit, w 16-bit."""
+    r8 = _w8()
+    r16 = _w16()
+    return Module(
+        "signed_call_ca_widen",
+        ports=[
+            Port("a", PortDirection.INPUT, width=r8),
+            Port("w", PortDirection.OUTPUT, width=r16),
+        ],
+        nets=[
+            Net("a", NetKind.WIRE, width=r8),
+            Net("w", NetKind.WIRE, width=r16),
+        ],
+        continuous_assigns=[
+            ContinuousAssign(
+                lhs=Identifier("w"),
+                rhs=FunctionCall("$signed", [Identifier("a")], is_system=True),
+            ),
+        ],
+    )
+
+
+def _make_unsigned_call_cont_assign_widen_module() -> Module:
+    """assign w = $unsigned(a);  a signed 8-bit, w 16-bit."""
+    r8 = _w8()
+    r16 = _w16()
+    return Module(
+        "unsigned_call_ca_widen",
+        ports=[
+            Port("a", PortDirection.INPUT, width=r8, signed=True),
+            Port("w", PortDirection.OUTPUT, width=r16),
+        ],
+        nets=[
+            Net("a", NetKind.WIRE, width=r8, signed=True),
+            Net("w", NetKind.WIRE, width=r16),
+        ],
+        continuous_assigns=[
+            ContinuousAssign(
+                lhs=Identifier("w"),
+                rhs=FunctionCall("$unsigned", [Identifier("a")], is_system=True),
+            ),
+        ],
+    )
+
+
+# ─── DSL signed-wire widening tests ─────────────────────────────────────────
+
+
+class TestDslSignedWidening:
+    """DSL-level cross-engine tests for signed/unsigned wire widening via continuous assign."""
+
+    ENGINES = ["reference", "vm", "vm-fast", "compiled"]
+
+    def _run(self, module_fn, drives: dict, expected: Value):
+        results = {}
+        for eng in self.ENGINES:
+            mod = module_fn() if callable(module_fn) else module_fn
+            sim = Simulator(mod, engine=eng)
+            for name, val in drives.items():
+                sim.drive(name, val)
+            sim.settle()
+            results[eng] = sim.read("w")
+        ref = results["reference"]
+        for eng in self.ENGINES:
+            assert results[eng] == ref, f"{eng} != reference: {results[eng]} != {ref}"
+        assert ref == expected, f"expected {expected}, got {ref}"
+
+    def test_signed_wire_ca_widening(self):
+        """DSL: signed wire → wider unsigned output via continuous assign signs-extends."""
+        m = _make_dsl_signed_wire_widen_module()
+        self._run(m, {"a": Value(0xFF, width=8)}, Value(0xFFFF, width=16))
+
+    def test_signed_wire_ca_widening_positive(self):
+        """DSL: signed wire 0x7F → wider unsigned output no extension needed."""
+        m = _make_dsl_signed_wire_widen_module()
+        self._run(m, {"a": Value(0x7F, width=8)}, Value(0x007F, width=16))
+
+    def test_unsigned_wire_ca_widening(self):
+        """DSL: unsigned wire → wider output zero-extends (default)."""
+        m = _make_dsl_unsigned_wire_widen_module()
+        self._run(m, {"a": Value(0xFF, width=8)}, Value(0x00FF, width=16))
+
+    def test_signed_wire_unsigned_cast_ca(self):
+        """DSL: unsigned(signed_wire) → wider output zero-extends."""
+        m = _make_dsl_signed_wire_unsigned_cast_module()
+        self._run(m, {"a": Value(0xFF, width=8)}, Value(0x00FF, width=16))
+
+    def test_unsigned_wire_signed_cast_ca(self):
+        """DSL: signed(unsigned_wire) → wider output sign-extends."""
+        m = _make_dsl_unsigned_wire_signed_cast_module()
+        self._run(m, {"a": Value(0xFF, width=8)}, Value(0xFFFF, width=16))
+
+
+def _make_dsl_signed_wire_widen_module():
+    from veriforge.dsl import Module
+
+    m = Module("dsl_signed_widen")
+    a = m.input("a", width=8, signed=True)
+    w = m.output("w", width=16)
+    m.assign(w, a)
+    return m.build()
+
+
+def _make_dsl_unsigned_wire_widen_module():
+    from veriforge.dsl import Module
+
+    m = Module("dsl_unsigned_widen")
+    a = m.input("a", width=8)
+    w = m.output("w", width=16)
+    m.assign(w, a)
+    return m.build()
+
+
+def _make_dsl_signed_wire_unsigned_cast_module():
+    from veriforge.dsl import Module, unsigned
+
+    m = Module("dsl_signed_unsigned_cast")
+    a = m.input("a", width=8, signed=True)
+    w = m.output("w", width=16)
+    m.assign(w, unsigned(a))
+    return m.build()
+
+
+def _make_dsl_unsigned_wire_signed_cast_module():
+    from veriforge.dsl import Module, signed
+
+    m = Module("dsl_unsigned_signed_cast")
+    a = m.input("a", width=8)
+    w = m.output("w", width=16)
+    m.assign(w, signed(a))
+    return m.build()
+
 
 # ─── Expression temporaries (O(k²) → O(k) fix) ─────────────────────────────
 
