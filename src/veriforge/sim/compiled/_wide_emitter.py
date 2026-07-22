@@ -3674,10 +3674,7 @@ class _WideEmitterMixin:
                 lw = self._expr_width(expr.left)
                 # Source may be wider than destination (e.g. 65-bit >> 4 into 33-bit dst).
                 # Load enough words to capture the full source so the shift sees all bits.
-                # Also ensure n_src covers the destination width for shifts that widen.
-                n_src_src = (lw + 63) // 64
-                n_src_dst = (dst_width + 63) // 64
-                n_src = max(n_words, n_src_src, n_src_dst)
+                n_src = max(n_words, (lw + 63) // 64)
                 llines = self._emit_wide_expr_to_scratch(expr.left, lslot, n_src, lw, indent)
                 if llines is None:
                     self._free_scratch(lslot)
@@ -4055,6 +4052,7 @@ class _WideEmitterMixin:
         max_expr_w = self._expr_width(rhs)
         expr_words = (max_expr_w + _WORD_BITS - 1) // _WORD_BITS
         n_words = max(n_words, expr_words)
+        n_words = max(n_words, self._module_max_wide_words())
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
         self._reset_scratch()
         slot = self._alloc_scratch()
