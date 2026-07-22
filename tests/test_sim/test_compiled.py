@@ -57566,6 +57566,155 @@ class TestWideUnifiedPhase0Codegen:
             assert f"cdef unsigned long long _sc{i}_m[{max_words}]" in pyx_body
 
 
+# ── Narrow signals with wide intermediates (regression for wide helper emission) ──
+
+
+class TestNarrowSignalsWideIntermediates:
+    """Compiled engine: all declared signals ≤ 64 bits but intermediate
+    expressions (shift, multiply, concat) exceed 64 bits, triggering the
+    wide codegen path.  Verifies that wide helper functions are correctly
+    emitted and N_WIDE_WORDS accommodates the intermediate widths."""
+
+    ENGINES = ("reference", "vm-fast", "compiled")
+
+    def _run(self, *build_fns):
+        for build_fn in build_fns:
+            m = build_fn()
+            ref_val = None
+            for engine in self.ENGINES:
+                from veriforge.sim.testbench import Simulator
+
+                sim = Simulator(m, engine=engine)
+                sim.settle()
+                for name, val in _DRIVE_NARROW_WIDE_INTERMEDIATES.get(m.name, {}).items():
+                    sim.drive(name, val)
+                sim.settle()
+                got = sim.read("out")
+                if ref_val is None:
+                    ref_val = got
+                assert got == ref_val, f"{m.name}: engine={engine} got={got!r} ref={ref_val!r}"
+
+    # ── Shift-left into OR (the original bug pattern) ──────────────
+
+    def test_shl_or_pack(self):
+        self._run(_make_narrow_shl_or_pack_module)
+
+    # ── Narrow multiply → wider result ─────────────────────────────
+
+    def test_mul_narrow_to_wide(self):
+        self._run(_make_narrow_mul_widen_module)
+
+    # ── Narrow concat → wider result ───────────────────────────────
+
+    def test_concat_narrow_to_wide(self):
+        self._run(_make_narrow_concat_widen_module)
+
+    # ── Direct shift → wider result ────────────────────────────────
+
+    def test_direct_shift_to_wide(self):
+        self._run(_make_narrow_direct_shift_module)
+
+    # ── Shift + OR with different widths ───────────────────────────
+
+    def test_shl_or_different_widths(self):
+        self._run(_make_narrow_shl_or_diff_widths_module)
+
+
+_DRIVE_NARROW_WIDE_INTERMEDIATES: dict[str, dict[str, Value]] = {}
+
+
+def _register_narrow_wide(name: str, drives: dict[str, Value]) -> str:
+    _DRIVE_NARROW_WIDE_INTERMEDIATES[name] = drives
+    return name
+
+
+def _make_narrow_shl_or_pack_module():
+    """lo_64 | (hi_64 << 32) — all signals ≤ 64 bits, shift produces 96-bit intermediate."""
+    from veriforge.dsl import Module
+
+    name = _register_narrow_wide(
+        "narrow_shl_or",
+        {"lo": Value(0xA, width=32), "hi": Value(0x14, width=32)},
+    )
+    m = Module(name)
+    lo = m.input("lo", width=32)
+    hi = m.input("hi", width=32)
+    lo_64 = m.wire("lo_64", width=64)
+    hi_64 = m.wire("hi_64", width=64)
+    m.assign(lo_64, lo)
+    m.assign(hi_64, hi)
+    out = m.output("out", width=64)
+    m.assign(out, lo_64 | (hi_64 << 32))
+    return m.build()
+
+
+def _make_narrow_mul_widen_module():
+    """32-bit * 32-bit → 64-bit output."""
+    from veriforge.dsl import Module
+
+    name = _register_narrow_wide(
+        "narrow_mul",
+        {"a": Value(0x10000, width=32), "b": Value(0x10000, width=32)},
+    )
+    m = Module(name)
+    a = m.input("a", width=32)
+    b = m.input("b", width=32)
+    out = m.output("out", width=64)
+    m.assign(out, a * b)
+    return m.build()
+
+
+def _make_narrow_concat_widen_module():
+    """cat(hi, lo) — 2×32-bit → 64-bit output."""
+    from veriforge.dsl import Module, cat
+
+    name = _register_narrow_wide(
+        "narrow_cat",
+        {"lo": Value(0xA, width=32), "hi": Value(0x14, width=32)},
+    )
+    m = Module(name)
+    lo = m.input("lo", width=32)
+    hi = m.input("hi", width=32)
+    out = m.output("out", width=64)
+    m.assign(out, cat(hi, lo))
+    return m.build()
+
+
+def _make_narrow_direct_shift_module():
+    """32-bit << 32 → 64-bit output."""
+    from veriforge.dsl import Module
+
+    name = _register_narrow_wide(
+        "narrow_direct_shift",
+        {"a": Value(0x14, width=32)},
+    )
+    m = Module(name)
+    a = m.input("a", width=32)
+    out = m.output("out", width=64)
+    m.assign(out, a << 32)
+    return m.build()
+
+
+def _make_narrow_shl_or_diff_widths_module():
+    """48-bit | (16-bit << 48) — shift produces 64-bit intermediate."""
+    from veriforge.dsl import Module
+
+    name = _register_narrow_wide(
+        "narrow_shl_or_diff",
+        {"lo": Value(0xA, width=48), "hi": Value(0x14, width=16)},
+    )
+    m = Module(name)
+    lo = m.input("lo", width=48)
+    hi = m.input("hi", width=16)
+    lo_64 = m.wire("lo_64", width=64)
+    hi_64 = m.wire("hi_64", width=64)
+    m.assign(lo_64, lo)
+    m.assign(hi_64, hi)
+    out = m.output("out", width=64)
+    m.assign(out, lo_64 | (hi_64 << 48))
+    return m.build()
+
+
 # ── Phase 1: Recursive wide expression emitter — codegen unit tests ──────────
 
 

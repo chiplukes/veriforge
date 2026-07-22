@@ -210,7 +210,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _gen_constants(self) -> str:
         wide_offsets, wide_words, total_wide_words = self._wide_layout()
         lines = [f"DEF N_SIGS = {max(self._n_sigs, 1)}"]
-        lines.append(f"DEF N_WIDE_WORDS = {max(total_wide_words, 1)}")
+        lines.append(f"DEF N_WIDE_WORDS = {max(total_wide_words, self._dynamic_max_wide_words, 1)}")
         lines.append("DEF OUT_BUF_MAX = 65536")
         lines.append(f"DEF PROCESS_LOOP_LIMIT = {_PROCESS_LOOP_LIMIT}")
         lines.append("DEF ERR_NONE = 0")

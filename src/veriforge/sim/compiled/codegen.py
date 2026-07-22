@@ -181,6 +181,7 @@ class CythonCodegen(
     __slots__ = (
         "_combo_processes",
         "_delta_limit",
+        "_dynamic_max_wide_words",
         "_et_count",
         "_et_node_masks",
         "_et_node_vals",
@@ -196,6 +197,7 @@ class CythonCodegen(
         "_module",
         "_n_mems",
         "_n_sigs",
+        "_needs_wide_helpers",
         "_param_env",
         "_param_init",
         "_processes",
@@ -256,6 +258,8 @@ class CythonCodegen(
         self._et_node_vals: dict[int, str] = {}
         self._py_val_cache: dict[int, str] = {}
         self._py_mask_cache: dict[int, str] = {}
+        self._needs_wide_helpers: bool = False
+        self._dynamic_max_wide_words: int = 0
 
     # ── Wide scratch allocator ────────────────────────────────────────────
     # Used by _emit_wide_expr_to_scratch (Phase 1) to manage temporary
@@ -1117,13 +1121,15 @@ class CythonCodegen(
         return (elem_width + (_WORD_BITS - 1)) // _WORD_BITS
 
     def _module_has_wide_state(self) -> bool:
+        if self._needs_wide_helpers:
+            return True
         return any(width > _WORD_BITS for width in self._signal_widths) or any(
             elem_width > _WORD_BITS for elem_width, _depth in self._mem_info
         )
 
     def _module_max_wide_words(self) -> int:
         """Return the maximum number of 64-bit words needed by any wide signal or memory."""
-        max_w = 0
+        max_w = self._dynamic_max_wide_words
         for width in self._signal_widths:
             if width > _WORD_BITS:
                 max_w = max(max_w, (width + _WORD_BITS - 1) // _WORD_BITS)
