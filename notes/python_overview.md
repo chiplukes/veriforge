@@ -197,7 +197,9 @@ src/veriforge/
 │   ├── __init__.py       # Public API: Module, Signal, Expr, Interface, helpers
 │   ├── builder.py        # Operator-overloaded Python DSL → model objects
 │   ├── interface.py      # Interface / bus grouping abstraction
+│   ├── prelude.py        # Star-import convenience module for DSL user code
 │   ├── ram.py            # RAM inference pattern library (single/dual-port, ROM)
+│   ├── spec.py           # Declarative ModuleSpec layer (__set_name__ port descriptors)
 │   ├── testbench.py      # Auto-generate testbench wrappers for DUT modules
 │   ├── testbench_deps.py # Auto-discovery of child-module source dependencies for scaffolds
 │   └── lib/              # Reusable component library

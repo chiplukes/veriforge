@@ -66,10 +66,15 @@ Two assignment types exist:
 | Syntax | Verilog Equivalent | Use Case |
 |--------|-------------------|----------|
 | `signal <<= expr` | `signal <= expr;` | Non-blocking (sequential `always` blocks) |
+| `signal.next = expr` | `signal <= expr;` | Non-blocking (property form, MyHDL-style) |
 | `signal @= expr` | `signal = expr;` | Blocking (combinational `always` blocks) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous assignment (outside always) |
 | `m.assign_nb(lhs, rhs)` | `lhs <= rhs;` | Non-blocking (method form) |
 | `m.assign_b(lhs, rhs)` | `lhs = rhs;` | Blocking (method form) |
+
+`signal.next = expr` and `signal <<= expr` are interchangeable; `.next` also
+works on selects (`data[i].next = x`). Reading `.next` raises — it is an
+assignment target only.
 
 > **Note:** `signal.set(expr)` is a deprecated alias for `signal @= expr` and still works.
 > `m.assign_nonblocking` / `m.assign_blocking` are long-form aliases for `m.assign_nb` / `m.assign_b`.
@@ -105,6 +110,22 @@ H = m.localparam("HALF", value=4)            # localparam HALF = 4
 data = m.input("data", width=W)              # input [WIDTH-1:0] data
 ```
 
+### Bulk declarations
+
+Declare several signals of the same kind in one call. Tokens are separated by
+whitespace and/or commas; each is `name` (width 1) or `name:width`:
+
+```python
+clk, rst, en = m.inputs("clk rst en")
+a, b         = m.inputs("a:8, b:8")
+(y,)         = m.outputs("y:4")
+q, valid     = m.output_regs("q:8 valid")
+w1, w2       = m.wires("w1:16 w2:16")
+s1, s2       = m.regs("s1:4 s2:4")
+```
+
+For `signed=`, `init=`, or `depth=`, use the single-signal forms.
+
 ## Expression Operators
 
 All standard Verilog operators are available through Python overloading:
@@ -133,6 +154,8 @@ data[3]                 # Bit select:  data[3]
 data[7:4]               # Range select: data[7:4]
 data.part_select(i, 8)      # Part select: data[i +: 8]
 data.part_select_down(i, 8)  # Part select: data[i -: 8]
+data.bits(lsb=i, width=8)   # Part select: data[i +: 8]  (keyword form)
+data.bits(msb=i, width=8)   # Part select: data[i -: 8]
 ```
 
 **Important:** Comparison operators return `Expr` objects, not Python booleans. Using a `Signal` in an `if` statement or `bool()` raises `TypeError` — use `m.if_(expr)` instead.
@@ -144,12 +167,13 @@ Reverse operators work too: `1 + a` produces `BinaryOp("+", Literal(1), Identifi
 These are top-level functions imported from `veriforge.dsl`:
 
 ```python
-from veriforge.dsl import cat, rep, mux, land, lor, lnot
+from veriforge.dsl import cat, rep, mux, when, select, land, lor, lnot
 from veriforge.dsl import reduce_and, reduce_or, reduce_xor
 from veriforge.dsl import ashl, ashr, case_eq, case_ne
 from veriforge.dsl import clog2, signed, unsigned, sim_time
 
 cat(a, b, c)        # Concatenation: {a, b, c}
+cat([a, b, c])       # Lists/tuples are flattened — same as above
 rep(4, a)            # Replication:   {4{a}}
 mux(sel, t, f)       # Ternary:       sel ? t : f
 
@@ -173,6 +197,26 @@ signed(a)            # $signed(a)
 unsigned(a)          # $unsigned(a)
 sim_time()           # $time
 ```
+
+### Conditional expression builders
+
+Nested `mux()` chains get hard to read. `when()` builds a priority chain and
+`select()` a case-style equality chain; both fold into the same nested
+ternary expression tree:
+
+```python
+from veriforge.dsl import when, select
+
+# c1 ? v1 : (c2 ? v2 : v3) — first match wins
+value = when(c1, v1).when(c2, v2).otherwise(v3)
+
+# (state == IDLE) ? go : ((state == BUSY) ? wait_ : idle_val)
+nxt = select(state, {IDLE: go, BUSY: wait_}, default=idle_val)
+```
+
+A `when()` chain must be closed with `.otherwise(default)` before it can be
+used in an expression or assignment; forgetting it raises a `TypeError` at the
+point of use. Chains are immutable — each `.when()` returns a new chain.
 
 ## Behavioral Blocks
 
@@ -202,6 +246,42 @@ with m.always(a, b):
 Sensitivity classification is automatic:
 - Edge triggers only → `SensitivityType.SEQUENTIAL`
 - Level triggers or empty → `SensitivityType.COMBINATIONAL`
+
+### seq() / comb() shorthands
+
+`m.seq(clk)` is `m.always(posedge(clk))`; `m.comb()` is `m.always()`:
+
+```python
+with m.seq(clk):
+    q.next = d
+
+with m.comb():
+    y @= a & b
+```
+
+`m.seq` can also generate the standard reset skeleton. The block body becomes
+the non-reset branch; `rst_vals` (an ordered `{signal: value}` map) becomes
+the reset branch:
+
+```python
+with m.seq(clk, rst=rst, rst_vals={count: 0, state: 0}):
+    count.next = count + 1
+```
+
+emits:
+
+```verilog
+always @(posedge clk)
+    if (rst) begin
+        count <= 0;
+        state <= 0;
+    end
+    else count <= count + 1;
+```
+
+Options: `rst_active_low=True` emits `if (!rst)`; `async_reset=True` adds the
+reset edge to the sensitivity list (`negedge rst` when active-low, else
+`posedge rst`). `rst=` and `rst_vals=` must be given together.
 
 ### Initial Blocks
 
@@ -805,6 +885,55 @@ m.assign(s23, a[2] + a[3])
 m.assign(total, s01 + s23)
 ```
 
+## Declarative Modules (ModuleSpec)
+
+For modules with a fixed port list, the declarative layer removes the
+name-string duplication of the imperative builder (`count =
+m.output_reg("count", ...)`). Ports, parameters, and internal signals are
+class attributes; the `__set_name__` descriptor protocol captures each
+attribute's name automatically:
+
+```python
+from veriforge.dsl import ModuleSpec, In, OutReg, Param
+
+class Counter(ModuleSpec):
+    WIDTH = Param(8)
+    clk = In()
+    rst = In()
+    en = In()
+    count = OutReg("WIDTH")        # width refers to the Param by name
+
+    def body(self, m):
+        with m.seq(self.clk, rst=self.rst, rst_vals={self.count: 0}):
+            with m.if_(self.en):
+                self.count.next = self.count + 1
+
+module = Counter().build()          # model Module named "Counter"
+module16 = Counter(WIDTH=16).build()  # parameter default overridden
+```
+
+Rules and behavior:
+
+- **Descriptors**: `In`, `Out`, `OutReg`, `Inout` declare ports; `Wire`, `Reg`
+  declare internal signals (both accept `depth=` for memories); `Param`
+  declares a Verilog parameter. All accept the same `width`/`signed`/`init`
+  options as the corresponding builder methods.
+- **Widths**: an `int`, or a `str` naming a `Param` on the same class
+  (`OutReg("WIDTH")` emits `output reg [WIDTH-1:0]`).
+- **Module name**: the class name, unless a `module_name = "..."` class
+  attribute is set.
+- **Order**: ports/signals are declared in class-body order; parameters are
+  emitted first. Subclassing appends the subclass's declarations after the
+  base class's and may override `body()`.
+- **`body(self, m)`**: receives the live imperative `Module` builder — the
+  full builder API works inside; `self.<attr>` resolves to the declared
+  `Signal` proxies. Accessing `self.<attr>` outside a build raises.
+- `build()` may be called repeatedly; each call produces a fresh model module.
+
+The declarative and imperative styles are complementary: use `ModuleSpec`
+for fixed interfaces, and the imperative builder when ports are generated
+programmatically (loops, interface expansion).
+
 ## Emission
 
 `m.build()` returns a `veriforge.model.design.Module` object. Pass it to the emitter:
@@ -955,7 +1084,18 @@ from veriforge.dsl import (
     signed,          # System function: $signed(a)
     unsigned,        # System function: $unsigned(a)
     sim_time,        # System function: $time
+    when,            # Priority-mux chain: when(c, v).when(...).otherwise(d)
+    select,          # Case-style mux: select(sel, {k: v, ...}, default=d)
+    WhenChain,       # Type returned by when() (for annotations)
+    ModuleSpec,      # Declarative module base class
+    In, Out, OutReg, Inout, Wire, Reg, Param,  # ModuleSpec descriptors
 )
+```
+
+Or grab the whole surface with the prelude:
+
+```python
+from veriforge.dsl.prelude import *
 ```
 
 

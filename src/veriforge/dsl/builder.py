@@ -103,6 +103,8 @@ def _to_expr_node(value: object) -> Expression:
         )
     if isinstance(value, dict):
         raise TypeError("Cannot use dict in hardware expressions")
+    if isinstance(value, WhenChain):
+        raise TypeError("Unclosed when() chain — call .otherwise(default) to produce an expression")
     raise TypeError(f"Cannot convert {type(value).__name__} to Expression")
 
 
@@ -404,6 +406,26 @@ class Expr:
             PartSelect(self._as_expr(), _to_expr_node(base), _to_expr_node(width), "-:"),
         )
 
+    def bits(
+        self,
+        *,
+        lsb: Signal | Expr | int | None = None,
+        msb: Signal | Expr | int | None = None,
+        width: Signal | Expr | int = 1,
+    ) -> Expr:
+        """Keyword part select: ``sig.bits(lsb=k, width=8)`` → ``sig[k +: 8]``.
+
+        Exactly one of *lsb* / *msb* must be given:
+
+        - ``bits(lsb=base, width=w)`` — ascending select ``sig[base +: w]``
+        - ``bits(msb=base, width=w)`` — descending select ``sig[base -: w]``
+        """
+        if (lsb is None) == (msb is None):
+            raise TypeError("bits() requires exactly one of lsb= or msb=")
+        if lsb is not None:
+            return self.part_select(lsb, width)
+        return self.part_select_down(msb, width)
+
     def __setitem__(self, key: object, value: object) -> None:
         """Guard for subscript augmented assignment (data[i] <<= x).
 
@@ -449,6 +471,22 @@ class Expr:
         if self._builder is None or not self._builder._block_stack:
             raise RuntimeError("Blocking assignment (.set()) must be inside an always or initial block")
         stmt = BlockingAssign(self._as_expr(), _to_expr_node(other))
+        self._builder._append_stmt(stmt)
+
+    @property
+    def next(self) -> Expr:  # noqa: A003 — deliberate MyHDL-style assignment target
+        """Reading ``.next`` is not meaningful — it exists only as an assignment target."""
+        raise TypeError(
+            "'.next' is write-only: use `sig.next = expr` for a non-blocking assignment. "
+            "To read the signal's current value, use the signal itself."
+        )
+
+    @next.setter  # noqa: A003
+    def next(self, other: object) -> None:
+        """Non-blocking assignment: ``signal.next = expr`` (alias for ``signal <<= expr``)."""
+        if self._builder is None or not self._builder._block_stack:
+            raise RuntimeError("Non-blocking assignment (.next =) must be inside an always or initial block")
+        stmt = NonblockingAssign(self._as_expr(), _to_expr_node(other))
         self._builder._append_stmt(stmt)
 
     # --- Internal ---
@@ -518,7 +556,7 @@ class Signal(Expr):  # cm:7d5f3a
 class _AlwaysContext:
     """Context manager for ``with m.always(posedge(clk)):`` blocks."""
 
-    __slots__ = ("_builder", "_comment", "_pending", "_sensitivity")
+    __slots__ = ("_builder", "_comment", "_pending", "_reset", "_sensitivity")
 
     def __init__(
         self,
@@ -526,11 +564,14 @@ class _AlwaysContext:
         sensitivity: tuple,
         comment: str | None = None,
         pending_comments: list[tuple[str, bool]] | None = None,
+        reset: tuple[Expression, bool, list[tuple[Expression, Expression]]] | None = None,
     ):
         self._builder = builder
         self._sensitivity = sensitivity
         self._comment = comment
         self._pending = pending_comments or []
+        # (rst_expr, active_low, [(lhs, rhs), ...]) — set by m.seq(rst=..., rst_vals=...)
+        self._reset = reset
 
     def __enter__(self) -> _AlwaysContext:
         if self._builder._block_stack:
@@ -553,6 +594,14 @@ class _AlwaysContext:
             return False
 
         body = _wrap_statements(stmts)
+
+        # m.seq(rst=..., rst_vals=...): wrap the body in the standard reset skeleton
+        #   if (rst) begin <resets> end else begin <body> end
+        if self._reset is not None:
+            rst_expr, active_low, reset_assigns = self._reset
+            cond: Expression = UnaryOp("!", rst_expr) if active_low else rst_expr
+            reset_body = _wrap_statements([NonblockingAssign(lhs, rhs) for lhs, rhs in reset_assigns])
+            body = IfStatement(cond, reset_body, else_body=body)
 
         # Build sensitivity list
         edges: list[SensitivityEdge] = []
@@ -1063,6 +1112,58 @@ class Module:  # cm:2b9e4c
         self._flush_pending(port)
         self._ports.append(port)
         return self._declare_signal(name, width)
+
+    # --- Bulk declarations ---
+
+    @staticmethod
+    def _parse_signal_spec(spec: str) -> list[tuple[str, int]]:
+        """Parse a bulk-declaration spec string into (name, width) pairs.
+
+        Tokens are separated by whitespace and/or commas; each token is
+        ``name`` (width 1) or ``name:width``.
+        """
+        entries: list[tuple[str, int]] = []
+        for token in spec.replace(",", " ").split():
+            name, sep, width_str = token.partition(":")
+            if sep:
+                try:
+                    width = int(width_str)
+                except ValueError:
+                    raise ValueError(f"Invalid width in bulk declaration token {token!r}") from None
+                if width <= 0:
+                    raise ValueError(f"Width must be positive in bulk declaration token {token!r}")
+            else:
+                width = 1
+            entries.append((name, width))
+        if not entries:
+            raise ValueError("Bulk declaration spec is empty")
+        return entries
+
+    def inputs(self, spec: str) -> tuple[Signal, ...]:
+        """Declare several input ports from a spec string.
+
+        Each whitespace/comma-separated token is ``name`` or ``name:width``::
+
+            clk, rst, en = m.inputs("clk rst en")
+            a, b = m.inputs("a:8 b:8")
+        """
+        return tuple(self.input(name, width) for name, width in self._parse_signal_spec(spec))
+
+    def outputs(self, spec: str) -> tuple[Signal, ...]:
+        """Declare several output (wire) ports from a spec string — see :meth:`inputs`."""
+        return tuple(self.output(name, width) for name, width in self._parse_signal_spec(spec))
+
+    def output_regs(self, spec: str) -> tuple[Signal, ...]:
+        """Declare several output reg ports from a spec string — see :meth:`inputs`."""
+        return tuple(self.output_reg(name, width) for name, width in self._parse_signal_spec(spec))
+
+    def wires(self, spec: str) -> tuple[Signal, ...]:
+        """Declare several internal wires from a spec string — see :meth:`inputs`."""
+        return tuple(self.wire(name, width) for name, width in self._parse_signal_spec(spec))
+
+    def regs(self, spec: str) -> tuple[Signal, ...]:
+        """Declare several internal regs from a spec string — see :meth:`inputs`."""
+        return tuple(self.reg(name, width) for name, width in self._parse_signal_spec(spec))
 
     # --- Interface / bus binding ---
 
@@ -1670,6 +1771,75 @@ class Module:  # cm:2b9e4c
         self._pending_comments.clear()
         return _AlwaysContext(self, sensitivity, comment=comment, pending_comments=pending)
 
+    def seq(
+        self,
+        clk: Signal | Expr,
+        rst: Signal | Expr | None = None,
+        *,
+        rst_vals: dict[Signal | Expr, int | Expr] | None = None,
+        rst_active_low: bool = False,
+        async_reset: bool = False,
+        comment: str | None = None,
+    ) -> _AlwaysContext:
+        """Begin a sequential always block: shorthand for ``m.always(posedge(clk))``.
+
+        With just a clock, ``m.seq(clk)`` is exactly ``m.always(posedge(clk))``.
+
+        Passing ``rst=`` and ``rst_vals=`` generates the standard reset
+        skeleton around the block body::
+
+            with m.seq(clk, rst=rst, rst_vals={count: 0, state: 0}):
+                count.next = count + 1     # body = the non-reset branch
+
+        emits::
+
+            always @(posedge clk) begin
+                if (rst) begin
+                    count <= 0;
+                    state <= 0;
+                end
+                else begin
+                    count <= count + 1;
+                end
+            end
+
+        Args:
+            clk: Clock signal (``posedge`` sensitivity).
+            rst: Reset signal. Requires ``rst_vals``.
+            rst_vals: Ordered ``{signal: reset_value}`` map emitted as
+                non-blocking assigns in the reset branch.
+            rst_active_low: Reset condition becomes ``if (!rst)``.
+            async_reset: Add the reset edge to the sensitivity list
+                (``negedge rst`` when active-low, else ``posedge rst``).
+            comment: Optional text emitted as ``// text`` above the block.
+        """
+        if rst is None:
+            if rst_vals is not None or rst_active_low or async_reset:
+                raise TypeError("m.seq(): rst_vals/rst_active_low/async_reset require rst=")
+            return self.always(posedge(clk), comment=comment)
+        if not rst_vals:
+            raise TypeError("m.seq(): rst= requires a non-empty rst_vals= mapping of reset assignments")
+
+        sensitivity: tuple = (posedge(clk),)
+        if async_reset:
+            edge = negedge(rst) if rst_active_low else posedge(rst)
+            sensitivity = (posedge(clk), edge)
+
+        reset_assigns = [(_to_expr_node(lhs), _to_expr_node(rhs)) for lhs, rhs in rst_vals.items()]
+        pending = list(self._pending_comments)
+        self._pending_comments.clear()
+        return _AlwaysContext(
+            self,
+            sensitivity,
+            comment=comment,
+            pending_comments=pending,
+            reset=(_to_expr_node(rst), rst_active_low, reset_assigns),
+        )
+
+    def comb(self, *, comment: str | None = None) -> _AlwaysContext:
+        """Begin a combinational always block: shorthand for ``m.always()`` (``always @(*)``)."""
+        return self.always(comment=comment)
+
     def initial(self, *, comment: str | None = None) -> _InitialContext:
         """Begin an initial block.
 
@@ -1847,13 +2017,27 @@ def negedge(sig: Signal | Expr) -> SensitivityEdge:
     return SensitivityEdge("negedge", _to_expr_node(sig))
 
 
-def cat(*args: Signal | Expr | int) -> Expr:
-    """Concatenation: ``{a, b, c}``"""
+def cat(*args: Signal | Expr | int | list | tuple) -> Expr:
+    """Concatenation: ``{a, b, c}``.
+
+    List/tuple arguments are flattened, so ``cat(parts)`` and
+    ``cat(a, parts, b)`` work as well as ``cat(*parts)``.
+    """
+    flat: list = []
+
+    def _flatten(items) -> None:
+        for a in items:
+            if isinstance(a, (list, tuple)):
+                _flatten(a)
+            else:
+                flat.append(a)
+
+    _flatten(args)
     # M28: empty concatenation
-    if not args:
+    if not flat:
         raise ValueError("cat() requires at least one argument")
-    exprs = [_to_expr_node(a) for a in args]
-    builder = _find_builder(args)
+    exprs = [_to_expr_node(a) for a in flat]
+    builder = _find_builder(flat)
     return Expr(builder, Concatenation(exprs))
 
 
@@ -1875,6 +2059,67 @@ def mux(cond: Signal | Expr | int, true_val: Signal | Expr | int, false_val: Sig
         builder,
         TernaryOp(_to_expr_node(cond), _to_expr_node(true_val), _to_expr_node(false_val)),
     )
+
+
+class WhenChain:
+    """Priority-mux expression builder — see :func:`when`.
+
+    Not itself an expression: call :meth:`otherwise` to close the chain and
+    obtain the resulting :class:`Expr`.
+    """
+
+    __slots__ = ("_arms",)
+
+    def __init__(self, arms: list[tuple[object, object]]):
+        self._arms = arms
+
+    def when(self, cond: Signal | Expr | int, val: Signal | Expr | int) -> WhenChain:
+        """Add a lower-priority arm: taken when *cond* is true and no earlier arm matched."""
+        return WhenChain([*self._arms, (cond, val)])
+
+    def otherwise(self, default: Signal | Expr | int) -> Expr:
+        """Close the chain with the value used when no condition matched."""
+        parts: list = [default]
+        for cond, val in self._arms:
+            parts.extend((cond, val))
+        builder = _find_builder(parts)
+        result = _to_expr_node(default)
+        for cond, val in reversed(self._arms):
+            result = TernaryOp(_to_expr_node(cond), _to_expr_node(val), result)
+        return Expr(builder, result)
+
+
+def when(cond: Signal | Expr | int, val: Signal | Expr | int) -> WhenChain:
+    """Start a priority-mux chain — a readable alternative to nested :func:`mux`::
+
+        value = when(c1, v1).when(c2, v2).otherwise(v3)
+        # c1 ? v1 : (c2 ? v2 : v3)
+
+    The chain must be closed with ``.otherwise(default)`` before use in an
+    expression or assignment.
+    """
+    return WhenChain([(cond, val)])
+
+
+def select(
+    sel: Signal | Expr,
+    cases: dict[int | Signal | Expr, Signal | Expr | int],
+    default: Signal | Expr | int,
+) -> Expr:
+    """Case-style mux: compare *sel* against each key in order::
+
+        nxt = select(state, {IDLE: s_idle, BUSY: s_busy}, default=state)
+        # (state == IDLE) ? s_idle : ((state == BUSY) ? s_busy : state)
+
+    *default* is required — hardware muxes need a value for the unmatched case.
+    """
+    chain: WhenChain | None = None
+    for key, val in cases.items():
+        arm_cond = sel == key
+        chain = when(arm_cond, val) if chain is None else chain.when(arm_cond, val)
+    if chain is None:
+        raise ValueError("select() requires at least one case")
+    return chain.otherwise(default)
 
 
 def land(a: Signal | Expr | int, b: Signal | Expr | int) -> Expr:

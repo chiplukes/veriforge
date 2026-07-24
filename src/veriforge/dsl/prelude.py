@@ -1,43 +1,22 @@
-"""Hardware Construction DSL — build Verilog model objects from Python.
+"""One-line import for DSL user code::
 
-Usage::
+    from veriforge.dsl.prelude import *
 
-    from veriforge.dsl import Module, posedge, negedge, cat, mux
-
-    with Module("counter") as m:
-        clk = m.input("clk")
-        rst = m.input("rst")
-        count = m.output_reg("count", width=8)
-
-        with m.always(posedge(clk)):
-            with m.if_(rst):
-                count <<= 0
-            with m.else_():
-                count <<= count + 1
-
-    module = m.build()
-
-    # Emit Verilog
-    from veriforge.codegen import emit_module
-    print(emit_module(module))
-
-    # Or simulate directly
-    from veriforge.sim import Simulator
-    sim = Simulator(module)
-    sim.run(test_fn, max_time=1000)
+Brings in the module builder, the declarative spec layer, and every
+expression helper — the names a typical DSL file imports individually.
 """
 
 from .builder import (
+    Expr,
+    Module,
+    Signal,
+    WhenChain,
     ashl,
     ashr,
     case_eq,
     case_ne,
-    Expr,
-    clog2,
-    Module,
-    Signal,
-    WhenChain,
     cat,
+    clog2,
     land,
     lnot,
     lor,

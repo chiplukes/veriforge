@@ -61,6 +61,13 @@ kept in sync with the Python interpreter.
 
 ## 2. DSL — ergonomics improvements
 
+> **Status (July 2026): implemented.** Items 1–5 below landed as
+> `dsl/spec.py` (ModuleSpec layer), `m.seq()`/`m.comb()`, `Signal.next`,
+> `when()`/`select()`, `Expr.bits()`, `cat()` flattening, bulk declarators
+> (`m.inputs()` etc.), and `dsl/prelude.py`. Width-as-second-positional
+> (item 6) already worked. Tests: `tests/test_dsl/test_ergonomics.py`,
+> `tests/test_dsl/test_module_spec.py`. Docs: `notes/dsl/dsl_guide.md`.
+
 The core design (Expr proxies + operator overloading + `with` blocks) is
 right, and the guardrails are unusually good (`__bool__` raises with a helpful
 message, `data[i] = x` typo detection via `__setitem__`, M11/M12 blocking/NBA

@@ -145,9 +145,14 @@ Recommended public imports:
 | `Signal`, `Expr` | DSL expression objects. |
 | `posedge`, `negedge` | Edge sensitivity helpers. |
 | `cat`, `rep`, `mux` | Concatenation, replication, and ternary helpers. |
+| `when`, `select` | Priority-mux chain and case-style mux builders. |
 | `land`, `lor`, `lnot` | Logical helpers. |
 | `reduce_and`, `reduce_or`, `reduce_xor` | Reduction helpers. |
 | `Interface`, `BoundInterface` | DSL interface helpers. |
+| `ModuleSpec`, `In`, `Out`, `OutReg`, `Inout`, `Wire`, `Reg`, `Param` | Declarative module layer (class-attribute ports). |
+
+For user scripts, ``from veriforge.dsl.prelude import *`` imports the whole
+DSL surface in one line.
 
 ## Verilog-to-DSL conversion
 

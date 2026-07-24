@@ -417,9 +417,18 @@ The DSL maps Python constructs to Verilog. The full reference is in
 |------------|---------|--------|
 | `signal <<= expr` | `signal <= expr;` | Non-blocking — sequential `always` |
 | `signal @= expr` | `signal = expr;` | Blocking — combinational `always` |
+| `signal.next = expr` | `signal <= expr;` | Non-blocking (property form) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous — outside `always` |
 | `m.assign_nb(lhs, rhs)` | `lhs <= rhs;` | Non-blocking (method form) |
 | `m.assign_b(lhs, rhs)` | `lhs = rhs;` | Blocking (method form) |
+
+Ergonomic shorthands (see [dsl_guide.md](dsl/dsl_guide.md) for details):
+`m.seq(clk)` / `m.comb()` replace `m.always(posedge(clk))` / `m.always()`,
+with `m.seq(clk, rst=rst, rst_vals={...})` generating the standard reset
+skeleton; `m.inputs("clk rst en")` bulk-declares signals;
+`when(c, v).when(...).otherwise(d)` and `select(sel, {...}, default=d)`
+replace nested `mux()`; and the declarative `ModuleSpec` class layer declares
+ports as class attributes with no name strings.
 
 #### Expression operators
 
