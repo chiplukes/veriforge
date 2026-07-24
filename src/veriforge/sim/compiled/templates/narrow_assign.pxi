@@ -6018,6 +6018,55 @@ cdef inline void _whole_stage_signal(SimCtx *c, int dst_sid, int src_sid) noexce
     c.nba_dirty[dst_sid] = 1
     c.nba_pending = 1
 
+cdef inline void _whole_stage_signal_s(SimCtx *c, int dst_sid, int src_sid) noexcept nogil:
+    cdef int dst_words = c.wide_words[dst_sid]
+    cdef int src_words = c.wide_words[src_sid]
+    cdef int dst_offset = c.wide_offset[dst_sid]
+    cdef int src_offset = c.wide_offset[src_sid]
+    cdef int i, remaining_w
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill
+    if src_words > 0:
+        sign_word_v = c.wide_val[src_offset + src_words - 1]
+        sign_word_m = c.wide_mask[src_offset + src_words - 1]
+    else:
+        sign_word_v = <unsigned long long>c.val[src_sid]
+        sign_word_m = <unsigned long long>c.mask[src_sid]
+    if sign_word_m & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+        sign_fill = 0
+    elif sign_word_v & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+        sign_fill = <unsigned long long>-1
+    else:
+        sign_fill = 0
+    if dst_words > 0:
+        for i in range(dst_words):
+            if src_words > 0:
+                if i < src_words:
+                    word_v = c.wide_val[src_offset + i]
+                    word_m = c.wide_mask[src_offset + i]
+                else:
+                    word_v = sign_fill
+                    word_m = 0
+            elif i == 0:
+                word_v = <unsigned long long>_sign_ext(c.val[src_sid], c.width[src_sid])
+                word_m = <unsigned long long>c.mask[src_sid]
+            else:
+                word_v = sign_fill
+                word_m = 0
+            remaining_w = c.width[dst_sid] - (i * 64)
+            tail_mask = _word_mask64(remaining_w)
+            c.wide_nba_val[dst_offset + i] = word_v & tail_mask
+            c.wide_nba_mask[dst_offset + i] = word_m & tail_mask
+        c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
+        c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[dst_offset]
+    elif src_words > 0:
+        c.nba_val[dst_sid] = <long long>(c.wide_val[src_offset] & _word_mask64(c.width[dst_sid]))
+        c.nba_mask[dst_sid] = <long long>(c.wide_mask[src_offset] & _word_mask64(c.width[dst_sid]))
+    else:
+        c.nba_val[dst_sid] = _sign_ext(c.val[src_sid], c.width[src_sid]) & wmask(c.width[dst_sid])
+        c.nba_mask[dst_sid] = c.mask[src_sid] & wmask(c.width[dst_sid])
+    c.nba_dirty[dst_sid] = 1
+    c.nba_pending = 1
+
 cdef inline void _whole_stage_const_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
     cdef int dst_offset = c.wide_offset[dst_sid]

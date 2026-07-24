@@ -1433,8 +1433,13 @@ class _WideEmitterMixin:
         if rhs_sid is None or (lhs_w <= _WORD_BITS and self._signal_widths[rhs_sid] <= _WORD_BITS):
             return None
 
+        rhs_signed = rhs_sid < len(self._signal_signed) and self._signal_signed[rhs_sid]
+        rhs_w = self._signal_widths[rhs_sid]
+
         phase = "stage" if is_nba else "assign"
         pad = "    " * indent
+        if rhs_signed and lhs_w > rhs_w:
+            return [f"{pad}_whole_{phase}_signal_s(c, {dst_sid}, {rhs_sid})"]
         return [f"{pad}_whole_{phase}_signal(c, {dst_sid}, {rhs_sid})"]
 
     def _emit_wide_replication_lines(

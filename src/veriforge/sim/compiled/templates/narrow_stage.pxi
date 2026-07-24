@@ -45,6 +45,68 @@ cdef inline void _whole_assign_signal(SimCtx *c, int dst_sid, int src_sid) noexc
     if changed:
         c.dirty[dst_sid] = 1
 
+cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noexcept nogil:
+    cdef int dst_words = c.wide_words[dst_sid]
+    cdef int src_words = c.wide_words[src_sid]
+    cdef int dst_offset = c.wide_offset[dst_sid]
+    cdef int src_offset = c.wide_offset[src_sid]
+    cdef int i, remaining_w, changed = 0
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill
+    cdef long long new_v, new_m
+    if src_words > 0:
+        # wide source: sign bit lives in top bit of last source word
+        sign_word_v = c.wide_val[src_offset + src_words - 1]
+        sign_word_m = c.wide_mask[src_offset + src_words - 1]
+    else:
+        sign_word_v = <unsigned long long>c.val[src_sid]
+        sign_word_m = <unsigned long long>c.mask[src_sid]
+    # Determine fill word: -1 (all 1s) if sign bit is 1, else 0
+    if sign_word_m & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+        sign_fill = 0  # sign bit is x/z → fill with 0 (conservative)
+    elif sign_word_v & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+        sign_fill = <unsigned long long>-1
+    else:
+        sign_fill = 0
+    if dst_words > 0:
+        for i in range(dst_words):
+            if src_words > 0:
+                if i < src_words:
+                    word_v = c.wide_val[src_offset + i]
+                    word_m = c.wide_mask[src_offset + i]
+                else:
+                    word_v = sign_fill
+                    word_m = 0
+            elif i == 0:
+                word_v = <unsigned long long>_sign_ext(c.val[src_sid], c.width[src_sid])
+                word_m = <unsigned long long>c.mask[src_sid]
+            else:
+                word_v = sign_fill
+                word_m = 0
+            remaining_w = c.width[dst_sid] - (i * 64)
+            tail_mask = _word_mask64(remaining_w)
+            word_v &= tail_mask
+            word_m &= tail_mask
+            if word_v != c.wide_val[dst_offset + i] or word_m != c.wide_mask[dst_offset + i]:
+                c.wide_val[dst_offset + i] = word_v
+                c.wide_mask[dst_offset + i] = word_m
+                changed = 1
+        new_v = <long long>c.wide_val[dst_offset]
+        new_m = <long long>c.wide_mask[dst_offset]
+    else:
+        if src_words > 0:
+            new_v = <long long>(c.wide_val[src_offset] & _word_mask64(c.width[dst_sid]))
+            new_m = <long long>(c.wide_mask[src_offset] & _word_mask64(c.width[dst_sid]))
+        else:
+            new_v = _sign_ext(c.val[src_sid], c.width[src_sid]) & wmask(c.width[dst_sid])
+            new_m = c.mask[src_sid] & wmask(c.width[dst_sid])
+    if new_v != c.val[dst_sid] or new_m != c.mask[dst_sid]:
+        c.val[dst_sid] = new_v
+        c.mask[dst_sid] = new_m
+        changed = 1
+    if changed:
+        c.dirty[dst_sid] = 1
+
+
 cdef inline void _whole_stage_and_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
     cdef int i, remaining_w
