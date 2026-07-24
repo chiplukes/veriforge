@@ -44,7 +44,7 @@ The bytecode VM has two interpreter backends controlled by `engine=`:
   the right choice for production use where performance matters.
 
 Internally, `VMScheduler` exposes `force_python=True/False` to control this.
-The env var `VERILOG_TOOLS_DISABLE_CYTHON_VM=1` forces the pure-Python path
+The env var `VERIFORGE_DISABLE_CYTHON_VM=1` forces the pure-Python path
 regardless of which engine name is used.
 
 ## File Layout

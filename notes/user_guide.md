@@ -395,7 +395,7 @@ with Module("logic") as m:
 ### DSL syntax reference
 
 The DSL maps Python constructs to Verilog. The full reference is in
-[dsl_guide.md](dsl_guide.md); this section covers the essentials.
+[dsl_guide.md](dsl/dsl_guide.md); this section covers the essentials.
 
 #### Declarations
 
@@ -535,7 +535,7 @@ m_axis = m.interface("m_axis", axis, role="master", reg=True)
 
 For the complete DSL reference — including LHS targets, error handling,
 `for`/`while`/`forever` loops, `wire_interface`, `port_map`, and simulation
-from DSL — see [dsl_guide.md](dsl_guide.md).
+from DSL — see [dsl_guide.md](dsl/dsl_guide.md).
 
 ### SystemVerilog type declarations
 
@@ -562,7 +562,7 @@ with Module("sv_types_demo") as m:
     m.import_pkg("my_pkg", "FOO")  # import my_pkg::FOO;
 ```
 
-For a full DSL reference and advanced patterns, see [dsl_guide.md](dsl_guide.md).
+For a full DSL reference and advanced patterns, see [dsl_guide.md](dsl/dsl_guide.md).
 
 ---
 
@@ -1627,7 +1627,7 @@ Project notes document additional testing conventions.
 ## 19. Pointers to related docs
 
 - Quick path: [getting_started.md](getting_started.md)
-- DSL reference: [dsl_guide.md](dsl_guide.md)
+- DSL reference: [dsl_guide.md](dsl/dsl_guide.md)
 - Architecture map: [python_overview.md](python_overview.md)
 - Semantic model notes: [semantic_model.md](semantic_model.md)
 - Simulation notes: [simulator_python.md](simulation/simulator_python.md),

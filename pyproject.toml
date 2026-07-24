@@ -40,6 +40,7 @@ version = {attr = "veriforge._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = [".", "src"]
+include = ["veriforge*"]
 
 [tool.setuptools.package-data]
 "veriforge" = ["lark_file/*.lark"]

@@ -187,8 +187,8 @@ a DSL memory before `batch_run`, `dump_memory(name, count)` to read it back, and
 `memory_names` property to list available memories.  All three raise
 `NotImplementedError` on non-compiled engines.
 
-Compiled-simulator details and limitations are owned by
-`notes\plans\plan_review_20260425_sim.md`.
+Compiled-simulator details and limitations are documented in
+`notes/simulation/simulator_compile_cython.md` and `notes/known_issues.md`.
 
 ## Simulation endpoints
 

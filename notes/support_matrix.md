@@ -40,7 +40,7 @@ current detailed story.
 | DSL builder | `notes\dsl\dsl_coverage.md` | Detailed builder-oriented construct matrix. |
 | Verilog-to-DSL converter | `notes\dsl\dsl_conversion_coverage.md` | Explicit current unsupported output shapes and recommended next steps. |
 | LSP | `notes\veriforge_lsp.md` | Standard features, custom commands, and current safe refactor subsets. |
-| Hierarchy/refactor tooling | `notes\veriforge_lsp.md` | Implemented preview/apply surface, diagnostics, and remaining blocked cases. Forward work in `notes\plans\plan_refactor_tool.md`. |
+| Hierarchy/refactor tooling | `notes\veriforge_lsp.md` | Implemented preview/apply surface, diagnostics, and remaining blocked cases. Forward work in `notes/roadmap.md`. |
 
 ## Scope notes
 
@@ -97,7 +97,7 @@ detailed DSL-specific notes.
 | Pure pass-through wrapper collapse apply | Partial | CLI can write guarded parent-module replacements. LSP returns editor-applied `WorkspaceEdit` payloads and does not initiate `workspace/applyEdit`. |
 | Structural, behavioral, parameterized, generate, interface, and unresolved wrappers | Planned / blocked | These are classified and diagnosed, but collapse is intentionally blocked until safer transforms are implemented. |
 | Extract selected logic into a submodule | Partial | CLI, LSP, and Peovim preview/write support complete continuous assignments, complete simple always/initial blocks, safe selected instance groups with direct signal connectivity, and coherent mixed structural selections that combine assigns with instance groups, plus helper declaration movement and selected parent-parameter pass-through. Broader connection patterns and better selection UX remain planned. |
-| Hierarchy boundary movement API | Partial | Unified `previewHierarchyBoundaryMove` / `applyHierarchyBoundaryMove` covers all four directions. Pull-up apply: direct-parent instance moves and design-wide child-definition moves (complete assigns/always/initial/instances, including from generate branches). Push-down apply: whole-module-wrap and instance/subtree selections; range push-down routes to the extract engine. Cross-file and cross-tree moves remain planned; see `notes\plans\plan_refactor_tool.md`. |
+| Hierarchy boundary movement API | Partial | Unified `previewHierarchyBoundaryMove` / `applyHierarchyBoundaryMove` covers all four directions. Pull-up apply: direct-parent instance moves and design-wide child-definition moves (complete assigns/always/initial/instances, including from generate branches). Push-down apply: whole-module-wrap and instance/subtree selections; range push-down routes to the extract engine. Cross-file and cross-tree moves remain planned; see `notes/roadmap.md`. |
 
 ## Out-of-scope or low-priority areas
 

@@ -11,7 +11,7 @@ and currently fails ~18 tests under `tests/test_sim/test_bench_native.py`
 (memory read-after-write divergence).  Users who hit those failures can set
 the environment variable `VERIFORGE_DISABLE_CYTHON_VM=1` or delete the
 built `_interp_fast.*.pyd`/`.so` to force the pure-Python path.  See
-`notes/simulator_engines.md` for status.
+`notes/simulation/simulator_engines.md` and `notes/known_issues.md` for status.
 """
 
 from __future__ import annotations

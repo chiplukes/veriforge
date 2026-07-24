@@ -30,7 +30,7 @@ block with valid propagation, reset logic, and optional enable/stall.
 function pointer or expression template as a generate parameter. You'd have
 to hand-code every stage, use `ifdef` chains, or resort to external text
 templating. The pipeline generator in
-[pipeline_generator.py](../examples/composability/pipeline_generator.py)
+[pipeline_generator.py](../../examples/composability/pipeline_generator.py)
 produces a different structural skeleton per call — not just different
 parameter values, but different *logic* at each stage.
 
@@ -74,7 +74,7 @@ register file means editing four separate places: the `reg` declaration,
 the reset clause, the write-decode case branch, and the read-decode case
 branch. Miss one and you have a bug. The declarative approach edits one
 line in one dict. See
-[register_bank.py](../examples/composability/register_bank.py).
+[register_bank.py](../../examples/composability/register_bank.py).
 
 This isn't just about saving keystrokes. It's about **eliminating a class
 of bugs** (inconsistent register maps) that are a routine source of silicon
@@ -101,7 +101,7 @@ for taps in [4, 8, 16, 32]:
               f"{stats['regs']:>3} regs, {stats['always_blocks']:>2} always blocks")
 ```
 
-Output (from [design_explorer.py](../examples/composability/design_explorer.py)):
+Output (from [design_explorer.py](../../examples/composability/design_explorer.py)):
 
 ```
 FIR Filter Design-Space Exploration
@@ -299,7 +299,7 @@ tb = generate_testbench(dut.build(), clock_period=10, reset_duration=20)
 The generator introspects the module's port list, detects clock/reset
 signals by naming convention, and produces a complete testbench — clock
 toggle, reset sequence, VCD setup, timeout watchdog. See
-[testbench.py](../src/veriforge/dsl/testbench.py).
+[testbench.py](../../src/veriforge/dsl/testbench.py).
 
 **Potential extensions** (not yet implemented but enabled by the approach):
 

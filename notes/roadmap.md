@@ -122,43 +122,37 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Endpoint detection
 
-- **Near-miss reporting** (item 14) — `endpoints/detect.py` matches complete
-  required-signal sets; bundles missing `tlast` or `awprot` are silently
-  undetected. Keep the strict default, but collect near-miss candidates
-  (prefix groups matching ≥N core signals) and surface them in
-  `DetectedInterface` diagnostics / `--explain-plan` output: "ports match
-  AXI-Lite except missing: awprot, wstrb". Optionally allow opt-in relaxation
-  for genuinely optional signals (`tlast`-less AXIS is legal per ARM spec for
-  unframed streams).
+- **Near-miss reporting** (item 14) — **Done.** `endpoints/detect.py` now provides
+  `detect_near_misses()` / `detect_relaxed_interfaces()`, and the bench planner
+  surfaces `near-miss: …` explanations in plan warnings. Remaining follow-up:
+  audit which optional signals should be relaxable by default (`tlast`-less AXIS
+  is legal per ARM spec for unframed streams).
 
 ## LSP
 
-- **Resilience without Verible** (item 15) — when Verible is not installed, tier 1
-  of the three-tier pipeline vanishes and there are no diagnostics between saves.
-  Options in order of effort: (a) document the Verible dependency prominently
-  in README / getting_started (currently only in notes/verilog_lsp.md); (b) fall
-  back to a debounced (~1–2 s idle) Lark parse of the open buffer for syntax
-  diagnostics — slower, but Earley on a single file is acceptable at idle-time
-  cadence. The Lark fallback tier is already implemented in `workspace.py`;
-  it just needs wiring into the didChange path when Verible is absent.
+- **Resilience without Verible** (item 15) — **Done.** `workspace.py` falls back
+  to a debounced Lark parse of the open buffer for syntax diagnostics when
+  Verible is absent, and the README documents the Verible dependency.
 
 ## Codebase health
 
-- **Move static Cython helpers to `.pxi` templates** (item 1) — four files in
-  `sim/compiled/` hold ~13,300 lines of static Cython source encoded as Python
-  `list[str]` literals with no syntax highlighting or linting. Store as `.pxi`
-  files under `sim/compiled/templates/` (already declared as package data).
-  The `_gen_*_code()` functions become 5-line file reads; byte-equality assertion
-  against current output locks in the migration.
-- **Decompose remaining oversized functions** (item 4 partial) — three functions
-  remain after `_render_bench_testbench` was extracted:
-  - `sim/compiled/_process_compiler.py:_compile_concat_cont_assign` (~532 lines)
+See [notes/plans/architecture_review_2026-07.md](plans/architecture_review_2026-07.md)
+for the July 2026 architecture review plan (semantic-core unification,
+cross-engine conformance testing, CI sim coverage, cycle removal).
+
+- **Move static Cython helpers to `.pxi` templates** (item 1) — **Done.** The
+  static Cython source now lives in `sim/compiled/templates/*.pxi` and the
+  `_gen_narrow_*.py` modules are thin file reads.
+- **Decompose remaining oversized functions** (item 4 partial) — largest
+  remaining (July 2026 measurement):
+  - `sim/compiled/_gen_wide_section.py:_gen_wide_primitives` (~847 lines)
+  - `sim/vm/interpreter.py:execute` (~773 lines — interpreter dispatch; may be
+    acceptable as-is)
+  - `sim/compiled/_stmt_emitters.py:_emit_concat_lhs` (~657 lines)
+  - `sim/compiled/_process_compiler.py:_compile_concat_cont_assign` (~533 lines)
     — per-lane emission helper seam
-  - `refactor/_pull_up_engine.py:_preview_pull_up_child_range` (~274 lines)
+  - `refactor/_pull_up_engine.py:_preview_pull_up_child_range` (~243 lines)
     — validation / plan-build / diff phases
-  - `dsl/testbench.py:_render_native_bench_testbench` — emits
-    native-bench-style scaffold; same seams as the already-refactored
-    `_render_bench_testbench`.
 
 ## PULP / common_cells examples
 

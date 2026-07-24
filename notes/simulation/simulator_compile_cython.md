@@ -559,8 +559,7 @@ encoded = sim.dump_memory("tb_sink__buf", n_words)
 once per element via the compiled `CompiledSim` Cython object. For most
 realistic ROM sizes (< 10M elements) this loop is fast enough to be
 negligible compared to `batch_run`. A true zero-overhead bulk-copy path
-(passing a typed memoryview into Cython) is a future enhancement and is
-documented in `../gfwx-fpga/notes/plans/veriforge_load_memory_api.md`.
+(passing a typed memoryview into Cython) is a future enhancement.
 
 ---
 

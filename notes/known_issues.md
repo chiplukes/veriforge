@@ -50,6 +50,19 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Cython VM interpreter drift (vm-fast engine)
+
+**Status**: Open — noted in `setup.py` docstring, unverified recently
+
+The Cython VM extension (`sim/vm/_interp_fast.pyx`) has drifted from the
+pure-Python interpreter and was last observed failing ~18 tests under
+`tests/test_sim/test_bench_native.py` (memory read-after-write divergence).
+The `vm-fast` engine silently falls back to pure Python when the extension is
+not built, so environments without the built extension are unaffected.
+Workarounds: set `VERIFORGE_DISABLE_CYTHON_VM=1` or delete the built
+`_interp_fast.*.pyd`/`.so`. Before relying on `vm-fast` with the extension
+built, re-run that test file to confirm current status.
+
 ### Declared signedness is now honored (all engines)
 
 **Status**: Resolved (June 2026)
@@ -61,8 +74,7 @@ context-determined sign-extension, and assignment sign-extension all activate
 when signal operands carry a declared-signed `True` flag — not only through
 explicit `$signed()` calls.
 
-See `notes/plans/plan_signedness_propagation.md` for the implementation plan
-and `tests/test_sim/test_testbench.py::TestSignedDeclarationSupport` for the
+See `tests/test_sim/test_testbench.py::TestSignedDeclarationSupport` for the
 validation tests.
 
 ### x and z share one representation (3-state, not 4-state)
@@ -95,7 +107,8 @@ single-word assumptions. This still affects:
 The **reference** and **VM** engines use Python `int` and handle arbitrary widths
 correctly. The remaining limitation is compiled-engine-specific.
 
-See `notes/plan.md` "Wide Signal Support" section for potential approaches.
+See `notes/plans/architecture_review_2026-07.md` and
+`notes/simulation/wide_signal_coverage.md` for status and potential approaches.
 
 ### Compiled engine: wide-emitter unary operator masking (latent)
 

@@ -257,7 +257,7 @@ Comparison operators (`==`, `!=`, `<`, etc.) return `Expr`, not `bool` — use
 `m.if_(expr)` instead of Python `if`.
 
 For the full DSL syntax reference (comments, attributes, interfaces, delays,
-system tasks, error handling, and more), see [dsl_guide.md](dsl_guide.md).
+system tasks, error handling, and more), see [dsl_guide.md](dsl/dsl_guide.md).
 
 ### DSL standard library (`veriforge.dsl.lib`)
 
@@ -616,6 +616,6 @@ For architecture details, see [veriforge_lsp.md](veriforge_lsp.md).
 ## Where to go next
 
 - Detailed guide: [user_guide.md](user_guide.md)
-- DSL deep dive: [dsl_guide.md](dsl_guide.md)
+- DSL deep dive: [dsl_guide.md](dsl/dsl_guide.md)
 - Architecture index: [python_overview.md](python_overview.md)
 - Example designs: ../examples/
