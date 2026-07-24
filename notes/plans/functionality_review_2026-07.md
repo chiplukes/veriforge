@@ -1,5 +1,9 @@
 # Functionality Review — July 2026
 
+> **Execution**: the ordered, agent-executable plan derived from this review
+> is [work_plan_2026-07.md](work_plan_2026-07.md). This document is the
+> rationale record.
+
 Mechanism-level ("how it works") review of the simulator engines, DSL,
 testbench generator, LSP, and test suite. Companion to
 `architecture_review_2026-07.md` (code-structure findings live there; overlap

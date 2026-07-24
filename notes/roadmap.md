@@ -2,6 +2,13 @@
 
 Known future work items, organized by area.
 
+> **Execution order lives in
+> [notes/plans/work_plan_2026-07.md](plans/work_plan_2026-07.md)** — the
+> concrete, ordered plan (quick wins → structural projects) synthesized from
+> the July 2026 architecture and functionality reviews. Work items from that
+> plan supersede overlapping entries below; this file remains the per-area
+> backlog for items not yet scheduled.
+
 ## Hierarchy refactor tool
 
 Items in `src/veriforge/refactor/`. Safety invariants and test requirements

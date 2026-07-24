@@ -1,5 +1,9 @@
 # Architecture Review — July 2026
 
+> **Execution**: the ordered, agent-executable plan derived from this review
+> is [work_plan_2026-07.md](work_plan_2026-07.md). This document is the
+> rationale record.
+
 Findings from a full-project review (code + `notes/`), with a plan for the
 items too involved to fix inline. Minor fixes (broken doc links, stale plan
 references, packaging exclude for `tests/`, roadmap staleness) were applied
