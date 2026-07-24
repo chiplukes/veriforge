@@ -71,15 +71,22 @@ documented only in `setup.py` (now also in `notes/known_issues.md`), and no CI
 job builds the extension — so the shipped-when-built artifact is effectively
 untested.
 
-**Plan — pick one:**
-- **(a) Fix and gate:** repair the divergence, add a CI job that builds
-  `_interp_fast` and runs the VM test subset against it.
-- **(b) Retire it:** the compiled Cython engine already serves the
-  "maximum speed" role and PyPy serves the "fast interpreter" role; deleting
-  `_interp_fast.pyx` removes an entire drift surface. `vm-fast` then aliases `vm`.
+**Plan (decided July 2026): fix and gate — the compiled VM stays.**
+The pure-Python VM interpreter is slower than the reference engine, so
+`vm-fast` with the extension built is the only useful form of the VM engine;
+the Python interpreter's role is executable specification. Therefore:
 
-Recommendation: (b), unless benchmarks show `vm-fast`-with-extension occupies a
-meaningful niche between `vm` and `compiled`.
+1. Repair the `_interp_fast.pyx` divergence (memory read-after-write cases in
+   `test_bench_native.py`).
+2. Add a CI job that builds `_interp_fast` and runs the VM test selection
+   twice — `VERIFORGE_DISABLE_CYTHON_VM=1` and `=0` — failing on any
+   difference. This makes the "compiled VM must match the Python VM" policy
+   mechanical instead of conventional.
+3. Sync policy going forward: changes to `sim/vm/interpreter.py` /
+   `opcodes.py` land with the matching `_interp_fast.pyx` change in the same
+   commit.
+
+See `functionality_review_2026-07.md` §1 for the engine-role framing.
 
 ## 4. CI does not exercise the simulator
 
