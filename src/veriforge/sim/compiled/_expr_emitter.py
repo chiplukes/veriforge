@@ -321,7 +321,11 @@ class _ExprEmitterMixin:
                     if sig_base != 0:
                         msb = f"(({msb}) - {sig_base})"
                         lsb = f"(({lsb}) - {sig_base})"
-                    return self._emit_signal_slice_expr(sid, f"({lsb})", f"(({msb}) - ({lsb}) + 1)")
+                    sel_w_expr = f"(({msb}) - ({lsb}) + 1)"
+                    result = self._emit_signal_slice_expr(sid, f"({lsb})", sel_w_expr)
+                    if sid < len(self._signal_signed) and self._signal_signed[sid]:
+                        result = f"_sign_ext({result}, {sel_w_expr})"
+                    return result
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
@@ -333,7 +337,11 @@ class _ExprEmitterMixin:
                         return self._emit_signed_widen(result, base_sid, sel_w, width)
                     msb = self._emit_expr(expr.msb, 32)
                     lsb = self._emit_expr(expr.lsb, 32)
-                    return self._emit_signal_slice_expr(base_sid, f"{offset} + ({lsb})", f"(({msb}) - ({lsb}) + 1)")
+                    sel_w_expr = f"(({msb}) - ({lsb}) + 1)"
+                    result = self._emit_signal_slice_expr(base_sid, f"{offset} + ({lsb})", sel_w_expr)
+                    if base_sid < len(self._signal_signed) and self._signal_signed[base_sid]:
+                        result = f"_sign_ext({result}, {sel_w_expr})"
+                    return result
                 storage_info = self._resolve_struct_storage_access(tname)
                 if storage_info is not None and storage_info[0] == "memory":
                     index_expr = self._emit_struct_storage_index_expr(storage_info[2])
@@ -386,13 +394,20 @@ class _ExprEmitterMixin:
                 lsb_val = int(expr.lsb.value) - sig_base
                 sel_w = msb_val - lsb_val + 1
                 mask_hex = _cy_hex((1 << sel_w) - 1)
-                return f"(({target}) >> {lsb_val}) & {mask_hex}"
+                result = f"(({target}) >> {lsb_val}) & {mask_hex}"
+                if self._expr_signed(expr) and width > sel_w:
+                    result = f"_sign_ext({result}, {sel_w})"
+                return result
             msb = self._emit_expr(expr.msb, 32)
             lsb = self._emit_expr(expr.lsb, 32)
             if sig_base != 0:
                 msb = f"(({msb}) - {sig_base})"
                 lsb = f"(({lsb}) - {sig_base})"
-            return f"(({target}) >> ({lsb})) & wmask(({msb}) - ({lsb}) + 1)"
+            sel_w_expr = f"(({msb}) - ({lsb}) + 1)"
+            result = f"(({target}) >> ({lsb})) & wmask({sel_w_expr})"
+            if self._expr_signed(expr):
+                result = f"_sign_ext({result}, {sel_w_expr})"
+            return result
 
         if etype is PartSelect:
             if isinstance(expr.target, Identifier):
@@ -416,6 +431,8 @@ class _ExprEmitterMixin:
                     result = self._emit_signal_slice_expr(sid, lsb_expr, width_expr)
                     if sel_w is not None:
                         result = self._emit_signed_widen(result, sid, sel_w, width)
+                    elif sid < len(self._signal_signed) and self._signal_signed[sid]:
+                        result = f"_sign_ext({result}, {width_expr})"
                     return result
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
@@ -434,6 +451,8 @@ class _ExprEmitterMixin:
                     result = self._emit_signal_slice_expr(base_sid, lsb_expr, width_expr)
                     if sel_w is not None:
                         result = self._emit_signed_widen(result, base_sid, sel_w, width)
+                    elif base_sid < len(self._signal_signed) and self._signal_signed[base_sid]:
+                        result = f"_sign_ext({result}, {width_expr})"
                     return result
                 storage_info = self._resolve_struct_storage_access(tname)
                 if storage_info is not None and storage_info[0] == "memory":
@@ -484,12 +503,21 @@ class _ExprEmitterMixin:
             if isinstance(expr.width, Literal):
                 pw = int(expr.width.value)
                 mask_hex = _cy_hex((1 << pw) - 1)
+                sel_w = pw
             else:
-                mask_hex = f"wmask({self._emit_expr(expr.width, 32)})"
+                width_expr = self._emit_expr(expr.width, 32)
+                mask_hex = f"wmask({width_expr})"
+                sel_w = None
             if expr.direction == "+:":
-                return f"(({target}) >> ({base})) & {mask_hex}"
-            # "-:" direction
-            return f"(({target}) >> (({base}) - ({self._emit_expr(expr.width, 32)}) + 1)) & {mask_hex}"
+                result = f"(({target}) >> ({base})) & {mask_hex}"
+            else:
+                result = f"(({target}) >> (({base}) - ({self._emit_expr(expr.width, 32)}) + 1)) & {mask_hex}"
+            if sel_w is not None:
+                if self._expr_signed(expr) and width > sel_w:
+                    result = f"_sign_ext({result}, {sel_w})"
+            elif self._expr_signed(expr):
+                result = f"_sign_ext({result}, {width_expr})"
+            return result
 
         if etype is FunctionCall:
             return self._emit_func_call(expr, width)
