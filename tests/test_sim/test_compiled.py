@@ -61086,6 +61086,209 @@ def _make_dsl_unsigned_wire_signed_cast_module():
     return m.build()
 
 
+# ─── Signed assignment widening cross-engine ─────────────────────────────────
+
+
+class TestSignedAssignmentCrossEngine:
+    """Cross-engine validation: signed narrowing assignments in processes
+    (always blocks) sign-extend correctly, matching continuous-assign behavior."""
+
+    ENGINES = ["reference", "vm", "compiled"]
+
+    def _run(self, module_fn, drives: dict, signals_to_check: list):
+        results = {}
+        for eng in self.ENGINES:
+            sim = Simulator(module_fn(), engine=eng)
+            for name, val in drives.items():
+                sim.drive(name, val)
+            sim.settle()
+            results[eng] = {name: sim.read(name) for name in signals_to_check}
+        ref = results["reference"]
+        for eng in ["vm", "compiled"]:
+            for sig in signals_to_check:
+                assert results[eng][sig] == ref[sig], (
+                    f"{eng} disagrees with reference on '{sig}': {results[eng][sig]} != {ref[sig]}"
+                )
+
+    # ── NBA: signed wire → wider register ──────────────────────────
+
+    def test_signed_nba_wider_register(self):
+        """signed 16-bit 0xFFE3 → signed 32-bit reg: 0xFFFFFFE3 (-29)."""
+        self._run(
+            _make_signed_nba_widen_module,
+            {"a": Value(0xFFE3, width=16), "clk": Value(1)},
+            ["o"],
+        )
+
+    def test_signed_nba_positive_no_extend(self):
+        """signed 16-bit 0x007F → signed 32-bit reg: 0x0000007F (127)."""
+        self._run(
+            _make_signed_nba_widen_module,
+            {"a": Value(0x007F, width=16), "clk": Value(1)},
+            ["o"],
+        )
+
+    def test_unsigned_nba_no_signed_extend(self):
+        """unsigned 16-bit 0xFFE3 → unsigned 32-bit reg: 0x0000FFE3."""
+        self._run(
+            _make_unsigned_nba_widen_module,
+            {"a": Value(0xFFE3, width=16), "clk": Value(1)},
+            ["o"],
+        )
+
+    # ── CA: range-select on signed signal → wider wire ─────────────
+
+    def test_signed_range_select_ca_wider(self):
+        """signed 16-bit[7:0] (0xE3=-29) → signed 32-bit: 0xFFFFFFE3."""
+        self._run(
+            _make_signed_range_select_ca_module,
+            {"a": Value(0xFFE3, width=16)},
+            ["o"],
+        )
+
+    def test_signed_range_select_ca_positive(self):
+        """signed 16-bit[7:0] (0x7F=127) → signed 32-bit: 0x0000007F."""
+        self._run(
+            _make_signed_range_select_ca_module,
+            {"a": Value(0x007F, width=16)},
+            ["o"],
+        )
+
+    # ── CA: part-select-like (range) on signed signal → wider wire ──
+
+    def test_signed_range_upper_ca_wider(self):
+        """signed 16-bit[15:8] (0xFF=-1) → signed 32-bit: 0xFFFFFFFF."""
+        self._run(
+            _make_signed_range_upper_ca_module,
+            {"a": Value(0xFF00, width=16)},
+            ["o"],
+        )
+
+    # ── NBA: $signed() in process → wider register ─────────────────
+
+    def test_signed_call_nba_wider(self):
+        """$signed(16-bit 0xFFE3) → signed 32-bit reg: 0xFFFFFFE3."""
+        self._run(
+            _make_signed_call_nba_widen_module,
+            {"a": Value(0xFFE3, width=16), "clk": Value(1)},
+            ["o"],
+        )
+
+    # ── NBA: signed wire same width (no sign-ext needed) ───────────
+
+    def test_signed_nba_same_width(self):
+        """signed 16-bit → signed 16-bit reg: no sign extension needed."""
+        self._run(
+            _make_signed_nba_same_width_module,
+            {"a": Value(0xFFE3, width=16), "clk": Value(1)},
+            ["o"],
+        )
+
+    # ── Signed comparison in process ────────────────────────────────
+
+    def test_signed_comparison_in_process(self):
+        """(-1 < 1) → lt=1 when both signed in always block."""
+        self._run(
+            _make_signed_cmp_process_module,
+            {"a": Value(0xFF, width=8), "b": Value(1, width=8)},
+            ["lt"],
+        )
+
+
+# ── Helper modules for TestSignedAssignmentCrossEngine ──────────────────────
+
+
+def _make_signed_nba_widen_module():
+    from veriforge.dsl import Module, posedge
+
+    m = Module("signed_nba_widen")
+    clk = m.input("clk")
+    a = m.input("a", width=16, signed=True)
+    o = m.output("o", width=32, signed=True)
+    r = m.reg("r", width=32, signed=True)
+    m.assign(o, r)
+    with m.always(posedge(clk)):
+        r <<= a
+    return m.build()
+
+
+def _make_unsigned_nba_widen_module():
+    from veriforge.dsl import Module, posedge
+
+    m = Module("unsigned_nba_widen")
+    clk = m.input("clk")
+    a = m.input("a", width=16)
+    o = m.output("o", width=32)
+    r = m.reg("r", width=32)
+    m.assign(o, r)
+    with m.always(posedge(clk)):
+        r <<= a
+    return m.build()
+
+
+def _make_signed_range_select_ca_module():
+    from veriforge.dsl import Module
+
+    m = Module("signed_range_select_ca")
+    a = m.input("a", width=16, signed=True)
+    o = m.output("o", width=32, signed=True)
+    m.assign(o, a[7:0])
+    return m.build()
+
+
+def _make_signed_range_upper_ca_module():
+    from veriforge.dsl import Module
+
+    m = Module("signed_range_upper_ca")
+    a = m.input("a", width=16, signed=True)
+    o = m.output("o", width=32, signed=True)
+    m.assign(o, a[15:8])
+    return m.build()
+
+
+def _make_signed_call_nba_widen_module():
+    from veriforge.dsl import Module, posedge, signed
+
+    m = Module("signed_call_nba_widen")
+    clk = m.input("clk")
+    a = m.input("a", width=16)
+    o = m.output("o", width=32, signed=True)
+    r = m.reg("r", width=32, signed=True)
+    m.assign(o, r)
+    with m.always(posedge(clk)):
+        r <<= signed(a)
+    return m.build()
+
+
+def _make_signed_nba_same_width_module():
+    from veriforge.dsl import Module, posedge
+
+    m = Module("signed_nba_same_width")
+    clk = m.input("clk")
+    a = m.input("a", width=16, signed=True)
+    o = m.output("o", width=16, signed=True)
+    r = m.reg("r", width=16, signed=True)
+    m.assign(o, r)
+    with m.always(posedge(clk)):
+        r <<= a
+    return m.build()
+
+
+def _make_signed_cmp_process_module():
+    from veriforge.dsl import Module, posedge
+
+    m = Module("signed_cmp_process")
+    clk = m.input("clk")
+    a = m.input("a", width=8, signed=True)
+    b = m.input("b", width=8, signed=True)
+    lt = m.output("lt", width=1)
+    lt_reg = m.reg("lt_reg", width=1)
+    m.assign(lt, lt_reg)
+    with m.always(posedge(clk)):
+        lt_reg <<= a < b
+    return m.build()
+
+
 # ─── Expression temporaries (O(k²) → O(k) fix) ─────────────────────────────
 
 

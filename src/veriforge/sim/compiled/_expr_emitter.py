@@ -141,6 +141,12 @@ class _ExprEmitterMixin:
             return "0"
         return "0"
 
+    def _emit_signed_widen(self, val_expr: str, sid: int, sel_width: int, context_width: int) -> str:
+        """If *sid* is signed and *context_width* > *sel_width*, wrap *val_expr* with _sign_ext."""
+        if context_width > sel_width and sid < len(self._signal_signed) and self._signal_signed[sid]:
+            return f"_sign_ext({val_expr}, {sel_width})"
+        return val_expr
+
     def _emit_expr(self, expr: Expression, width: int) -> str:  # noqa: PLR0911, PLR0912
         """Return a Cython value expression string for *expr*.
 
@@ -154,7 +160,11 @@ class _ExprEmitterMixin:
                 name = ".".join(expr.hierarchy) + "." + name
             sid = self._signal_map.get(name)
             if sid is not None:
-                return f"c.val[{sid}]"
+                sig_width = self._signal_widths[sid]
+                val = f"c.val[{sid}]"
+                if width > sig_width and sid < len(self._signal_signed) and self._signal_signed[sid]:
+                    val = f"_sign_ext({val}, {sig_width})"
+                return val
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
                 if struct_info[0] == "signal":
@@ -304,7 +314,8 @@ class _ExprEmitterMixin:
                         msb_val = int(expr.msb.value) - sig_base
                         lsb_val = int(expr.lsb.value) - sig_base
                         sel_w = msb_val - lsb_val + 1
-                        return self._emit_signal_slice_expr(sid, lsb_val, sel_w)
+                        result = self._emit_signal_slice_expr(sid, lsb_val, sel_w)
+                        return self._emit_signed_widen(result, sid, sel_w, width)
                     msb = self._emit_expr(expr.msb, 32)
                     lsb = self._emit_expr(expr.lsb, 32)
                     if sig_base != 0:
@@ -318,7 +329,8 @@ class _ExprEmitterMixin:
                         msb_val = int(expr.msb.value)
                         lsb_val = int(expr.lsb.value)
                         sel_w = msb_val - lsb_val + 1
-                        return self._emit_signal_slice_expr(base_sid, f"{offset} + {lsb_val}", sel_w)
+                        result = self._emit_signal_slice_expr(base_sid, f"{offset} + {lsb_val}", sel_w)
+                        return self._emit_signed_widen(result, base_sid, sel_w, width)
                     msb = self._emit_expr(expr.msb, 32)
                     lsb = self._emit_expr(expr.lsb, 32)
                     return self._emit_signal_slice_expr(base_sid, f"{offset} + ({lsb})", f"(({msb}) - ({lsb}) + 1)")
@@ -391,28 +403,38 @@ class _ExprEmitterMixin:
                     base = self._emit_expr(expr.base, 32)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
+                        sel_w = int(expr.width.value)
                     else:
                         width_expr = self._emit_expr(expr.width, 32)
+                        sel_w = None
                     if sig_base != 0:
                         base = f"(({base}) - {sig_base})"
                     if expr.direction == "+:":
                         lsb_expr = base
                     else:
                         lsb_expr = f"({base}) - ({width_expr}) + 1"
-                    return self._emit_signal_slice_expr(sid, lsb_expr, width_expr)
+                    result = self._emit_signal_slice_expr(sid, lsb_expr, width_expr)
+                    if sel_w is not None:
+                        result = self._emit_signed_widen(result, sid, sel_w, width)
+                    return result
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
                     base = self._emit_expr(expr.base, 32)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
+                        sel_w = int(expr.width.value)
                     else:
                         width_expr = self._emit_expr(expr.width, 32)
+                        sel_w = None
                     if expr.direction == "+:":
                         lsb_expr = f"{offset} + ({base})"
                     else:
                         lsb_expr = f"{offset} + ({base}) - ({width_expr}) + 1"
-                    return self._emit_signal_slice_expr(base_sid, lsb_expr, width_expr)
+                    result = self._emit_signal_slice_expr(base_sid, lsb_expr, width_expr)
+                    if sel_w is not None:
+                        result = self._emit_signed_widen(result, base_sid, sel_w, width)
+                    return result
                 storage_info = self._resolve_struct_storage_access(tname)
                 if storage_info is not None and storage_info[0] == "memory":
                     index_expr = self._emit_struct_storage_index_expr(storage_info[2])
@@ -544,6 +566,11 @@ class _ExprEmitterMixin:
                 name = ".".join(expr.hierarchy) + "." + name
             sid = self._signal_map.get(name)
             if sid is not None:
+                sig_width = self._signal_widths[sid]
+                if width > sig_width and sid < len(self._signal_signed) and self._signal_signed[sid]:
+                    mask = self._emit_py_width_mask(sig_width)
+                    sign_bit = f"((<object>1) << {sig_width - 1})"
+                    return f"(((_sig_py_unsigned(c, {sid}) & {mask}) ^ {sign_bit}) - {sign_bit})"
                 return f"_sig_py_unsigned(c, {sid})"
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
