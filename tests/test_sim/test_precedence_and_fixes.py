@@ -12,8 +12,6 @@ These bugs were discovered during DarkRISCV full-SoC simulation:
   - `$readmemh("file.mem", MEM)` filename parsed as Identifier, not StringLiteral
 """
 
-import shutil
-
 import pytest
 
 from veriforge.model.assignments import ContinuousAssign
@@ -45,28 +43,12 @@ from veriforge.sim.value import Value
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
+from .engines import ENGINES
 
 
 def _w(n: int) -> Range:
     """Create a width range [n-1:0]."""
     return Range(Literal(n - 1), Literal(0))
-
-
-def _engines():
-    """Return list of available engine names."""
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
 
 
 def _parse_module(source: str) -> Module:

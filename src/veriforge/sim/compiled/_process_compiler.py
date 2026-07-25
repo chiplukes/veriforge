@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from veriforge._env import get_env
 from veriforge.model.expressions import (
     BinaryOp,
     BitSelect,
@@ -50,11 +51,10 @@ class _ProcessCompilerMixin:
     __slots__ = ()
 
     def _compile_continuous_assigns(self, module: Module) -> None:
-        import os
         import sys
         import time
 
-        _profile = os.environ.get("VERIFORGE_CODEGEN_PROFILE")
+        _profile = get_env("CODEGEN_PROFILE")
         if _profile:
             try:
                 import resource as _resource

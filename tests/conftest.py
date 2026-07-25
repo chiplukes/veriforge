@@ -28,16 +28,16 @@ def _compile_cache_per_test(tmp_path, monkeypatch):
     the pytest temp tree until the next run's cleanup.  Everything else
     (generated C source, obj files, setup.py) is deleted immediately.
 
-    If VERILOG_TOOLS_COMPILE_CACHE is already set in the environment the
+    If VERIFORGE_COMPILE_CACHE is already set in the environment the
     persistent cache is used unchanged — developers who want cross-run caching
     can set that variable in their shell profile.
     """
-    if os.environ.get("VERILOG_TOOLS_COMPILE_CACHE"):
+    if os.environ.get("VERIFORGE_COMPILE_CACHE"):
         yield
         return
 
     cache_dir = str(tmp_path / "compile_cache")
-    monkeypatch.setenv("VERILOG_TOOLS_COMPILE_CACHE", cache_dir)
+    monkeypatch.setenv("VERIFORGE_COMPILE_CACHE", cache_dir)
     yield
     try:
         from veriforge.sim.compiled.compiler import CythonCompiler
@@ -258,6 +258,8 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "section_a6: marks tests for Section A.6 (Behavioral)")
     config.addinivalue_line("markers", "section_a8: marks tests for Section A.8 (Expressions)")
     config.addinivalue_line("markers", "synthesizable: marks tests for synthesizable constructs")
+    config.addinivalue_line("markers", "cross_engine: marks tests that run across multiple simulator engines")
+    config.addinivalue_line("markers", "compiled: marks tests specific to the compiled Cython engine")
 
 
 def pytest_addoption(parser):

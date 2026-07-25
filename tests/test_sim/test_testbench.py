@@ -8,8 +8,6 @@ Covers:
   - Simulator: clock integration
 """
 
-import shutil
-
 import pytest
 
 from veriforge.model.assignments import ContinuousAssign
@@ -29,23 +27,7 @@ from veriforge.sim.testbench import (
 )
 from veriforge.sim.value import Value
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines():
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
-STEPPED_ENGINES = [engine for engine in ENGINES if engine in {"vm", "compiled"}]
+from .engines import ENGINES, STEPPED_ENGINES
 
 
 # ── Module builders ──────────────────────────────────────────────────

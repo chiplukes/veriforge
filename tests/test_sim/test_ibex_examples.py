@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -10,22 +9,7 @@ import pytest
 from veriforge.project import parse_files
 from veriforge.sim.testbench import Simulator
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines() -> list[str]:
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
+from .engines import ENGINES
 
 
 def _repo_root() -> Path:

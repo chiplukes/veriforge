@@ -358,9 +358,9 @@ class IcarusCosim:  # cm:9d7c3f
 
         if self._verilog_src is not None:
             from ..transforms import tree_to_design  # noqa: PLC0415
-            from ..verilog_parser import verilog_parser  # noqa: PLC0415
+            from ..verilog_parser import VerilogParser  # noqa: PLC0415
 
-            parser = verilog_parser(start="source_text")
+            parser = VerilogParser(start="source_text")
             tree = parser.build_tree(self._verilog_src)
             design = tree_to_design(tree)
             if not design.modules:

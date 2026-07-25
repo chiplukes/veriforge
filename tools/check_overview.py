@@ -152,6 +152,78 @@ def _compare(doc_paths: list[str], git_paths: set[str]) -> tuple[list[str], list
 
 
 # ---------------------------------------------------------------------------
+# Doc-reference checker
+# ---------------------------------------------------------------------------
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+_BACKTICK_PATH_RE = re.compile(r"`(notes/[^`*]*\.md)`|`(docs/[^`*]*\.md)`|`(README\.md)`|`(CONTRIBUTING\.md)`")
+
+
+def check_doc_references(root: Path | None = None) -> int:
+    """Scan markdown files for broken internal references.  Returns 0 if all are valid."""
+    if root is None:
+        root = Path(__file__).resolve().parents[1]
+
+    md_files = list(root.glob("notes/**/*.md")) + list(root.glob("README.md")) + list(root.glob("CONTRIBUTING.md"))
+    errors: list[str] = []
+    for md_file in sorted(md_files):
+        content = md_file.read_text(encoding="utf-8")
+        in_code_block = False
+        for line in content.splitlines():
+            if line.startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            for m in _MD_LINK_RE.finditer(line):
+                target = m.group(2)
+                if _skip_link(target):
+                    continue
+                resolved = _resolve_link_target(md_file, target)
+                if not resolved.exists():
+                    errors.append(f"  {md_file}: broken link [{m.group(1)}]({target}) → {resolved}")
+            for m in _BACKTICK_PATH_RE.finditer(line):
+                for g in m.groups():
+                    if g is None:
+                        continue
+                    if "*" in g or "<" in g or "..." in g or "nope" in g:
+                        continue
+                    resolved = root / g
+                    if not resolved.exists():
+                        errors.append(f"  {md_file}: broken backtick ref `{g}` → {resolved}")
+    if errors:
+        print(f"\n{len(errors)} broken doc reference(s):")
+        for e in errors:
+            print(e)
+        return 1
+    print(f"All doc references valid ({len(md_files)} files checked).")
+    return 0
+
+
+def _skip_link(target: str) -> bool:
+    return (
+        target.startswith("http:")
+        or target.startswith("https:")
+        or target.startswith("mailto:")
+        or target.startswith("#")
+        or "<" in target
+        or "*" in target
+    )
+
+
+def _resolve_link_target(md_file: Path, target: str) -> Path:
+    """Resolve a markdown link target relative to *md_file*'s directory,
+    stripping any fragment (#...)."""
+    if "#" in target:
+        target = target[: target.index("#")]
+    if not target:
+        return md_file  # self-fragment, resolves to own file
+    base = md_file.parent if not target.startswith("/") else Path("/")
+    return (base / target).resolve()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -211,4 +283,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc1 = main() if len(sys.argv) == 1 or "--check-links" not in sys.argv else 0
+    rc2 = 0
+    if "--check-links" in sys.argv or len(sys.argv) == 1:
+        rc2 = check_doc_references()
+    sys.exit(rc1 or rc2)

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import shutil
-
 import pytest
 
 from veriforge.dsl import Module, posedge
@@ -17,18 +15,7 @@ from veriforge.sim.endpoints import (
 from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
-
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines() -> list[str]:
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        engines.append("compiled")
-    return engines
-
-
-ENGINES = _engines()
+from .engines import ENGINES
 
 
 def _axi_lite_regs_module():

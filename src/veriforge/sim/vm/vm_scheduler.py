@@ -53,9 +53,9 @@ except ImportError:
 # Opt-out: the Cython VM currently has known divergences from the pure-Python
 # interpreter (see notes/simulator_engines.md).  Setting this env var forces
 # the pure-Python path even when the extension is built.
-import os as _os
+from veriforge._env import get_env
 
-if _os.environ.get("VERIFORGE_DISABLE_CYTHON_VM") == "1":
+if get_env("DISABLE_CYTHON_VM") == "1":
     _HAS_CYTHON = False
 
 if TYPE_CHECKING:

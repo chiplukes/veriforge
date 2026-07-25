@@ -33,8 +33,6 @@ Constructs covered (mapped to DarkRISCV source):
  25. Memory read-modify-write byte enable  (darkram.v byte writes)
 """
 
-import shutil
-
 import pytest
 
 from veriforge.analysis.resolver import link_instances, resolve_port_connections
@@ -74,28 +72,12 @@ from veriforge.model.variables import Variable, VariableKind
 from veriforge.sim.testbench import Clock, Simulator
 from veriforge.sim.value import Value
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
+from .engines import ENGINES
 
 
 def _w(n: int) -> Range:
     """Create a width range [n-1:0]."""
     return Range(Literal(n - 1), Literal(0))
-
-
-def _engines():
-    """Return list of available engine names."""
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
 
 
 # =====================================================================

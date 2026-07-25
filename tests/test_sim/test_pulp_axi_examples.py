@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -20,17 +19,8 @@ from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 from veriforge.sim.trace import attach_vcd  # noqa: E402
 
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
+from .engines import ENGINES  # noqa: E402
 
-
-def _engines() -> list[str]:
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        engines.append("compiled")
-    return engines
-
-
-ENGINES = _engines()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SLV_B_RESP = "i_core.i_dut.slv_b_resp_int"
 SLV_B_VALID = "i_core.i_dut.slv_b_valid_int"

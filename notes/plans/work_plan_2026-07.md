@@ -20,9 +20,9 @@ decisions have already been made and are stated in the item.
 
 ---
 
-## Tier 1 — Quick wins
+## Tier 1 — Quick wins ✅ (all done July 2026)
 
-### 1.1 Move `tests/test_partial_assign.py` into `tests/test_sim/` (S)
+### 1.1 Move `tests/test_partial_assign.py` into `tests/test_sim/` (S) ✅
 
 **Goal**: fix the one stray top-level test file.
 **Steps**: `git mv tests/test_partial_assign.py tests/test_sim/test_partial_assign.py`.
@@ -30,7 +30,7 @@ Fix any imports that referenced it (grep first: `grep -rn "test_partial_assign" 
 **Accept**: `uv run pytest tests/test_sim/test_partial_assign.py -q` passes; no
 references to the old path remain.
 
-### 1.2 Centralize the per-file `_engines()` helper (S)
+### 1.2 Centralize the per-file `_engines()` helper (S) ✅
 
 **Goal**: one definition of the engine list instead of ~15 copies.
 **Context**: many `tests/test_sim/*.py` files define an identical `_engines()`
@@ -63,7 +63,7 @@ work — here only register them.
 **Accept**: `grep -rn "def _engines" tests/` returns only `tests/test_sim/engines.py`;
 `uv run pytest tests/test_sim/test_precedence_and_fixes.py -q` passes.
 
-### 1.3 Env-var unification behind one accessor (S)
+### 1.3 Env-var unification behind one accessor (S) ✅
 
 **Goal**: stop the `VERIFORGE_*` / `VERILOG_TOOLS_*` prefix split
 (architecture review item 7).
@@ -109,7 +109,7 @@ inside `_env.py`; full fast suite green:
 `uv run pytest tests/test_sim/test_compiled.py -q -n 4` (cache env vars are
 exercised by the compiled tests).
 
-### 1.4 Docs: forward slashes + reference checker (S)
+### 1.4 Docs: forward slashes + reference checker (S) ✅
 
 **Goal**: make stale doc references impossible to reintroduce
 (architecture review item 9, steps 2–3).
@@ -129,7 +129,7 @@ exercised by the compiled tests).
 temporarily add a bogus `notes/nope.md` reference (verify both, then remove
 the bogus ref). CI already runs this tool, so no workflow change is needed.
 
-### 1.5 LSP: test the Verible-absent fallback tier (S)
+### 1.5 LSP: test the Verible-absent fallback tier (S) ✅
 
 **Goal**: the debounced Lark syntax-diagnostic fallback in
 `veriforge_lsp/workspace.py` is implemented but untested
@@ -146,7 +146,7 @@ diagnostics.
 **Accept**: `uv run pytest tests/test_lsp/test_lark_fallback.py -q` passes and
 fails if the fallback wiring is commented out (verify once locally).
 
-### 1.6 `verilog_parser.py` modernization (S)
+### 1.6 `verilog_parser.py` modernization (S) ✅
 
 **Goal**: bring the oldest file up to project standard without breaking API
 (architecture review item 10 note).

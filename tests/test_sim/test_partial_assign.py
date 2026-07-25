@@ -7,8 +7,6 @@ lsb_constant_expression from the parse tree, collapsing range-select LHS to
 plain identifiers.
 """
 
-import shutil
-
 import pytest
 
 from veriforge.model.design import Design
@@ -16,23 +14,7 @@ from veriforge.sim.testbench import Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
-
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines():
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
+from .engines import ENGINES
 
 
 def _parse_module(source: str):

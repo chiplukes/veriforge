@@ -18,8 +18,6 @@ Patterns covered:
  10. Multiple always blocks per module
 """
 
-import shutil
-
 import pytest
 
 from veriforge.analysis.resolver import link_instances, resolve_port_connections
@@ -29,22 +27,7 @@ from veriforge.sim.value import Value
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines():
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
+from .engines import ENGINES
 
 
 def _parse_design(source: str) -> Design:

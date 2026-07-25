@@ -12,8 +12,9 @@ Phase 3: LHS complexity (bit-select, range-select, concatenation) and
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
+
+from veriforge._env import get_env
 
 from veriforge.model.expressions import (
     AssignmentPattern,
@@ -1410,7 +1411,7 @@ class CythonCodegen(
         # Only enforce strict transport-only restrictions when explicitly requested.
         # The default path lets the recursive wide emitter handle any expression it
         # supports; only unsupported patterns will cause a runtime error during emit.
-        if os.environ.get("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "") != "1":
+        if get_env("COMPILED_WIDE_TRANSPORT_ONLY", "") != "1":
             return
         if not self._module_has_wide_state():
             return

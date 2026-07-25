@@ -29,7 +29,7 @@ from .refactor import (
     preview_hierarchy_push_down,
     preview_hierarchy_pull_up,
 )
-from .verilog_parser import verilog_parser
+from .verilog_parser import VerilogParser
 from .sim.bench import PlannerOverrides
 
 log = logging.getLogger("rich")
@@ -801,7 +801,7 @@ def _configure_logging(level_name: str) -> None:
 
 
 def _build_tree(args: argparse.Namespace):
-    vp = verilog_parser(
+    vp = VerilogParser(
         transformer=None,
         parser=args.parser,
         start="verilog",

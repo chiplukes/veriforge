@@ -38,7 +38,7 @@ from pathlib import Path
 from .model.design import Design
 from .transforms.comment_extractor import extract_comments
 from .transforms.tree_to_model import tree_to_design
-from .verilog_parser import verilog_parser
+from .verilog_parser import VerilogParser
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def parse_file(  # cm:e5b6f8
     preprocess: bool = False,
     defines: dict[str, str] | None = None,
     include_paths: list[str | Path] | None = None,
-    _parser: "verilog_parser | None" = None,
+    _parser: "VerilogParser | None" = None,
 ) -> Design:
     """Parse a single Verilog file into a Design.
 
@@ -169,7 +169,7 @@ def parse_file(  # cm:e5b6f8
     if comments:
         parse_text, comment_list = extract_comments(parse_text, source_file)
 
-    parser = _parser if _parser is not None else verilog_parser(start="verilog")
+    parser = _parser if _parser is not None else VerilogParser(start="verilog")
     tree = parser.build_tree(parse_text)
 
     return tree_to_design(

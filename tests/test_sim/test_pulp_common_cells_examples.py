@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -12,18 +11,8 @@ from veriforge.sim.example_runner import display_lines  # noqa: E402
 from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until  # noqa: E402
 from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 
+from .engines import ENGINES  # noqa: E402
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines() -> list[str]:
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        engines.append("compiled")
-    return engines
-
-
-ENGINES = _engines()
 REPO_ROOT = Path(__file__).resolve().parents[2]
 POPCOUNT_TOPS = {
     "reference": "popcount_tb_local",

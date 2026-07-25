@@ -285,21 +285,22 @@ class TestCacheControls:
         from veriforge.sim.compiled.compiler import _default_cache_dir
 
         monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("VERILOG_TOOLS_COMPILE_CACHE", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILE_CACHE", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILE_CACHE", raising=False)
         result = _default_cache_dir()
         assert result == str(tmp_path / ".cycache")
 
     def test_env_var_overrides_cache_dir(self, tmp_path, monkeypatch):
-        """VERILOG_TOOLS_COMPILE_CACHE env var sets the cache directory."""
+        """VERIFORGE_COMPILE_CACHE env var sets the cache directory."""
         from veriforge.sim.compiled.compiler import _default_cache_dir
 
         custom = str(tmp_path / "custom_cache")
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILE_CACHE", custom)
+        monkeypatch.setenv("VERIFORGE_COMPILE_CACHE", custom)
         assert _default_cache_dir() == custom
 
     def test_no_cache_env_var_still_produces_working_module(self, tmp_cache, monkeypatch):
-        """VERILOG_TOOLS_NO_COMPILE_CACHE=1 still compiles and returns a working module."""
-        monkeypatch.setenv("VERILOG_TOOLS_NO_COMPILE_CACHE", "1")
+        """VERIFORGE_NO_COMPILE_CACHE=1 still compiles and returns a working module."""
+        monkeypatch.setenv("VERIFORGE_NO_COMPILE_CACHE", "1")
         compiler = CythonCompiler(cache_dir=tmp_cache)
         mod = compiler.compile_pyx(TRIVIAL_PYX, "nocache_test")
         assert mod.add(2, 3) == 5
@@ -21660,25 +21661,25 @@ class TestWideSignalExternalIO:
             assert results[eng] == ref, f"{eng}: {results[eng]} != {ref}"
 
     def test_transport_only_mode_rejects_wide_add(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         with pytest.raises(NotImplementedError, match="wide transport-only support"):
             Simulator(_make_wide_combo_add(65), engine="compiled")
 
     def test_transport_only_mode_rejects_wide_equality(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         with pytest.raises(NotImplementedError, match="wide transport-only support"):
             Simulator(_make_wide_equality(65), engine="compiled")
 
     def test_transport_only_mode_rejects_wide_if_condition(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         with pytest.raises(NotImplementedError, match="wide transport-only support"):
             Simulator(_make_wide_if_condition(65), engine="compiled")
 
     def test_transport_only_mode_keeps_wide_passthrough(self, monkeypatch):
-        monkeypatch.delenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
 
         value = (1 << 64) | 0x55AA
         results = {}
@@ -21692,7 +21693,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_allows_narrow_arithmetic_on_wide_slice(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         value = (1 << 64) | 0xAB
         results = {}
@@ -21706,7 +21707,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_constant_range_extract(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         value = (1 << 128) | (0x0FEDCBA987654321 << 32) | 0x13579BDF
         results = {}
@@ -21720,7 +21721,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_dynamic_part_extract(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         value = (1 << 128) | (0x123456789ABCDEF0 << 32) | 0xCAFEBABE
         results = {}
@@ -21735,7 +21736,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_concat_pair(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -21749,7 +21750,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_seq_concat_pair(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -21783,7 +21784,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_assignment_pattern(self, monkeypatch, builder, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         data_value = (1 << 64) | 0x13579BDF
         valid_value = 1
@@ -21820,7 +21821,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_passthrough(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
@@ -21851,7 +21852,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
@@ -21883,7 +21884,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_field(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         data_value = (1 << 64) | 0x2468ACE
@@ -21921,7 +21922,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66, mask=(1 << 13) | 1)
@@ -21952,7 +21953,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_field_read(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         data_value = (1 << 64) | 0x13579BDF2468ACE
@@ -21998,7 +21999,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_field_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66, mask=(1 << 13) | 1)
@@ -22032,7 +22033,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat_copy(
         self, monkeypatch, builder_name, needs_clock
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66, mask=(1 << 13) | 1)
@@ -22057,7 +22058,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_mixed_rhs_to_signal_composed_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22088,7 +22089,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_mixed_rhs_to_memory_composed_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22119,7 +22120,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_mixed_split_composed_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         full_in = Value((((1 << 128) | 0x11112222333344445555666677778888) << 1) | 1, width=130)
         full_data = full_in.val >> 1
@@ -22151,7 +22152,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_struct_mixed_rhs_to_signal_pipeline(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22178,7 +22179,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_struct_mixed_rhs_to_memory_pipeline(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22205,7 +22206,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_struct_signal_multi_nba_mutation(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22232,7 +22233,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_struct_memory_multi_nba_mutation(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         mem_in = Value((((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0) << 1) | 1, width=130)
         sig_in = Value((((1 << 128) | 0x0FEDCBA9876543210FEDCBA987654321) << 1) | 0, width=130)
@@ -22320,7 +22321,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -22403,7 +22404,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 64) | 0x123456789ABCDEF, width=65)
         results = {}
@@ -22526,7 +22527,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -22648,7 +22649,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -22741,7 +22742,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_selectors(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -22823,7 +22824,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_wide_selectors(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 64) | 0x123456789ABCDEF, width=65)
         results = {}
@@ -22945,7 +22946,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat_selectors(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -23066,7 +23067,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_field_concat_wide_selectors(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -23105,7 +23106,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_field(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         data_value = (1 << 64) | 0x2468ACE
@@ -23144,7 +23145,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         bus_value = (1 << 65) | 0x123456789ABCDEF
@@ -23177,7 +23178,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_field_read(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         data_value = (1 << 64) | 0x13579BDF2468ACE
@@ -23221,7 +23222,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_element_read(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66, mask=(1 << 13) | 1)
@@ -23254,7 +23255,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((0x0FEDCBA987654321 << 1), width=66, mask=1 << 17)
@@ -23280,7 +23281,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_whole_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -23304,7 +23305,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_whole_concat_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -23331,7 +23332,7 @@ class TestWideSignalExternalIO:
         [("cont", False), ("combo", False), ("seq", False), ("cont", True), ("combo", True), ("seq", True)],
     )
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_field_copy(self, monkeypatch, mode, concat):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -23415,7 +23416,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_field_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -23537,7 +23538,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_field_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 64) | 0x123456789ABCDEF, width=65)
         results = {}
@@ -23661,7 +23662,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_field_concat_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -23784,7 +23785,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_to_signal_field_concat_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -23819,7 +23820,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_whole_concat_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -23844,7 +23845,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_whole_copy(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -23872,7 +23873,7 @@ class TestWideSignalExternalIO:
         [("cont", False), ("combo", False), ("seq", False), ("cont", True), ("combo", True), ("seq", True)],
     )
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_field_copy(self, monkeypatch, mode, concat):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF0) << 1) | 1, width=66)
         results = {}
@@ -24011,7 +24012,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_field_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -24043,7 +24044,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_ternary_bus_selection(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         sel = Value(1, width=1, mask=1)
         a = Value((1 << 128) | 0x123456789ABCDEF0123456789ABCDEF0, width=129)
@@ -24078,7 +24079,7 @@ class TestWideSignalExternalIO:
 
     @pytest.mark.parametrize("mode", ["cont", "combo", "seq"])
     def test_transport_only_mode_keeps_wide_ternary_slice_selection(self, monkeypatch, mode):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         sel = Value(1, width=1, mask=1)
         a = Value((1 << 128) | 0xFEDCBA98765432100123456789ABCDEF, width=129)
@@ -24245,7 +24246,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_field_concat_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -24422,7 +24423,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_field_concat_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 65) | 1, width=66)
         results = {}
@@ -24601,7 +24602,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_signal_to_memory_field_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 64), width=65)
         results = {}
@@ -24695,7 +24696,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -24817,7 +24818,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((1 << 64) | 0x123456789ABCDEF, width=65)
         results = {}
@@ -24940,7 +24941,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -25062,7 +25063,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_wide_selector_copy(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -25101,7 +25102,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_struct_whole_memory_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         src0 = Value((((1 << 64) | 0x12345678) << 1) | 1, width=66, mask=(1 << 9) | 1)
@@ -25259,7 +25260,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_selectors(
         self, monkeypatch, builder_name, needs_clock, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25434,7 +25435,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_wide_selectors(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.delenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -25545,7 +25546,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_selectors(
         self, monkeypatch, builder_name, needs_clock, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25660,7 +25661,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_part_selectors(
         self, monkeypatch, builder_name, needs_clock, drives, expected_out, expected_mem
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25725,7 +25726,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_wide_range_selectors(
         self, monkeypatch, mode, dynamic, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -25819,7 +25820,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_struct_memory_field_concat_wide_part_selectors(
         self, monkeypatch, mode, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -25854,7 +25855,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_dynamic_range(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25887,7 +25888,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_bit_select(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25932,7 +25933,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_part_select(self, monkeypatch, builder_name, needs_clock, drives):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         results = {}
@@ -25984,7 +25985,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_memory_wide_range_select(
         self, monkeypatch, mode, dynamic, drives, expected
     ):
-        monkeypatch.delenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -26063,7 +26064,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_memory_wide_part_select(
         self, monkeypatch, mode, dynamic, direction, drives, expected
     ):
-        monkeypatch.delenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
+        monkeypatch.delenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", raising=False)
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -26124,7 +26125,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_memory_selector_read(
         self, monkeypatch, mode, selector_kind, dynamic, direction, drives, expected
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         results = {}
         for eng in ["reference", "vm", "compiled"]:
@@ -26159,7 +26160,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_element_read(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value((1 << 64) | 0x123456789ABCDEF0, width=65, mask=1 << 12)
@@ -26221,7 +26222,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_memory_concat_wide_range_selectors(
         self, monkeypatch, mode, dynamic, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -26315,7 +26316,7 @@ class TestWideSignalExternalIO:
     def test_transport_only_mode_keeps_wide_memory_concat_wide_part_selectors(
         self, monkeypatch, mode, dynamic, direction, drives
     ):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         expected = Value((((1 << 64) | 0x123456789ABCDEF) << 1) | 1, width=66)
         results = {}
@@ -26350,7 +26351,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_concat(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         hi_value = (1 << 64) | 0x1555
@@ -26389,7 +26390,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_zero(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         expected = Value(0, width=65)
@@ -26418,7 +26419,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_memory_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         hi_mask = 1
@@ -26444,7 +26445,7 @@ class TestWideSignalExternalIO:
         assert results["vm"] == results["reference"]
 
     def test_transport_only_mode_keeps_wide_seq_memory_copy(self, monkeypatch):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         hi_mask = 1
         lo_mask = 1 << 4
@@ -26474,7 +26475,7 @@ class TestWideSignalExternalIO:
         ],
     )
     def test_transport_only_mode_keeps_wide_whole_memory_copy(self, monkeypatch, builder_name, needs_clock):
-        monkeypatch.setenv("VERILOG_TOOLS_COMPILED_WIDE_TRANSPORT_ONLY", "1")
+        monkeypatch.setenv("VERIFORGE_COMPILED_WIDE_TRANSPORT_ONLY", "1")
 
         builder = globals()[builder_name]
         src0 = Value((1 << 64) | 0x12345678, width=65)

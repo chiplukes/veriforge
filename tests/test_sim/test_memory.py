@@ -9,8 +9,6 @@ Covers:
   - Dimension preservation in hierarchy flattening
 """
 
-import shutil
-
 import pytest
 
 from veriforge.model.assignments import ContinuousAssign
@@ -40,22 +38,7 @@ from veriforge.sim.scheduler import Scheduler
 from veriforge.sim.testbench import Simulator
 from veriforge.sim.value import Value
 
-_has_compiler = shutil.which("gcc") or shutil.which("cl") or shutil.which("cc")
-
-
-def _engines():
-    engines = ["reference", "vm", "vm-fast"]
-    if _has_compiler:
-        try:
-            import Cython  # noqa: F401, PLC0415
-
-            engines.append("compiled")
-        except ImportError:
-            pass
-    return engines
-
-
-ENGINES = _engines()
+from .engines import ENGINES
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

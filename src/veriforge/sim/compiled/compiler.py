@@ -7,10 +7,10 @@ version, and platform tag so that subsequent runs skip compilation.
 Cache location
 --------------
 By default, compiled extensions are stored in ``.cycache/`` under the current
-working directory.  Override with the ``VERILOG_TOOLS_COMPILE_CACHE``
+working directory.  Override with the ``VERIFORGE_COMPILE_CACHE``
 environment variable::
 
-    VERILOG_TOOLS_COMPILE_CACHE=/tmp/my_cache uv run pytest ...
+    VERIFORGE_COMPILE_CACHE=/tmp/my_cache uv run pytest ...
 
 Cache invalidation
 ------------------
@@ -27,7 +27,7 @@ automatically invalidates all elab cache entries on the next run.
 
 Disabling caching
 -----------------
-Set ``VERILOG_TOOLS_NO_COMPILE_CACHE=1`` to bypass the cache entirely.
+Set ``VERIFORGE_NO_COMPILE_CACHE=1`` to bypass the cache entirely.
 Every call to ``compile_pyx`` will recompile from scratch.  Useful for
 debugging codegen changes without manually clearing the cache.
 
@@ -60,6 +60,8 @@ import shutil
 import subprocess
 import sys
 
+from veriforge._env import get_env
+
 try:
     from filelock import FileLock as _FileLock
 except ImportError:  # pragma: no cover — filelock is a test/bench dep
@@ -86,10 +88,11 @@ def _default_cache_dir() -> str:
     """Return the default cache directory for compiled extensions.
 
     Resolution order:
-    1. ``VERILOG_TOOLS_COMPILE_CACHE`` environment variable.
+    1. ``VERIFORGE_COMPILE_CACHE`` environment variable (legacy ``VERILOG_TOOLS_COMPILE_CACHE`` still
+       works but emits a deprecation warning).
     2. ``.cycache/`` under the current working directory.
     """
-    env = os.environ.get("VERILOG_TOOLS_COMPILE_CACHE")
+    env = get_env("COMPILE_CACHE")
     if env:
         return env
     return os.path.join(os.getcwd(), ".cycache")
@@ -170,7 +173,7 @@ class CythonCompiler:  # cm:3d7f4a
         cache_dir: Directory for compiled extension cache.
                    Defaults to ``.cycache/`` under the current working
                    directory.
-                   Override via ``VERILOG_TOOLS_COMPILE_CACHE`` env var.
+                    Override via ``VERIFORGE_COMPILE_CACHE`` env var.
     """
 
     __slots__ = ("_cache_dir",)
@@ -189,7 +192,7 @@ class CythonCompiler:  # cm:3d7f4a
         loaded directly without recompilation.  If loading a cached
         extension fails, the stale entry is removed and recompiled.
 
-        Set ``VERILOG_TOOLS_NO_COMPILE_CACHE=1`` to skip caching entirely.
+        Set ``VERIFORGE_NO_COMPILE_CACHE=1`` to skip caching entirely.
 
         Args:
             source:      Complete .pyx file contents.
@@ -202,7 +205,7 @@ class CythonCompiler:  # cm:3d7f4a
             RuntimeError: If Cython or a C compiler is not available,
                           or if compilation fails.
         """
-        no_cache = os.environ.get("VERILOG_TOOLS_NO_COMPILE_CACHE", "") == "1"
+        no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
 
         key = _cache_key(source)
         # Use key in the actual module name to allow multiple versions to coexist
@@ -304,7 +307,7 @@ class CythonCompiler:  # cm:3d7f4a
             RuntimeError: If Cython or a C compiler is not available, or if
                           compilation fails.
         """
-        no_cache = os.environ.get("VERILOG_TOOLS_NO_COMPILE_CACHE", "") == "1"
+        no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
 
         key = _cache_key_from_source_hash(source_sha256_hex)
         keyed_name = _keyed_module_name(module_name, key)
