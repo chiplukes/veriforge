@@ -215,9 +215,34 @@ Style presets: `FormatStyle.knr()`, `FormatStyle.allman()`, `FormatStyle.gnu()`.
 
 ## 7) Build RTL using the Python DSL
 
+The recommended style declares ports/registers as class attributes — a
+`ModuleSpec` subclass — so a signal's name is never typed twice:
+
+```python
+from veriforge.dsl import ModuleSpec, In, OutReg, posedge
+from veriforge.codegen import emit_module
+
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
+
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
+
+print(emit_module(Counter().build()))
+```
+
+There's also an imperative builder (`clk = m.input("clk")`, name passed as
+a string) for cases where the set of signals isn't fixed at write-time —
+a loop generating N ports, for instance:
+
 ```python
 from veriforge.dsl import Module, posedge
-from veriforge.codegen import emit_module
 
 with Module("counter") as m:
     clk = m.input("clk")
@@ -234,14 +259,21 @@ mod = m.build()
 print(emit_module(mod))
 ```
 
+Both produce the same Verilog; `ModuleSpec.body(self, m)` receives the same
+`m` builder shown above, so everything below applies inside either style.
+
 ### DSL syntax at a glance
 
 | Python DSL | Verilog | Notes |
 |------------|---------|-------|
-| `m.input("clk")` | `input clk` | Also `m.output`, `m.output_reg`, `m.inout` |
-| `m.wire("w", width=8)` | `wire [7:0] w` | Also `m.reg`, `m.integer` |
-| `m.parameter("W", default=8)` | `parameter W = 8` | Also `m.localparam` |
-| `m.reg("mem", width=8, depth=256)` | `reg [7:0] mem [0:255]` | Memory arrays |
+| `In()` / `Out()` / `OutReg(8)` / `Inout()` | `input` / `output` / `output reg [7:0]` / `inout` | Declarative port descriptors — class attributes |
+| `Wire(8)` / `Reg(8)` | `wire [7:0]` / `reg [7:0]` | Declarative internal-signal descriptors |
+| `Reg(8, depth=256)` | `reg [7:0] mem [0:255]` | Declarative memory array |
+| `Param(8)` | `parameter NAME = 8` | Declarative parameter |
+| `m.input("clk")` | `input clk` | Imperative — also `m.output`, `m.output_reg`, `m.inout` |
+| `m.wire("w", width=8)` | `wire [7:0] w` | Imperative — also `m.reg`, `m.integer` |
+| `m.parameter("W", default=8)` | `parameter W = 8` | Imperative — also `m.localparam` |
+| `m.reg("mem", width=8, depth=256)` | `reg [7:0] mem [0:255]` | Imperative memory array |
 | `signal <<= expr` | `signal <= expr;` | Non-blocking (sequential) |
 | `signal @= expr` | `signal = expr;` | Blocking (combinational) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous assignment |
@@ -256,8 +288,10 @@ print(emit_module(mod))
 Comparison operators (`==`, `!=`, `<`, etc.) return `Expr`, not `bool` — use
 `m.if_(expr)` instead of Python `if`.
 
-For the full DSL syntax reference (comments, attributes, interfaces, delays,
-system tasks, error handling, and more), see [dsl_guide.md](dsl/dsl_guide.md).
+For the full DSL syntax reference (the complete declarative-descriptor
+reference, when to use the imperative builder, comments, attributes,
+interfaces, delays, system tasks, error handling, and more), see
+[dsl_guide.md](dsl/dsl_guide.md).
 
 ### DSL standard library (`veriforge.dsl.lib`)
 

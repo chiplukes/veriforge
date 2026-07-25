@@ -50,22 +50,27 @@ for mod in design.modules:
 
 ### Build hardware with the Python DSL
 
+Ports and registers are class attributes — a signal's name is never typed
+twice (see [dsl_guide.md](notes/dsl/dsl_guide.md) for the imperative
+builder alternative, used when the signal count isn't fixed at write-time):
+
 ```python
-from veriforge.dsl import Module, posedge
+from veriforge.dsl import ModuleSpec, In, OutReg, posedge
 from veriforge.codegen import emit_module
 
-with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
 
-    with m.always(posedge(clk)):
-        with m.if_(rst):
-            count <<= 0
-        with m.else_():
-            count <<= count + 1
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
 
-print(emit_module(m.build()))
+print(emit_module(Counter().build()))
 ```
 
 ### Simulate directly from Python
@@ -73,7 +78,7 @@ print(emit_module(m.build()))
 ```python
 from veriforge.sim import Simulator, Clock
 
-sim = Simulator(m.build())
+sim = Simulator(Counter().build())
 sim.fork(Clock(sim.signal("clk"), period=10))
 
 def test(s):

@@ -3,7 +3,12 @@
 ## Build Time vs Simulation Time
 
 The DSL has two distinct execution phases. Understanding this separation
-is essential for correct usage.
+is essential for correct usage. Everything below applies identically
+whether the module was declared with the imperative `Module` builder (used
+throughout this page, since its loop-based examples need it — see
+[dsl_guide.md](dsl_guide.md#the-imperative-builder)) or with the
+declarative `ModuleSpec` class layer: a `ModuleSpec`'s `body(self, m)` is
+still build-time Python code, running once, receiving the same `m`.
 
 ### Build Time (Python Execution)
 

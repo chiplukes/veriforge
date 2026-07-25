@@ -2,32 +2,51 @@
 
 The DSL lets you build Verilog modules using Python expressions and context managers. Instead of writing Verilog text, you construct a structural/behavioral model that can be emitted to Verilog or simulated directly.
 
-**Source:** `src/veriforge/dsl/builder.py` (~1480 lines), `src/veriforge/dsl/interface.py` (~170 lines)
+There are two ways to declare a module's ports/registers/wires, and they
+compose freely:
+
+- **Declarative (`ModuleSpec`)** — ports, parameters, and internal signals
+  are class attributes (`clk = In()`, `count = Reg(8)`). Python's
+  `__set_name__` protocol captures each attribute's name automatically, so
+  a signal's name is never typed twice. **This is the default/recommended
+  style** for anything with a fixed interface, and is what the rest of this
+  guide leads with.
+- **Imperative (`Module` builder)** — `clk = m.input("clk")`,
+  `count = m.reg("cnt", width=8)`. The name is passed as an explicit
+  string. This is what `ModuleSpec` itself calls internally, and it's still
+  the right tool when the set of signals isn't fixed at write-time — a
+  `for` loop generating N ports, a bus interface expanding into a variable
+  number of prefixed signals, or a module converted from parsed Verilog.
+  See **[The Imperative Builder](#the-imperative-builder)** below for the
+  full picture of when and how to reach for it.
+
+**Source:** `src/veriforge/dsl/builder.py` (~1480 lines), `src/veriforge/dsl/spec.py` (declarative layer), `src/veriforge/dsl/interface.py` (~170 lines)
 
 ## Quick Start
 
 ```python
-from veriforge.dsl import Module, posedge
+from veriforge.dsl import ModuleSpec, In, OutReg, posedge
 from veriforge.codegen.verilog_emitter import emit_module
 
-with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
 
-    with m.always(posedge(clk)):
-        with m.if_(rst):
-            count <<= 0
-        with m.else_():
-            count <<= count + 1
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
 
-print(emit_module(m.build()))
+print(emit_module(Counter().build()))
 ```
 
 Output:
 
 ```verilog
-module counter(
+module Counter(
     input clk,
     input rst,
     output reg [7:0] count
@@ -43,18 +62,28 @@ end
 endmodule
 ```
 
+Notice: `clk`, `rst`, and `count` each appear exactly once — as the
+attribute name. The class name (`Counter`) becomes the Verilog module name
+automatically too (override with a `module_name = "..."` class attribute).
+
 ## Core Concepts
 
 ### Module Builder
 
-`Module(name)` is the top-level builder. It can be used as a context manager (`with Module(...) as m:`) or directly (`m = Module("name")`). Call `m.build()` at the end to get an immutable model `Module` object.
+Every `ModuleSpec` is built on top of `Module(name)`, the underlying
+imperative builder — `ModuleSpec.build()` creates one, declares your class
+attributes onto it, then calls your `body(self, m)` with it. You can also
+use `Module` directly, either as a context manager (`with Module(...) as
+m:`) or plainly (`m = Module("name")`); call `m.build()` at the end to get
+an immutable model `Module` object. See
+**[The Imperative Builder](#the-imperative-builder)** for when to do that.
 
 ### Signal and Expr
 
 Every declaration method returns a `Signal` (subclass of `Expr`). `Signal` objects capture hardware expressions via Python operator overloading — no computation happens at build time, only expression tree construction.
 
 ```python
-a = m.input("a", width=8)
+a = m.input("a", width=8)  # or self.a from a ModuleSpec's In(8), inside body()
 b = m.input("b", width=8)
 result = (a + b) & 0xFF   # Expr wrapping BinaryOp("&", BinaryOp("+", ...), Literal(255))
 ```
@@ -81,39 +110,157 @@ assignment target only.
 
 ## Port and Signal Declarations
 
+Declare ports, internal signals, and parameters as class attributes on a
+`ModuleSpec` subclass. `__set_name__` captures each attribute's name at
+class-creation time, so the name is never passed as a string:
+
+```python
+from veriforge.dsl import ModuleSpec, In, Out, OutReg, Inout, Wire, Reg, Param
+
+class Example(ModuleSpec):
+    # Ports
+    clk   = In()                          # input clk
+    data  = In(8)                         # input [7:0] data
+    sdata = In(8, signed=True)            # input signed [7:0] sdata
+    y     = Out(4)                        # output [3:0] y
+    q     = OutReg(8)                     # output reg [7:0] q
+    q0    = OutReg(8, init=0)             # output reg [7:0] q0 = 0
+    bus   = Inout(8)                      # inout [7:0] bus
+
+    # Internal signals
+    w  = Wire(16)                         # wire [15:0] w
+    w0 = Wire(8, init=0)                  # wire [7:0] w0 = 0
+    state = Reg(4)                        # reg [3:0] state
+    cnt   = Reg(8, init=0)                # reg [7:0] cnt = 0
+
+    # Memory arrays — depth= makes it an array
+    mem = Reg(8, depth=256)               # reg [7:0] mem [0:255]
+    rom = Wire(32, depth=1024)            # wire [31:0] rom [0:1023]
+
+    # Parameters
+    WIDTH = Param(8)                      # parameter WIDTH = 8
+
+    # Parameterized width — a string names a Param on the same class
+    wide_data = In("WIDTH")               # input [WIDTH-1:0] wide_data
+
+    def body(self, m):
+        ...  # self.clk, self.data, self.cnt, etc. are the built Signals
+```
+
+### Descriptor reference
+
+| Descriptor | Verilog | Options |
+|------------|---------|---------|
+| `In(width=1, *, signed=False, init=None)` | `input [...] name` | — |
+| `Out(width=1, *, signed=False, init=None)` | `output [...] name` | — |
+| `OutReg(width=1, *, signed=False, init=None)` | `output reg [...] name` | also creates the backing variable |
+| `Inout(width=1, *, signed=False, init=None)` | `inout [...] name` | — |
+| `Wire(width=1, *, signed=False, init=None, depth=None)` | `wire [...] name` | `depth=` → memory array |
+| `Reg(width=1, *, signed=False, init=None, depth=None)` | `reg [...] name` | `depth=` → memory array |
+| `Param(default=0, *, width=None, signed=False)` | `parameter NAME = default` | width is the parameter's own declared width, not what it's used for elsewhere |
+
+`width` is either an `int` or a `str` naming a `Param` declared on the same
+class (resolved regardless of class-body order — parameters are always
+declared first, so a `Param` may appear textually after the signal that
+references it). `init` takes a plain `int`. There is no descriptor for
+`localparam` or `integer` yet — declare those imperatively inside
+`body(self, m)` (`m.localparam(...)`, `m.integer(...)`); see
+[The Imperative Builder](#the-imperative-builder).
+
+### Comments and attributes on declarative signals
+
+`.comment()` / `.attr()` (see [Comments](#comments) /
+[Synthesis Attributes](#synthesis-attributes) below) are called on a built
+`Signal`, so for `ModuleSpec` they're called on `self.<attr>` at the start
+of `body()`, not on the descriptor itself:
+
+```python
+def body(self, m):
+    self.clk.comment("100 MHz system clock")
+    self.state.attr("fsm_encoding", "one_hot")
+    ...
+```
+
+### Rules and behavior
+
+- **Module name**: the class name, unless a `module_name = "..."` class
+  attribute is set.
+- **Declaration order**: class-body order, with parameters always emitted
+  first (so string-width references to a `Param` work regardless of where
+  the `Param` sits textually). Subclassing appends the subclass's
+  declarations after the base class's, and may override `body()`.
+- **`body(self, m)`**: receives the live imperative `Module` builder — the
+  entire builder API (assignments, `always`/`initial` blocks, instances,
+  interfaces, loops) works inside it exactly as described in the rest of
+  this guide; `self.<attr>` resolves to the declared `Signal`. Accessing
+  `self.<attr>` outside a build raises `RuntimeError`.
+- **Building**: `Counter().build()` returns a fresh model `Module`; call it
+  again for a fresh copy. Override a `Param`'s default per-instance with a
+  keyword: `Counter(WIDTH=16).build()`.
+- **No batch shorthand**: unlike the imperative builder's `m.inputs("a:8
+  b:8")` (see below), there's no multi-signal-per-line declarative form —
+  each descriptor is already a single, terse, name-free line, so batching
+  isn't needed the same way.
+
+## The Imperative Builder
+
+`ModuleSpec` is sugar over `Module` — `.build()` creates a `Module`,
+declares each class attribute onto it via the same methods shown below,
+then calls your `body(self, m)`. Use `Module` directly (or call its methods
+inside a `ModuleSpec.body()`) whenever the set of signals isn't fixed at
+write-time:
+
+- The number of ports/signals depends on a runtime value (a `for` loop
+  building N instances, a parameterized bus width fanning out into that
+  many bit-select wires).
+- You're expanding a bus `Interface` (`m.interface(...)` — see
+  [Interfaces](#interfaces-signal-bus-grouping)), which is inherently a
+  procedural, prefix-driven expansion.
+- You're converting parsed Verilog to DSL code (`design_to_dsl` — see
+  [python_overview.md](../python_overview.md)), which emits one `m.input(...)`-style
+  call per signal it found, matching the source 1:1.
+- You just want a throwaway script/REPL module without defining a class.
+
+### Single-signal declarations
+
+Every descriptor in the table above is backed by one of these `Module`
+methods — the name is now a required string argument:
+
 ```python
 # Ports
-clk   = m.input("clk")                      # input clk
-data  = m.input("data", width=8)             # input [7:0] data
+clk   = m.input("clk")                       # input clk
+data  = m.input("data", width=8)              # input [7:0] data
 sdata = m.input("sdata", width=8, signed=True)  # input signed [7:0] sdata
-y     = m.output("y", width=4)               # output [3:0] y
-q     = m.output_reg("q", width=8)           # output reg [7:0] q  (also creates a variable)
-q0    = m.output_reg("q0", width=8, init=0)  # output reg [7:0] q0 = 0
-bus   = m.inout("bus", width=8)              # inout [7:0] bus
+y     = m.output("y", width=4)                # output [3:0] y
+q     = m.output_reg("q", width=8)            # output reg [7:0] q  (also creates a variable)
+q0    = m.output_reg("q0", width=8, init=0)   # output reg [7:0] q0 = 0
+bus   = m.inout("bus", width=8)               # inout [7:0] bus
 
 # Internal signals
-w = m.wire("w", width=16)                    # wire [15:0] w
-w0 = m.wire("w0", width=8, init=0)           # wire [7:0] w0 = 0
-r = m.reg("state", width=4)                  # reg [3:0] state
-r0 = m.reg("cnt", width=8, init=0)           # reg [7:0] cnt = 0
-i = m.integer("i")                           # integer i
+w  = m.wire("w", width=16)                    # wire [15:0] w
+w0 = m.wire("w0", width=8, init=0)            # wire [7:0] w0 = 0
+r  = m.reg("state", width=4)                  # reg [3:0] state
+r0 = m.reg("cnt", width=8, init=0)            # reg [7:0] cnt = 0
+i  = m.integer("i")                           # integer i (no declarative equivalent)
 
 # Memory arrays
-mem = m.reg("mem", width=8, depth=256)       # reg [7:0] mem [0:255]
-rom = m.wire("rom", width=32, depth=1024)    # wire [31:0] rom [0:1023]
+mem = m.reg("mem", width=8, depth=256)        # reg [7:0] mem [0:255]
+rom = m.wire("rom", width=32, depth=1024)     # wire [31:0] rom [0:1023]
 
 # Parameters
-W = m.parameter("WIDTH", default=8)          # parameter WIDTH = 8
-H = m.localparam("HALF", value=4)            # localparam HALF = 4
+W = m.parameter("WIDTH", default=8)           # parameter WIDTH = 8
+H = m.localparam("HALF", value=4)             # localparam HALF = 4 (no declarative equivalent)
 
 # Parameterized width — width argument accepts Signal/Expr
-data = m.input("data", width=W)              # input [WIDTH-1:0] data
+data = m.input("data", width=W)               # input [WIDTH-1:0] data
 ```
 
 ### Bulk declarations
 
-Declare several signals of the same kind in one call. Tokens are separated by
-whitespace and/or commas; each is `name` (width 1) or `name:width`:
+Declare several signals of the same kind in one call — the imperative
+builder's answer to "one line per signal without a `ModuleSpec` class".
+Tokens are separated by whitespace and/or commas; each is `name` (width 1)
+or `name:width`:
 
 ```python
 clk, rst, en = m.inputs("clk rst en")
@@ -125,6 +272,86 @@ s1, s2       = m.regs("s1:4 s2:4")
 ```
 
 For `signed=`, `init=`, or `depth=`, use the single-signal forms.
+
+### Side by side with Quick Start
+
+The [Quick Start](#quick-start) counter, in imperative style:
+
+```python
+from veriforge.dsl import Module, posedge
+from veriforge.codegen.verilog_emitter import emit_module
+
+with Module("counter") as m:
+    clk = m.input("clk")
+    rst = m.input("rst")
+    count = m.output_reg("count", width=8)
+
+    with m.always(posedge(clk)):
+        with m.if_(rst):
+            count <<= 0
+        with m.else_():
+            count <<= count + 1
+
+print(emit_module(m.build()))
+```
+
+Same Verilog output as the declarative version — the difference is purely
+in how `clk`/`rst`/`count` were declared; every `m.always(...)`/`m.if_(...)`
+line is identical to what goes inside a `ModuleSpec.body(self, m)`.
+
+### Python-powered generation
+
+Since the DSL is plain Python, loops and functions replace Verilog's
+`generate` — and this is the case that most needs the imperative builder,
+since the signal count isn't known until the loop runs:
+
+```python
+# Unrolled inverter array
+m = Module("inv_array")
+inputs  = [m.input(f"in_{i}") for i in range(4)]
+outputs = [m.output(f"out_{i}") for i in range(4)]
+for i in range(4):
+    m.assign(outputs[i], ~inputs[i])
+
+# Adder tree
+m = Module("adder_tree")
+a = [m.input(f"a{i}", width=8) for i in range(4)]
+s01   = m.wire("s01", width=9)
+s23   = m.wire("s23", width=9)
+total = m.output("total", width=10)
+m.assign(s01, a[0] + a[1])
+m.assign(s23, a[2] + a[3])
+m.assign(total, s01 + s23)
+```
+
+### Mixing both styles in one module
+
+The realistic day-to-day pattern: declare the *fixed* interface
+declaratively, and reach for the imperative builder inside `body()` for
+anything generated. `m` in `body(self, m)` is the same `Module` builder
+described in this whole section:
+
+```python
+class RegFile(ModuleSpec):
+    clk = In()
+    we  = In()
+    addr = In(4)
+    wdata = In(8)
+    rdata = OutReg(8)
+
+    def body(self, m):
+        # 16 registers — count comes from a Python constant, not a fixed
+        # set of class attributes, so this part stays imperative.
+        regs = [m.reg(f"r{i}", width=8) for i in range(16)]
+
+        with m.always(posedge(self.clk)):
+            with m.if_(self.we):
+                with m.case(self.addr) as c:
+                    for i in range(16):
+                        with c.when(i):
+                            regs[i] <<= self.wdata
+            self.rdata <<= regs[0]  # simplified read path
+```
 
 ## Expression Operators
 
@@ -432,30 +659,38 @@ m.assign(y, mux(sel, a, b))  # assign y = sel ? a : b;
 
 ## Module Instantiation
 
-Use `m.instance()` to instantiate sub-modules with named port and parameter connections:
+Use `m.instance()` to instantiate sub-modules with named port and parameter
+connections. Instantiation itself is always a `{port_name: signal}` dict
+regardless of which style declared the sub-module or the parent — wiring
+two modules together is fundamentally a mapping, not the kind of
+name-vs-name duplication `ModuleSpec` removes:
 
 ```python
-from veriforge.dsl import Module, posedge
+from veriforge.dsl import ModuleSpec, In, OutReg, Module, posedge
 from veriforge.codegen.verilog_emitter import emit_module
 
-# Define a reusable counter module
-with Module("counter") as counter_mod:
-    clk   = counter_mod.input("clk")
-    rst   = counter_mod.input("rst")
-    count = counter_mod.output_reg("count", width=8)
-    with counter_mod.always(posedge(clk)):
-        with counter_mod.if_(rst):
-            count <<= 0
-        with counter_mod.else_():
-            count <<= count + 1
+# A reusable counter module, declared with ModuleSpec ("Counter" becomes
+# the Verilog module name automatically).
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
 
-# Instantiate it inside a top-level module
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
+
+# The top-level wiring is procedural (it's just an instance + a wire), so
+# it stays imperative even though the reusable submodule above is not.
 with Module("top") as top:
     sys_clk = top.input("sys_clk")
     sys_rst = top.input("sys_rst")
     cnt     = top.wire("cnt", width=8)
 
-    top.instance("counter", "u_counter", ports={
+    top.instance("Counter", "u_counter", ports={
         "clk":   sys_clk,
         "rst":   sys_rst,
         "count": cnt,
@@ -474,7 +709,7 @@ module top(
 
 wire [7:0] cnt;
 
-counter u_counter(
+Counter u_counter(
     .clk(sys_clk),
     .rst(sys_rst),
     .count(cnt)
@@ -482,6 +717,11 @@ counter u_counter(
 
 endmodule
 ```
+
+`top` could equally be a `ModuleSpec` whose `body()` does the same
+`m.wire(...)` / `m.instance(...)` calls — see
+[Mixing both styles in one module](#mixing-both-styles-in-one-module)
+above.
 
 ### Parameter Overrides
 
@@ -543,7 +783,9 @@ Bit selects, range selects, and concatenations work as assignment targets:
 with m.always(posedge(clk)):
     data[3] <<= 1          # Bit select LHS
     data[7:0] <<= 0xFF     # Range select LHS
-    cat(a, b) <<= c        # Concatenation LHS: {a, b} <= c
+    lhs = cat(a, b)        # Concatenation LHS: assign the Expr to a name first —
+    lhs <<= c              # `cat(a, b) <<= c` is invalid Python syntax (augmented
+                            # assignment requires an assignable target, not a call)
 ```
 
 ## Comments
@@ -692,6 +934,21 @@ The `Interface` class groups related signals into reusable bus templates,
 similar to SystemVerilog `interface` + `modport`. Since we emit Verilog 2005,
 the interface expands into flat ports with a naming prefix.
 
+Binding an interface (`m.interface(...)` below) is inherently one of the
+[imperative-builder](#the-imperative-builder) cases — the number and names
+of the expanded ports depend on the `Interface` template and the prefix, not
+on fixed class attributes — so it's called on `m` inside a `ModuleSpec.body()`
+just as it would be on a plain `Module`:
+
+```python
+class Producer(ModuleSpec):
+    clk = In()
+
+    def body(self, m):
+        m_axis = m.interface("m_axis", axi_stream, role="master")
+        ...
+```
+
 ### Defining an Interface
 
 ```python
@@ -809,8 +1066,13 @@ m_axis = m.interface("m_axis", axi_stream(data_width=64), role="master")
 
 ### Complete Example: AXI-Stream System
 
+Producer and consumer have a fixed `clk`/`rst` interface, so those are
+declarative `ModuleSpec` classes; the AXI-Stream bus binding and the
+top-level wiring are procedural, so they use the imperative builder inside
+`body()` (interface binding) and directly (`top`, which is just wiring):
+
 ```python
-from veriforge.dsl import Interface, Module, posedge
+from veriforge.dsl import Interface, ModuleSpec, In, Module, posedge
 from veriforge.codegen.verilog_emitter import emit_module
 
 # Define bus template
@@ -820,119 +1082,49 @@ axi_s = (Interface("axi_stream")
     .signal("tdata", width=8, src="master")
     .signal("tlast", src="master"))
 
-# Producer
-prod = Module("axi_producer")
-clk = prod.input("clk")
-rst = prod.input("rst")
-m_axis = prod.interface("m_axis", axi_s, role="master", reg=True)
-cnt = prod.reg("cnt", width=8)
-with prod.always(posedge(clk)):
-    with prod.if_(rst):
-        m_axis.tvalid <<= 0
-        m_axis.tdata  <<= 0
-        cnt <<= 0
-    with prod.else_():
-        m_axis.tvalid <<= 1
-        m_axis.tdata  <<= cnt
-        m_axis.tlast  <<= cnt == 255
-        cnt <<= cnt + 1
+class AxiProducer(ModuleSpec):
+    clk = In()
+    rst = In()
 
-# Consumer
-cons = Module("axi_consumer")
-clk_c = cons.input("clk")
-s_axis = cons.interface("s_axis", axi_s, role="slave")
-cons.assign(s_axis.tready, 1)
+    def body(self, m):
+        m_axis = m.interface("m_axis", axi_s, role="master", reg=True)
+        cnt = m.reg("cnt", width=8)
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                m_axis.tvalid <<= 0
+                m_axis.tdata  <<= 0
+                cnt <<= 0
+            with m.else_():
+                m_axis.tvalid <<= 1
+                m_axis.tdata  <<= cnt
+                m_axis.tlast  <<= cnt == 255
+                cnt <<= cnt + 1
 
-# Top-level wiring
+class AxiConsumer(ModuleSpec):
+    clk = In()
+
+    def body(self, m):
+        s_axis = m.interface("s_axis", axi_s, role="slave")
+        m.assign(s_axis.tready, 1)
+
+# Top-level wiring — just an instance + a wire, so stays imperative.
 top = Module("top")
 clk_t = top.input("clk")
 rst_t = top.input("rst")
 axis = top.wire_interface("axis", axi_s)
-top.instance("axi_producer", "i_prod", ports={
+top.instance("AxiProducer", "i_prod", ports={
     "clk": clk_t, "rst": rst_t,
     **axis.port_map("m_axis"),
 })
-top.instance("axi_consumer", "i_cons", ports={
+top.instance("AxiConsumer", "i_cons", ports={
     "clk": clk_t,
     **axis.port_map("s_axis"),
 })
 
-for mod in [prod, cons, top]:
-    print(emit_module(mod.build()))
+for mod in [AxiProducer().build(), AxiConsumer().build(), top.build()]:
+    print(emit_module(mod))
     print()
 ```
-
-## Python-Powered Generation
-
-Since the DSL is plain Python, loops and functions replace Verilog's `generate`:
-
-```python
-# Unrolled inverter array
-m = Module("inv_array")
-inputs  = [m.input(f"in_{i}") for i in range(4)]
-outputs = [m.output(f"out_{i}") for i in range(4)]
-for i in range(4):
-    m.assign(outputs[i], ~inputs[i])
-
-# Adder tree
-m = Module("adder_tree")
-a = [m.input(f"a{i}", width=8) for i in range(4)]
-s01   = m.wire("s01", width=9)
-s23   = m.wire("s23", width=9)
-total = m.output("total", width=10)
-m.assign(s01, a[0] + a[1])
-m.assign(s23, a[2] + a[3])
-m.assign(total, s01 + s23)
-```
-
-## Declarative Modules (ModuleSpec)
-
-For modules with a fixed port list, the declarative layer removes the
-name-string duplication of the imperative builder (`count =
-m.output_reg("count", ...)`). Ports, parameters, and internal signals are
-class attributes; the `__set_name__` descriptor protocol captures each
-attribute's name automatically:
-
-```python
-from veriforge.dsl import ModuleSpec, In, OutReg, Param
-
-class Counter(ModuleSpec):
-    WIDTH = Param(8)
-    clk = In()
-    rst = In()
-    en = In()
-    count = OutReg("WIDTH")        # width refers to the Param by name
-
-    def body(self, m):
-        with m.seq(self.clk, rst=self.rst, rst_vals={self.count: 0}):
-            with m.if_(self.en):
-                self.count.next = self.count + 1
-
-module = Counter().build()          # model Module named "Counter"
-module16 = Counter(WIDTH=16).build()  # parameter default overridden
-```
-
-Rules and behavior:
-
-- **Descriptors**: `In`, `Out`, `OutReg`, `Inout` declare ports; `Wire`, `Reg`
-  declare internal signals (both accept `depth=` for memories); `Param`
-  declares a Verilog parameter. All accept the same `width`/`signed`/`init`
-  options as the corresponding builder methods.
-- **Widths**: an `int`, or a `str` naming a `Param` on the same class
-  (`OutReg("WIDTH")` emits `output reg [WIDTH-1:0]`).
-- **Module name**: the class name, unless a `module_name = "..."` class
-  attribute is set.
-- **Order**: ports/signals are declared in class-body order; parameters are
-  emitted first. Subclassing appends the subclass's declarations after the
-  base class's and may override `body()`.
-- **`body(self, m)`**: receives the live imperative `Module` builder — the
-  full builder API works inside; `self.<attr>` resolves to the declared
-  `Signal` proxies. Accessing `self.<attr>` outside a build raises.
-- `build()` may be called repeatedly; each call produces a fresh model module.
-
-The declarative and imperative styles are complementary: use `ModuleSpec`
-for fixed interfaces, and the imperative builder when ports are generated
-programmatically (loops, interface expansion).
 
 ## Emission
 
@@ -948,24 +1140,27 @@ print(verilog_text)
 
 ## Simulation
 
-DSL-built modules can be simulated directly without emitting Verilog:
+DSL-built modules can be simulated directly without emitting Verilog —
+`.build()` returns the same model `Module` either way, so `ModuleSpec` and
+the imperative builder feed the `Simulator` identically:
 
 ```python
-from veriforge.dsl import Module, posedge
+from veriforge.dsl import ModuleSpec, In, OutReg, posedge
 from veriforge.sim import Simulator, Clock
 
-# Build a counter
-with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
-    with m.always(posedge(clk)):
-        with m.if_(rst):
-            count <<= 0
-        with m.else_():
-            count <<= count + 1
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
 
-module = m.build()
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
+
+module = Counter().build()
 
 # Simulate
 sim = Simulator(module)
@@ -978,13 +1173,17 @@ sim.run(test, max_time=5)
 assert sim.read("count") == 0    # Counter held at 0
 
 # Combinational example — no clock needed
-m2 = Module("adder")
-a = m2.input("a", width=8)
-b = m2.input("b", width=8)
-s = m2.output("sum", width=9)
-m2.assign(s, a + b)
+from veriforge.dsl import Out
 
-sim2 = Simulator(m2.build())
+class Adder(ModuleSpec):
+    a = In(8)
+    b = In(8)
+    sum = Out(9)
+
+    def body(self, m):
+        m.assign(self.sum, self.a + self.b)
+
+sim2 = Simulator(Adder().build())
 sim2.drive("a", 10)
 sim2.drive("b", 20)
 sim2.run(lambda s: None, max_time=100)
@@ -1006,34 +1205,35 @@ assert sim2.read("sum") == 30
 ## Complete Example: 4-to-1 Mux
 
 ```python
-from veriforge.dsl import Module
+from veriforge.dsl import ModuleSpec, In, OutReg
 from veriforge.codegen.verilog_emitter import emit_module
 from veriforge.sim import Simulator
 
-with Module("mux4") as m:
-    sel = m.input("sel", width=2)
-    a = m.input("a", width=8)
-    b = m.input("b", width=8)
-    c = m.input("c", width=8)
-    d = m.input("d", width=8)
-    y = m.output_reg("y", width=8)
+class Mux4(ModuleSpec):
+    sel = In(2)
+    a = In(8)
+    b = In(8)
+    c = In(8)
+    d = In(8)
+    y = OutReg(8)
 
-    with m.always():
-        with m.case(sel) as cs:
-            with cs.when(0):
-                y @= a
-            with cs.when(1):
-                y @= b
-            with cs.when(2):
-                y @= c
-            with cs.default():
-                y @= d
+    def body(self, m):
+        with m.always():
+            with m.case(self.sel) as cs:
+                with cs.when(0):
+                    self.y @= self.a
+                with cs.when(1):
+                    self.y @= self.b
+                with cs.when(2):
+                    self.y @= self.c
+                with cs.default():
+                    self.y @= self.d
 
 # Emit
-print(emit_module(m.build()))
+print(emit_module(Mux4().build()))
 
 # Simulate
-sim = Simulator(m.build())
+sim = Simulator(Mux4().build())
 sim.drive("a", 42)
 sim.drive("b", 99)
 sim.drive("sel", 1)

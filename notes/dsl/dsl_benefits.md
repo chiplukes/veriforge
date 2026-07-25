@@ -7,6 +7,15 @@ but it's just sugar. The real value is **compositional power**: patterns
 where the DSL enables hardware construction techniques that have no
 equivalent in Verilog 2005 (and are awkward even in SystemVerilog).
 
+Every example below is built with the *imperative* `Module` builder
+(`m.reg(...)`, `m.assign(...)` in loops/functions), because that's exactly
+what this kind of Python-driven generation needs — the signal count and
+shape aren't fixed at write-time. This is unrelated to the `ModuleSpec`
+*declarative* style described in
+[dsl_guide.md](dsl_guide.md#port-and-signal-declarations) (fixed-interface
+modules, no name-string duplication); "declarative" in section 2's title
+below refers to "driven by a data structure", not to `ModuleSpec`.
+
 ---
 
 ## 1. Per-Stage Callable Operations

@@ -357,39 +357,48 @@ The DSL is useful when you want:
 - composable blocks
 - Python-native metaprogramming
 
+Ports, registers, and wires are declared declaratively, as class attributes
+on a `ModuleSpec` subclass — this is the recommended default, and means a
+signal's name is never passed as a string *and* assigned to a variable of
+the same name. There's also an imperative builder (`m.input("clk", ...)`,
+name given as a string) for when the set of signals isn't fixed at
+write-time; see [dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder) for
+when to reach for it — the two compose freely in the same module.
+
 ### Minimal sequential example
 
 ```python
-from veriforge.dsl import Module, posedge
+from veriforge.dsl import ModuleSpec, In, OutReg, posedge
 from veriforge.codegen import emit_module
 
-with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+class Counter(ModuleSpec):
+    clk = In()
+    rst = In()
+    count = OutReg(8)
 
-    with m.always(posedge(clk)):
-        with m.if_(rst):
-            count <<= 0
-        with m.else_():
-            count <<= count + 1
+    def body(self, m):
+        with m.always(posedge(self.clk)):
+            with m.if_(self.rst):
+                self.count <<= 0
+            with m.else_():
+                self.count <<= self.count + 1
 
-module = m.build()
-print(emit_module(module))
+print(emit_module(Counter().build()))
 ```
 
 ### Combinational example
 
 ```python
-from veriforge.dsl import Module
+from veriforge.dsl import ModuleSpec, In, OutReg
 
-with Module("logic") as m:
-    a = m.input("a", width=8)
-    b = m.input("b", width=8)
-    y = m.output_reg("y", width=8)
+class Logic(ModuleSpec):
+    a = In(8)
+    b = In(8)
+    y = OutReg(8)
 
-    with m.always():
-        y @= (a & b) | (a ^ b)
+    def body(self, m):
+        with m.always():
+            self.y @= (self.a & self.b) | (self.a ^ self.b)
 ```
 
 ### DSL syntax reference
@@ -399,15 +408,31 @@ The DSL maps Python constructs to Verilog. The full reference is in
 
 #### Declarations
 
+Declarative (class attributes, no name strings — recommended default):
+
+| Python DSL | Verilog | Notes |
+|------------|---------|-------|
+| `d = In(8)` | `input [7:0] d` | Also `Out`, `OutReg`, `Inout` |
+| `w = Wire(8)` | `wire [7:0] w` | Internal wire |
+| `r = Reg(4)` | `reg [3:0] r` | Internal register |
+| `mem = Reg(8, depth=256)` | `reg [7:0] mem [0:255]` | Memory array |
+| `W = Param(8)` | `parameter W = 8` | Module parameter |
+| `q = OutReg(8, init=0)` | `output reg [7:0] q = 0` | Initial value |
+| `d = In("W")` | `input [W-1:0] d` | Parameterized width — string names a `Param` |
+
+Imperative (`Module` builder, name is an explicit string — for
+dynamic/generated signal counts, see
+[dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder)):
+
 | Python DSL | Verilog | Notes |
 |------------|---------|-------|
 | `m.input("d", width=8)` | `input [7:0] d` | `m.output`, `m.output_reg`, `m.inout` |
 | `m.wire("w", width=8)` | `wire [7:0] w` | Internal wire |
 | `m.reg("r", width=4)` | `reg [3:0] r` | Internal register |
 | `m.reg("mem", width=8, depth=256)` | `reg [7:0] mem [0:255]` | Memory array |
-| `m.integer("i")` | `integer i` | 32-bit integer variable |
+| `m.integer("i")` | `integer i` | 32-bit integer variable — no declarative equivalent |
 | `m.parameter("W", default=8)` | `parameter W = 8` | Module parameter |
-| `m.localparam("H", value=4)` | `localparam H = 4` | Local parameter |
+| `m.localparam("H", value=4)` | `localparam H = 4` | Local parameter — no declarative equivalent |
 | `m.output_reg("q", width=8, init=0)` | `output reg [7:0] q = 0` | Initial value |
 | `m.input("d", width=W)` | `input [W-1:0] d` | Parameterized width |
 

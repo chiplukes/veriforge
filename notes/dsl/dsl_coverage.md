@@ -4,6 +4,13 @@ Audit of Verilog constructs vs DSL builder coverage.
 Model = `src/veriforge/model/`, DSL = `src/veriforge/dsl/builder.py`,
 Emit = `src/veriforge/codegen/verilog_emitter.py`, Sim = `src/veriforge/sim/`.
 
+This audits the imperative `Module` builder API — the declarative
+`ModuleSpec` layer (`src/veriforge/dsl/spec.py`, see
+[dsl_guide.md](dsl_guide.md#port-and-signal-declarations)) is a thin
+name-free wrapper over the same `m.input()`/`m.wire()`/etc. calls listed
+here, so its coverage is identical; it isn't broken out into a separate
+table.
+
 **Legend:** ✅ Supported · ⚠️ Partial · ❌ Not supported · — Not applicable
 
 ---

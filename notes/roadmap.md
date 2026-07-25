@@ -186,6 +186,50 @@ Note: `generate for`/`generate if`, `function`, and `task` declarations are
 intentionally absent from the DSL — Python's own `for`/`if` and functions serve
 those roles at elaboration time. See `notes/dsl/dsl_coverage.md` Gap Analysis.
 
+### Imperative-to-declarative migration tool
+
+Requested July 2026: a good amount of existing DSL code (library
+components, examples, project-specific modules) still uses the imperative
+builder (`clk = m.input("clk")`) from before `ModuleSpec` existed
+(`src/veriforge/dsl/spec.py`), and hand-converting each file to the
+declarative style is tedious and error-prone at scale.
+
+Proposed scope: an AST-based (Python `ast` module, not regex/string
+rewriting — see `veriforge.convert.to_dsl` for the existing precedent of
+walking a design and emitting DSL source) tool that rewrites one Python
+file at a time:
+
+- Detect the *mechanically convertible* shape: a `with Module("name") as
+  m:` (or `m = Module("name")`) block whose ports/wires/regs/params are
+  declared with simple `x = m.input("x", ...)`-style calls (variable name
+  equals the string name argument) with no loop, no computed name, no
+  `m.interface()`/`m.instance()` expansion feeding the port count.
+- Rewrite that shape into a `ModuleSpec` subclass: one descriptor per
+  declaration (`In`/`Out`/`OutReg`/`Inout`/`Wire`/`Reg`/`Param`, per the
+  mapping table in `dsl_guide.md`), module name becomes the class name
+  (with `module_name = "..."` only if it doesn't match), and the remaining
+  behavioral code (assignments, `always`/`initial` blocks, instances,
+  interfaces) becomes `body(self, m)` with `m.<name>` renamed to
+  `self.<name>` for every converted declaration.
+- Leave anything else (loops generating a variable signal count, computed
+  names, `m.interface()` expansion, mismatched variable/string names)
+  untouched in place — this is inherently the imperative builder's
+  territory (see [dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder))
+  and should not be force-converted. Print a report of what was converted
+  vs. left alone (with the reason) rather than silently skipping.
+- Round-trip check: re-emit both the original and converted module and
+  diff the Verilog output (or run both through the reference engine on the
+  same stimulus) to catch a bad rewrite before it lands.
+- Likely entry point: `veriforge convert-dsl-style <file>` alongside the
+  existing `design_to_dsl`/`export_dsl_project` conversion commands (which
+  go the other direction, Verilog → DSL); this tool goes DSL → DSL.
+
+Not scoped yet: whether to attempt any partial conversion of loop-shaped
+code (e.g. converting the *fixed* ports of a module that also has a
+dynamically-sized internal array) — likely worth doing once the simple
+case is solid, per the "mixing both styles in one module" pattern in
+`dsl_guide.md`.
+
 ## Test infrastructure
 
 Proposed markers from [notes/test_taxonomy.md](test_taxonomy.md) not yet applied:
