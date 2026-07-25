@@ -2822,6 +2822,64 @@ class TestXZPropagation:
         sim.run(max_time=0)
         assert sim.read("y").is_x
 
+    # ── Arithmetic right shift (>>>) precise X-propagation ───────
+    # Regression for work plan item 2.4 (notes/plans/x_prop_work.md): >>>
+    # used to bail out to an all-x result whenever *any* source bit was x.
+    # IEEE 1364/1800 semantics are precise -- only the sign bit's own
+    # (un)knownness determines whether the vacated top bits become x; a
+    # non-sign x bit just shifts positionally like any other bit.
+
+    def test_ashr_precise_x_bit_shifts_positionally(self, engine):
+        """A non-sign x bit shifts to its new position; nothing else becomes x."""
+        m = self._make_xz_module(
+            BinaryOp(">>>", Identifier("a"), Literal(4, width=8)),
+        )
+        sim = Simulator(m, engine=engine)
+        # x at bit 5 (not the sign bit, which is bit 7); sign bit is known-0,
+        # so the vacated top 4 bits fill with 0, not x.
+        sim.drive("a", Value(0, width=8, mask=1 << 5))
+        sim.settle()
+        y = sim.read("y")
+        assert y.mask == 1 << 1, f"Expected x only at output bit 1 (5 - 4), got {y}"
+        assert y.val == 0, f"Expected val 0 elsewhere, got {y}"
+
+    def test_ashr_unknown_sign_bit_fills_vacated_bits_with_x(self, engine):
+        """Unknown sign bit -> every bit the shift derives from it becomes x."""
+        m = self._make_xz_module(
+            BinaryOp(">>>", Identifier("a"), Literal(3, width=8)),
+        )
+        sim = Simulator(m, engine=engine)
+        sim.drive("a", Value(0b0101_0110, width=8, mask=1 << 7))  # sign bit(7) unknown
+        sim.settle()
+        y = sim.read("y")
+        # Bit 4 reads the (unknown) sign bit directly via the shift itself;
+        # bits 5-7 are the vacated fill, also x since the sign is unknown.
+        # Bits 0-3 are known bits shifted down from source bits 3-6.
+        assert y.mask == 0b1111_0000, f"Expected x in bits 4-7, got {y}"
+        assert y.val & 0b0000_1111 == (0b0101_0110 >> 3) & 0b1111, f"Shifted known bits wrong: {y}"
+
+    def test_ashr_unknown_shift_amount_produces_all_x(self, engine):
+        """Shift amount itself x -> the whole result is genuinely undetermined."""
+        m = self._make_xz_module(
+            BinaryOp(">>>", Identifier("a"), Identifier("b")),
+        )
+        sim = Simulator(m, engine=engine)
+        sim.drive("a", Value(0xAA, width=8))
+        sim.drive("b", Value(0, width=8, mask=0xFF))
+        sim.settle()
+        assert sim.read("y").is_x
+
+    def test_ashr_shift_by_zero_is_identity_with_x(self, engine):
+        """Shift by 0 leaves an x-contaminated value untouched."""
+        m = self._make_xz_module(
+            BinaryOp(">>>", Identifier("a"), Literal(0, width=8)),
+        )
+        sim = Simulator(m, engine=engine)
+        a_val = Value(0b1010_1010, width=8, mask=1 << 3)
+        sim.drive("a", a_val)
+        sim.settle()
+        assert sim.read("y") == a_val
+
     # ── Comparison with x ────────────────────────────────────────
 
     def test_eq_x_produces_x(self, engine):

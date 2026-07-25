@@ -52,7 +52,9 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ### Cython VM interpreter drift (vm-fast engine)
 
-**Status**: Open — noted in `setup.py` docstring, unverified recently
+**Status**: Open — re-verified July 2026 (work plan item 2.4 incidentally
+built the extension for the first time in this environment); scope is
+larger than previously known, see confirmed symptoms below
 
 The Cython VM extension (`sim/vm/_interp_fast.pyx`) has drifted from the
 pure-Python interpreter and was last observed failing ~18 tests under
@@ -62,6 +64,85 @@ not built, so environments without the built extension are unaffected.
 Workarounds: set `VERIFORGE_DISABLE_CYTHON_VM=1` or delete the built
 `_interp_fast.*.pyd`/`.so`. Before relying on `vm-fast` with the extension
 built, re-run that test file to confirm current status.
+
+**Additional confirmed symptoms** (found incidentally July 2026 while working
+work plan item 2.4, with the extension built for the first time in this
+environment — unrelated to that item's `OP_ASHR` fix; every symptom below
+was confirmed to reproduce identically on both the pre- and post-2.4 source
+via `git stash`, so none of it is a 2.4 regression):
+
+- `tests/test_sim/test_compiled.py::TestNarrow64BitUnsignedOps` — 7
+  failures, all vm-fast-only, all involving 64-bit unsigned values with the
+  MSB set (`test_udiv_64bit_msb_set`, `test_lsr_64bit_ones_shift32`,
+  `test_lsr_64bit_msb_only_shift1`, `test_lsr_64bit_msb_only_shift63`,
+  `test_ult_64bit_small_less_than_msb`, `test_ugt_64bit_msb_set`,
+  `test_umod_64bit_msb_set`). Symptom: e.g. unsigned `1 < 0xFFFFFFFFFFFFFFFF`
+  (should be `1`) returns `0` on vm-fast only — looks like a 64-bit value
+  with the MSB set is being compared/shifted/divided as a signed
+  `long long` somewhere in `_interp_fast.pyx`'s narrow (<=64-bit) opcode
+  paths instead of being cast to `unsigned long long` first (the pattern
+  already used correctly elsewhere in the same file, e.g. `OP_SHR`'s wide
+  path and the narrow-path fixes in `_expr_emitter.py`/item 2.3).
+- `tests/test_sim/test_assignment_matrix.py` — 30 failures, all vm-fast-only,
+  all the signed-narrower-into-wider cases (`s*_to_s*`/`su*_to_su*`/
+  `scast*_to_scast*`, all four assignment kinds) at widths (4,8), (63,64),
+  (64,65), (65,80) — i.e. vm-fast's sign-extension-on-assignment appears to
+  have its own drift distinct from (and in addition to) the reference/vm
+  bug fixed as item 2.6.
+- `tests/test_sim/test_compiled_edge_shapes.py` — 8 failures, all vm-fast-only:
+  `seam63_shl64`, `seam63_shr64`, `seam64_shl64`, `seam64_shr64` (the same
+  shift-by-word-width wraparound class fixed for the *compiled* engine in
+  item 2.3 Part B — vm-fast has its own independent instance of this in
+  `_interp_fast.pyx`'s `OP_SHL`/`OP_SHR`, not yet fixed), `seam64_lt` (same
+  MSB-set comparison symptom as the `test_compiled.py` bullet above), and
+  `self_det_unary_neg_65_to_80_signed` (vm-fast disagrees with vm/reference
+  here too, on top of the already-tracked item 2.6 `~`-unsigned case).
+
+None of this was root-caused further — it's all item 3.3's territory (fix
+vm-fast, then gate the two VM selections in CI), not item 2.4's. Total:
+~45 additional vm-fast-only failures beyond the 7 already known, none
+visible unless the extension is actually built (this repo's default/CI
+state does not build it, so this was previously silently masked).
+
+### Wide/narrow arithmetic right shift (`>>>`) X-propagation
+
+**Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in
+its own plan file (`x_prop_work.md`, under `notes/plans/`), now removed
+since its checklist is complete.
+
+Reference, the pure-Python VM (`sim/vm/interpreter.py`), and the Cython VM
+(`sim/vm/_interp_fast.pyx`, both narrow and wide opcode paths) each had
+their own copy of an overly-conservative rule: if *any* bit of the `>>>`
+operand was x, the entire result became x. Correct (IEEE 1364/1800)
+semantics are precise — only bits actually derived from an unknown bit
+(the shifted-through bits, plus the vacated top bits when the sign bit
+itself is unknown) become x. Fixed in all three by extending the operand
+to `(width + shift)` bits (sign-filling the top with correct x propagation
+from the sign bit, using `Value.sign_extend`), then logically shifting —
+`(a.sign_extend(width + shift) >> shift).resize(width)` — which reproduces
+arithmetic-shift-right exactly, including precise x-propagation, using only
+already-correct primitives. The compiled engine's `wide_ashr` (in
+`_gen_wide_section.py`) had a matching conservative workaround (added to
+match the then-buggy VM) that was reverted once the VM was fixed.
+
+**Additional regression found and fixed while verifying the above**: a
+separate, hand-written fast-path template family — `_whole_{assign,stage}
+_sar_{op}_signal` in `sim/compiled/templates/{narrow_assign,narrow_stage}.pxi`
+(30 functions total; used for patterns like `$signed(a | b) >>> N`,
+bypassing the generic wide-emitter path) — had the identical conservative
+bail-out, independently of `wide_ashr`. This wasn't part of the original
+plan (which only knew about `wide_ashr`) and only surfaced as a compiled-
+vs-vm mismatch once the VM became precise. Every affected function already
+computed a fully precise 4-state mask for its bitwise combination (and,
+or, xor, and mixed-with-xor variants) *before* the premature bail — the
+fix was to delete the dead `if combined_mask != 0: bail-to-all-x; return`
+line in each, letting the already-correct shift+sign-fill logic underneath
+run instead (verified empirically before applying at scale: two functions
+were fixed and tested individually first). The `add`/`sub` variants of this
+same family (`_whole_assign_sar_add_signal`/`sar_sub_signal`) were
+deliberately left untouched — they don't track a precise mask at all
+(arithmetic carry propagation is harder), and this matches `Value.__add__`/
+`__sub__`'s own equally-conservative behavior, so it isn't an inconsistency.
 
 ### Declared signedness is now honored (all engines)
 

@@ -510,6 +510,8 @@ cdef int _execute_core(
     cdef int wflag[STACK_MAX]
     cdef int wi     # loop index for wide word loops
     cdef unsigned long long wtmp
+    cdef unsigned long long ashr_sign_m  # OP_ASHR: sign bit's mask (1 = sign unknown)
+    cdef unsigned long long ashr_shifted_v, ashr_shifted_m, ashr_fill_bits, ashr_fill_v  # OP_ASHR narrow path
 
     cdef int pc = 0
     cdef int op, arg1
@@ -1736,81 +1738,111 @@ cdef int _execute_core(
                         for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS] = <unsigned long long>a.mask
                         for wi in range(1, WIDE_WORDS): wm[sp * WIDE_WORDS + wi] = 0
-                    # If left operand has any X bits, result is all-X
-                    has_x = 0
-                    for wi in range(WIDE_WORDS):
-                        if wm[sp * WIDE_WORDS + wi]: has_x = 1; break
-                    if has_x:
-                        for wi in range(WIDE_WORDS):
-                            wv[sp * WIDE_WORDS + wi] = 0
-                            wm[sp * WIDE_WORDS + wi] = 0xFFFFFFFFFFFFFFFF
-                        _wm_mask_to_width(&wm[sp * WIDE_WORDS], w)
+                    n = <int>b.val
+                    # Find sign bit: bit (w-1), which is bit (w-1)&63 of word (w-1)>>6
+                    wsp = (w - 1) >> 6
+                    bit_in_word = (w - 1) & 63
+                    if wsp < WIDE_WORDS:
+                        wtmp = (wv[sp * WIDE_WORDS + wsp] >> bit_in_word) & 1ULL  # sign bit value
+                        ashr_sign_m = (wm[sp * WIDE_WORDS + wsp] >> bit_in_word) & 1ULL  # sign bit mask (1 = x)
                     else:
-                        n = <int>b.val
-                        # Find sign bit: bit (w-1), which is bit (w-1)&63 of word (w-1)>>6
-                        wsp = (w - 1) >> 6
-                        bit_in_word = (w - 1) & 63
-                        if wsp < WIDE_WORDS:
-                            wtmp = (wv[sp * WIDE_WORDS + wsp] >> bit_in_word) & 1ULL  # sign bit
+                        wtmp = 0
+                        ashr_sign_m = 0
+                    # Logical right-shift first (word-by-word) -- precise per-bit X
+                    # propagation for the shifted-in-range bits falls out of shifting
+                    # wm alongside wv here; only the *vacated* top bits (filled below)
+                    # need special handling, and only their fill depends on the sign
+                    # bit specifically (whether it's known and what its value is).
+                    wrd_off = n >> 6; bit_off = n & 63
+                    for wi in range(WIDE_WORDS):
+                        if wi + wrd_off >= WIDE_WORDS:
+                            concat_rv[wi] = 0; concat_rm[wi] = 0
+                        elif bit_off == 0:
+                            concat_rv[wi] = wv[sp * WIDE_WORDS + wi + wrd_off]
+                            concat_rm[wi] = wm[sp * WIDE_WORDS + wi + wrd_off]
                         else:
-                            wtmp = 0
-                        # Logical right-shift first (word-by-word)
-                        wrd_off = n >> 6; bit_off = n & 63
-                        for wi in range(WIDE_WORDS):
-                            if wi + wrd_off >= WIDE_WORDS:
-                                concat_rv[wi] = 0; concat_rm[wi] = 0
-                            elif bit_off == 0:
-                                concat_rv[wi] = wv[sp * WIDE_WORDS + wi + wrd_off]
-                                concat_rm[wi] = wm[sp * WIDE_WORDS + wi + wrd_off]
-                            else:
-                                concat_rv[wi] = wv[sp * WIDE_WORDS + wi + wrd_off] >> bit_off
-                                concat_rm[wi] = wm[sp * WIDE_WORDS + wi + wrd_off] >> bit_off
-                                if wi + wrd_off + 1 < WIDE_WORDS:
-                                    concat_rv[wi] |= wv[sp * WIDE_WORDS + wi + wrd_off + 1] << (64 - bit_off)
-                                    concat_rm[wi] |= wm[sp * WIDE_WORDS + wi + wrd_off + 1] << (64 - bit_off)
-                        if wtmp:
-                            # Fill vacated high bits with 1s (sign-fill)
-                            # Fill bits [w-n .. w-1] with 1s (n bits at the top of the w-bit field)
-                            if n >= w:
-                                # Shift >= width: entire result is all-1s
-                                for wi in range(WIDE_WORDS):
+                            concat_rv[wi] = wv[sp * WIDE_WORDS + wi + wrd_off] >> bit_off
+                            concat_rm[wi] = wm[sp * WIDE_WORDS + wi + wrd_off] >> bit_off
+                            if wi + wrd_off + 1 < WIDE_WORDS:
+                                concat_rv[wi] |= wv[sp * WIDE_WORDS + wi + wrd_off + 1] << (64 - bit_off)
+                                concat_rm[wi] |= wm[sp * WIDE_WORDS + wi + wrd_off + 1] << (64 - bit_off)
+                    if wtmp or ashr_sign_m:
+                        # Fill vacated high bits with the sign bit: value-1s if the
+                        # sign bit is known-1, mask-1s (x) if the sign bit is unknown.
+                        # Fill bits [w-n .. w-1] with 1s (n bits at the top of the w-bit field)
+                        if n >= w:
+                            # Shift >= width: entire result is the sign bit replicated.
+                            for wi in range(WIDE_WORDS):
+                                if ashr_sign_m:
+                                    concat_rm[wi] = 0xFFFFFFFFFFFFFFFF
+                                elif wtmp:
                                     concat_rv[wi] = 0xFFFFFFFFFFFFFFFF
-                            else:
-                                # Fill top n bits of the w-bit field
-                                # The fill starts at bit position (w - n) within the w-bit result
-                                n_bits = (w - n) >> 6   # fill_start_word
-                                bits_here = (w - n) & 63  # fill_start_bit
-                                for wi in range(WIDE_WORDS):
-                                    if wi > n_bits:
-                                        if wi * 64 < w:
+                        else:
+                            # Fill top n bits of the w-bit field
+                            # The fill starts at bit position (w - n) within the w-bit result
+                            n_bits = (w - n) >> 6   # fill_start_word
+                            bits_here = (w - n) & 63  # fill_start_bit
+                            for wi in range(WIDE_WORDS):
+                                if wi > n_bits:
+                                    if wi * 64 < w:
+                                        if ashr_sign_m:
+                                            concat_rm[wi] = 0xFFFFFFFFFFFFFFFF
+                                        elif wtmp:
                                             concat_rv[wi] = 0xFFFFFFFFFFFFFFFF
-                                    elif wi == n_bits:
-                                        # Fill bits [bits_here .. 63] with 1s
+                                elif wi == n_bits:
+                                    # Fill bits [bits_here .. 63] with 1s
+                                    if ashr_sign_m:
+                                        concat_rm[wi] |= ~((1ULL << bits_here) - 1)
+                                    elif wtmp:
                                         concat_rv[wi] |= ~((1ULL << bits_here) - 1)
-                            # Mask the top word to w bits
-                            wsp = (w - 1) >> 6
-                            if wsp < WIDE_WORDS:
-                                bit_in_word = w & 63
-                                if bit_in_word > 0:
-                                    wtmp = (1ULL << bit_in_word) - 1
-                                    concat_rv[wsp] &= wtmp; concat_rm[wsp] &= wtmp
-                        for wi in range(WIDE_WORDS):
-                            wv[sp * WIDE_WORDS + wi] = concat_rv[wi]
-                            wm[sp * WIDE_WORDS + wi] = concat_rm[wi]
+                        # Mask the top word to w bits
+                        wsp = (w - 1) >> 6
+                        if wsp < WIDE_WORDS:
+                            bit_in_word = w & 63
+                            if bit_in_word > 0:
+                                wtmp = (1ULL << bit_in_word) - 1
+                                concat_rv[wsp] &= wtmp; concat_rm[wsp] &= wtmp
+                    for wi in range(WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = concat_rv[wi]
+                        wm[sp * WIDE_WORDS + wi] = concat_rm[wi]
                 wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0; stack[sp].width = w
             else:
                 wmask = mask_for_width(w)
-                if b.mask or a.mask:
+                if b.mask:
+                    # Shift amount unknown -> entire result is genuinely undetermined.
                     stack[sp].val = 0; stack[sp].mask = wmask
                 else:
+                    # Precise per-bit X propagation (IEEE 1364/1800 semantics):
+                    # only the sign bit's own (un)knownness determines whether the
+                    # vacated top bits become x, not "any x in a -> all x".
                     n = <int>b.val
-                    if w > 0 and (a.val >> (w - 1)) & 1:
-                        result_val = a.val - (1LL << w)
-                        result_val = result_val >> n
-                        stack[sp].val = result_val & wmask
+                    if w > 0:
+                        wtmp = (<unsigned long long>a.val >> (w - 1)) & 1ULL       # sign bit value
+                        ashr_sign_m = (<unsigned long long>a.mask >> (w - 1)) & 1ULL  # sign bit mask
                     else:
-                        stack[sp].val = (a.val >> n) & wmask
-                    stack[sp].mask = 0
+                        wtmp = 0
+                        ashr_sign_m = 0
+                    if n <= 0:
+                        stack[sp].val = a.val & wmask
+                        stack[sp].mask = a.mask & wmask
+                    elif n >= w:
+                        # Shift >= width: entire result is the sign bit replicated.
+                        if ashr_sign_m:
+                            stack[sp].val = 0; stack[sp].mask = wmask
+                        else:
+                            stack[sp].val = (wmask if wtmp else 0)
+                            stack[sp].mask = 0
+                    else:
+                        ashr_shifted_v = (<unsigned long long>a.val & <unsigned long long>wmask) >> n
+                        ashr_shifted_m = (<unsigned long long>a.mask & <unsigned long long>wmask) >> n
+                        ashr_fill_bits = ((1ULL << n) - 1) << (w - n)
+                        if ashr_sign_m:
+                            stack[sp].val = <long long>(ashr_shifted_v & <unsigned long long>wmask)
+                            stack[sp].mask = <long long>((ashr_shifted_m | ashr_fill_bits) & <unsigned long long>wmask)
+                        else:
+                            ashr_fill_v = ashr_fill_bits if wtmp else 0
+                            stack[sp].val = <long long>((ashr_shifted_v | ashr_fill_v) & <unsigned long long>wmask)
+                            stack[sp].mask = <long long>(ashr_shifted_m & <unsigned long long>wmask)
                 stack[sp].width = w; wflag[sp] = 0
             sp += 1
             continue

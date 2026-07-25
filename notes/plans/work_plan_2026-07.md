@@ -382,16 +382,53 @@ passed / 3 xfailed (only item 2.6's cross-engine `~` cases remain).
 `--run-slow`) green; 1207 shift-focused `--run-slow` cases green
 separately.
 
-### 2.4 Wide `OP_ASHR` precise X-propagation (M)
+### 2.4 Wide `OP_ASHR` precise X-propagation (M) ✅
 
-**Goal**: the existing, fully-specified plan in `notes/plans/x_prop_work.md`
-(replace the "any x → all x" bail-out in `_interp_fast.pyx` `OP_ASHR` with a
-precise shift-then-sign-fill of value and mask words; revert the matching
-workaround in `_gen_wide_section.py`). Follow that plan document verbatim —
-it lists affected tests and a completion checklist. Do it after 2.1/2.2 so
-the new suites guard the change.
-**Accept**: checklist in `x_prop_work.md` complete; delete or archive that
-plan file and remove the roadmap "Simulation" entry pointing at it.
+**Goal**: the existing, fully-specified plan in its own plan file
+(`x_prop_work.md`, formerly under `notes/plans/`, now removed — see Result
+below) (replace the "any x → all x" bail-out in `_interp_fast.pyx`
+`OP_ASHR` with a precise shift-then-sign-fill of value and mask words;
+revert the matching workaround in `_gen_wide_section.py`). Follow that plan
+document verbatim — it lists affected tests and a completion checklist. Do
+it after 2.1/2.2 so the new suites guard the change.
+**Accept**: checklist in that plan file complete; delete or archive it and
+remove the roadmap "Simulation" entry pointing at it.
+
+**Result** (July 2026): fixed in four places, not the one the plan named —
+`sim/evaluator.py` (reference) and `sim/vm/interpreter.py` (pure-Python VM)
+turned out to have their own separate copies of the same conservative bug
+(the plan only knew about `_interp_fast.pyx` and `_gen_wide_section.py`),
+found by checking the plan's own "confirm reference shares the VM's opcode
+path" step rather than assuming it. All four (plus `_gen_wide_section.py`'s
+`wide_ashr` revert) now use the same minimal fix:
+`(a.sign_extend(width + shift) >> shift).resize(width)` at the `Value`
+level, and the equivalent word-array version in the two Cython files.
+Added a narrow-path `>>>` X-propagation smoke test to
+`tests/test_sim/test_vm.py::TestXZPropagation` per the plan's optional
+checklist item.
+
+Along the way, fixing the VM surfaced a **real regression**: a separate
+hand-written fast-path template family in
+`sim/compiled/templates/{narrow_assign,narrow_stage}.pxi`
+(`_whole_*_sar_{op}_signal`, 30 functions, used for patterns like
+`$signed(a | b) >>> N`) had the identical conservative bail-out
+independently of `wide_ashr`, invisible until the VM became precise and
+started disagreeing with it. Fixed the same way — see
+`notes/known_issues.md` ("Wide/narrow arithmetic right shift (`>>>`)
+X-propagation") for the full account, including why `add`/`sub` variants
+of that family were deliberately left alone.
+
+Verifying the VM fix required building the Cython VM extension for the
+first time in this environment, which exposed ~45 additional pre-existing
+`vm-fast`-only failures (confirmed via `git stash` to predate this work) —
+see `notes/known_issues.md` ("Cython VM interpreter drift"), now
+considerably better-characterized than before. That's item 3.3's scope,
+not this item's.
+
+Full regression: 1218 `--run-slow` shift/ashr-focused `test_compiled.py`
+cases green; `tests/test_sim/test_vm.py` green; targeted checks against
+Icarus/Verilator-style hand oracles green for narrow/wide, shift ≥ width,
+shift = 0, and unknown-sign-bit cases across all four engines.
 
 ### 2.5 Split `test_compiled.py` by feature (M — mechanical)
 

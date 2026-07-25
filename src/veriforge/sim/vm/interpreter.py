@@ -474,7 +474,12 @@ class Interpreter:  # cm:e3f1b4
             if op == Op.ASHR:
                 b = s_pop()
                 a = s_pop()
-                # Arithmetic shift right (sign-extend)
+                # Arithmetic shift right (sign-extend). Only genuinely
+                # undetermined bits become x (IEEE 1364/1800 semantics) --
+                # not "any x in the source -> entire result is x". Extending
+                # a to (width+shift) bits sign-fills the top bits with
+                # correct x propagation from the sign bit; a plain logical
+                # shift of that then reproduces arithmetic-shift-right.
                 if isinstance(b, Value):
                     if b.mask:
                         s_append(Value.x(a.width))
@@ -482,12 +487,9 @@ class Interpreter:  # cm:e3f1b4
                     shift = b.val
                 else:
                     shift = b
-                if a.mask:
-                    s_append(Value.x(a.width))
-                    continue
-                signed_val = a.as_signed()
-                result = signed_val >> shift
-                s_append(Value(result, width=a.width))
+                width = a.width
+                extended = a.sign_extend(width + shift)
+                s_append((extended >> shift).resize(width))
                 continue
 
             # ── Comparison ───────────────────────────────────────

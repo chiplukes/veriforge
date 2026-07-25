@@ -797,18 +797,21 @@ def _eval_binary_op(op: str, left: Value, right: Value) -> Value:
     if op == "<<<":
         return left << right  # arithmetic shift left = logical shift left
     if op == ">>>":
-        # Arithmetic shift right (sign-extend)
+        # Arithmetic shift right (sign-extend). Only genuinely undetermined
+        # bits become x (IEEE 1364/1800 semantics) -- not "any x in the
+        # source -> entire result is x". Extending left to (width+shift)
+        # bits sign-fills the top bits with correct x propagation from the
+        # sign bit; a plain logical shift of that then reproduces
+        # arithmetic-shift-right.
         if isinstance(right, Value):
             if right.mask:
                 return Value.x(left.width)
             shift = right.val
         else:
             shift = right
-        if left.mask:
-            return Value.x(left.width)
-        signed_val = left.as_signed()
-        result = signed_val >> shift
-        return Value(result, width=left.width)
+        width = left.width
+        extended = left.sign_extend(width + shift)
+        return (extended >> shift).resize(width)
 
     # Comparison — returns 1-bit Value
     if op == "==":

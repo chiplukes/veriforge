@@ -3014,9 +3014,6 @@ cdef inline void _whole_stage_sar_sub_const_xor_signal(SimCtx *c, int dst_sid, i
     diff_val = (sub_val - sub_const) & sub_mask
     xor_val = (diff_val ^ xor_raw_val) & width_mask
     xor_mask = xor_raw_mask & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3051,9 +3048,6 @@ cdef inline void _whole_stage_sar_const_sub_xor_signal(SimCtx *c, int dst_sid, i
     diff_val = (sub_const - sub_val) & sub_mask
     xor_val = (diff_val ^ xor_raw_val) & width_mask
     xor_mask = xor_raw_mask & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3086,9 +3080,6 @@ cdef inline void _whole_stage_sar_mask_xor_signal(SimCtx *c, int dst_sid, int ma
     left_mask = _sig_py_mask(c, mask_sid) & mask_bits
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3121,9 +3112,6 @@ cdef inline void _whole_stage_sar_or_const_xor_signal(SimCtx *c, int dst_sid, in
     left_mask = _sig_py_mask(c, or_sid) & (width_mask ^ or_bits)
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3156,9 +3144,6 @@ cdef inline void _whole_stage_sar_xor_const_xor_signal(SimCtx *c, int dst_sid, i
     left_mask = _sig_py_mask(c, xor1_sid) & width_mask
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3193,9 +3178,6 @@ cdef inline void _whole_stage_sar_add_const_xor_signal(SimCtx *c, int dst_sid, i
     sum_val = (add_val + add_const) & add_mask
     xor_val = (sum_val ^ xor_raw_val) & width_mask
     xor_mask = xor_raw_mask & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3230,9 +3212,6 @@ cdef inline void _whole_stage_sar_xor_xor_signal(SimCtx *c, int dst_sid, int xor
     left_mask = (xor1_mask | xor2_mask) & width_mask
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3267,9 +3246,6 @@ cdef inline void _whole_stage_sar_or_xor_signal(SimCtx *c, int dst_sid, int or1_
     left_mask = ((or1_mask | or2_mask) & ~(or1_val & ~or1_mask) & ~(or2_val & ~or2_mask)) & width_mask
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3304,9 +3280,6 @@ cdef inline void _whole_stage_sar_and_xor_signal(SimCtx *c, int dst_sid, int and
     left_mask = ((and1_mask | and2_mask) & ~(~and1_val & ~and1_mask) & ~(~and2_val & ~and2_mask)) & width_mask
     xor_val = (left_val ^ xor_raw_val) & width_mask
     xor_mask = (left_mask | xor_raw_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3342,9 +3315,6 @@ cdef inline void _whole_stage_sar_add_xor_signal(SimCtx *c, int dst_sid, int add
     sum_val = (add1_val + add2_val) & add_mask
     xor_val = (sum_val ^ xor_raw_val) & width_mask
     xor_mask = xor_raw_mask & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3380,9 +3350,6 @@ cdef inline void _whole_stage_sar_sub_xor_signal(SimCtx *c, int dst_sid, int sub
     diff_val = (sub1_val - sub2_val) & sub_mask
     xor_val = (diff_val ^ xor_raw_val) & width_mask
     xor_mask = xor_raw_mask & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
@@ -3440,9 +3407,6 @@ cdef inline void _whole_stage_sar_and_signal(SimCtx *c, int dst_sid, int lhs_sid
     rhs_mask = _sig_py_mask(c, rhs_sid)
     and_val = (lhs_val & rhs_val) & width_mask
     and_mask = ((lhs_mask | rhs_mask) & ~(~lhs_val & ~lhs_mask) & ~(~rhs_val & ~rhs_mask)) & width_mask
-    if and_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = and_val & sign_bit
     sign_is_unknown = and_mask & sign_bit
@@ -3472,9 +3436,6 @@ cdef inline void _whole_stage_sar_or_signal(SimCtx *c, int dst_sid, int lhs_sid,
     rhs_mask = _sig_py_mask(c, rhs_sid)
     or_val = (lhs_val | rhs_val) & width_mask
     or_mask = ((lhs_mask | rhs_mask) & ~(lhs_val & ~lhs_mask) & ~(rhs_val & ~rhs_mask)) & width_mask
-    if or_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = or_val & sign_bit
     sign_is_unknown = or_mask & sign_bit
@@ -3504,9 +3465,6 @@ cdef inline void _whole_stage_sar_xor_signal(SimCtx *c, int dst_sid, int lhs_sid
     rhs_mask = _sig_py_mask(c, rhs_sid)
     xor_val = (lhs_val ^ rhs_val) & width_mask
     xor_mask = (lhs_mask | rhs_mask) & width_mask
-    if xor_mask != 0:
-        _whole_stage_all_x(c, dst_sid)
-        return
     sign_bit = (<object>1) << (result_width - 1)
     sign_is_one = xor_val & sign_bit
     sign_is_unknown = xor_mask & sign_bit
