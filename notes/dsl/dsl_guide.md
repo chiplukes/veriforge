@@ -1031,7 +1031,9 @@ axis = top.wire_interface("axis", axi_stream)
 
 ### Instance Connections with `port_map()`
 
-The `port_map()` method returns a dict suitable for `**` expansion:
+`port_map(prefix=None)` returns a `{"prefix_signame": Signal, ...}` dict —
+one entry per signal the `Interface` template defined — suitable for `**`
+expansion into `ports={}`:
 
 ```python
 top.instance("producer", "i_prod", ports={
@@ -1045,8 +1047,80 @@ top.instance("consumer", "i_cons", ports={
 })
 ```
 
-When called without arguments, `port_map()` uses its own prefix.
-Pass a different prefix to match the target instance's port names.
+**Prefix override.** `port_map()` defaults to the `BoundInterface`'s own
+bound prefix (the first argument to `m.interface()`/`m.wire_interface()`).
+That's only correct when the target instance's port names happen to match.
+For an internal bus wired between two *different* instances, the same
+`axis` object above is passed to `port_map("m_axis")` for the producer side
+and `port_map("s_axis")` for the consumer side — same signals, different
+prefix, because that's what each instance's own port names are.
+
+**Mixing bus-mapped and individually-mapped ports.** `ports={}` is a plain
+dict, and `m.instance()` doesn't know or care whether each entry came from
+`**port_map(...)` or was written by hand — so an instance with two buses
+(or one bus plus a handful of loose signals) can freely combine both
+styles in one call:
+
+```python
+m.instance("dual_stream_core", "u_x", ports={
+    "clk": clk,
+    "rst": rst,
+    **s_axis_bus.port_map("s_axis"),   # bus-mapped
+    "m_axis_tvalid": m_tvalid,          # individually mapped — e.g. this
+    "m_axis_tready": m_tready,          # side was never built as an
+    "m_axis_tdata":  m_tdata,           # Interface/BoundInterface, or has
+    "m_axis_tlast":  m_tlast,           # an asymmetric signal set (below)
+})
+```
+
+Later keys win in a dict literal, so you can also override *individual*
+signals from an otherwise bus-mapped connection in the same expression —
+useful for the asymmetric-signal case just below:
+
+```python
+ports={**bus.port_map("m_axis"), "m_axis_tlast": some_other_expr}
+```
+
+**No cross-validation — know the failure modes.** `m.instance()` does not
+check the `ports` dict against the target module's actual declared ports at
+all (`module_name` is just a string); it emits a named connection
+(`.port_name(signal)`) for every key you give it, full stop. Two ways this
+bites you if an `Interface`'s signal set doesn't exactly match a given
+instance's actual ports:
+
+- **Extra signal** (the `Interface` has a signal this instance's port list
+  doesn't): `port_map()` emits a connection to a port that doesn't exist.
+  Nothing catches this at DSL-build time — it only surfaces when the
+  emitted Verilog is elaborated by an external tool (or re-parsed by
+  `parse_file` for a round-trip check), as a "no such port" error.
+- **Missing signal** (this instance has a port the `Interface` doesn't
+  define): that port is simply absent from the connection list, which is
+  legal Verilog (an unlisted named port defaults to unconnected) but
+  silently leaves it floating — no error at all, just a dangling port.
+
+The mitigation is the same principle as [Parameterized
+Interfaces](#parameterized-interfaces) below: build each bus's `Interface`
+so its signal set matches *both* ends of that physical wire exactly (true
+by construction for most internal buses, since one instance's output
+literally drives the other's input). `dsl.lib.axi_stream`'s
+`axi_stream(data_width, *, tid_width=0, tdest_width=0, tuser_width=0)`
+already follows this: `tid`/`tdest`/`tuser` are only added to the
+`Interface` when their width is nonzero, so you control the exact optional
+signal set per call. It does not currently support `tkeep`/`tstrb` at all —
+if a design needs those, either extend `axi_stream()` locally (it's a
+~10-line function; `.signal("tkeep", width=data_width // 8, src="master")`
+following the same `if width > 0` pattern) or use the asymmetric override
+pattern below for the one instance that has them.
+
+For a genuinely **asymmetric bus** (say a width-adapter that drops `tkeep`
+on its output while everything upstream carries it), you can't use one
+uniform `port_map()` call for both connected instances — build the dict
+from the fuller side and drop what the other side lacks:
+
+```python
+ports = {**bus_w.port_map("m_axis")}
+del ports["m_axis_tkeep"]   # this instance's output has no tkeep port
+```
 
 ### Parameterized Interfaces
 
