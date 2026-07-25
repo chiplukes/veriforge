@@ -54,11 +54,17 @@ GitHub Actions runs two workflows:
 - **`ci.yml`** — runs on every push/PR to `main`:
   - **lint** job: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src/veriforge/ veriforge_lsp/`, `uv run python tools/check_overview.py`
   - **test** job (needs lint): fast test slice (parser/model/analysis/preprocessor/formatter) on Python 3.10/3.11/3.12/3.13
+  - **vm-equivalence** job (needs lint): builds the `_interp_fast` Cython
+    extension, then runs `tests/test_sim/test_vm.py` +
+    `tests/test_sim/test_bench_native.py` twice — once with the extension
+    built, once with `VERIFORGE_DISABLE_CYTHON_VM=1` — requiring both green.
+    This is the drift gate described in the sync policy above.
 - **`publish.yml`** — triggered by `v*` tags or `workflow_dispatch`; builds and publishes to PyPI via OIDC trusted publishing
 
 The compiled-engine suite is not exercised in CI — run
 `uv run pytest tests/test_sim/test_compiled.py -n auto --run-slow` locally
-before releases.
+before releases. (Work plan item 3.2, a scheduled `weekly.yml` workflow for
+this, has not landed yet.)
 
 ## 4. Project structure
 
@@ -97,6 +103,16 @@ VM behaviour use `["vm", "vm-fast"]`; for broader cross-validation use
 for the testing strategy.
 
 Not all steps are required for every construct; simple expressions may only need grammar + model + emitter + reference simulator.
+
+**Cython VM sync policy**: `sim/vm/_interp_fast.pyx` is a hand-written Cython
+reimplementation of `sim/vm/interpreter.py`'s opcode dispatch — it is not
+generated from it. Any change to `sim/vm/interpreter.py` or `sim/vm/opcodes.py`
+(new opcode, changed semantics, a bug fix) must land with the matching
+`_interp_fast.pyx` change in the *same commit*. CI builds the extension and
+runs the VM test selection twice — once with it built, once with
+`VERIFORGE_DISABLE_CYTHON_VM=1` — and requires both green, so a missed sync
+fails the build rather than silently drifting (see `notes/known_issues.md`
+for the history of drift this caught).
 
 ## 6. Cross-simulator validation (cosim)
 

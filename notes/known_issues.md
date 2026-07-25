@@ -52,57 +52,41 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ### Cython VM interpreter drift (vm-fast engine)
 
-**Status**: Open — re-verified July 2026 (work plan item 2.4 incidentally
-built the extension for the first time in this environment); scope is
-larger than previously known, see confirmed symptoms below
+**Status**: Resolved (July 2026, work plan item 3.3). CI now builds the
+extension and runs the VM test selection twice — with it built, and with
+`VERIFORGE_DISABLE_CYTHON_VM=1` forcing the pure-Python path — requiring
+both green, so future drift fails the build instead of being silently
+masked (see `notes/developer_guide.md` §5, "Cython VM sync policy").
 
-The Cython VM extension (`sim/vm/_interp_fast.pyx`) has drifted from the
-pure-Python interpreter and was last observed failing ~18 tests under
-`tests/test_sim/test_bench_native.py` (memory read-after-write divergence).
-The `vm-fast` engine silently falls back to pure Python when the extension is
-not built, so environments without the built extension are unaffected.
-Workarounds: set `VERIFORGE_DISABLE_CYTHON_VM=1` or delete the built
-`_interp_fast.*.pyd`/`.so`. Before relying on `vm-fast` with the extension
-built, re-run that test file to confirm current status.
+Root causes found and fixed in `_interp_fast.pyx`:
 
-**Additional confirmed symptoms** (found incidentally July 2026 while working
-work plan item 2.4, with the extension built for the first time in this
-environment — unrelated to that item's `OP_ASHR` fix; every symptom below
-was confirmed to reproduce identically on both the pre- and post-2.4 source
-via `git stash`, so none of it is a 2.4 regression):
+- **Memory read-after-write divergence** (`tests/test_sim/test_bench_native.py`,
+  ~18 failures) — fixed to match `sim/vm/interpreter.py`'s memory NBA
+  handling.
+- **Narrow-path (<=64-bit) signed/unsigned C-arithmetic bugs** — several
+  opcodes compared/shifted/divided `a.val`/`b.val` as signed `long long`
+  instead of casting to `unsigned long long` first, so any 64-bit value with
+  the MSB set (stored as a negative two's-complement `long long`) produced
+  wrong results under Verilog's unsigned semantics: `OP_CMP_LT`/`LE`/`GT`/`GE`,
+  `OP_SHR` (was also sign-extending instead of logical-shifting), `OP_DIV`,
+  `OP_MOD`. (The signed variants — `OP_CMP_SLT` etc., `OP_SDIV`/`OP_SMOD` —
+  already sign-extended correctly and were unaffected.)
+- **`OP_SHL`/`OP_SHR` shift-by->=64 wraparound** — C's `<<`/`>>` on a 64-bit
+  type is undefined for a shift count >= the type width (some platforms wrap
+  the count mod 64 instead of producing 0); added an explicit `b.val >= 64`
+  guard, mirroring the equivalent compiled-engine fix in item 2.3 Part B.
+- **`OP_SIGN_EXT` any-x-taints-sign-extension** — checked "any bit of the
+  operand is x" instead of specifically the sign bit, so an unrelated
+  unknown low bit would incorrectly X-contaminate the entire sign-extended
+  result. Also, the wide path (extending to >64 bits) was missing entirely —
+  the new upper bit(s) were silently left unfilled. Both fixed to check only
+  the sign bit (bit `width-1`), matching `Value.sign_extend`.
 
-- `tests/test_sim/test_compiled.py::TestNarrow64BitUnsignedOps` — 7
-  failures, all vm-fast-only, all involving 64-bit unsigned values with the
-  MSB set (`test_udiv_64bit_msb_set`, `test_lsr_64bit_ones_shift32`,
-  `test_lsr_64bit_msb_only_shift1`, `test_lsr_64bit_msb_only_shift63`,
-  `test_ult_64bit_small_less_than_msb`, `test_ugt_64bit_msb_set`,
-  `test_umod_64bit_msb_set`). Symptom: e.g. unsigned `1 < 0xFFFFFFFFFFFFFFFF`
-  (should be `1`) returns `0` on vm-fast only — looks like a 64-bit value
-  with the MSB set is being compared/shifted/divided as a signed
-  `long long` somewhere in `_interp_fast.pyx`'s narrow (<=64-bit) opcode
-  paths instead of being cast to `unsigned long long` first (the pattern
-  already used correctly elsewhere in the same file, e.g. `OP_SHR`'s wide
-  path and the narrow-path fixes in `_expr_emitter.py`/item 2.3).
-- `tests/test_sim/test_assignment_matrix.py` — 30 failures, all vm-fast-only,
-  all the signed-narrower-into-wider cases (`s*_to_s*`/`su*_to_su*`/
-  `scast*_to_scast*`, all four assignment kinds) at widths (4,8), (63,64),
-  (64,65), (65,80) — i.e. vm-fast's sign-extension-on-assignment appears to
-  have its own drift distinct from (and in addition to) the reference/vm
-  bug fixed as item 2.6.
-- `tests/test_sim/test_compiled_edge_shapes.py` — 8 failures, all vm-fast-only:
-  `seam63_shl64`, `seam63_shr64`, `seam64_shl64`, `seam64_shr64` (the same
-  shift-by-word-width wraparound class fixed for the *compiled* engine in
-  item 2.3 Part B — vm-fast has its own independent instance of this in
-  `_interp_fast.pyx`'s `OP_SHL`/`OP_SHR`, not yet fixed), `seam64_lt` (same
-  MSB-set comparison symptom as the `test_compiled.py` bullet above), and
-  `self_det_unary_neg_65_to_80_signed` (vm-fast disagrees with vm/reference
-  here too, on top of the already-tracked item 2.6 `~`-unsigned case).
-
-None of this was root-caused further — it's all item 3.3's territory (fix
-vm-fast, then gate the two VM selections in CI), not item 2.4's. Total:
-~45 additional vm-fast-only failures beyond the 7 already known, none
-visible unless the extension is actually built (this repo's default/CI
-state does not build it, so this was previously silently masked).
+These were found via `tests/test_sim/test_compiled.py::TestNarrow64BitUnsignedOps`,
+`tests/test_sim/test_assignment_matrix.py`, and
+`tests/test_sim/test_compiled_edge_shapes.py` (all vm-fast-only failures,
+confirmed pre-existing via `git stash` against item 2.4's commit, not a
+regression from that item's `OP_ASHR` fix).
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

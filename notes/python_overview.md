@@ -6,6 +6,7 @@
 src/veriforge/
 ├── __init__.py
 ├── _version.py           # Single source of truth for __version__; zero imports (safe for isolated builds)
+├── _env.py               # VERIFORGE_<suffix> env var reads with VERILOG_TOOLS_<suffix> legacy-prefix fallback
 ├── __main__.py           # CLI entry point
 ├── verilog_parser.py     # Main parser class (Layer 1)
 ├── preprocessor.py       # Verilog preprocessor (`define/`ifdef/`include/`timescale etc.)

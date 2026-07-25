@@ -46,3 +46,20 @@ jobs:
           tests/test_preprocessor/test_preprocessor.py
           tests/test_formatter/test_formatter.py
           --tb=short -q
+
+  vm-equivalence:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra test --extra bench
+      - run: uv run python setup_cython.py build_ext --inplace
+      - name: VM tests (Cython vm-fast extension built)
+        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_bench_native.py -n auto -q
+      - name: VM tests (pure-Python VM, extension disabled)
+        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_bench_native.py -n auto -q
+        env:
+          VERIFORGE_DISABLE_CYTHON_VM: "1"

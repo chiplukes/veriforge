@@ -512,6 +512,8 @@ cdef int _execute_core(
     cdef unsigned long long wtmp
     cdef unsigned long long ashr_sign_m  # OP_ASHR: sign bit's mask (1 = sign unknown)
     cdef unsigned long long ashr_shifted_v, ashr_shifted_m, ashr_fill_bits, ashr_fill_v  # OP_ASHR narrow path
+    cdef unsigned long long sx_sign_v, sx_sign_m, sx_fill_v, sx_fill_m, sx_fill_mask, sx_tail_mask  # OP_SIGN_EXT wide path
+    cdef int sx_fill_start_word, sx_fill_bit_in_word, sx_tail_word, sx_tail_bit
 
     cdef int pc = 0
     cdef int op, arg1
@@ -741,28 +743,83 @@ cdef int _execute_core(
             continue
 
         if op == OP_SIGN_EXT:
-            # Sign-extend TOS from a.width to arg1 bits
+            # Sign-extend TOS from a.width to arg1 bits. Only the *sign bit*
+            # (bit w-1) determines the fill for the new bits -- not "any bit
+            # of a is x" (that was the bug: it treated an unrelated unknown
+            # low bit as if the sign were unknown too, X-contaminating the
+            # extension). Matches sim/value.py's Value.sign_extend().
             a = stack[sp - 1]
             w = a.width
-            if arg1 <= w:
-                wmask = mask_for_width(arg1)
-                stack[sp - 1].val   = a.val & wmask & ~a.mask
-                stack[sp - 1].mask  = a.mask & wmask
-                stack[sp - 1].width = arg1
-            elif a.mask == 0:
-                if w > 0 and (a.val >> (w - 1)) & 1:
-                    # MSB is 1: fill bits [w, arg1-1] with 1
-                    wmask = mask_for_width(arg1) ^ mask_for_width(w)
-                    stack[sp - 1].val  = a.val | wmask
+            if arg1 <= 64 and not wflag[sp - 1]:
+                # Fully narrow (both source and result fit in the scalar
+                # stack fields): operate directly on val/mask.
+                if arg1 <= w:
+                    wmask = mask_for_width(arg1)
+                    stack[sp - 1].val   = a.val & wmask & ~a.mask
+                    stack[sp - 1].mask  = a.mask & wmask
+                    stack[sp - 1].width = arg1
                 else:
-                    stack[sp - 1].val  = a.val  # MSB=0: upper bits remain 0
-                stack[sp - 1].mask  = 0
-                stack[sp - 1].width = arg1
+                    wmask = mask_for_width(arg1) ^ mask_for_width(w)
+                    if w > 0 and ((a.mask >> (w - 1)) & 1):
+                        # Sign bit itself unknown: extension bits become x;
+                        # existing low-bit mask bits are preserved as-is.
+                        stack[sp - 1].val  = a.val
+                        stack[sp - 1].mask = a.mask | wmask
+                    elif w > 0 and ((a.val >> (w - 1)) & 1):
+                        # Sign bit known-1: fill extension bits with 1.
+                        stack[sp - 1].val  = a.val | wmask
+                        stack[sp - 1].mask = a.mask
+                    else:
+                        # Sign bit known-0 (or w==0): fill extension bits with 0.
+                        stack[sp - 1].val  = a.val
+                        stack[sp - 1].mask = a.mask
+                    stack[sp - 1].width = arg1
             else:
-                # Has X bits: extended bits become X (sign bit unknown)
-                wmask = mask_for_width(arg1) ^ mask_for_width(w)
-                stack[sp - 1].val   = a.val
-                stack[sp - 1].mask  = a.mask | wmask
+                # Result is wide (arg1 > 64), or the operand is already wide:
+                # work in the word-array (wv/wm) representation. If the
+                # operand was still narrow, promote it first (word 0 = its
+                # value/mask, rest zero -- the sign fill below corrects the
+                # upper words using the *original* width w to find the sign
+                # bit within word 0).
+                if not wflag[sp - 1]:
+                    wv[(sp - 1) * WIDE_WORDS] = <unsigned long long>a.val
+                    wm[(sp - 1) * WIDE_WORDS] = <unsigned long long>a.mask
+                    for wi in range(1, WIDE_WORDS):
+                        wv[(sp - 1) * WIDE_WORDS + wi] = 0
+                        wm[(sp - 1) * WIDE_WORDS + wi] = 0
+                if w > 0:
+                    wsp = (w - 1) >> 6
+                    bit_in_word = (w - 1) & 63
+                    sx_sign_v = (wv[(sp - 1) * WIDE_WORDS + wsp] >> bit_in_word) & 1ULL
+                    sx_sign_m = (wm[(sp - 1) * WIDE_WORDS + wsp] >> bit_in_word) & 1ULL
+                else:
+                    sx_sign_v = 0
+                    sx_sign_m = 0
+                sx_fill_v = 0 if sx_sign_v == 0 else <unsigned long long>-1
+                sx_fill_m = 0 if sx_sign_m == 0 else <unsigned long long>-1
+                sx_fill_start_word = w >> 6
+                sx_fill_bit_in_word = w & 63
+                for wi in range(sx_fill_start_word, WIDE_WORDS):
+                    sx_fill_mask = <unsigned long long>-1
+                    if wi == sx_fill_start_word and sx_fill_bit_in_word > 0:
+                        sx_fill_mask = sx_fill_mask & ~((1ULL << sx_fill_bit_in_word) - 1)
+                    wv[(sp - 1) * WIDE_WORDS + wi] = (wv[(sp - 1) * WIDE_WORDS + wi] & ~sx_fill_mask) | (sx_fill_v & sx_fill_mask)
+                    wm[(sp - 1) * WIDE_WORDS + wi] = (wm[(sp - 1) * WIDE_WORDS + wi] & ~sx_fill_mask) | (sx_fill_m & sx_fill_mask)
+                # Clear anything beyond arg1 bits (defensive -- callers should
+                # already size WIDE_WORDS to cover arg1).
+                sx_tail_word = (arg1 - 1) >> 6 if arg1 > 0 else 0
+                sx_tail_bit = arg1 & 63
+                if sx_tail_word < WIDE_WORDS:
+                    if sx_tail_bit > 0:
+                        sx_tail_mask = (1ULL << sx_tail_bit) - 1
+                        wv[(sp - 1) * WIDE_WORDS + sx_tail_word] &= sx_tail_mask
+                        wm[(sp - 1) * WIDE_WORDS + sx_tail_word] &= sx_tail_mask
+                    for wi in range(sx_tail_word + 1, WIDE_WORDS):
+                        wv[(sp - 1) * WIDE_WORDS + wi] = 0
+                        wm[(sp - 1) * WIDE_WORDS + wi] = 0
+                wflag[sp - 1] = 1
+                stack[sp - 1].val   = 0
+                stack[sp - 1].mask  = 0
                 stack[sp - 1].width = arg1
             continue
 
@@ -1230,7 +1287,11 @@ cdef int _execute_core(
                 stack[sp].val = <long long>wv[sp * WIDE_WORDS]
                 stack[sp].mask = 0; stack[sp].width = w
             else:
-                stack[sp].val = (a.val // b.val) & wmask
+                # Unsigned division: a.val/b.val are signed `long long`, so a
+                # value with its MSB set would otherwise divide as negative
+                # (signed division is handled separately by OP_SDIV, which
+                # sign-extends first).
+                stack[sp].val = <long long>((<unsigned long long>a.val // <unsigned long long>b.val) & <unsigned long long>wmask)
                 stack[sp].mask = 0
                 stack[sp].width = w
                 wflag[sp] = 0
@@ -1286,7 +1347,9 @@ cdef int _execute_core(
                 stack[sp].val = <long long>wv[sp * WIDE_WORDS]
                 stack[sp].mask = 0; stack[sp].width = w
             else:
-                stack[sp].val = (a.val % b.val) & wmask
+                # Unsigned modulo: see OP_DIV comment above for why the
+                # signed `long long` values must be cast to unsigned first.
+                stack[sp].val = <long long>((<unsigned long long>a.val % <unsigned long long>b.val) & <unsigned long long>wmask)
                 stack[sp].mask = 0
                 stack[sp].width = w
                 wflag[sp] = 0
@@ -1600,8 +1663,14 @@ cdef int _execute_core(
                 wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0; stack[sp].width = w
             else:
                 wmask = mask_for_width(w)
+                # A shift amount >= 64 must yield 0 (Verilog semantics), but
+                # a native C shift instruction only consults the low 6 bits
+                # of the count, so `x << 64` silently behaves like `x << 0`
+                # on a 64-bit word -- guard it explicitly.
                 if b.mask:
                     stack[sp].val = 0; stack[sp].mask = wmask
+                elif b.val >= 64:
+                    stack[sp].val = 0; stack[sp].mask = 0
                 elif a.mask:
                     stack[sp].val = (a.val << <int>b.val) & wmask
                     stack[sp].mask = (a.mask << <int>b.val) & wmask
@@ -1649,14 +1718,20 @@ cdef int _execute_core(
                         wm[sp * WIDE_WORDS + wi] = concat_rm[wi]
                 wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0; stack[sp].width = w
             else:
+                # Verilog >> is logical (zero-fill), but a.val is a signed
+                # long long, so a plain `>>` would arithmetic-shift (sign-fill)
+                # whenever the MSB is set -- cast to unsigned first. Also
+                # guard shift amount >= 64 (see OP_SHL for why).
                 if b.mask:
                     wmask = mask_for_width(w)
                     stack[sp].val = 0; stack[sp].mask = wmask
+                elif b.val >= 64:
+                    stack[sp].val = 0; stack[sp].mask = 0
                 elif a.mask:
-                    stack[sp].val = a.val >> <int>b.val
-                    stack[sp].mask = a.mask >> <int>b.val
+                    stack[sp].val = <long long>(<unsigned long long>a.val >> <int>b.val)
+                    stack[sp].mask = <long long>(<unsigned long long>a.mask >> <int>b.val)
                 else:
-                    stack[sp].val = a.val >> <int>b.val
+                    stack[sp].val = <long long>(<unsigned long long>a.val >> <int>b.val)
                     stack[sp].mask = 0
                 stack[sp].width = w; wflag[sp] = 0
             sp += 1
@@ -1921,7 +1996,12 @@ cdef int _execute_core(
             if a.mask or b.mask:
                 stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
             else:
-                stack[sp].val = 1 if a.val < b.val else 0
+                # Unsigned comparison: a.val/b.val are signed `long long`, so
+                # a value with its MSB set (e.g. a 64-bit value >= 2**63) is
+                # stored as a negative container -- compare the unsigned
+                # reinterpretation, not the signed one (signed comparisons
+                # go through OP_CMP_SLT and already sign-extend correctly).
+                stack[sp].val = 1 if <unsigned long long>a.val < <unsigned long long>b.val else 0
                 stack[sp].mask = 0; stack[sp].width = 1
             sp += 1; continue
 
@@ -1931,7 +2011,7 @@ cdef int _execute_core(
             if a.mask or b.mask:
                 stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
             else:
-                stack[sp].val = 1 if a.val <= b.val else 0
+                stack[sp].val = 1 if <unsigned long long>a.val <= <unsigned long long>b.val else 0
                 stack[sp].mask = 0; stack[sp].width = 1
             sp += 1; continue
 
@@ -1941,7 +2021,7 @@ cdef int _execute_core(
             if a.mask or b.mask:
                 stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
             else:
-                stack[sp].val = 1 if a.val > b.val else 0
+                stack[sp].val = 1 if <unsigned long long>a.val > <unsigned long long>b.val else 0
                 stack[sp].mask = 0; stack[sp].width = 1
             sp += 1; continue
 
@@ -1951,7 +2031,7 @@ cdef int _execute_core(
             if a.mask or b.mask:
                 stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
             else:
-                stack[sp].val = 1 if a.val >= b.val else 0
+                stack[sp].val = 1 if <unsigned long long>a.val >= <unsigned long long>b.val else 0
                 stack[sp].mask = 0; stack[sp].width = 1
             sp += 1; continue
 

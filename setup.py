@@ -6,12 +6,14 @@ Cython is available.  If Cython is not present, the package still installs as
 pure Python — the VM scheduler transparently falls back to the Python
 interpreter (`vm_scheduler._HAS_CYTHON = False`).
 
-NOTE (known issue): the Cython VM has drifted from the pure-Python interpreter
-and currently fails ~18 tests under `tests/test_sim/test_bench_native.py`
-(memory read-after-write divergence).  Users who hit those failures can set
-the environment variable `VERIFORGE_DISABLE_CYTHON_VM=1` or delete the
-built `_interp_fast.*.pyd`/`.so` to force the pure-Python path.  See
-`notes/simulation/simulator_engines.md` and `notes/known_issues.md` for status.
+The Cython VM's drift from the pure-Python interpreter (memory
+read-after-write divergence, plus a batch of narrow-path signed/unsigned
+opcode bugs) was fixed in work plan item 3.3 (July 2026) and is now gated in
+CI by running the VM test selection twice — once with the extension built,
+once with `VERIFORGE_DISABLE_CYTHON_VM=1` — and requiring both green. Any
+change to `sim/vm/interpreter.py` or `sim/vm/opcodes.py` must land with the
+matching `_interp_fast.pyx` change in the same commit; see
+`notes/developer_guide.md` §5 and `notes/simulation/simulator_engines.md`.
 """
 
 from __future__ import annotations

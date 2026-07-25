@@ -645,6 +645,29 @@ useful form).
    the drift entry).
 **Accept**: both runs in step 4 green in CI; known_issues updated.
 
+**Result** (July 2026): Done. The originally-documented ~18-failure memory
+read-after-write drift (step 2) was already fixed in a prior session without
+the docs being updated — `test_bench_native.py` ran clean before any new work
+started here. The real remaining drift, found via item 2.4's incidental
+first build of the extension in this environment, was a batch of narrow-path
+(<=64-bit) signed-vs-unsigned C-arithmetic bugs in `_interp_fast.pyx`:
+`OP_CMP_LT`/`LE`/`GT`/`GE` and `OP_SHR` compared/shifted `a.val`/`b.val` as
+signed `long long` instead of casting to `unsigned long long` first (any
+64-bit value with the MSB set misbehaved); `OP_DIV`/`OP_MOD` had the same
+signed-vs-unsigned bug; `OP_SHL`/`OP_SHR` didn't guard against shift counts
+>= 64 (undefined C behavior); `OP_SIGN_EXT` checked "any bit is x" instead of
+specifically the sign bit, and was missing its wide-path (>64-bit) branch
+entirely. All fixed to match `sim/vm/interpreter.py`'s Python-level (already
+correct) semantics. Verified via `test_vm.py`, `test_assignment_matrix.py`,
+`test_compiled_edge_shapes.py` (vm-fast previously 41/8/7 failures
+respectively → 0), `test_compiled.py --run-slow` (4728 passed, 2 known
+xfailed), and `test_bench_native.py` (434 passed). Added a `vm-equivalence`
+job to `ci.yml` (not `weekly.yml`, which doesn't exist yet — item 3.2 is not
+scheduled) that builds the extension and runs the VM selection twice with
+`-n auto`, gating both the built-extension and
+`VERIFORGE_DISABLE_CYTHON_VM=1` paths. Sync policy added to
+`developer_guide.md` §5; `setup.py` docstring and `known_issues.md` updated.
+
 ### 3.4 Randomized differential harness (M)
 
 **Goal**: generated cross-engine conformance testing
