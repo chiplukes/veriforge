@@ -666,7 +666,15 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
     # Ports that don't have a matching net/var declaration need a signal too
     for port in sub.ports:
         if port.name not in seen:
-            flat.nets.append(Net(f"{prefix}.{port.name}", NetKind.WIRE, width=port.width, dimensions=port.dimensions))
+            flat.nets.append(
+                Net(
+                    f"{prefix}.{port.name}",
+                    NetKind.WIRE,
+                    width=port.width,
+                    signed=port.signed,
+                    dimensions=port.dimensions,
+                )
+            )
 
 
 def _pre_apply_param_overrides(flat: Module, inst: Instance, sub: Module) -> Module:

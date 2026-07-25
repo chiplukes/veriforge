@@ -131,3 +131,44 @@ operand width. If the primitive uses this parameter for masking, this is the sam
 class of bug that was fixed in the narrow-path `_emit_unary` (May 2026). No
 failing test exercises it yet — a triggering case requires a >64-bit unary
 expression evaluated in a strictly wider context.
+
+### Compiled engine: narrow blocking/nonblocking bare assignment drops the x-mask
+
+**Status**: Open — exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail)
+**Found**: July 2026, work plan item 2.1 (cross-engine assignment-semantics matrix)
+
+`b = a;` (blocking, in `always @(*)`) or `b <= a;` (non-blocking, in
+`always @(posedge clk)`) loses the x-mask on the compiled engine whenever
+**both** `a` and `b` are 64 bits or narrower (the single-word/"narrow-path"
+codegen). Driving `a` with any x-contaminated bit and settling leaves `b`
+fully-defined (mask forced to 0) instead of propagating the x bit(s).
+Continuous assigns (`assign b = a;`) and port connections (which lower to
+continuous assigns during flattening) are unaffected — only the narrow-path
+procedural-assignment codegen drops the mask. Cases where either side is
+wider than 64 bits are also unaffected (they use a different, correctly
+mask-propagating wide-path codegen).
+
+Reproduce:
+
+```python
+sim.drive("a", Value(0, width=8, mask=1))  # a[0] is x
+sim.settle()
+sim.read("b")  # compiled: 8'b00000000 (wrong); reference/vm: 8'b0000000x (correct)
+```
+
+### Compiled engine: wide-emitter sign-extension wrong for the 65->80 width pair
+
+**Status**: Open — exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail)
+**Found**: July 2026, work plan item 2.1 (cross-engine assignment-semantics matrix)
+
+Assigning a declared-signed (or `$signed()`-cast) 65-bit value into an
+80-bit target zero-extends instead of sign-extending, on the compiled
+engine only, and only for this specific (65, 80) width pair — every kind
+tested (continuous assign, blocking, non-blocking, port connection) is
+affected. Other width pairs that also cross the 64-bit word boundary
+((63,64), (64,65), (64,63), (65,64), (80,65)) sign-extend correctly, so this
+looks like a narrow gap in the wide-emitter's sign-extension fill logic
+specifically for a src/dst pair that both occupy two 64-bit words (65 bits:
+1 full word + 1 bit; 80 bits: 1 full word + 16 bits) rather than a general
+word-count issue. Not yet root-caused beyond that; likely in the same
+`_wide_emitter.py` family as the wide-emitter unary masking bug above.

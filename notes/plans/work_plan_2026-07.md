@@ -171,7 +171,7 @@ fails if the fallback wiring is commented out (verify once locally).
 
 ## Tier 2 — Test infrastructure (do before engine bug-fixing)
 
-### 2.1 Cross-engine assignment-semantics matrix (M)
+### 2.1 Cross-engine assignment-semantics matrix (M) ✅
 
 **Goal**: enumerate the recent bug class — size-mismatched and
 signed↔unsigned assignment — across all engines
@@ -223,6 +223,15 @@ keep compile count ≈ 36, not 500.
 `uv run pytest tests/test_sim/test_assignment_matrix.py -n 4 -q`. Any
 compiled failures are real bugs: file them in `notes/known_issues.md` and
 xfail (strict) with a comment rather than weakening the oracle.
+
+**Result** (July 2026): 648 cases (162 matrix cells × 4 engines); 589
+pass, 59 strict-xfail on compiled (two root causes, both filed in
+`notes/known_issues.md`: narrow-path blocking/nonblocking x-mask loss, and
+wide-emitter sign-extension wrong for the 65→80 width pair specifically).
+The matrix also caught a cross-engine bug in shared elaboration code
+(`elaborate.py::_create_prefixed_signals` dropped `signed` on a child's
+implicit port net), which was fixed directly rather than xfailed since it
+affected the reference engine itself.
 
 ### 2.2 Compiled-engine edge-case suites (M)
 
