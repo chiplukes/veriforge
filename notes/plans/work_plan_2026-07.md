@@ -289,44 +289,85 @@ below); (4) unrelated: compiled's narrow-path shift by exactly the word
 width (64) is a no-op instead of yielding 0, at widths 63/64 (not 65).
 **Item 2.3 below must be rewritten before it is executed.**
 
-### 2.3 Fix the latent wide unary masking bug (S — after 2.2 §4) — ⚠️ fix direction below is WRONG, see note
+### 2.3 Fix compiled-only unary/shift codegen bugs found in 2.2 (S)
 
-> **July 2026 correction**: item 2.2's work found that the IEEE citation
-> below is backwards — unary `-`/`~` are *context-determined*, not
-> self-determined, as the top-level RHS of an assignment (verified against
-> Icarus Verilog and Verilator; see `notes/known_issues.md`, "Unary `-`/`~`
-> are context-determined, not self-determined"). **`dst_width` is the
-> width-correct choice already in the code below; do NOT change it to
-> `op_width`.** The real bug in this exact code path is that it doesn't
-> respect `a`'s *declared signedness* when extending it to `dst_width` (it
-> always zero-extends). The narrow-path `_emit_unary` fix from May 2026
-> that this item's Steps say to "mirror" is itself the same
-> wrongly-self-determined behavior found on reference/vm/vm-fast/
-> compiled-narrow in 2.2 — do not mirror it; it needs its own, separate fix.
-> Steps 1–3 below are kept for history but must not be followed as written.
-> Re-scope this item against the four bugs listed in 2.2's Result above
-> before starting.
+**Goal**: architecture review item 8, rescoped July 2026 after 2.2 found the
+original diagnosis (IEEE self-determined citation) was backwards — see the
+"Unary `-`/`~` are context-determined, not self-determined" entry in
+`notes/known_issues.md` for the full truth table and Icarus/Verilator
+verification. This item covers only the two bugs below that are contained
+to the compiled engine (bugs 3 and 4 from 2.2's Result note); the
+cross-engine `~` bug (1/2 from that note) is item **2.6**, not this item —
+do not attempt to fix it here, it needs its own phased, full-regression
+approach since it touches the reference engine.
 
-**Goal**: architecture review item 8. In
-`src/veriforge/sim/compiled/_wide_emitter.py` (~line 3590), `wide_not`/
-`wide_neg` receive `dst_width` as their final (tail-mask) parameter, but per
-IEEE Table 5-22 unary `~`/`-` are self-determined to the *operand* width;
-`op_width` is already computed in scope at ~line 3585.
-**Steps** (superseded — see correction above):
-1. Confirm the failing test from 2.2 §4 exists and fails (if it does not
-   fail, the primitive doesn't use the parameter for masking — investigate
-   `wide_not`/`wide_neg` definitions in the `.pxi` templates or generated
-   primitives in `_gen_wide_section.py` before changing anything, and record
-   the finding in the test's docstring instead).
-2. ~~Change the emitted call to pass `op_width`~~ do not do this (see
-   correction above); then ensure the result is extended to `dst_width`:
-   after the primitive call, zero any words between `ceil(op_width/64)` and
-   `n_words` and mask the boundary word — mirror how the narrow-path
-   `_emit_unary` fix (May 2026) handled it; find that commit with
-   `git log --oneline -S"_emit_unary"`.
-3. Remove the corresponding entry from `notes/known_issues.md` ("wide-emitter
-   unary operator masking") once green.
-**Accept**: the 2.2 §4 cases pass on compiled;
+**Part A — wide unary path ignores declared signedness (S)**.
+In `src/veriforge/sim/compiled/_wide_emitter.py`, the `UnaryOp` handler for
+`~`/`-` (~line 3574–3594) emits the operand into scratch at its own
+`op_width` (line 3586: `self._emit_wide_expr_to_scratch(expr.operand,
+op_slot, n_words, op_width, indent)`), then calls `wide_not`/`wide_neg`
+passing `n_words`/`dst_width` (line 3591) — the primitive has no way to
+know the operand's signedness, so it always fills the extension words with
+zero. This file never calls `self._expr_signed()` anywhere (grep confirms),
+so signedness genuinely isn't consulted in this path at all.
+**Steps**:
+1. When `op_width < dst_width` and `self._expr_signed(expr.operand)` is
+   true, sign-extend the operand's scratch buffer from `op_width` to
+   `dst_width` *before* the `wide_not`/`wide_neg` call (there's no existing
+   wide-scratch sign-extend helper in this file — check
+   `_emit_wide_expr_to_scratch`'s width-handling and the `BinaryOp` sign-
+   extension logic elsewhere in this file for the pattern to mirror, e.g.
+   fill words between `ceil(op_width/64)` and `ceil(dst_width/64)` with
+   all-1s and mask the boundary word when the operand's sign bit is 1, all-0
+   when it's 0 — same shape as the narrow-path `_sign_ext` helper's logic,
+   just over multiple words).
+2. When unsigned, behavior is already correct (verified in 2.2) — don't
+   change that path.
+3. Update `tests/test_sim/test_compiled_edge_shapes.py`: remove the
+   `_known_engine_bug` entries for `self_det_unary_not_65_to_80_signed` and
+   `self_det_unary_neg_65_to_80_signed` (they should now pass un-xfailed).
+4. Update `notes/known_issues.md`: remove bullet 3 ("wide unary path ignores
+   declared signedness entirely") from the "Unary `-`/`~` are
+   context-determined" entry once green; leave bullets 1/2 (item 2.6's
+   scope) in place.
+
+**Part B — narrow-path shift by exactly the word width (64) is a no-op (S)**.
+In `src/veriforge/sim/compiled/_expr_emitter.py::_emit_binary` (~line
+1149–1156), `>>` and `<<` emit a raw C shift
+(`<unsigned long long>(...) >> <unsigned long long>(...)` /
+`(<long long>(...)) << (...)`) with no guard for a shift amount >= 64; on
+x86-64 the native shift instruction only consults the low 6 bits of the
+count, so a runtime shift amount of exactly 64 silently behaves like 0 (the
+classic C undefined-behavior footgun). Verilog requires a shift amount >=
+the operand's width to produce an all-zero result.
+**Steps**:
+1. Wrap the two shift cases in a runtime guard, following this file's
+   existing `(0 if COND else EXPR)` idiom (e.g. line 782, 1116):
+   ```python
+   if expr.op == ">>":
+       core = f"(0 if ({right}) >= 64 else (<long long>(<unsigned long long>({left}) >> <unsigned long long>({right}))))"
+   elif expr.op in ("<<", "<<<"):
+       core = f"(0 if ({right}) >= 64 else ((<long long>({left})) {c_op} ({right})))"
+   ```
+   (`right` is already a parenthesized sub-expression string reused safely
+   elsewhere in this function; confirm it has no side effects before
+   duplicating it in the guard — it shouldn't, these are pure value exprs.)
+2. Check whether `>>>`  (arithmetic right shift, handled separately at line
+   1129–1133 via `_sign_ext`) has the same issue — a shift amount >= width
+   there should saturate to all sign-bit-fill, not wrap; add the same shape
+   of guard if a test shows it's wrong (write one first: `>>>` by 64 on a
+   64-bit signed all-1s-except-sign-bit-clear pattern, expect all-0; on a
+   sign-bit-set pattern, expect all-1s).
+3. Update `tests/test_sim/test_compiled_edge_shapes.py`: remove the
+   `_known_engine_bug` entries for `seam63_shl64`, `seam63_shr64`,
+   `seam64_shl64`, `seam64_shr64`.
+4. Update `notes/known_issues.md`: remove the "narrow-path shift by exactly
+   the word width (64) is a no-op" entry once green.
+
+**Accept**: the 6 now-un-xfailed cases in
+`tests/test_sim/test_compiled_edge_shapes.py` pass without their xfail
+marks (collection should show 0 xfailed if item 2.6 hasn't landed yet, since
+that item's 3 cases are unrelated — check the count matches);
 `uv run pytest tests/test_sim/test_compiled.py -q -n 4` no regressions.
 
 ### 2.4 Wide `OP_ASHR` precise X-propagation (M)
@@ -380,6 +421,98 @@ docs/notes by name).
    equal the count from step 1 (and with `--run-slow` likewise).
 **Accept**: identical collected counts; full compiled suite green locally
 (`-n 8`, per project convention); docs updated.
+
+### 2.6 Fix cross-engine unary `~` self-determined-width bug (M)
+
+**Goal**: found by item 2.2 (see its Result note and
+`notes/known_issues.md`, "Unary `-`/`~` are context-determined, not
+self-determined", bullets 1–2). Appended here out of numeric sequence
+rather than renumbering 2.4/2.5 — do this whenever convenient relative to
+2.4/2.5, there's no ordering dependency between them, but it's riskier than
+either (it changes reference-engine output) so treat it with the same care
+as item 3.3's VM-sync work: fix one engine, run the full suite, only then
+move to the next.
+
+**Verified bug** (Icarus Verilog + Verilator cross-checked): `~a`, used as
+the top-level RHS of an assignment to a wider target, is computed as
+self-determined (at `a`'s own width, extended afterward using `a`'s
+declared signedness) on reference, vm, and vm-fast, and on compiled's
+narrow (<=64-bit) path. This happens to equal the IEEE-correct
+context-determined result when `a` is signed (sign-extension commutes with
+bitwise complement) but is wrong when `a` is unsigned (zero-extension does
+not commute with complement — the correct extension bits are all-1, not
+all-0). Unary `-`/`+` are unaffected — they already extend the operand to
+context width before applying the operator, everywhere.
+
+**Fix locations** (three, not four — vm and vm-fast share one bytecode
+compiler, so fixing it fixes both engines):
+
+1. **Reference** — `src/veriforge/sim/evaluator.py`,
+   `ExpressionEvaluator.eval`, `UnaryOp` branch (~line 339–358). The `~`
+   case (line 344–346) evaluates the operand self-determined with no width
+   passed to `self.eval`; the `+`/`-` case right below it (line 347–355)
+   already does the right thing (passes `width` through, then
+   `sign_extend`/`resize` if `operand.width < width`). Merge `~` into that
+   same branch (`if expr.op in ("~", "+", "-"):`), keeping the final
+   `_eval_unary_op(expr.op, operand)` call for all three.
+2. **VM (fixes vm and vm-fast)** — `src/veriforge/sim/vm/compiler.py`,
+   the `UnaryOp` compile branch (~line 834–865). Same shape: the `~` case
+   (line 840–851) compiles the operand self-determined then emits
+   `SIGN_EXT`/`RESIZE` *after* the operator instruction; the `+`/`-` case
+   (line 853–865) compiles the operand with `width` passed in and extends
+   *before* the operator. Merge `~` into that branch the same way as (1).
+3. **Compiled narrow path** — `src/veriforge/sim/compiled/_expr_emitter.py`,
+   `_emit_unary` (~line 1167–1205). Same shape again: `~` (line 1179–1187)
+   computes at `ow` then wraps the whole result in `_sign_ext(..., ow)`
+   afterward if signed; `+`/`-` (line 1189–1199) compute the operand at
+   `max(ow, width)` and sign-extend the *operand* first. Merge `~` into
+   that branch.
+
+**Steps**:
+1. Characterize first (this class of bug warrants it — see item 4.2's
+   Phase A methodology): before changing code, write a small fixture of
+   `~a` cases (unsigned/signed, narrow/wide, various context widths) and
+   confirm each of the three locations above reproduces the exact
+   mis-behavior described, to rule out any other interacting factor.
+2. Existing-test audit already done (July 2026, before writing this item):
+   no test in the suite hardcodes the buggy self-determined value as an
+   "expected" result — every other `~`-on-unsigned-operand test either
+   evaluates `~a` directly with no wider context, or has the operand
+   already at the full context/target width (both cases make
+   self-determined == context-determined, so they can't be encoding the
+   bug). The one thing that *will* need updating is in this repo's own new
+   test file: `tests/test_sim/test_compiled_edge_shapes.py`'s
+   `self_det_unary_not_65_to_80_unsigned` case is `pytest.mark.xfail(strict=True)`
+   for engines `!= "compiled"` (via `_known_engine_bug`) — once reference/
+   vm/vm-fast are fixed those cases will XPASS, which `strict=True` turns
+   into a *failure* until the xfail is removed (that's step 6 below,
+   sequence matters: fix all three engines before running this file's
+   suite, or expect a transient failure). Also worth a sanity re-run (not
+   expected to break, deferred initial-value evaluation in `codegen.py`
+   should stay in sync automatically):
+   `tests/test_sim/test_compiled_latent_risks.py::test_initial_value_unary_matches_reference`.
+3. Fix (1) reference; run the full fast suite
+   (`uv run pytest tests/ --ignore=tests/test_sim/test_compiled.py -q -n 8`,
+   excluding the slow compiled suite) plus
+   `tests/test_sim/test_assignment_matrix.py` and
+   `tests/test_sim/test_compiled_edge_shapes.py`; fix any test from step 2
+   that breaks.
+4. Fix (2) vm/compiler.py (covers vm and vm-fast); full suite again
+   including `tests/test_sim/test_vm.py`, `test_bench_native.py`.
+5. Fix (3) compiled narrow path; full compiled suite
+   (`uv run pytest tests/test_sim/test_compiled.py -q -n 8`, plus
+   `--run-slow` if time allows) and `tests/test_sim/test_assignment_matrix.py`.
+6. Remove the `_known_engine_bug` entry for
+   `self_det_unary_not_65_to_80_unsigned` in
+   `tests/test_sim/test_compiled_edge_shapes.py` (and its
+   `skip_ref_crosscheck` flag, now unneeded) once all three engines agree
+   with the oracle.
+7. Update `notes/known_issues.md`: remove bullets 1–2 from the "Unary
+   `-`/`~` are context-determined" entry (or the whole entry, if 2.3 has
+   also landed by then) once green.
+**Accept**: all three engines match the context-determined oracle for `~`;
+full fast suite + compiled suite green; no test from step 2 left asserting
+the old (wrong) behavior.
 
 ---
 
