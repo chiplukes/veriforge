@@ -233,7 +233,7 @@ The matrix also caught a cross-engine bug in shared elaboration code
 implicit port net), which was fixed directly rather than xfailed since it
 affected the reference engine itself.
 
-### 2.2 Compiled-engine edge-case suites (M)
+### 2.2 Compiled-engine edge-case suites (M) ✅
 
 **Goal**: deterministic tests for the recent-bug-shaped gaps
 (functionality review §5 list). New file
@@ -273,24 +273,57 @@ as in 2.1 (known_issues + strict xfail, or fix if trivial). This file becomes
 the regression home for future compiled bugs: add the failing shape here
 before fixing.
 
-### 2.3 Fix the latent wide unary masking bug (S — after 2.2 §4)
+**Result** (July 2026): 92 cases × 4 engines = 368; 359 pass, 9 strict-xfail.
+Investigating family 4 turned up that the IEEE reading behind the existing
+"wide-emitter unary operator masking" known-issue (and item 2.3 below) was
+**backwards** — verified against both Icarus Verilog and Verilator, unary
+`-`/`~` are *context-determined*, not self-determined, when they are an
+assignment's top-level RHS. That reframes the bug into four independent,
+precisely-characterized ones (full detail, repro commands, and truth tables
+in `notes/known_issues.md`): (1) `~` is wrongly self-determined on
+reference/vm/vm-fast at all widths; (2) compiled's narrow (<=64-bit) path
+has the same `~` bug; (3) compiled's wide (>64-bit) unary path ignores
+declared signedness (always zero-extends before applying `~`/`-`) — this is
+what item 2.3 was actually about, but its fix direction was wrong (see
+below); (4) unrelated: compiled's narrow-path shift by exactly the word
+width (64) is a no-op instead of yielding 0, at widths 63/64 (not 65).
+**Item 2.3 below must be rewritten before it is executed.**
+
+### 2.3 Fix the latent wide unary masking bug (S — after 2.2 §4) — ⚠️ fix direction below is WRONG, see note
+
+> **July 2026 correction**: item 2.2's work found that the IEEE citation
+> below is backwards — unary `-`/`~` are *context-determined*, not
+> self-determined, as the top-level RHS of an assignment (verified against
+> Icarus Verilog and Verilator; see `notes/known_issues.md`, "Unary `-`/`~`
+> are context-determined, not self-determined"). **`dst_width` is the
+> width-correct choice already in the code below; do NOT change it to
+> `op_width`.** The real bug in this exact code path is that it doesn't
+> respect `a`'s *declared signedness* when extending it to `dst_width` (it
+> always zero-extends). The narrow-path `_emit_unary` fix from May 2026
+> that this item's Steps say to "mirror" is itself the same
+> wrongly-self-determined behavior found on reference/vm/vm-fast/
+> compiled-narrow in 2.2 — do not mirror it; it needs its own, separate fix.
+> Steps 1–3 below are kept for history but must not be followed as written.
+> Re-scope this item against the four bugs listed in 2.2's Result above
+> before starting.
 
 **Goal**: architecture review item 8. In
 `src/veriforge/sim/compiled/_wide_emitter.py` (~line 3590), `wide_not`/
 `wide_neg` receive `dst_width` as their final (tail-mask) parameter, but per
 IEEE Table 5-22 unary `~`/`-` are self-determined to the *operand* width;
 `op_width` is already computed in scope at ~line 3585.
-**Steps**:
+**Steps** (superseded — see correction above):
 1. Confirm the failing test from 2.2 §4 exists and fails (if it does not
    fail, the primitive doesn't use the parameter for masking — investigate
    `wide_not`/`wide_neg` definitions in the `.pxi` templates or generated
    primitives in `_gen_wide_section.py` before changing anything, and record
    the finding in the test's docstring instead).
-2. Change the emitted call to pass `op_width`; then ensure the result is
-   extended to `dst_width`: after the primitive call, zero any words between
-   `ceil(op_width/64)` and `n_words` and mask the boundary word — mirror how
-   the narrow-path `_emit_unary` fix (May 2026) handled it; find that commit
-   with `git log --oneline -S"_emit_unary"`.
+2. ~~Change the emitted call to pass `op_width`~~ do not do this (see
+   correction above); then ensure the result is extended to `dst_width`:
+   after the primitive call, zero any words between `ceil(op_width/64)` and
+   `n_words` and mask the boundary word — mirror how the narrow-path
+   `_emit_unary` fix (May 2026) handled it; find that commit with
+   `git log --oneline -S"_emit_unary"`.
 3. Remove the corresponding entry from `notes/known_issues.md` ("wide-emitter
    unary operator masking") once green.
 **Accept**: the 2.2 §4 cases pass on compiled;

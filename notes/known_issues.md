@@ -110,14 +110,79 @@ correctly. The remaining limitation is compiled-engine-specific.
 See `notes/plans/architecture_review_2026-07.md` and
 `notes/simulation/wide_signal_coverage.md` for status and potential approaches.
 
-### Compiled engine: wide-emitter unary operator masking (latent)
+### Unary `-`/`~` are context-determined, not self-determined (corrects the entry below)
 
-**Status**: Open — not yet exercised by any test
-**Found**: noted during May 2026 `_emit_unary` fix
+**Status**: Open — root-caused and precisely characterized July 2026 (work
+plan item 2.2); exercised by `tests/test_sim/test_compiled_edge_shapes.py`
+("self_det_unary_*" cases, strict xfail where wrong)
+**Supersedes**: the previous version of this entry (below, kept struck
+through for history) claimed, citing IEEE 1364-2005 Table 5-22, that unary
+`-`/`~` are *self-determined* to the operand's own width. That claim was
+verified WRONG against two independent, conformant tools (Icarus Verilog
+and Verilator): when `-a`/`~a` is the top-level RHS of an assignment to a
+wider target, both tools extend `a` to the **full assignment context
+width first** (using `a`'s own declared signedness), and only then apply
+the operator at that width — i.e. these operators are
+**context-determined** in this position, the same as binary `+`/`-`.
+(Table 5-22's "self-determined" row for these operators governs their use
+as *subexpressions* of a larger context-determined expression, not their
+use as the expression's own top-level operator — a distinction this
+codebase's implementations, and this note before it, got backwards.)
 
-In `_wide_emitter.py` (around line 3570), the `wide_not`/`wide_neg` primitive
+**Verified empirically** (see the reproduction commands below): for
+`reg [7:0] a; wire [15:0] y = -a;` / `~a`, real tools give `y=16'hFFFF` /
+`16'hFFFE` for `a=8'd1` — NOT `16'h00FF` / `16'h00FE`, which is what
+"self-determined" would predict.
+
+This changes the diagnosis for **item 2.3 of `notes/plans/work_plan_2026-07.md`
+("Fix the latent wide unary masking bug")**: as originally written, that
+item's fix (change `wide_not`/`wide_neg` to use `op_width` instead of
+`dst_width` for the tail mask) would make the compiled engine's wide-path
+(>64-bit) unary emitter **match the already-broken narrow-path/reference/vm
+behavior instead of fixing it** — `dst_width` is the width-correct choice.
+Item 2.3 must be rewritten before it is executed; see the plan file's own
+note on this item.
+
+**Four distinct, now-precisely-characterized bugs** (all found by generating
+the `self_det_unary_*_65_to_80_*` and `seam*_sh{l,r}64` cases in
+`tests/test_sim/test_compiled_edge_shapes.py` and cross-checking against
+Icarus/Verilator):
+
+1. **`~` is wrongly self-determined on reference, vm, and vm-fast** (all
+   widths, all three engines identically): `~a` is computed at `a`'s own
+   width, then extended using `a`'s *declared signedness* — which happens
+   to equal the correct context-determined result when `a` is signed (a
+   coincidence: sign-extension commutes with bitwise complement) but is
+   wrong when `a` is unsigned (zero-extension does not commute with
+   complement — the correct result has its extension bits all-1, not
+   all-0). Reproduce:
+   ```python
+   # module t(input [7:0] a, output [15:0] y); assign y = ~a;
+   # a = 8'd1 -> reference/vm/vm-fast give y=16'h00FE (wrong); correct is 16'hFFFE.
+   ```
+2. **Compiled's narrow (<=64-bit) unary path has the same bug as (1)** —
+   both `~` and (for reasons not yet isolated) apparently just `~`; `-` is
+   correct on the narrow path at all widths/signedness tested.
+3. **Compiled's wide (>64-bit) unary path ignores declared signedness
+   entirely** for both `~` and `-`: it always zero-extends the operand to
+   context width before applying the operator (which happens to be
+   *correct* when the operand is unsigned, but wrong when it is signed —
+   compiled then produces the same bit pattern as if the operand had been
+   unsigned).
+
+None of these three should be "fixed" by copying one engine's behavior to
+another — (1)/(2) and (3) are independent bugs in different code paths
+requiring independent fixes against the verified-correct (context-determined)
+semantics above, not against each other. (A fourth, unrelated bug found by
+the same test file — narrow-path shift by exactly 64 — is documented
+separately below.)
+
+<details>
+<summary>Original (incorrect) entry, kept for history</summary>
+
+~~In `_wide_emitter.py` (around line 3570), the `wide_not`/`wide_neg` primitive
 call passes `dst_width` (context width) as the tail-mask parameter rather than
-the operand width:
+the operand width:~~
 
 ```python
 lines.append(
@@ -126,11 +191,14 @@ lines.append(
 )
 ```
 
-Per IEEE 1364-2005 Table 5-22, unary `-` and `~` are self-determined to the
+~~Per IEEE 1364-2005 Table 5-22, unary `-` and `~` are self-determined to the
 operand width. If the primitive uses this parameter for masking, this is the same
-class of bug that was fixed in the narrow-path `_emit_unary` (May 2026). No
-failing test exercises it yet — a triggering case requires a >64-bit unary
-expression evaluated in a strictly wider context.
+class of bug that was fixed in the narrow-path `_emit_unary` (May 2026).~~ This
+premise was wrong (see above) — `dst_width` here is actually the width-correct
+choice; the real remaining bug is that this code path doesn't respect `a`'s
+declared signedness when extending it to `dst_width`.
+
+</details>
 
 ### Compiled engine: narrow blocking/nonblocking bare assignment drops the x-mask
 
@@ -172,3 +240,21 @@ specifically for a src/dst pair that both occupy two 64-bit words (65 bits:
 1 full word + 1 bit; 80 bits: 1 full word + 16 bits) rather than a general
 word-count issue. Not yet root-caused beyond that; likely in the same
 `_wide_emitter.py` family as the wide-emitter unary masking bug above.
+
+### Compiled engine: narrow-path shift by exactly the word width (64) is a no-op
+
+**Status**: Open — exercised by `tests/test_sim/test_compiled_edge_shapes.py`
+("seam63_shl64", "seam63_shr64", "seam64_shl64", "seam64_shr64", strict xfail)
+**Found**: July 2026, work plan item 2.2 (compiled-engine edge-case suites)
+
+`a << 64` and `a >> 64` on a <=64-bit signal (widths 63 and 64 both
+affected; width 65, which uses the wide/multi-word codegen path, is not)
+return `a` unchanged on the compiled engine instead of `0` (a shift amount
+equal to or greater than the operand's width must produce an all-zero
+result). This is the classic C/hardware undefined-behavior pattern where a
+native shift instruction only consults the low log2(word-bits) bits of the
+shift amount (e.g. x86 `SHL`/`SHR` use the count register's low 6 bits for
+a 64-bit operand), so shifting by exactly 64 silently becomes a shift by 0.
+The generated narrow-path shift code does not clamp/special-case shift
+amounts >= the word width before emitting the native shift. Reference, VM,
+and vm-fast are unaffected (Python's `<<`/`>>` have no such wraparound).
