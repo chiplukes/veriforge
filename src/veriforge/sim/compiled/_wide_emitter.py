@@ -3578,7 +3578,13 @@ class _WideEmitterMixin:
             if op == "+":
                 return self._emit_wide_expr_to_scratch(expr.operand, slot, n_words, dst_width, indent)
 
-            # Bitwise invert / negate — result has the same width as operand
+            # Bitwise invert / negate — operator applies at the context
+            # (dst_width) width per IEEE 1364-2005 (context-determined, not
+            # self-determined — see notes/known_issues.md). The operand must
+            # therefore be extended to dst_width *before* wide_not/wide_neg
+            # is applied: sign-extend if the operand is declared signed,
+            # otherwise the existing zero-padding from
+            # _emit_wide_expr_to_scratch's leaf cases is already correct.
             if op in {"~", "-"}:
                 prim = "wide_not" if op == "~" else "wide_neg"
                 op_slot = self._alloc_scratch()
@@ -3587,6 +3593,8 @@ class _WideEmitterMixin:
                 if lines is None:
                     self._free_scratch(op_slot)
                     return None
+                if op_width < dst_width and self._expr_signed(expr.operand):
+                    lines.append(f"{pad}wide_sign_extend(_sc{op_slot}_v, _sc{op_slot}_m, {n_words}, {op_width})")
                 lines.append(
                     f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, {n_words}, {dst_width})"
                 )

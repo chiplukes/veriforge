@@ -1125,12 +1125,14 @@ class _ExprEmitterMixin:
             return f"(<unsigned long long>pow(<double>({left}), <double>({right}))) & wmask({width})"
 
         # Arithmetic right shift: preserve the signed operand width before
-        # truncating to the surrounding assignment width.
+        # truncating to the surrounding assignment width. A shift amount
+        # >= 64 must saturate to the sign bit replicated across all bits
+        # (0 if non-negative, -1/all-ones if negative) rather than wrap —
+        # same native-shift-instruction footgun as the `>>`/`<<` guard above.
         if c_op == ">>_ARITH":
-            if self._expr_signed(expr.left):
-                signed_width = self._expr_width(expr.left)
-                return f"(_sign_ext({left}, {signed_width}) >> ({right})) & wmask({width})"
-            return f"(_sign_ext({left}, {width}) >> ({right})) & wmask({width})"
+            signed_width = self._expr_width(expr.left) if self._expr_signed(expr.left) else width
+            sx = f"_sign_ext({left}, {signed_width})"
+            return f"((0 if ({sx}) >= 0 else -1) if ({right}) >= 64 else (({sx}) >> ({right}))) & wmask({width})"
 
         if expr.op in _COMPARISON_OPS:
             # Signed relational comparison: both operands must be sign-extended
@@ -1148,12 +1150,16 @@ class _ExprEmitterMixin:
 
         # Logical right shift: Verilog >> is unsigned (zero-fill).  Cython's >>
         # on long long is arithmetic (sign-extends MSB), so cast to unsigned.
+        # A shift amount >= 64 must yield 0 (Verilog semantics), but the
+        # native C shift instruction only consults the low 6 bits of the
+        # count, so `x >> 64` / `x << 64` silently behave like `x >> 0` /
+        # `x << 0` on a 64-bit word — guard it explicitly.
         if expr.op == ">>":
-            core = f"(<long long>(<unsigned long long>({left}) >> <unsigned long long>({right})))"
+            core = f"(0 if ({right}) >= 64 else (<long long>(<unsigned long long>({left}) >> <unsigned long long>({right}))))"
         # For left-shift, promote left operand to long long to avoid
         # C int overflow when small literal << large shift (e.g. 4095 << 20).
         elif expr.op in ("<<", "<<<"):
-            core = f"((<long long>({left})) {c_op} ({right}))"
+            core = f"(0 if ({right}) >= 64 else ((<long long>({left})) {c_op} ({right})))"
         elif expr.op in ("/", "%") and not self._expr_signed(expr.left) and not self._expr_signed(expr.right):
             # Unsigned division/modulus: cast both sides to avoid signed C behavior
             # on 64-bit values with MSB=1 stored as negative long long.

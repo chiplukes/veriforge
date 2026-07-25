@@ -289,7 +289,7 @@ below); (4) unrelated: compiled's narrow-path shift by exactly the word
 width (64) is a no-op instead of yielding 0, at widths 63/64 (not 65).
 **Item 2.3 below must be rewritten before it is executed.**
 
-### 2.3 Fix compiled-only unary/shift codegen bugs found in 2.2 (S)
+### 2.3 Fix compiled-only unary/shift codegen bugs found in 2.2 (S) ✅
 
 **Goal**: architecture review item 8, rescoped July 2026 after 2.2 found the
 original diagnosis (IEEE self-determined citation) was backwards — see the
@@ -369,6 +369,18 @@ the operand's width to produce an all-zero result.
 marks (collection should show 0 xfailed if item 2.6 hasn't landed yet, since
 that item's 3 cases are unrelated — check the count matches);
 `uv run pytest tests/test_sim/test_compiled.py -q -n 4` no regressions.
+
+**Result** (July 2026): both parts landed. Part A: added a `wide_sign_extend`
+primitive to `_gen_wide_section.py` (mirrors `wide_ashr`'s sign-fill logic)
+and call it from `_wide_emitter.py`'s `UnaryOp` handler before `wide_not`/
+`wide_neg` when the operand is signed and narrower than the context width.
+Part B: guarded `>>`, `<<`, and `>>>` (which had the same bug, found while
+verifying Part B per the plan's step 2) in `_expr_emitter.py::_emit_binary`
+against a >=64 shift amount. `test_compiled_edge_shapes.py` now shows 365
+passed / 3 xfailed (only item 2.6's cross-engine `~` cases remain).
+`uv run pytest tests/test_sim/test_compiled.py -q -n 8` (full, not
+`--run-slow`) green; 1207 shift-focused `--run-slow` cases green
+separately.
 
 ### 2.4 Wide `OP_ASHR` precise X-propagation (M)
 

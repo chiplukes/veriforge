@@ -156,6 +156,35 @@ class _GenWideSectionsMixin:
             "",
         ]
 
+        # ── wide_sign_extend (in-place, fills bits [src_width:n*64) with the
+        #    sign bit at src_width-1) ─────────────────────────────────────────
+        # Mirrors the fill logic in wide_ashr below. No-op if src_width already
+        # covers the whole n-word buffer.
+        L += [
+            "cdef inline void wide_sign_extend(",
+            "    unsigned long long *v, unsigned long long *m,",
+            "    int n, int src_width) noexcept nogil:",
+            "    cdef int sign_word, sign_pos, fill_start_word, fill_bit_in_word, i",
+            "    cdef unsigned long long sign_v, sign_m, fill_v, fill_m, fill_mask",
+            "    sign_word = (src_width - 1) >> 6",
+            "    sign_pos = (src_width - 1) & 63",
+            "    if sign_word >= n:",
+            "        return",
+            "    sign_v = (v[sign_word] >> sign_pos) & 1",
+            "    sign_m = (m[sign_word] >> sign_pos) & 1",
+            "    fill_v = 0 if sign_v == 0 else <unsigned long long>-1",
+            "    fill_m = 0 if sign_m == 0 else <unsigned long long>-1",
+            "    fill_start_word = src_width >> 6",
+            "    fill_bit_in_word = src_width & 63",
+            "    for i in range(fill_start_word, n):",
+            "        fill_mask = <unsigned long long>-1",
+            "        if i == fill_start_word and fill_bit_in_word > 0:",
+            "            fill_mask = fill_mask & ~_word_mask64(fill_bit_in_word)",
+            "        v[i] = (v[i] & ~fill_mask) | (fill_v & fill_mask)",
+            "        m[i] = (m[i] & ~fill_mask) | (fill_m & fill_mask)",
+            "",
+        ]
+
         # ── wide_add (multi-word addition) ─────────────────────────────────────
         # Any x/z in either operand → result is all-x.
         L += [

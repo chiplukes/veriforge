@@ -771,20 +771,14 @@ def _dynamic_part_select_cases() -> list[EdgeCase]:
 def _known_engine_bug(engine: str, case: EdgeCase) -> str | None:
     """Return a known_issues.md-linked reason if *engine* is known-broken for *case*.
 
-    Full empirically-verified (Icarus/Verilator cross-checked) truth table for
-    the two "self_det_unary_*_65_to_80_*" sub-families:
-
-        op=~ unsigned: reference/vm/vm-fast WRONG (self-determined); compiled OK
-        op=~ signed:   reference/vm/vm-fast OK; compiled WRONG (ignores `signed`)
-        op=- unsigned: all OK
-        op=- signed:   reference/vm/vm-fast OK; compiled WRONG (ignores `signed`)
+    `~` is wrongly self-determined on reference/vm/vm-fast for an unsigned
+    operand (see "Unary `-`/`~` are context-determined, not self-determined"
+    in notes/known_issues.md — item 2.6, not yet fixed). The signed case and
+    the compiled engine's wide-path signedness handling (item 2.3 Part A)
+    were both already fixed and no longer need an xfail here.
     """
     if case.id == "self_det_unary_not_65_to_80_unsigned" and engine != "compiled":
         return "known reference/vm/vm-fast unary ~ self-determined-width bug (see notes/known_issues.md)"
-    if case.id in ("self_det_unary_not_65_to_80_signed", "self_det_unary_neg_65_to_80_signed") and engine == "compiled":
-        return "known compiled wide-emitter unary op ignores declared signedness (see notes/known_issues.md)"
-    if case.id in ("seam63_shl64", "seam63_shr64", "seam64_shl64", "seam64_shr64") and engine == "compiled":
-        return "known compiled narrow-path shift-by-word-width wraparound bug (see notes/known_issues.md)"
     return None
 
 

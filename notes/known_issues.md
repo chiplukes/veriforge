@@ -112,9 +112,12 @@ See `notes/plans/architecture_review_2026-07.md` and
 
 ### Unary `-`/`~` are context-determined, not self-determined (corrects the entry below)
 
-**Status**: Open — root-caused and precisely characterized July 2026 (work
-plan item 2.2); exercised by `tests/test_sim/test_compiled_edge_shapes.py`
-("self_det_unary_*" cases, strict xfail where wrong)
+**Status**: Partially resolved. Root-caused and precisely characterized
+July 2026 (work plan item 2.2); the compiled-only bug (3 below) was fixed
+in item 2.3 Part A. The cross-engine bug (1/2 below, reference/vm/vm-fast)
+remains open as item 2.6. Exercised by
+`tests/test_sim/test_compiled_edge_shapes.py` ("self_det_unary_*" cases,
+strict xfail where still wrong).
 **Supersedes**: the previous version of this entry (below, kept struck
 through for history) claimed, citing IEEE 1364-2005 Table 5-22, that unary
 `-`/`~` are *self-determined* to the operand's own width. That claim was
@@ -134,48 +137,51 @@ codebase's implementations, and this note before it, got backwards.)
 `16'hFFFE` for `a=8'd1` — NOT `16'h00FF` / `16'h00FE`, which is what
 "self-determined" would predict.
 
-This changes the diagnosis for **item 2.3 of `notes/plans/work_plan_2026-07.md`
+This changed the diagnosis for **item 2.3 of `notes/plans/work_plan_2026-07.md`
 ("Fix the latent wide unary masking bug")**: as originally written, that
 item's fix (change `wide_not`/`wide_neg` to use `op_width` instead of
-`dst_width` for the tail mask) would make the compiled engine's wide-path
-(>64-bit) unary emitter **match the already-broken narrow-path/reference/vm
-behavior instead of fixing it** — `dst_width` is the width-correct choice.
-Item 2.3 must be rewritten before it is executed; see the plan file's own
-note on this item.
+`dst_width` for the tail mask) would have made the compiled engine's
+wide-path (>64-bit) unary emitter match the already-broken narrow-path/
+reference/vm behavior instead of fixing it — `dst_width` was already the
+width-correct choice. Item 2.3 was rescoped (see the plan file) and its
+Part A fixed the actual bug (signedness, not width) — see bug 3 below.
 
-**Four distinct, now-precisely-characterized bugs** (all found by generating
-the `self_det_unary_*_65_to_80_*` and `seam*_sh{l,r}64` cases in
-`tests/test_sim/test_compiled_edge_shapes.py` and cross-checking against
-Icarus/Verilator):
+**Four distinct bugs found** (all via the `self_det_unary_*_65_to_80_*` and
+`seam*_sh{l,r}64` cases in `tests/test_sim/test_compiled_edge_shapes.py`,
+cross-checked against Icarus/Verilator):
 
-1. **`~` is wrongly self-determined on reference, vm, and vm-fast** (all
-   widths, all three engines identically): `~a` is computed at `a`'s own
-   width, then extended using `a`'s *declared signedness* — which happens
-   to equal the correct context-determined result when `a` is signed (a
-   coincidence: sign-extension commutes with bitwise complement) but is
-   wrong when `a` is unsigned (zero-extension does not commute with
-   complement — the correct result has its extension bits all-1, not
-   all-0). Reproduce:
+1. **`~` is wrongly self-determined on reference, vm, and vm-fast** for an
+   *unsigned* operand (all three engines identically): `~a` is computed at
+   `a`'s own width, then zero-extended — the correct result has its
+   extension bits all-1, not all-0 (zero-extension does not commute with
+   bitwise complement the way sign-extension does, which is why the signed
+   case below happened to already be right). **Status: open — this is
+   item 2.6 in `notes/plans/work_plan_2026-07.md`, not yet fixed.**
+   Reproduce:
    ```python
    # module t(input [7:0] a, output [15:0] y); assign y = ~a;
    # a = 8'd1 -> reference/vm/vm-fast give y=16'h00FE (wrong); correct is 16'hFFFE.
    ```
-2. **Compiled's narrow (<=64-bit) unary path has the same bug as (1)** —
-   both `~` and (for reasons not yet isolated) apparently just `~`; `-` is
-   correct on the narrow path at all widths/signedness tested.
-3. **Compiled's wide (>64-bit) unary path ignores declared signedness
-   entirely** for both `~` and `-`: it always zero-extends the operand to
-   context width before applying the operator (which happens to be
-   *correct* when the operand is unsigned, but wrong when it is signed —
-   compiled then produces the same bit pattern as if the operand had been
-   unsigned).
+2. **Compiled's narrow (<=64-bit) unary path has the same bug as (1)** for
+   `~` on an unsigned operand; `-` is correct on the narrow path at all
+   widths/signedness tested. **Status: open — also item 2.6.**
+3. **Compiled's wide (>64-bit) unary path ignored declared signedness
+   entirely** for both `~` and `-`: it always zero-extended the operand to
+   context width before applying the operator (already correct for an
+   unsigned operand, wrong for a signed one). **Status: resolved (July
+   2026, work plan item 2.3 Part A)** — fixed in
+   `src/veriforge/sim/compiled/_wide_emitter.py`'s `UnaryOp` handler by
+   sign-extending the operand's scratch buffer to the context width before
+   calling `wide_not`/`wide_neg`, via a new `wide_sign_extend` primitive in
+   `_gen_wide_section.py` (mirrors the sign-fill logic already used by
+   `wide_ashr`).
 
-None of these three should be "fixed" by copying one engine's behavior to
-another — (1)/(2) and (3) are independent bugs in different code paths
-requiring independent fixes against the verified-correct (context-determined)
-semantics above, not against each other. (A fourth, unrelated bug found by
-the same test file — narrow-path shift by exactly 64 — is documented
-separately below.)
+None of these should be "fixed" by copying one engine's behavior to
+another — (1)/(2) and (3) were independent bugs in different code paths,
+fixed independently against the verified-correct (context-determined)
+semantics above. (A fourth, unrelated bug found by the same test file —
+narrow-path shift by exactly 64 — was documented and resolved separately
+below.)
 
 <details>
 <summary>Original (incorrect) entry, kept for history</summary>
@@ -243,18 +249,18 @@ word-count issue. Not yet root-caused beyond that; likely in the same
 
 ### Compiled engine: narrow-path shift by exactly the word width (64) is a no-op
 
-**Status**: Open — exercised by `tests/test_sim/test_compiled_edge_shapes.py`
-("seam63_shl64", "seam63_shr64", "seam64_shl64", "seam64_shr64", strict xfail)
-**Found**: July 2026, work plan item 2.2 (compiled-engine edge-case suites)
+**Status**: Resolved (July 2026, work plan item 2.3 Part B)
 
 `a << 64` and `a >> 64` on a <=64-bit signal (widths 63 and 64 both
-affected; width 65, which uses the wide/multi-word codegen path, is not)
-return `a` unchanged on the compiled engine instead of `0` (a shift amount
-equal to or greater than the operand's width must produce an all-zero
-result). This is the classic C/hardware undefined-behavior pattern where a
-native shift instruction only consults the low log2(word-bits) bits of the
-shift amount (e.g. x86 `SHL`/`SHR` use the count register's low 6 bits for
-a 64-bit operand), so shifting by exactly 64 silently becomes a shift by 0.
-The generated narrow-path shift code does not clamp/special-case shift
-amounts >= the word width before emitting the native shift. Reference, VM,
-and vm-fast are unaffected (Python's `<<`/`>>` have no such wraparound).
+affected; width 65, which uses the wide/multi-word codegen path, was not)
+returned `a` unchanged instead of `0`. Also affected `>>>` by exactly the
+operand width, which returned the operand unchanged instead of saturating
+to sign-bit-fill (all-0 or all-1s). Both were the classic C/hardware
+undefined-behavior pattern where a native shift instruction only consults
+the low log2(word-bits) bits of the shift amount (e.g. x86 `SHL`/`SHR` use
+the count register's low 6 bits for a 64-bit operand), so shifting by
+exactly 64 silently became a shift by 0. Fixed in
+`src/veriforge/sim/compiled/_expr_emitter.py::_emit_binary` by guarding
+`>>`/`<<`/`>>>` with an explicit `shift_amount >= 64` check before emitting
+the native shift. Reference, VM, and vm-fast were unaffected (Python's
+`<<`/`>>` have no such wraparound).
