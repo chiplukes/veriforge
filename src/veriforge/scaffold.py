@@ -142,7 +142,7 @@ def generate_python_testbench_skeleton(  # noqa: PLR0913  # cm:f3d2c6
     Returns:
         Generated Python source text, or the written output path if ``output_path`` is provided.
     """
-    from .dsl.testbench import generate_python_testbench
+    from .sim.bench.skeleton import generate_python_testbench
 
     if module_name is None:
         tops = design.get_top_modules()

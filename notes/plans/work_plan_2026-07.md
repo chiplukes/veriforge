@@ -832,6 +832,52 @@ Documented in both `simulator_engines.md` and `public_api.md`.
 layering test green and demonstrably fails when a forbidden module-level
 import is added temporarily.
 
+**Result** (July 2026): Done as specified, with adjustments driven by what
+the tree actually needed (per step 3's own instruction to derive the real
+edge set rather than force the plan's illustrative table verbatim):
+
+1. `project.py`'s scaffold re-export is now a PEP 562 module `__getattr__`
+   (added `# noqa: F822` to the four `__all__` entries it resolves
+   dynamically, since ruff can't see through it).
+2. `dsl/testbench.py` moved to `sim/bench/skeleton.py` (fixed its 3
+   `model.*` imports, its `sim.endpoints` import — now intra-package — and
+   its `from . import Expr, Module, sim_time` — now
+   `from veriforge.dsl import ...`, the sanctioned `sim.bench → dsl` edge
+   alongside `lowering.py`). `dsl/testbench.py` is now a 12-line
+   backward-compat shim (`from veriforge.sim.bench.skeleton import *` plus
+   the private helpers tests import directly). `dsl/testbench_deps.py` did
+   not need to move — independent of both `testbench.py` and `sim`.
+   `scaffold.py`'s lazy import updated to the new path directly (it's
+   first-party code, not a legacy consumer, so it doesn't need the shim).
+   Also had to move `veriforge.dsl.testbench`'s entry in `pyproject.toml`'s
+   mypy per-module `ignore_errors` override list to
+   `veriforge.sim.bench.skeleton` (the module it was suppressing untyped
+   legacy patterns for moved; without this mypy surfaced ~16 pre-existing,
+   previously-silenced errors).
+3. `tests/test_project/test_import_layering.py` added: walks
+   `src/veriforge/**/*.py` with `ast`, checks only module-level imports
+   (function-body imports are the sanctioned lazy pattern), and asserts
+   against an `ALLOWED_EDGES` per-top-level-package DAG derived from the
+   actual current edge set (not the plan's illustrative table verbatim —
+   e.g. `dsl → project` via `testbench_deps.py`, `verilog_parser →
+   preprocessor`, and `sim → _env`/`_version` utility-module imports all
+   needed adding). The sim/dsl boundary needed file-level precision beyond
+   the coarse per-package DAG (`ALLOWED_FILE_EDGES` + a `sim/bench/*`
+   special case), since a blanket "dsl ⟷ sim allowed" would be too loose to
+   catch a future mistake like core `sim.evaluator` importing `dsl`
+   directly. Verified the test both passes cleanly and fails with a precise
+   file:line message when a forbidden import is temporarily injected (into
+   both a foundational file, which crashes at collection via a real
+   circular import as expected, and a non-foundational one, which fails
+   cleanly via the assertion). `sim → project` (via `cosim.py`) was already
+   a lazy, function-scoped import — no change needed there.
+
+Full fast suite + `test_dsl/` + `test_sim/` + `test_project/`: 6812 passed,
+3843 skipped (slow, not requested), 62 xfailed, 0 failed. Full ruff/mypy/
+check_overview gate green. CLI smoke-tested end-to-end
+(`--generate-python-testbench`) to confirm the moved code path works
+outside the test suite too.
+
 ### 4.2 Semantic core unification (L — the big one)
 
 **Goal**: one implementation of width/signedness/const-eval semantics

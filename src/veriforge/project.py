@@ -339,21 +339,31 @@ def parse_directory(  # noqa: PLR0913  # cm:7b9e5f
 # ── Backward-compatible re-exports ───────────────────────────────────────────
 # The functions below now live in veriforge.scaffold.  They are re-exported
 # here so that existing code using ``from veriforge.project import …``
-# continues to work without modification.
-
-from .scaffold import (  # noqa: E402
-    build_testbench,
-    build_testbench_plan,
-    export_dsl_project,
-    generate_python_testbench_skeleton,
-)
-
-__all__ = [
-    "DEFAULT_EXTENSIONS",
+# continues to work without modification. A lazy PEP 562 module `__getattr__`
+# (rather than a module-level `from .scaffold import ...`) avoids a project ↔
+# scaffold import cycle: `scaffold.py` itself imports from `project.py`.
+_SCAFFOLD_REEXPORTS = {
     "build_testbench",
     "build_testbench_plan",
     "export_dsl_project",
     "generate_python_testbench_skeleton",
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _SCAFFOLD_REEXPORTS:
+        from . import scaffold
+
+        return getattr(scaffold, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "DEFAULT_EXTENSIONS",
+    "build_testbench",  # noqa: F822 -- resolved dynamically by __getattr__ above
+    "build_testbench_plan",  # noqa: F822
+    "export_dsl_project",  # noqa: F822
+    "generate_python_testbench_skeleton",  # noqa: F822
     "parse_directory",
     "parse_file",
     "parse_files",

@@ -181,19 +181,23 @@ src/veriforge/
 │       ├── runtime.py    # Testbench (orchestrates clocks/resets/MultiDomainRunner) +
 │       │                 #   Domain (one clock + reset + DomainCoordinator) +
 │       │                 #   make_bench factory
-│       └── lowering.py   # Engine-native lowering: compile_native(), LoweredDesign,
-│                         #   InterfaceLowering protocol, LoweringError,
-│                         #   AXIStreamSourceLowering (case-ROM, O(n) C switch;
-│                         #     optional PRNG pause: prng_bits/pause_threshold/prng_seed),
-│                         #   AXIStreamSinkLowering (captures n beats + done signal;
-│                         #     optional PRNG back-pressure: same 3 params),
-│                         #   32-bit Galois LFSR helper (_build_lfsr_pause),
-│                         #   AXILiteMasterLowering + AXILiteOp (scripted write/read seq.),
-│                         #   AXILiteSlaveLowering (memory-backed responder for DUT master),
-│                         #   AXI4SlaveLowering (burst responder for DUT AXI4 master);
-│                         #   LoweredDesign.run(engine, cycles, vcd_path=) and
-│                         #   LoweredDesign.batch_run(cycles) return merged dict of
-│                         #   capture_signals + done_signals
+│       ├── lowering.py   # Engine-native lowering: compile_native(), LoweredDesign,
+│       │                 #   InterfaceLowering protocol, LoweringError,
+│       │                 #   AXIStreamSourceLowering (case-ROM, O(n) C switch;
+│       │                 #     optional PRNG pause: prng_bits/pause_threshold/prng_seed),
+│       │                 #   AXIStreamSinkLowering (captures n beats + done signal;
+│       │                 #     optional PRNG back-pressure: same 3 params),
+│       │                 #   32-bit Galois LFSR helper (_build_lfsr_pause),
+│       │                 #   AXILiteMasterLowering + AXILiteOp (scripted write/read seq.),
+│       │                 #   AXILiteSlaveLowering (memory-backed responder for DUT master),
+│       │                 #   AXI4SlaveLowering (burst responder for DUT AXI4 master);
+│       │                 #   LoweredDesign.run(engine, cycles, vcd_path=) and
+│       │                 #   LoweredDesign.batch_run(cycles) return merged dict of
+│       │                 #   capture_signals + done_signals
+│       └── skeleton.py   # generate_testbench()/generate_python_testbench(): auto-generate
+│                         #   testbench wrappers for DUT modules (moved from dsl/testbench.py
+│                         #   to break a sim <-> dsl import cycle; dsl/testbench.py is now a
+│                         #   thin backward-compatible re-export shim, see notes/architecture.md)
 ├── dsl/                  # Hardware Construction DSL (Phase 7)
 │   ├── __init__.py       # Public API: Module, Signal, Expr, Interface, helpers
 │   ├── builder.py        # Operator-overloaded Python DSL → model objects
@@ -201,7 +205,7 @@ src/veriforge/
 │   ├── prelude.py        # Star-import convenience module for DSL user code
 │   ├── ram.py            # RAM inference pattern library (single/dual-port, ROM)
 │   ├── spec.py           # Declarative ModuleSpec layer (__set_name__ port descriptors)
-│   ├── testbench.py      # Auto-generate testbench wrappers for DUT modules
+│   ├── testbench.py      # Backward-compat re-export shim → sim/bench/skeleton.py
 │   ├── testbench_deps.py # Auto-discovery of child-module source dependencies for scaffolds
 │   └── lib/              # Reusable component library
 │       ├── __init__.py   # Re-exports all library components + RAM functions

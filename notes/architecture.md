@@ -65,25 +65,30 @@ See [notes/support_matrix.md](support_matrix.md) for the full coverage status by
 - [notes/dsl/dsl_guide.md](dsl/dsl_guide.md) — DSL syntax reference
 - [notes/dsl/dsl_conversion_coverage.md](dsl/dsl_conversion_coverage.md) — Verilog→DSL conversion coverage
 
-## sim ↔ dsl import cycle
+## sim ↔ dsl: now acyclic
 
-`sim/bench/lowering.py` imports `veriforge.dsl` at module load (to build
-DSL `Module` objects for the native-lowering path).  `dsl/testbench.py`
-imports from `sim.endpoints` at module load (to detect AXI/Stream interfaces)
-and from `sim.bench.planner` lazily (deferred inside a function body).
+`sim/bench/lowering.py` imports `veriforge.dsl` at module load (to build DSL
+`Module` objects for the native-lowering path) — this is the one
+architecturally-sanctioned direction, since `sim.bench`'s job is to bridge
+DSL-built designs into the simulator.
 
-This creates a package-level cycle (`sim.bench` → `dsl` → `dsl.testbench` →
-`sim.endpoints`), but **not** a circular import at runtime because the leaf of
-the cycle (`sim.endpoints`) does not import `sim.bench`.  The invariant to
-preserve:
+Testbench wrapper generation (formerly `dsl/testbench.py`, which imported
+from `sim.endpoints` at module load) now lives in `sim/bench/skeleton.py`,
+alongside `lowering.py` — this removed the only `dsl → sim` edge with real
+code behind it, breaking what used to be a package-level cycle
+(`sim.bench` → `dsl` → `dsl.testbench` → `sim.endpoints` → ... → `sim.bench`).
+`dsl/testbench.py` still exists as a thin backward-compatible re-export shim
+(`from veriforge.sim.bench.skeleton import *`) so existing
+`from veriforge.dsl.testbench import ...` call sites keep working — this is
+the one allow-listed exception in the layering test
+(`tests/test_project/test_import_layering.py`), since it's a compat surface
+with no real logic, not an architectural dependency.
 
-- **`dsl`** must never import `sim.bench.*` or `sim.evaluator/executor` at
-  module load (lazy imports inside functions are OK).
+The invariant going forward:
+
+- **`dsl`** must never import `sim.*` beyond `sim.endpoints` at module load
+  (lazy imports inside functions are OK; the layering test enforces this).
 - **`sim.endpoints`** must never import `sim.bench.*` or `dsl` at module load.
-
-Refactoring `dsl/testbench.py` into `sim/bench/` (option a from the health
-plan) would break the cycle structurally; the deferred-import approach (option
-b) is the current choice.
 
 ## Simulation
 
