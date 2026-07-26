@@ -192,6 +192,15 @@ a DSL memory before `batch_run`, `dump_memory(name, count)` to read it back, and
 `memory_names` property to list available memories.  All three raise
 `NotImplementedError` on non-compiled engines.
 
+`Simulator.engine_report()` works on every engine: returns
+`{"engine": str, "native_processes": int, "fallback_processes": int,
+"fallback_reasons": list[str]}`. On the compiled engine, `fallback_processes`
+counts `initial`/`always` blocks that couldn't compile natively (timing
+controls or system tasks) and fell back to the reference executor/coroutine
+path; `fallback_reasons` holds the corresponding diagnostic strings. On
+`"reference"`/`"vm"`/`"vm-fast"`, every process runs natively, so the
+fallback fields are always `0`/`[]`.
+
 Compiled-simulator details and limitations are documented in
 `notes/simulation/simulator_compile_cython.md` and `notes/known_issues.md`.
 

@@ -55466,6 +55466,23 @@ class TestPhase4Execution:
         # At t=0: clk=x (initial), t=5: clk=~x, ...
         # The exact value depends on x semantics; just check no crash
 
+    def test_engine_report_compiled_fallback(self):
+        """`always #5 clk = ~clk` needs reference/coroutine fallback on the
+        compiled engine (>=1 fallback process, a non-empty reason); the
+        reference engine runs everything natively (zero fallback)."""
+        sim = Simulator(_make_always_timing_clock(), engine="compiled")
+        report = sim.engine_report()
+        assert report["engine"] == "compiled"
+        assert report["fallback_processes"] >= 1
+        assert report["native_processes"] >= 0
+        assert report["fallback_reasons"]
+
+        ref_sim = Simulator(_make_always_timing_clock(), engine="reference")
+        ref_report = ref_sim.engine_report()
+        assert ref_report["engine"] == "reference"
+        assert ref_report["fallback_processes"] == 0
+        assert ref_report["fallback_reasons"] == []
+
     def test_initial_counter_setup(self):
         """Initial block sets up reset, then counter counts on clock."""
         mod = _make_initial_counter_setup()

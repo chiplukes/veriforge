@@ -199,6 +199,31 @@ class Simulator:  # cm:a5c8f4
             sched._write_buffer = ""
         return sched.display_output
 
+    def engine_report(self) -> dict:
+        """Report native vs. fallback process counts for the active engine.
+
+        For ``"compiled"``, ``initial``/``always`` blocks with timing
+        controls (``#delay``/``@(event)``) or system tasks
+        (``$display``/``$readmemh``/...) run through the reference-executor
+        or coroutine fallback path instead of native Cython — this surfaces
+        which and why. ``"reference"``/``"vm"``/``"vm-fast"`` always run
+        every process natively (fallback fields are zero/empty).
+        """
+        total = len(self._module.initial_blocks) + len(self._module.always_blocks)
+        fallback_processes = 0
+        fallback_reasons: list[str] = []
+        if self._engine == "compiled":
+            fallback_processes = len(self._sched._initial_blocks) + len(self._sched._always_timing_blocks)
+            codegen = self._sched._codegen
+            if codegen is not None:
+                fallback_reasons = list(codegen.timing_diagnostics)
+        return {
+            "engine": self._engine,
+            "native_processes": total - fallback_processes,
+            "fallback_processes": fallback_processes,
+            "fallback_reasons": fallback_reasons,
+        }
+
     def signal(self, name: str) -> SignalHandle:
         """Get a handle to a signal by name.
 

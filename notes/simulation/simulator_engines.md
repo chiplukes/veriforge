@@ -125,6 +125,21 @@ The compiled engine emits a `UserWarning` during `Simulator` construction for
 each process that will fall back, naming the process index, the fallback reason,
 and a cost estimate.
 
+`Simulator.engine_report()` surfaces the same information programmatically
+(no need to capture warnings):
+
+```python
+sim = Simulator(module, engine="compiled")
+sim.engine_report()
+# {"engine": "compiled", "native_processes": 3, "fallback_processes": 1,
+#  "fallback_reasons": ["always block 1: timing control (#delay or @event) "
+#                       "→ coroutine fallback; expect ~10-100x slower..."]}
+```
+
+For `"reference"`/`"vm"`/`"vm-fast"`, every `initial`/`always` block runs
+natively, so `fallback_processes` is always `0` and `fallback_reasons` is
+always empty.
+
 ## Key Design Decisions
 
 ### Mask Propagation in Compiled Engine

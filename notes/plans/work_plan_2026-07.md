@@ -763,6 +763,15 @@ architecture than `sim/vm/compiler.py`). Running the harness with
    section) and `notes/public_api.md`.
 **Accept**: test green; docs updated.
 
+**Result** (July 2026): Done as specified. Added `Simulator.engine_report()`
+to `sim/testbench.py`, counting `initial`/`always` blocks against the
+compiled scheduler's existing `_initial_blocks`/`_always_timing_blocks`
+fallback lists and surfacing `_codegen.timing_diagnostics` as
+`fallback_reasons`; reference/vm/vm-fast always report zero fallback. Test
+added to `test_compiled.py::TestPhase4Execution` (reusing the existing
+`always #5 clk = ~clk` fixture already used by `test_always_timing_clock`).
+Documented in both `simulator_engines.md` and `public_api.md`.
+
 ---
 
 ## Tier 4 — Structural projects (one at a time, in this order)
