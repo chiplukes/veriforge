@@ -386,6 +386,13 @@ class Value:  # cm:c8a1e6
             if other.mask:
                 return Value.x(self.width)
             other = other.val
+        # A shift amount >= width shifts every bit out; every subsequent bit
+        # of `self.val << other` gets masked away in Value.__init__ anyway,
+        # but computing it for an astronomically large `other` (e.g. a wide
+        # operand used self-determined as a shift count) can itself raise
+        # OverflowError (CPython caps huge int shifts) -- short-circuit.
+        if other >= self.width:
+            return Value(0, width=self.width)
         if self.mask:
             return Value(self.val << other, width=self.width, mask=self.mask << other)
         return Value(self.val << other, width=self.width)
@@ -395,6 +402,8 @@ class Value:  # cm:c8a1e6
             if other.mask:
                 return Value.x(self.width)
             other = other.val
+        if other >= self.width:
+            return Value(0, width=self.width)
         if self.mask:
             return Value(self.val >> other, width=self.width, mask=self.mask >> other)
         return Value(self.val >> other, width=self.width)
@@ -404,14 +413,23 @@ class Value:  # cm:c8a1e6
     def _cmp(self, other: Value | int, op: str) -> Value:
         """Verilog comparison: returns 1-bit Value; x if either operand is x/z."""
         other = _coerce(other, self.width)
+        if op in ("==", "!="):
+            # Precise: a KNOWN bit that differs between the two operands
+            # resolves the comparison regardless of x/z bits elsewhere (this
+            # is a simple bitwise check, unlike ordering comparisons below,
+            # which need full certainty). Only fall back to x when no known
+            # bit disagrees and at least one operand still has uncertainty.
+            known_diff = (self.val ^ other.val) & ~self.mask & ~other.mask
+            if known_diff:
+                return Value(1 if op == "!=" else 0, width=1)
+            if self.mask or other.mask:
+                return Value.x(1)
+            result = (self.val == other.val) if op == "==" else (self.val != other.val)
+            return Value(1 if result else 0, width=1)
         if self.mask or other.mask:
             return Value.x(1)
         a, b = self.val, other.val
-        if op == "==":
-            result = a == b
-        elif op == "!=":
-            result = a != b
-        elif op == "<":
+        if op == "<":
             result = a < b
         elif op == "<=":
             result = a <= b
@@ -502,28 +520,29 @@ class Value:  # cm:c8a1e6
     # ── Logical operators (return 1-bit Value) ─────────────────────────
 
     def logical_and(self, other: Value | int) -> Value:
-        """Verilog && — logical AND."""
+        """Verilog && — logical AND.
+
+        Precise per IEEE 1364/1800: an operand with some x/z bits is still
+        DEFINITELY nonzero/true if any of its *known* bits is 1 (e.g. a wide
+        concat with one unknown bit and other known-1 bits) -- x only
+        applies when the operand's truthiness genuinely cannot be
+        determined, not whenever it has any unknown bit at all.
+        """
         other = _coerce(other, self.width)
-        if self.mask or other.mask:
-            # If either is definitely 0, result is 0
-            if not self.mask and self.val == 0:
-                return Value(0, width=1)
-            if not other.mask and other.val == 0:
-                return Value(0, width=1)
-            return Value.x(1)
-        return Value(1 if (self.val and other.val) else 0, width=1)
+        if (self.mask == 0 and self.val == 0) or (other.mask == 0 and other.val == 0):
+            return Value(0, width=1)
+        if (self.val & ~self.mask) and (other.val & ~other.mask):
+            return Value(1, width=1)
+        return Value.x(1)
 
     def logical_or(self, other: Value | int) -> Value:
-        """Verilog || — logical OR."""
+        """Verilog || — logical OR. See `logical_and` for the precision note."""
         other = _coerce(other, self.width)
-        if self.mask or other.mask:
-            # If either is definitely non-zero, result is 1
-            if not self.mask and self.val != 0:
-                return Value(1, width=1)
-            if not other.mask and other.val != 0:
-                return Value(1, width=1)
-            return Value.x(1)
-        return Value(1 if (self.val or other.val) else 0, width=1)
+        if (self.val & ~self.mask) or (other.val & ~other.mask):
+            return Value(1, width=1)
+        if self.mask == 0 and other.mask == 0:
+            return Value(0, width=1)
+        return Value.x(1)
 
     def logical_not(self) -> Value:
         """Verilog ! — logical NOT."""

@@ -3824,7 +3824,15 @@ cdef inline void _whole_assign_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_si
     cdef int out_words = dst_words if dst_words > 0 else 1
     cdef int lhs_digits = (c.width[lhs_sid] + 15) >> 4
     cdef int rhs_digits = (c.width[rhs_sid] + 15) >> 4
-    cdef int prod_width = c.width[lhs_sid] + c.width[rhs_sid]
+    # Verilog's own sum-of-operand-widths self-determined rule for '*'
+    # (IEEE 1364-2005 Table 5-22) only matters when the multiply is
+    # unconstrained; here it's an operand of an enclosing shift feeding
+    # dst_sid, so the enclosing context wins and narrows the product width
+    # -- otherwise the shift's zero-fill lands too far up in the
+    # (unnecessarily wide) sum-rule representation, corrupting x-precision
+    # once truncated back down to dst_sid's actual width.
+    cdef int _mul_floor_w = c.width[lhs_sid] if c.width[lhs_sid] > c.width[rhs_sid] else c.width[rhs_sid]
+    cdef int prod_width = c.width[dst_sid] if c.width[dst_sid] > _mul_floor_w else _mul_floor_w
     cdef int prod_words = (prod_width + 63) >> 6
     cdef int prod_digits = (prod_width + 15) >> 4
     cdef int i, src_index, remaining_w, curr_index = -1, digit_index = 0, changed = 0
@@ -3920,7 +3928,15 @@ cdef inline void _whole_assign_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_si
     cdef int out_words = dst_words if dst_words > 0 else 1
     cdef int lhs_digits = (c.width[lhs_sid] + 15) >> 4
     cdef int rhs_digits = (c.width[rhs_sid] + 15) >> 4
-    cdef int prod_width = c.width[lhs_sid] + c.width[rhs_sid]
+    # Verilog's own sum-of-operand-widths self-determined rule for '*'
+    # (IEEE 1364-2005 Table 5-22) only matters when the multiply is
+    # unconstrained; here it's an operand of an enclosing shift feeding
+    # dst_sid, so the enclosing context wins and narrows the product width
+    # -- otherwise the shift's zero-fill lands too far up in the
+    # (unnecessarily wide) sum-rule representation, corrupting x-precision
+    # once truncated back down to dst_sid's actual width.
+    cdef int _mul_floor_w = c.width[lhs_sid] if c.width[lhs_sid] > c.width[rhs_sid] else c.width[rhs_sid]
+    cdef int prod_width = c.width[dst_sid] if c.width[dst_sid] > _mul_floor_w else _mul_floor_w
     cdef int prod_words = (prod_width + 63) >> 6
     cdef int prod_digits = (prod_width + 15) >> 4
     cdef int i, src_index, remaining_w, curr_index = -1, next_index = 0, digit_index = 0, changed = 0
@@ -4084,7 +4100,11 @@ cdef inline void _whole_assign_mul_const_shl(SimCtx *c, int dst_sid, int mul_sid
 cdef inline void _whole_assign_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid, unsigned long long rhs_const, int rhs_width, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
     cdef int src_words = c.wide_words[mul_sid] if c.wide_words[mul_sid] > 0 else 1
-    cdef int prod_width = c.width[mul_sid] + rhs_width
+    # See the mul_signal variant above for why this is narrowed to the
+    # enclosing (dst_sid) context rather than left at '*'s own
+    # sum-of-operand-widths self-determined rule.
+    cdef int _mul_floor_w = c.width[mul_sid] if c.width[mul_sid] > rhs_width else rhs_width
+    cdef int prod_width = c.width[dst_sid] if c.width[dst_sid] > _mul_floor_w else _mul_floor_w
     cdef int prod_words = (prod_width + 63) >> 6
     cdef int out_words = dst_words if dst_words > 0 else 1
     cdef int i, src_index, remaining_w, curr_index = -1, next_index = 0, changed = 0

@@ -88,6 +88,119 @@ These were found via `tests/test_sim/test_compiled.py::TestNarrow64BitUnsignedOp
 confirmed pre-existing via `git stash` against item 2.4's commit, not a
 regression from that item's `OP_ASHR` fix).
 
+### Randomized differential harness (work plan item 3.4): bugs found and fixed
+
+**Status**: Harness landed and green (July 2026) for its default scope
+(reference/vm/vm-fast). See `tests/test_sim/test_differential.py`.
+
+Building the harness (random expression trees over a fixed 8-signal set,
+checked across engines) immediately surfaced a batch of real, previously
+undetected correctness bugs — reference and vm/vm-fast had each independently
+drifted from true IEEE 1364/1800 semantics in ways that happened to agree
+with each other often enough to go undetected by the existing curated test
+suites. All of the following were verified against Icarus Verilog before
+fixing, and are now covered by the harness across 10+ seeds x 400-500 cases
+each (see `VERIFORGE_DIFF_SEED`/`VERIFORGE_DIFF_CASES` in the test file):
+
+- **Bit-select/part-select signedness** (`sim/evaluator.py`, `sim/vm/compiler.py`,
+  `sim/compiled/_expr_emitter.py`) — a bit-select/range-select/part-select
+  result is always unsigned per IEEE 1364-2005 §5.5.1, regardless of the
+  sliced signal's own declared signedness; all three engines' `_expr_signed`
+  incorrectly inherited the target signal's signedness. Also required the
+  same fix in the compiled engine's separate `_emit_signed_widen` helper and
+  two `PartSelect` code paths in `_expr_emitter.py`, which bypassed
+  `_expr_signed` entirely with their own (unfixed) direct signedness check.
+- **Conditional operator (`?:`) signedness** (`sim/evaluator.py`,
+  `sim/vm/compiler.py`) — per IEEE 1364-2005 §5.5.1, a ternary's *own*
+  combined signedness (signed only if BOTH branches are signed) governs
+  every extension needed while evaluating whichever branch is selected — not
+  that branch's own individual signedness, and not the branch's containing
+  operator's usual rule. Fixed by threading a `signed_override` parameter
+  through `eval()`/`_compile_expr()`, established fresh by each ternary for
+  its own branches (verified against Icarus across several nesting shapes:
+  nested unary +/-, nested binary ops, plain identifiers).
+- **Comparison/logical operators wrongly context-determined**
+  (`sim/evaluator.py`) — `==`/`!=`/`<`/`<=`/`>`/`>=`/`&&`/`||` produce a 1-bit
+  result and must NOT have their operands extended to an enclosing
+  assignment's width (only self-determined, matching each other) — the code
+  had a comment saying so but didn't actually implement it, corrupting
+  comparisons whenever the two operands' individual signedness differed.
+- **`&&`/`||`/`==`/`!=` imprecise x-handling** (`sim/value.py`
+  `logical_and`/`logical_or`/`_cmp`, `sim/vm/_interp_fast.pyx`
+  `OP_LOG_AND`/`OP_LOG_OR`/`OP_CMP_EQ`/`OP_CMP_NE`) — all four naively
+  treated "any operand has an x/z bit" as "result is x", when IEEE requires
+  checking whether a *known* bit already resolves the result first (a
+  known-1 bit anywhere makes `||`/logical-truth definitely true regardless
+  of other unknown bits; a known-differing bit makes `==`/`!=` definitely
+  resolved) — this is a simple bitwise check, unlike ordering comparisons
+  (`<` etc.) which genuinely need full certainty and were left as-is.
+- **`OP_TERNARY` wide condition** (`_interp_fast.pyx`) — the
+  fully-defined-condition fast path read the condition's truthiness/definedness
+  from the narrow `.val`/`.mask` stack slot unconditionally, never checking
+  `wflag` — for a >64-bit (wide) condition, that slot doesn't hold the real
+  data (it lives in `wv`/`wm`), so a wide condition could be silently
+  misread, picking the wrong branch.
+- **Shift-amount wide/huge-value handling** (`_interp_fast.pyx`, all of
+  `OP_SHL`/`OP_SHR`/`OP_ASHL`/`OP_ASHR`) — the shift-amount operand's
+  x-ness and value were always read from the narrow `.mask`/`.val` slot even
+  when the shift amount itself was wide (>64 bits) or simply a value whose
+  magnitude didn't fit a 32-bit `<int>` cast; both cases silently produced
+  wrong or garbage results, and in one case (a raw C shift by a
+  corrupted-via-truncation huge count) a segfault. Fixed by checking
+  `wflag` for the shift amount and saturating (not truncating) an
+  out-of-32-bit-range magnitude to a safe "definitely >= any width" sentinel.
+- **`Value.__mul__`'s sum-width rule leaking through an enclosing
+  context-determined operator** (`sim/value.py`, `sim/evaluator.py`) —
+  multiplication's own self-determined width is the SUM of its operand
+  widths (IEEE 1364-2005 Table 5-22), correct when `*` is unconstrained —
+  but when `*` is itself an operand of a further context-determined operator
+  (e.g. the left side of `>>`), the enclosing context must narrow the
+  product to its own width before that operator runs, or the subsequent
+  operation's zero/sign-fill lands at the wrong bit position once the
+  oversized intermediate result is later truncated back down, corrupting
+  x-precision. Fixed in `evaluator.py` via a new `_expr_self_width()`
+  helper (self-determined width using the generic max-of-operands rule for
+  every binary op, including `*`, mirroring `sim/vm/compiler.py`'s
+  `_expr_width`) used as a floor: `target = max(context_width,
+  _expr_self_width(operand))`, applied symmetrically (narrows OR widens) to
+  BinaryOp/UnaryOp context-determined operands.
+- **Compiled engine: same `*`-into-shift bug, in a separate legacy
+  fast-path** (`sim/compiled/templates/{narrow_assign,narrow_stage}.pxi`) —
+  `_whole_{assign,stage}_mul_{const,signal}_sh{l,r}` hardcode the sum-width
+  rule directly (`prod_width = c.width[lhs] + c.width[rhs]`) in
+  hand-written Cython, bypassing the (already-correct) `_expr_width()` used
+  by the newer recursive wide emitter; a legacy-fast-path dispatch order
+  intentionally routes `(a*b)>>N`/`(a*K)>>N` through these functions first.
+  Fixed by narrowing `prod_width` to `max(dst_width, max(operand widths))`,
+  matching the other two engines.
+- **`_word_mask64`/`wmask` undefined behavior for negative width**
+  (`sim/compiled/templates/narrow_accessors.pxi`) — uncovered by the fix
+  above: once `prod_width` is correctly narrowed, a later word's "remaining
+  valid bits" computation can go negative (meaning "no valid bits in this
+  word"), and shifting by a negative C `int` is undefined behavior (some
+  platforms mask the shift count to its low 6 bits instead of erroring,
+  silently producing a garbage mask). Fixed by clamping `w <= 0` to return 0.
+- **`Value.__lshift__`/`__rshift__` `OverflowError` crash** (`sim/value.py`)
+  — a shift amount that's itself a huge (but validly-typed) value from a
+  wide self-determined operand could make CPython's own big-int shift guard
+  raise `OverflowError` before the result ever got masked down to width;
+  added an `if other >= self.width: return Value(0, ...)` short-circuit
+  (correct per Verilog semantics: any shift by >= the operand's width
+  produces 0, avoiding ever constructing the oversized intermediate). Same
+  fix applied to the `>>>` (arithmetic shift) operator's `sign_extend(width
+  + shift)` construction in both `evaluator.py` and `sim/vm/interpreter.py`,
+  which had the identical crash risk for a huge self-determined shift amount.
+
+**Deferred (not fixed)**: the compiled engine's ternary/context-determined
+operator codegen (`sim/compiled/_expr_emitter.py`, `_wide_emitter.py`) never
+received the `signed_override`-threading fix described above for the
+conditional operator — it is a separate, much larger codegen architecture
+than `sim/vm/compiler.py`, and replicating the fix there is a substantial
+follow-up, not yet scheduled. Running the harness with
+`VERIFORGE_DIFF_COMPILED=1` will show ternary-related compiled-engine
+divergences; this is why the harness's default run does not include the
+compiled engine (see the module docstring in `test_differential.py`).
+
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
 **Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in

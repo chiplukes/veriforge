@@ -735,13 +735,26 @@ class Compiler:  # cm:8c1e4a
 
     # ── Expression compilation ───────────────────────────────────
 
-    def _compile_expr(self, expr: Expression, program: list[tuple[int, int, int]], width: int = 0) -> None:  # noqa: PLR0912, PLR0911, PLR0915
+    def _compile_expr(
+        self,
+        expr: Expression,
+        program: list[tuple[int, int, int]],
+        width: int = 0,
+        signed_override: bool | None = None,
+    ) -> None:  # noqa: PLR0912, PLR0911, PLR0915
         """Compile an expression to bytecode (post-order: children first).
 
         *width* is the context-determined bit-width from an enclosing
         assignment LHS (IEEE 1364-2005 §5.4.1).  When non-zero, operands
         of context-determined operators are widened with RESIZE before
         the operation so that upper bits are not lost.
+
+        *signed_override*, when not None, replaces `_expr_signed()` for
+        every extension decision made while compiling *expr* (propagated
+        unchanged through nested context-determined operators). This
+        mirrors `ExpressionEvaluator.eval`'s `signed_override` -- see its
+        docstring for the full rationale (IEEE 1364-2005 §5.5.1's rule for
+        the conditional operator).
         """
         etype = type(expr)
 
@@ -753,6 +766,12 @@ class Compiler:  # cm:8c1e4a
             sid = self.signal_map.get(name)
             if sid is not None:
                 program.append(instr(Op.LOAD_SIG, sid))
+                if width and self.sig_width[sid] < width:
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, width, 0))
+                    else:
+                        program.append(instr(Op.RESIZE, width))
                 return
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
@@ -771,6 +790,12 @@ class Compiler:  # cm:8c1e4a
                 return
             sid = self._get_signal_id(name)
             program.append(instr(Op.LOAD_SIG, sid))
+            if width and self.sig_width[sid] < width:
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if eff_signed:
+                    program.append(instr(Op.SIGN_EXT, width, 0))
+                else:
+                    program.append(instr(Op.RESIZE, width))
             return
 
         # -- Literal: load constant --
@@ -794,31 +819,51 @@ class Compiler:  # cm:8c1e4a
                 if expr.op == ">>>" and self._expr_signed(expr.left):
                     self._compile_expr(expr.left, program)
                 else:
-                    self._compile_expr(expr.left, program, width)
-                    left_width = self._expr_width(expr.left)
-                    if width and left_width < width:
-                        if self._expr_signed(expr.left):
-                            program.append(instr(Op.SIGN_EXT, width, 0))
+                    self._compile_expr(expr.left, program, width, signed_override)
+                    if width:
+                        # Target max(width, static self-determined width) --
+                        # NOT `width` alone. Context-determined extension
+                        # must only ever WIDEN an operand, never narrow it
+                        # below its own natural width (an operand can
+                        # legitimately be wider than the enclosing context,
+                        # e.g. a wide concat feeding a narrower assignment;
+                        # SIGN_EXT/RESIZE truncate when the target is
+                        # smaller than the value's current width, which
+                        # would corrupt the operator's input). Using the
+                        # static estimate as a floor is always safe even
+                        # when it's an overestimate (e.g. expr.left contains
+                        # a ternary, whose static width is max(branches) but
+                        # the actual picked branch may be narrower): the
+                        # target is then still >= the true runtime width, so
+                        # this only ever widens or no-ops, never truncates.
+                        target = max(width, self._expr_width(expr.left))
+                        eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                        if eff_signed:
+                            program.append(instr(Op.SIGN_EXT, target, 0))
                         else:
-                            program.append(instr(Op.RESIZE, width))
+                            program.append(instr(Op.RESIZE, target))
                 self._compile_expr(expr.right, program)  # self-determined
             else:
                 # Context-determined: arithmetic (+,-,*,/,%,**) and
-                # bitwise (&,|,^,~^,^~) — widen both operands.
-                self._compile_expr(expr.left, program, width)
-                left_width = self._expr_width(expr.left)
-                if width and left_width < width:
-                    if self._expr_signed(expr.left):
-                        program.append(instr(Op.SIGN_EXT, width, 0))
+                # bitwise (&,|,^,~^,^~) — widen both operands. See the shift
+                # branch above for why the target is max(width, static
+                # width), not `width` alone.
+                self._compile_expr(expr.left, program, width, signed_override)
+                if width:
+                    target = max(width, self._expr_width(expr.left))
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
                     else:
-                        program.append(instr(Op.RESIZE, width))
-                self._compile_expr(expr.right, program, width)
-                right_width = self._expr_width(expr.right)
-                if width and right_width < width:
-                    if self._expr_signed(expr.right):
-                        program.append(instr(Op.SIGN_EXT, width, 0))
+                        program.append(instr(Op.RESIZE, target))
+                self._compile_expr(expr.right, program, width, signed_override)
+                if width:
+                    target = max(width, self._expr_width(expr.right))
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
                     else:
-                        program.append(instr(Op.RESIZE, width))
+                        program.append(instr(Op.RESIZE, target))
             # Detect signed comparison: both operands must be signed
             if expr.op in _SIGNED_CMP_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_CMP_MAP[expr.op]))
@@ -842,23 +887,27 @@ class Compiler:  # cm:8c1e4a
             if expr.op == "~":
                 self._compile_expr(expr.operand, program)
                 program.append(instr(op))
-                operand_width = self._expr_width(expr.operand)
-                if width and operand_width < width:
-                    if self._expr_signed(expr.operand):
-                        program.append(instr(Op.SIGN_EXT, width, 0))
+                # Target max(width, static width), not `width` alone -- see
+                # the BinaryOp comment above for why.
+                if width:
+                    target = max(width, self._expr_width(expr.operand))
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
                     else:
-                        program.append(instr(Op.RESIZE, width))
+                        program.append(instr(Op.RESIZE, target))
                 return
 
             # Unary +/- are context-determined for signed values.
             if expr.op in ("+", "-"):
-                self._compile_expr(expr.operand, program, width)
-                operand_width = self._expr_width(expr.operand)
-                if width and operand_width < width:
-                    if self._expr_signed(expr.operand):
-                        program.append(instr(Op.SIGN_EXT, width, 0))
+                self._compile_expr(expr.operand, program, width, signed_override)
+                if width:
+                    target = max(width, self._expr_width(expr.operand))
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
                     else:
-                        program.append(instr(Op.RESIZE, width))
+                        program.append(instr(Op.RESIZE, target))
             else:
                 self._compile_expr(expr.operand, program)
             program.append(instr(op))
@@ -866,21 +915,38 @@ class Compiler:  # cm:8c1e4a
 
         # -- TernaryOp (evaluate both branches, merge on x-condition) --
         if etype is TernaryOp:
+            # IEEE 1364-2005 §5.5.1: the conditional operator's own combined
+            # signedness (signed only if BOTH branches are signed) governs
+            # every extension needed while compiling either branch -- not
+            # each branch's own individual signedness. This establishes a
+            # *fresh* override for both branches (see `signed_override` on
+            # `_compile_expr`), replacing whatever override was active from
+            # further out; a nested TernaryOp will similarly establish its
+            # own fresh override for its own branches, so this one's
+            # override does not reach past it.
+            #
+            # `width` is propagated straight into BOTH branches (mirroring
+            # the reference evaluator's dynamic dispatch, which propagates
+            # it into whichever branch is actually selected at runtime): a
+            # branch that itself consumes width (Identifier, BinaryOp,
+            # nested UnaryOp +/-, nested TernaryOp) extends using the
+            # propagated override; other kinds (FunctionCall, Concatenation,
+            # Replication, selects) ignore it entirely, exactly as they do
+            # at the top level, and simply return their own self-determined
+            # value -- there is deliberately no extra extension attempted
+            # at the ternary's own level (matching the reference evaluator,
+            # which just returns whichever branch's eval() produced with no
+            # further wrapping).
+            #
+            # Op.TERNARY does not require its two operands to share a width:
+            # when the condition is fully defined it picks one operand
+            # wholesale (using that operand's own width/value), and when the
+            # condition is x/z it merges bit-by-bit, zero-padding the
+            # narrower operand.
+            own_signed = self._expr_signed(expr)
             self._compile_expr(expr.condition, program)  # self-determined
-            self._compile_expr(expr.true_expr, program, width)
-            true_width = self._expr_width(expr.true_expr)
-            if width and true_width < width:
-                if self._expr_signed(expr.true_expr):
-                    program.append(instr(Op.SIGN_EXT, width, 0))
-                else:
-                    program.append(instr(Op.RESIZE, width))
-            self._compile_expr(expr.false_expr, program, width)
-            false_width = self._expr_width(expr.false_expr)
-            if width and false_width < width:
-                if self._expr_signed(expr.false_expr):
-                    program.append(instr(Op.SIGN_EXT, width, 0))
-                else:
-                    program.append(instr(Op.RESIZE, width))
+            self._compile_expr(expr.true_expr, program, width, own_signed)
+            self._compile_expr(expr.false_expr, program, width, own_signed)
             program.append(instr(Op.TERNARY))
             return
 
@@ -1740,6 +1806,10 @@ class Compiler:  # cm:8c1e4a
             return 1
 
         if etype is BinaryOp:
+            if expr.op in (
+                "==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||",
+            ):  # fmt: skip
+                return 1
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
 
         if etype is UnaryOp:
@@ -1785,7 +1855,9 @@ class Compiler:  # cm:8c1e4a
             result = expr.signed
 
         elif etype in (BitSelect, RangeSelect, PartSelect):
-            result = self._expr_signed(expr.target, cache)
+            # Always unsigned (§5.5.1), regardless of the target's declared
+            # signedness.
+            result = False
 
         elif etype is UnaryOp:
             if expr.op == "!":
@@ -1823,12 +1895,21 @@ class Compiler:  # cm:8c1e4a
         lhs: Expression,
         program: list[tuple[int, int, int]],
     ) -> None:
-        """Emit SIGN_EXT if RHS expression is signed and LHS is wider."""
+        """Emit SIGN_EXT if RHS expression is signed and LHS is wider.
+
+        Whether to emit is decided purely from `_expr_signed(rhs)`, not from
+        comparing static `_expr_width` estimates: when `rhs` contains a
+        ternary, `_expr_width` returns max(true_width, false_width), which
+        can overestimate the ACTUAL runtime width (whichever branch is
+        picked may be narrower). Gating on that static estimate can wrongly
+        conclude "already wide enough" and skip sign-extension when the
+        real, narrower runtime value still needs it. Op.SIGN_EXT's own
+        runtime check (comparing its target width against the value's
+        actual current width) makes it a safe no-op to always emit here.
+        """
         if self._expr_signed(rhs):
-            rhs_w = self._expr_width(rhs)
             lhs_w = self._expr_width(lhs)
-            if lhs_w > rhs_w:
-                program.append((Op.SIGN_EXT, lhs_w, 0))
+            program.append((Op.SIGN_EXT, lhs_w, 0))
 
     # ── LHS compilation ──────────────────────────────────────────
 

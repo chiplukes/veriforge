@@ -440,6 +440,37 @@ cdef int _wide_signed_cmp_py(
         return 1 if a_py >= b_py else 0
 
 
+cdef int _wide_unsigned_cmp_py(
+    unsigned long long *a_v, int a_width, int a_is_wide, long long a_narrow,
+    unsigned long long *b_v, int b_width, int b_is_wide, long long b_narrow,
+    int op_code,
+) noexcept:
+    cdef object a_py, b_py
+    cdef int wi
+    if a_is_wide:
+        a_py = <object>0
+        for wi in range(WIDE_WORDS):
+            a_py = a_py | ((<object>a_v[wi]) << (wi * 64))
+        a_py = a_py & (((<object>1) << a_width) - 1)
+    else:
+        a_py = (<object>(<unsigned long long>a_narrow)) & (((<object>1) << a_width) - 1)
+    if b_is_wide:
+        b_py = <object>0
+        for wi in range(WIDE_WORDS):
+            b_py = b_py | ((<object>b_v[wi]) << (wi * 64))
+        b_py = b_py & (((<object>1) << b_width) - 1)
+    else:
+        b_py = (<object>(<unsigned long long>b_narrow)) & (((<object>1) << b_width) - 1)
+    if op_code == 27:
+        return 1 if a_py < b_py else 0
+    elif op_code == 28:
+        return 1 if a_py <= b_py else 0
+    elif op_code == 29:
+        return 1 if a_py > b_py else 0
+    else:
+        return 1 if a_py >= b_py else 0
+
+
 cdef void _wm_mask_to_width(unsigned long long *wm_base, int w) noexcept nogil:
     """Clear bits in wm_base[] that lie above bit position w-1."""
     cdef int wsp = w >> 6
@@ -557,6 +588,10 @@ cdef int _execute_core(
     cdef int wide_part_nba_max = 0
     cdef int a_wide, b_wide, a_any_x, b_any_x, b_is_zero
     cdef int has_x, red_parity, all_ones, any_one
+    cdef int t_wide, cond_defined, cond_nonzero
+    cdef int b_has_x, b_shift_n, b_huge
+    cdef int any_x
+    cdef unsigned long long known_diff
     cdef unsigned long long av_w, am_w, bv_w, bm_w, agree_word
     if wctx != NULL:
         wide_nba_max = wctx.nba_cap
@@ -1624,8 +1659,43 @@ cdef int _execute_core(
             sp -= 1
             a = stack[sp]
             w = a.width
+            # The shift amount `b` may itself be wide (>64 bits, e.g. a wide
+            # concat used as a shift count): its narrow .val/.mask slot is
+            # not meaningful in that case (wide results always zero it out,
+            # see OP_CONCAT) -- the real data lives in wv[]/wm[] at
+            # (sp+1)*WIDE_WORDS.  Determine has-x and the effective (small)
+            # shift count from the wide words when that's where the data is.
+            b_wide = wflag[sp + 1]
+            if b_wide:
+                b_has_x = 0
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_has_x = 1; break
+                # A raw `<int>` truncation of word0 can wrap to a small or
+                # negative value when the true (possibly huge) shift amount
+                # doesn't fit in 32 bits, corrupting the word-index math
+                # below (out-of-bounds wv[]/wm[] access). Any word beyond
+                # word0 being nonzero, or word0 alone exceeding INT32_MAX,
+                # means the shift amount is certainly >= any width we
+                # support -- saturate to a safely-huge sentinel instead.
+                b_huge = 0
+                for wi in range(1, WIDE_WORDS):
+                    if wv[(sp + 1) * WIDE_WORDS + wi]: b_huge = 1; break
+                if not b_huge and wv[(sp + 1) * WIDE_WORDS] > <unsigned long long>0x7FFFFFFF:
+                    b_huge = 1
+                b_shift_n = 0x7FFFFFFF if b_huge else <int>wv[(sp + 1) * WIDE_WORDS]
+            else:
+                b_has_x = 1 if b.mask else 0
+                # b.val is a `long long` and can legitimately hold up to ~64
+                # bits of magnitude (e.g. a declared-63-bit shift-amount
+                # signal) -- a raw `<int>` truncation to 32 bits silently
+                # wraps a huge-but-defined value to a small/wrong one,
+                # corrupting the word-index math for wide `a` operands.
+                # Saturate instead (any shift amount this large is >= any
+                # width we support, so the exact saturated value never
+                # matters downstream).
+                b_shift_n = 0x7FFFFFFF if <unsigned long long>b.val > <unsigned long long>0x7FFFFFFF else <int>b.val
             if w > 64 or wflag[sp]:
-                if b.mask:
+                if b_has_x:
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS + wi] = 0xFFFFFFFFFFFFFFFF
@@ -1636,7 +1706,7 @@ cdef int _execute_core(
                         for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS] = <unsigned long long>a.mask
                         for wi in range(1, WIDE_WORDS): wm[sp * WIDE_WORDS + wi] = 0
-                    n = <int>b.val
+                    n = b_shift_n
                     wrd_off = n >> 6; bit_off = n & 63
                     for wi in range(WIDE_WORDS - 1, -1, -1):
                         if wi - wrd_off < 0:
@@ -1667,15 +1737,15 @@ cdef int _execute_core(
                 # a native C shift instruction only consults the low 6 bits
                 # of the count, so `x << 64` silently behaves like `x << 0`
                 # on a 64-bit word -- guard it explicitly.
-                if b.mask:
+                if b_has_x:
                     stack[sp].val = 0; stack[sp].mask = wmask
-                elif b.val >= 64:
+                elif b_shift_n >= 64:
                     stack[sp].val = 0; stack[sp].mask = 0
                 elif a.mask:
-                    stack[sp].val = (a.val << <int>b.val) & wmask
-                    stack[sp].mask = (a.mask << <int>b.val) & wmask
+                    stack[sp].val = (a.val << b_shift_n) & wmask
+                    stack[sp].mask = (a.mask << b_shift_n) & wmask
                 else:
-                    stack[sp].val = (a.val << <int>b.val) & wmask
+                    stack[sp].val = (a.val << b_shift_n) & wmask
                     stack[sp].mask = 0
                 stack[sp].width = w; wflag[sp] = 0
             sp += 1
@@ -1687,8 +1757,39 @@ cdef int _execute_core(
             sp -= 1
             a = stack[sp]
             w = a.width
+            # See OP_SHL for why the shift amount's wide-ness must be
+            # checked explicitly rather than trusting b.val/b.mask.
+            b_wide = wflag[sp + 1]
+            if b_wide:
+                b_has_x = 0
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_has_x = 1; break
+                # A raw `<int>` truncation of word0 can wrap to a small or
+                # negative value when the true (possibly huge) shift amount
+                # doesn't fit in 32 bits, corrupting the word-index math
+                # below (out-of-bounds wv[]/wm[] access). Any word beyond
+                # word0 being nonzero, or word0 alone exceeding INT32_MAX,
+                # means the shift amount is certainly >= any width we
+                # support -- saturate to a safely-huge sentinel instead.
+                b_huge = 0
+                for wi in range(1, WIDE_WORDS):
+                    if wv[(sp + 1) * WIDE_WORDS + wi]: b_huge = 1; break
+                if not b_huge and wv[(sp + 1) * WIDE_WORDS] > <unsigned long long>0x7FFFFFFF:
+                    b_huge = 1
+                b_shift_n = 0x7FFFFFFF if b_huge else <int>wv[(sp + 1) * WIDE_WORDS]
+            else:
+                b_has_x = 1 if b.mask else 0
+                # b.val is a `long long` and can legitimately hold up to ~64
+                # bits of magnitude (e.g. a declared-63-bit shift-amount
+                # signal) -- a raw `<int>` truncation to 32 bits silently
+                # wraps a huge-but-defined value to a small/wrong one,
+                # corrupting the word-index math for wide `a` operands.
+                # Saturate instead (any shift amount this large is >= any
+                # width we support, so the exact saturated value never
+                # matters downstream).
+                b_shift_n = 0x7FFFFFFF if <unsigned long long>b.val > <unsigned long long>0x7FFFFFFF else <int>b.val
             if w > 64 or wflag[sp]:
-                if b.mask:
+                if b_has_x:
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS + wi] = 0xFFFFFFFFFFFFFFFF
@@ -1699,7 +1800,7 @@ cdef int _execute_core(
                         for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS] = <unsigned long long>a.mask
                         for wi in range(1, WIDE_WORDS): wm[sp * WIDE_WORDS + wi] = 0
-                    n = <int>b.val
+                    n = b_shift_n
                     wrd_off = n >> 6; bit_off = n & 63
                     for wi in range(WIDE_WORDS):
                         if wi + wrd_off >= WIDE_WORDS:
@@ -1722,16 +1823,16 @@ cdef int _execute_core(
                 # long long, so a plain `>>` would arithmetic-shift (sign-fill)
                 # whenever the MSB is set -- cast to unsigned first. Also
                 # guard shift amount >= 64 (see OP_SHL for why).
-                if b.mask:
+                if b_has_x:
                     wmask = mask_for_width(w)
                     stack[sp].val = 0; stack[sp].mask = wmask
-                elif b.val >= 64:
+                elif b_shift_n >= 64:
                     stack[sp].val = 0; stack[sp].mask = 0
                 elif a.mask:
-                    stack[sp].val = <long long>(<unsigned long long>a.val >> <int>b.val)
-                    stack[sp].mask = <long long>(<unsigned long long>a.mask >> <int>b.val)
+                    stack[sp].val = <long long>(<unsigned long long>a.val >> b_shift_n)
+                    stack[sp].mask = <long long>(<unsigned long long>a.mask >> b_shift_n)
                 else:
-                    stack[sp].val = <long long>(<unsigned long long>a.val >> <int>b.val)
+                    stack[sp].val = <long long>(<unsigned long long>a.val >> b_shift_n)
                     stack[sp].mask = 0
                 stack[sp].width = w; wflag[sp] = 0
             sp += 1
@@ -1744,8 +1845,39 @@ cdef int _execute_core(
             sp -= 1
             a = stack[sp]
             w = a.width
+            # See OP_SHL for why the shift amount's wide-ness must be
+            # checked explicitly rather than trusting b.val/b.mask.
+            b_wide = wflag[sp + 1]
+            if b_wide:
+                b_has_x = 0
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_has_x = 1; break
+                # A raw `<int>` truncation of word0 can wrap to a small or
+                # negative value when the true (possibly huge) shift amount
+                # doesn't fit in 32 bits, corrupting the word-index math
+                # below (out-of-bounds wv[]/wm[] access). Any word beyond
+                # word0 being nonzero, or word0 alone exceeding INT32_MAX,
+                # means the shift amount is certainly >= any width we
+                # support -- saturate to a safely-huge sentinel instead.
+                b_huge = 0
+                for wi in range(1, WIDE_WORDS):
+                    if wv[(sp + 1) * WIDE_WORDS + wi]: b_huge = 1; break
+                if not b_huge and wv[(sp + 1) * WIDE_WORDS] > <unsigned long long>0x7FFFFFFF:
+                    b_huge = 1
+                b_shift_n = 0x7FFFFFFF if b_huge else <int>wv[(sp + 1) * WIDE_WORDS]
+            else:
+                b_has_x = 1 if b.mask else 0
+                # b.val is a `long long` and can legitimately hold up to ~64
+                # bits of magnitude (e.g. a declared-63-bit shift-amount
+                # signal) -- a raw `<int>` truncation to 32 bits silently
+                # wraps a huge-but-defined value to a small/wrong one,
+                # corrupting the word-index math for wide `a` operands.
+                # Saturate instead (any shift amount this large is >= any
+                # width we support, so the exact saturated value never
+                # matters downstream).
+                b_shift_n = 0x7FFFFFFF if <unsigned long long>b.val > <unsigned long long>0x7FFFFFFF else <int>b.val
             if w > 64 or wflag[sp]:
-                if b.mask:
+                if b_has_x:
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS + wi] = 0xFFFFFFFFFFFFFFFF
@@ -1756,7 +1888,7 @@ cdef int _execute_core(
                         for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS] = <unsigned long long>a.mask
                         for wi in range(1, WIDE_WORDS): wm[sp * WIDE_WORDS + wi] = 0
-                    n = <int>b.val
+                    n = b_shift_n
                     wrd_off = n >> 6; bit_off = n & 63
                     for wi in range(WIDE_WORDS - 1, -1, -1):
                         if wi - wrd_off < 0:
@@ -1783,13 +1915,19 @@ cdef int _execute_core(
                 wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0; stack[sp].width = w
             else:
                 wmask = mask_for_width(w)
-                if b.mask:
+                # A shift amount >= 64 must yield 0 (Verilog semantics), but
+                # a native C shift instruction is undefined behavior for a
+                # count >= the operand's bit width -- guard it explicitly
+                # (see OP_SHL for the same guard).
+                if b_has_x:
                     stack[sp].val = 0; stack[sp].mask = wmask
+                elif b_shift_n >= 64:
+                    stack[sp].val = 0; stack[sp].mask = 0
                 elif a.mask:
-                    stack[sp].val = (a.val << <int>b.val) & wmask
-                    stack[sp].mask = (a.mask << <int>b.val) & wmask
+                    stack[sp].val = (a.val << b_shift_n) & wmask
+                    stack[sp].mask = (a.mask << b_shift_n) & wmask
                 else:
-                    stack[sp].val = (a.val << <int>b.val) & wmask
+                    stack[sp].val = (a.val << b_shift_n) & wmask
                     stack[sp].mask = 0
                 stack[sp].width = w; wflag[sp] = 0
             sp += 1
@@ -1801,8 +1939,39 @@ cdef int _execute_core(
             sp -= 1
             a = stack[sp]
             w = a.width
+            # See OP_SHL for why the shift amount's wide-ness must be
+            # checked explicitly rather than trusting b.val/b.mask.
+            b_wide = wflag[sp + 1]
+            if b_wide:
+                b_has_x = 0
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_has_x = 1; break
+                # A raw `<int>` truncation of word0 can wrap to a small or
+                # negative value when the true (possibly huge) shift amount
+                # doesn't fit in 32 bits, corrupting the word-index math
+                # below (out-of-bounds wv[]/wm[] access). Any word beyond
+                # word0 being nonzero, or word0 alone exceeding INT32_MAX,
+                # means the shift amount is certainly >= any width we
+                # support -- saturate to a safely-huge sentinel instead.
+                b_huge = 0
+                for wi in range(1, WIDE_WORDS):
+                    if wv[(sp + 1) * WIDE_WORDS + wi]: b_huge = 1; break
+                if not b_huge and wv[(sp + 1) * WIDE_WORDS] > <unsigned long long>0x7FFFFFFF:
+                    b_huge = 1
+                b_shift_n = 0x7FFFFFFF if b_huge else <int>wv[(sp + 1) * WIDE_WORDS]
+            else:
+                b_has_x = 1 if b.mask else 0
+                # b.val is a `long long` and can legitimately hold up to ~64
+                # bits of magnitude (e.g. a declared-63-bit shift-amount
+                # signal) -- a raw `<int>` truncation to 32 bits silently
+                # wraps a huge-but-defined value to a small/wrong one,
+                # corrupting the word-index math for wide `a` operands.
+                # Saturate instead (any shift amount this large is >= any
+                # width we support, so the exact saturated value never
+                # matters downstream).
+                b_shift_n = 0x7FFFFFFF if <unsigned long long>b.val > <unsigned long long>0x7FFFFFFF else <int>b.val
             if w > 64 or wflag[sp]:
-                if b.mask:
+                if b_has_x:
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS + wi] = 0xFFFFFFFFFFFFFFFF
@@ -1813,7 +1982,7 @@ cdef int _execute_core(
                         for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0
                         wm[sp * WIDE_WORDS] = <unsigned long long>a.mask
                         for wi in range(1, WIDE_WORDS): wm[sp * WIDE_WORDS + wi] = 0
-                    n = <int>b.val
+                    n = b_shift_n
                     # Find sign bit: bit (w-1), which is bit (w-1)&63 of word (w-1)>>6
                     wsp = (w - 1) >> 6
                     bit_in_word = (w - 1) & 63
@@ -1883,14 +2052,14 @@ cdef int _execute_core(
                 wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0; stack[sp].width = w
             else:
                 wmask = mask_for_width(w)
-                if b.mask:
+                if b_has_x:
                     # Shift amount unknown -> entire result is genuinely undetermined.
                     stack[sp].val = 0; stack[sp].mask = wmask
                 else:
                     # Precise per-bit X propagation (IEEE 1364/1800 semantics):
                     # only the sign bit's own (un)knownness determines whether the
                     # vacated top bits become x, not "any x in a -> all x".
-                    n = <int>b.val
+                    n = b_shift_n
                     if w > 0:
                         wtmp = (<unsigned long long>a.val >> (w - 1)) & 1ULL       # sign bit value
                         ashr_sign_m = (<unsigned long long>a.mask >> (w - 1)) & 1ULL  # sign bit mask
@@ -1937,20 +2106,30 @@ cdef int _execute_core(
                     wv[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.val & ~b.mask)
                     wm[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.mask)
                     for wi in range(1, WIDE_WORDS): wv[(sp + 1) * WIDE_WORDS + wi] = 0; wm[(sp + 1) * WIDE_WORDS + wi] = 0
-                # Check for any X bits
-                result_val = 1; new_mask = 0
+                # A KNOWN bit that differs resolves the comparison (to
+                # "not equal") regardless of x/z bits elsewhere -- checking
+                # only "any x anywhere -> x" (without first checking for a
+                # resolving known difference) is imprecise per IEEE
+                # 1364/1800: e.g. comparing a wide value with some x bits
+                # against one whose KNOWN bits already differ is definitely
+                # unequal, not x.
+                known_diff = 0; any_x = 0
                 for wi in range(WIDE_WORDS):
-                    if wm[sp * WIDE_WORDS + wi] or wm[(sp + 1) * WIDE_WORDS + wi]:
-                        new_mask = 1; break
-                    if wv[sp * WIDE_WORDS + wi] != wv[(sp + 1) * WIDE_WORDS + wi]:
-                        result_val = 0; break
-                if new_mask:
+                    if wm[sp * WIDE_WORDS + wi] or wm[(sp + 1) * WIDE_WORDS + wi]: any_x = 1
+                    if (wv[sp * WIDE_WORDS + wi] ^ wv[(sp + 1) * WIDE_WORDS + wi]) & ~wm[sp * WIDE_WORDS + wi] & ~wm[(sp + 1) * WIDE_WORDS + wi]:
+                        known_diff = 1; break
+                if known_diff:
+                    stack[sp].val = 0; stack[sp].mask = 0
+                elif any_x:
                     stack[sp].val = 0; stack[sp].mask = 1
                 else:
-                    stack[sp].val = result_val; stack[sp].mask = 0
+                    stack[sp].val = 1; stack[sp].mask = 0
                 wflag[sp] = 0
             else:
-                if a.mask or b.mask:
+                known_diff = (<unsigned long long>a.val ^ <unsigned long long>b.val) & ~(<unsigned long long>a.mask) & ~(<unsigned long long>b.mask)
+                if known_diff:
+                    stack[sp].val = 0; stack[sp].mask = 0
+                elif a.mask or b.mask:
                     stack[sp].val = 0; stack[sp].mask = 1
                 else:
                     stack[sp].val = 1 if a.val == b.val else 0
@@ -1970,19 +2149,26 @@ cdef int _execute_core(
                     wv[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.val & ~b.mask)
                     wm[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.mask)
                     for wi in range(1, WIDE_WORDS): wv[(sp + 1) * WIDE_WORDS + wi] = 0; wm[(sp + 1) * WIDE_WORDS + wi] = 0
-                result_val = 0; new_mask = 0
+                # See OP_CMP_EQ for why a known-differing bit resolves the
+                # comparison ("not equal" -> 1 here) regardless of x/z
+                # elsewhere.
+                known_diff = 0; any_x = 0
                 for wi in range(WIDE_WORDS):
-                    if wm[sp * WIDE_WORDS + wi] or wm[(sp + 1) * WIDE_WORDS + wi]:
-                        new_mask = 1; break
-                    if wv[sp * WIDE_WORDS + wi] != wv[(sp + 1) * WIDE_WORDS + wi]:
-                        result_val = 1; break
-                if new_mask:
+                    if wm[sp * WIDE_WORDS + wi] or wm[(sp + 1) * WIDE_WORDS + wi]: any_x = 1
+                    if (wv[sp * WIDE_WORDS + wi] ^ wv[(sp + 1) * WIDE_WORDS + wi]) & ~wm[sp * WIDE_WORDS + wi] & ~wm[(sp + 1) * WIDE_WORDS + wi]:
+                        known_diff = 1; break
+                if known_diff:
+                    stack[sp].val = 1; stack[sp].mask = 0
+                elif any_x:
                     stack[sp].val = 0; stack[sp].mask = 1
                 else:
-                    stack[sp].val = result_val; stack[sp].mask = 0
+                    stack[sp].val = 0; stack[sp].mask = 0
                 wflag[sp] = 0
             else:
-                if a.mask or b.mask:
+                known_diff = (<unsigned long long>a.val ^ <unsigned long long>b.val) & ~(<unsigned long long>a.mask) & ~(<unsigned long long>b.mask)
+                if known_diff:
+                    stack[sp].val = 1; stack[sp].mask = 0
+                elif a.mask or b.mask:
                     stack[sp].val = 0; stack[sp].mask = 1
                 else:
                     stack[sp].val = 1 if a.val != b.val else 0
@@ -1990,49 +2176,48 @@ cdef int _execute_core(
             stack[sp].width = 1
             sp += 1; continue
 
-        if op == OP_CMP_LT:
+        if op == OP_CMP_LT or op == OP_CMP_LE or op == OP_CMP_GT or op == OP_CMP_GE:
             sp -= 1; b = stack[sp]
+            b_wide = wflag[sp]; wflag[sp] = 0
             sp -= 1; a = stack[sp]
+            a_wide = wflag[sp]; wflag[sp] = 0
+            has_x = 0
             if a.mask or b.mask:
+                has_x = 1
+            elif a_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[sp * WIDE_WORDS + wi]: has_x = 1; break
+            if not has_x and b_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: has_x = 1; break
+            if has_x:
                 stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
+            elif a_wide or b_wide:
+                # Wide (>64-bit) unsigned magnitude comparison -- narrow-only
+                # comparison below cannot see the real data for a wide
+                # operand (it lives in wv[]/wm[], not stack[].val/mask).
+                with gil:
+                    result_val = _wide_unsigned_cmp_py(
+                        &wv[sp * WIDE_WORDS], a.width, a_wide, a.val,
+                        &wv[(sp + 1) * WIDE_WORDS], b.width, b_wide, b.val,
+                        op,
+                    )
+                stack[sp].val = result_val; stack[sp].mask = 0; stack[sp].width = 1
             else:
                 # Unsigned comparison: a.val/b.val are signed `long long`, so
                 # a value with its MSB set (e.g. a 64-bit value >= 2**63) is
                 # stored as a negative container -- compare the unsigned
                 # reinterpretation, not the signed one (signed comparisons
                 # go through OP_CMP_SLT and already sign-extend correctly).
-                stack[sp].val = 1 if <unsigned long long>a.val < <unsigned long long>b.val else 0
-                stack[sp].mask = 0; stack[sp].width = 1
-            sp += 1; continue
-
-        if op == OP_CMP_LE:
-            sp -= 1; b = stack[sp]
-            sp -= 1; a = stack[sp]
-            if a.mask or b.mask:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
-            else:
-                stack[sp].val = 1 if <unsigned long long>a.val <= <unsigned long long>b.val else 0
-                stack[sp].mask = 0; stack[sp].width = 1
-            sp += 1; continue
-
-        if op == OP_CMP_GT:
-            sp -= 1; b = stack[sp]
-            sp -= 1; a = stack[sp]
-            if a.mask or b.mask:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
-            else:
-                stack[sp].val = 1 if <unsigned long long>a.val > <unsigned long long>b.val else 0
-                stack[sp].mask = 0; stack[sp].width = 1
-            sp += 1; continue
-
-        if op == OP_CMP_GE:
-            sp -= 1; b = stack[sp]
-            sp -= 1; a = stack[sp]
-            if a.mask or b.mask:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1
-            else:
-                stack[sp].val = 1 if <unsigned long long>a.val >= <unsigned long long>b.val else 0
-                stack[sp].mask = 0; stack[sp].width = 1
+                if op == OP_CMP_LT:
+                    result_val = 1 if <unsigned long long>a.val < <unsigned long long>b.val else 0
+                elif op == OP_CMP_LE:
+                    result_val = 1 if <unsigned long long>a.val <= <unsigned long long>b.val else 0
+                elif op == OP_CMP_GT:
+                    result_val = 1 if <unsigned long long>a.val > <unsigned long long>b.val else 0
+                else:
+                    result_val = 1 if <unsigned long long>a.val >= <unsigned long long>b.val else 0
+                stack[sp].val = result_val; stack[sp].mask = 0; stack[sp].width = 1
             sp += 1; continue
 
         if op == OP_CMP_CASE_EQ:
@@ -2099,10 +2284,18 @@ cdef int _execute_core(
                 else:
                     a.val = 0; a.mask = 0
             if a.mask or b.mask:
+                # a.val/b.val already have their masked (x) bit positions
+                # cleared (per the struct invariant), so a nonzero .val
+                # means a genuinely KNOWN 1 bit exists elsewhere -- an
+                # operand can be definitely true despite having *some*
+                # unrelated unknown bits; only "definitely zero" requires
+                # full certainty (mask == 0).
                 if a.mask == 0 and a.val == 0:
                     stack[sp].val = 0; stack[sp].mask = 0
                 elif b.mask == 0 and b.val == 0:
                     stack[sp].val = 0; stack[sp].mask = 0
+                elif a.val != 0 and b.val != 0:
+                    stack[sp].val = 1; stack[sp].mask = 0
                 else:
                     stack[sp].val = 0; stack[sp].mask = 1
             else:
@@ -2139,10 +2332,14 @@ cdef int _execute_core(
                 else:
                     a.val = 0; a.mask = 0
             if a.mask or b.mask:
-                if a.mask == 0 and a.val != 0:
+                # See OP_LOG_AND: a nonzero .val is already known-true
+                # regardless of unrelated unknown bits elsewhere.
+                if a.val != 0:
                     stack[sp].val = 1; stack[sp].mask = 0
-                elif b.mask == 0 and b.val != 0:
+                elif b.val != 0:
                     stack[sp].val = 1; stack[sp].mask = 0
+                elif a.mask == 0 and b.mask == 0:
+                    stack[sp].val = 0; stack[sp].mask = 0
                 else:
                     stack[sp].val = 0; stack[sp].mask = 1
             else:
@@ -2860,9 +3057,24 @@ cdef int _execute_core(
             a_wide = wflag[sp]
             sp -= 1
             t = stack[sp]       # cond
-            if t.mask == 0:
+            t_wide = wflag[sp]
+            if t_wide:
+                # Condition itself may be >64 bits (e.g. a wide concat) --
+                # the narrow t.val/t.mask slot does not hold the real data
+                # in that case (it lives in wv[]/wm[]), so it must not be
+                # consulted directly.
+                has_x = 0
+                cond_nonzero = 0
+                for wi in range(WIDE_WORDS):
+                    if wm[sp * WIDE_WORDS + wi]: has_x = 1
+                    if wv[sp * WIDE_WORDS + wi]: cond_nonzero = 1
+                cond_defined = not has_x
+            else:
+                cond_defined = t.mask == 0
+                cond_nonzero = t.val != 0
+            if cond_defined:
                 # Condition fully defined — select one operand
-                if t.val != 0:
+                if cond_nonzero:
                     stack[sp] = a
                     wflag[sp] = a_wide
                     if a_wide:

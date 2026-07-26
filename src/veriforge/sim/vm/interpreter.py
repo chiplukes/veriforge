@@ -488,6 +488,22 @@ class Interpreter:  # cm:e3f1b4
                 else:
                     shift = b
                 width = a.width
+                if width == 0:
+                    s_append(Value(0, width=0))
+                    continue
+                if shift >= width:
+                    # Entire result is the sign bit (bit width-1) replicated
+                    # -- avoid constructing a `width + shift`-bit
+                    # intermediate value, which can raise OverflowError
+                    # (CPython caps huge int shifts) when `shift` comes from
+                    # a wide self-determined operand.
+                    if (a.mask >> (width - 1)) & 1:
+                        s_append(Value.x(width))
+                    elif (a.val >> (width - 1)) & 1:
+                        s_append(Value((1 << width) - 1, width=width))
+                    else:
+                        s_append(Value(0, width=width))
+                    continue
                 extended = a.sign_extend(width + shift)
                 s_append((extended >> shift).resize(width))
                 continue

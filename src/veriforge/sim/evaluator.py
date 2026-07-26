@@ -261,13 +261,27 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # Set by StatementExecutor.__init__.
         self._executor: object | None = None
 
-    def eval(self, expr: Expression, ctx: EvalContext, width: int = 0) -> Value:  # noqa: PLR0911, PLR0912, PLR0915
+    def eval(  # noqa: PLR0911, PLR0912, PLR0915
+        self, expr: Expression, ctx: EvalContext, width: int = 0, signed_override: bool | None = None
+    ) -> Value:
         """Evaluate an expression tree and return its Value.
 
         *width* is the context-determined bit-width (e.g. from an
         assignment target).  When non-zero it widens operands of
         context-determined operators (arithmetic, bitwise, shift-left-
         operand) before evaluation — matching IEEE 1364-2005 §5.4.1.
+
+        *signed_override*, when not None, replaces `_expr_signed()` for
+        every extension decision made while evaluating *expr* (and
+        propagates unchanged through nested context-determined operators).
+        This models the conditional (ternary) operator's IEEE 1364-2005
+        §5.5.1 rule: both of ITS branches are extended using ONE combined
+        signedness (signed only if BOTH branches are signed) — not each
+        branch's own individual signedness — and this combined signedness
+        governs every extension nested within either branch, not just the
+        branch's own immediate value. A ternary establishes a *fresh*
+        override for its own branches (see the TernaryOp case below),
+        discarding whatever override may have been active from further out.
         """
         etype = type(expr)
 
@@ -281,7 +295,8 @@ class ExpressionEvaluator:  # cm:7e8b5d
             v = ctx._signals.get(name)
             if v is not None:
                 if width and v.width < width:
-                    if _expr_signed(expr, ctx):
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                    if eff_signed:
                         return v.sign_extend(width)
                     return v.resize(width)
                 return v
@@ -304,30 +319,51 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- Hot path: BinaryOp ------------------------------------
         if etype is BinaryOp:
             op = expr.op
+            # Comparison/logical ops produce 1-bit — operands are NOT
+            # context-determined from the enclosing width; they are only
+            # evaluated self-determined (matching the VM compiler, which
+            # never propagates width into these operands either). Extending
+            # each operand independently to some unrelated outer context
+            # width (using each operand's own signedness) before comparing
+            # would corrupt the comparison whenever the operands' own
+            # signedness differs.
+            if op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+                left = self.eval(expr.left, ctx)
+                right = self.eval(expr.right, ctx)
             # Shift operators: only LEFT operand is context-determined
-            if op in ("<<", ">>", "<<<", ">>>"):
-                left = self.eval(expr.left, ctx, width)
+            elif op in ("<<", ">>", "<<<", ">>>"):
+                left = self.eval(expr.left, ctx, width, signed_override)
                 right = self.eval(expr.right, ctx)  # self-determined
-                if width and left.width < width:
-                    if _expr_signed(expr.left, ctx):
-                        left = left.sign_extend(width)
-                    else:
-                        left = left.resize(width)
+                if width and left.width != width:
+                    target = max(width, _expr_self_width(expr.left, ctx))
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                    left = left.sign_extend(target) if eff_signed else left.resize(target)
             else:
-                left = self.eval(expr.left, ctx, width)
-                right = self.eval(expr.right, ctx, width)
-                # Context-determined: widen both to max(context, operand widths)
+                left = self.eval(expr.left, ctx, width, signed_override)
+                right = self.eval(expr.right, ctx, width, signed_override)
+                # Context-determined: resize both to max(context, operand's
+                # own self-determined width) -- this can WIDEN (extend) or
+                # NARROW (truncate) the operand. Truncation matters when the
+                # operand is itself a further context-determined operator
+                # whose own self-determined width can exceed the enclosing
+                # context (e.g. multiplication's own width is the SUM of its
+                # operand widths per IEEE 1364-2005 §5.4.1, which can easily
+                # exceed an enclosing shift's context width): the enclosing
+                # context wins and the multiply's result must be narrowed to
+                # match before the shift runs, mirroring what real hardware
+                # (and sim/vm/compiler.py, which already does this) does.
+                # `_expr_self_width` is a floor so a genuinely-wide operand
+                # whose width IS its meaning (e.g. a concatenation) is never
+                # narrowed below its own exact width.
                 if width:
-                    if left.width < width:
-                        if _expr_signed(expr.left, ctx):
-                            left = left.sign_extend(width)
-                        else:
-                            left = left.resize(width)
-                    if right.width < width:
-                        if _expr_signed(expr.right, ctx):
-                            right = right.sign_extend(width)
-                        else:
-                            right = right.resize(width)
+                    if left.width != width:
+                        target = max(width, _expr_self_width(expr.left, ctx))
+                        eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                        left = left.sign_extend(target) if eff_signed else left.resize(target)
+                    if right.width != width:
+                        target = max(width, _expr_self_width(expr.right, ctx))
+                        eff_signed = signed_override if signed_override is not None else _expr_signed(expr.right, ctx)
+                        right = right.sign_extend(target) if eff_signed else right.resize(target)
             # Detect signed comparison: both operands must be signed
             if op in ("<", "<=", ">", ">=") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
                 return _eval_signed_cmp(op, left, right)
@@ -344,29 +380,37 @@ class ExpressionEvaluator:  # cm:7e8b5d
             if expr.op == "~":
                 operand = self.eval(expr.operand, ctx)
                 return _eval_unary_op("~", operand)
-            # Unary +/- are context-determined for signed values: widen the
-            # signed operand to the surrounding context width.
+            # Unary +/- are context-determined for signed values: resize the
+            # operand to the surrounding context width (see the BinaryOp
+            # arithmetic branch above for why this can narrow, not just
+            # widen, the operand).
             if expr.op in ("+", "-"):
-                operand = self.eval(expr.operand, ctx, width)
-                if width and operand.width < width:
-                    if _expr_signed(expr.operand, ctx):
-                        operand = operand.sign_extend(width)
-                    else:
-                        operand = operand.resize(width)
+                operand = self.eval(expr.operand, ctx, width, signed_override)
+                if width and operand.width != width:
+                    target = max(width, _expr_self_width(expr.operand, ctx))
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.operand, ctx)
+                    operand = operand.sign_extend(target) if eff_signed else operand.resize(target)
             else:
                 operand = self.eval(expr.operand, ctx)
             return _eval_unary_op(expr.op, operand)
 
         # -- TernaryOp ---------------------------------------------
         if etype is TernaryOp:
+            # IEEE 1364-2005 §5.5.1: the conditional operator's own combined
+            # signedness (signed only if BOTH branches are signed) governs
+            # every extension needed while evaluating whichever branch is
+            # selected -- not that branch's own individual signedness. This
+            # establishes a *fresh* override for both branches, replacing
+            # whatever override (if any) was active from further out.
+            own_signed = _expr_signed(expr, ctx)
             cond = self.eval(expr.condition, ctx)
             if cond.is_defined:
                 if cond.val:
-                    return self.eval(expr.true_expr, ctx, width)
+                    return self.eval(expr.true_expr, ctx, width, own_signed)
                 else:
-                    return self.eval(expr.false_expr, ctx, width)
-            t = self.eval(expr.true_expr, ctx, width)
-            f = self.eval(expr.false_expr, ctx, width)
+                    return self.eval(expr.false_expr, ctx, width, own_signed)
+            t = self.eval(expr.true_expr, ctx, width, own_signed)
+            f = self.eval(expr.false_expr, ctx, width, own_signed)
             return _merge_xz(t, f)
 
         # -- Concatenation -----------------------------------------
@@ -625,6 +669,69 @@ class ExpressionEvaluator:  # cm:7e8b5d
         return local_ctx.read_signal(func.name)
 
 
+# ── Self-determined width (generic max-rule, incl. for '*') ───────────
+
+
+def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
+    """Self-determined width of *expr*, using the max-of-operands rule for
+    every binary arithmetic operator, INCLUDING multiplication -- not the
+    IEEE 1364-2005 §5.4.1 sum-of-operand-widths rule '*'/'**' otherwise get.
+
+    Used only as a floor when resizing an operand of an enclosing
+    context-determined operator (see the BinaryOp/UnaryOp context-determined
+    branches in `eval()`): multiplication's own "widen to the sum of operand
+    widths" rule only matters when '*' is genuinely unconstrained; when it
+    is itself an operand of a further context-determined operator (e.g. the
+    left side of '>>'), the ENCLOSING context wins and the multiply's result
+    must be narrowed to match -- mirrors `sim/vm/compiler.py`'s
+    `_expr_width`, which has the same generic-max treatment for this reason,
+    and which the compiled/vm-fast/reference/vm engines must all agree with.
+    """
+    etype = type(expr)
+    if etype is Identifier:
+        name = expr.name
+        if expr.hierarchy:
+            name = ".".join(expr.hierarchy) + "." + name
+        v = ctx._signals.get(name)
+        return v.width if v is not None else 32
+    if etype is Literal:
+        return expr.width or 32
+    if etype is BitSelect:
+        return 1
+    if etype is RangeSelect:
+        if isinstance(expr.msb, Literal) and isinstance(expr.lsb, Literal):
+            return int(expr.msb.value) - int(expr.lsb.value) + 1
+        return 1
+    if etype is PartSelect:
+        if isinstance(expr.width, Literal):
+            return int(expr.width.value)
+        return 1
+    if etype is Concatenation:
+        return sum(_expr_self_width(p, ctx) for p in expr.parts)
+    if etype is Replication:
+        if isinstance(expr.count, Literal):
+            return int(expr.count.value) * _expr_self_width(expr.value, ctx)
+        return _expr_self_width(expr.value, ctx)
+    if etype is BinaryOp:
+        if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+            return 1
+        return max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+    if etype is UnaryOp:
+        if expr.op in ("&", "|", "^", "~&", "~|", "~^", "^~", "!"):
+            return 1
+        return _expr_self_width(expr.operand, ctx)
+    if etype is TernaryOp:
+        return max(_expr_self_width(expr.true_expr, ctx), _expr_self_width(expr.false_expr, ctx))
+    if etype is FunctionCall:
+        name = expr.name.lower()
+        if name in ("$signed", "$unsigned") and expr.arguments:
+            return _expr_self_width(expr.arguments[0], ctx)
+        return 32
+    if etype is StringLiteral:
+        return len(expr.value) * 8
+    return 32
+
+
 # ── Signed comparison helpers ─────────────────────────────────────────
 
 
@@ -664,12 +771,11 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             cache[id(expr)] = result
         return result
 
-    # -- BitSelect / RangeSelect / PartSelect: parent signedness ----------
+    # -- BitSelect / RangeSelect / PartSelect: always unsigned (§5.5.1) ---
     if etype in (BitSelect, RangeSelect, PartSelect):
-        result = _expr_signed(expr.target, ctx, cache)
         if cache is not None:
-            cache[id(expr)] = result
-        return result
+            cache[id(expr)] = False
+        return False
 
     # -- UnaryOp: signed if operand is signed ------------------------------
     if etype is UnaryOp:
@@ -810,6 +916,18 @@ def _eval_binary_op(op: str, left: Value, right: Value) -> Value:
         else:
             shift = right
         width = left.width
+        if width == 0:
+            return Value(0, width=0)
+        if shift >= width:
+            # Entire result is the sign bit (bit width-1) replicated -- avoid
+            # constructing a `width + shift`-bit intermediate value, which
+            # can raise OverflowError (CPython caps huge int shifts) when
+            # `shift` comes from a wide self-determined operand.
+            if (left.mask >> (width - 1)) & 1:
+                return Value.x(width)
+            if (left.val >> (width - 1)) & 1:
+                return Value((1 << width) - 1, width=width)
+            return Value(0, width=width)
         extended = left.sign_extend(width + shift)
         return (extended >> shift).resize(width)
 

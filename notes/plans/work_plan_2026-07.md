@@ -703,6 +703,46 @@ Tier 2.
 found → reduce to a deterministic case in `test_compiled_edge_shapes.py`
 (2.2) before fixing, same known_issues/xfail protocol.
 
+**Result** (July 2026): Done, as specified, with two adjustments. (1) The
+"compiled" engine is opt-in via `VERIFORGE_DIFF_COMPILED=1`, not part of the
+default run — per-module Cython compilation is too slow for "a few seconds",
+and the compiled engine has a separate, unfixed ternary-signedness codegen
+gap (see below), so including it by default would make the default run red.
+(2) `weekly.yml` doesn't exist yet (item 3.2 not scheduled), so the
+heavier/compiled-enabled run isn't wired into CI yet — deferred to whenever
+3.2 lands.
+
+Building the harness immediately found ~11 distinct, real, previously
+undetected correctness bugs (verified against Icarus Verilog) spanning
+reference, vm, vm-fast, and the compiled engine — full writeup in
+`notes/known_issues.md` under "Randomized differential harness (work plan
+item 3.4): bugs found and fixed". Highlights: bit-select/part-select
+signedness inheriting the base signal's signedness instead of always being
+unsigned (IEEE 1364-2005 §5.5.1); the conditional operator's own combined
+signedness not overriding individual-branch signedness for nested
+context-determined extension; comparison/logical operators wrongly
+inheriting the enclosing assignment's context width; several "any x bit ->
+result is x" imprecise x-propagation bugs in `&&`/`||`/`==`/`!=` where a
+known bit should have resolved the result; a wide-condition bug in
+`OP_TERNARY`; wide/huge shift-amount handling bugs in `_interp_fast.pyx`
+(including a segfault); multiplication's sum-of-widths self-determined rule
+leaking through an enclosing context-determined operator (found in both
+reference and, independently, in a legacy compiled-engine fast-path, which
+also uncovered an undefined-behavior bug in a shared `_word_mask64` helper
+for negative widths); and an `OverflowError` crash for shift amounts derived
+from a large self-determined operand. All fixed and verified across 10+
+seeds x 400-500 cases in `test_differential.py`, plus the full existing
+`test_compiled.py --run-slow` + `test_bench_native.py` + `test_sim/` +
+`test_dsl/` suites (5716 + 4728 tests, all green, no regressions).
+
+**Deferred follow-up** (documented in known_issues.md, not scheduled): the
+compiled engine's ternary/context-determined-operator codegen
+(`sim/compiled/_expr_emitter.py`, `_wide_emitter.py`) never received the
+conditional-operator signedness fix — replicating it there is a separate,
+substantially larger undertaking (a different, much bigger codegen
+architecture than `sim/vm/compiler.py`). Running the harness with
+`VERIFORGE_DIFF_COMPILED=1` shows this.
+
 ### 3.5 `Simulator.engine_report()` (S/M)
 
 **Goal**: make compiled-engine fallback visible

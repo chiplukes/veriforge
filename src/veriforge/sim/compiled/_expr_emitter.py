@@ -142,9 +142,12 @@ class _ExprEmitterMixin:
         return "0"
 
     def _emit_signed_widen(self, val_expr: str, sid: int, sel_width: int, context_width: int) -> str:
-        """If *sid* is signed and *context_width* > *sel_width*, wrap *val_expr* with _sign_ext."""
-        if context_width > sel_width and sid < len(self._signal_signed) and self._signal_signed[sid]:
-            return f"_sign_ext({val_expr}, {sel_width})"
+        """No-op: a bit-select/range-select/part-select is always unsigned
+        (IEEE 1364-2005 §5.5.1) regardless of the sliced signal's own
+        declared signedness -- kept as a passthrough so call sites don't
+        need to change.
+        """
+        del sid, sel_width, context_width
         return val_expr
 
     def _emit_expr(self, expr: Expression, width: int) -> str:  # noqa: PLR0911, PLR0912
@@ -418,42 +421,33 @@ class _ExprEmitterMixin:
                     base = self._emit_expr(expr.base, 32)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
-                        sel_w = int(expr.width.value)
                     else:
                         width_expr = self._emit_expr(expr.width, 32)
-                        sel_w = None
                     if sig_base != 0:
                         base = f"(({base}) - {sig_base})"
                     if expr.direction == "+:":
                         lsb_expr = base
                     else:
                         lsb_expr = f"({base}) - ({width_expr}) + 1"
-                    result = self._emit_signal_slice_expr(sid, lsb_expr, width_expr)
-                    if sel_w is not None:
-                        result = self._emit_signed_widen(result, sid, sel_w, width)
-                    elif sid < len(self._signal_signed) and self._signal_signed[sid]:
-                        result = f"_sign_ext({result}, {width_expr})"
-                    return result
+                    # A part-select is always unsigned (IEEE 1364-2005
+                    # §5.5.1) regardless of the sliced signal's own
+                    # declared signedness -- no sign-extension here.
+                    return self._emit_signal_slice_expr(sid, lsb_expr, width_expr)
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
                     base = self._emit_expr(expr.base, 32)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
-                        sel_w = int(expr.width.value)
                     else:
                         width_expr = self._emit_expr(expr.width, 32)
-                        sel_w = None
                     if expr.direction == "+:":
                         lsb_expr = f"{offset} + ({base})"
                     else:
                         lsb_expr = f"{offset} + ({base}) - ({width_expr}) + 1"
-                    result = self._emit_signal_slice_expr(base_sid, lsb_expr, width_expr)
-                    if sel_w is not None:
-                        result = self._emit_signed_widen(result, base_sid, sel_w, width)
-                    elif base_sid < len(self._signal_signed) and self._signal_signed[base_sid]:
-                        result = f"_sign_ext({result}, {width_expr})"
-                    return result
+                    # Always unsigned -- see the comment in the plain-signal
+                    # branch above.
+                    return self._emit_signal_slice_expr(base_sid, lsb_expr, width_expr)
                 storage_info = self._resolve_struct_storage_access(tname)
                 if storage_info is not None and storage_info[0] == "memory":
                     index_expr = self._emit_struct_storage_index_expr(storage_info[2])
@@ -1631,7 +1625,9 @@ class _ExprEmitterMixin:
             result = expr.signed
 
         elif etype in (BitSelect, RangeSelect, PartSelect):
-            result = self._expr_signed(expr.target, cache)
+            # Always unsigned (§5.5.1), regardless of the target's declared
+            # signedness.
+            result = False
 
         elif etype is UnaryOp:
             if expr.op == "!":

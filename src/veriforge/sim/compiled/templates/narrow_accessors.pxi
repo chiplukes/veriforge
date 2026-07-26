@@ -1,11 +1,21 @@
 cdef inline long long wmask(int w) noexcept nogil:
     if w >= 64:
         return -1
+    if w <= 0:
+        return 0
     return (1LL << w) - 1
 
 cdef inline unsigned long long _word_mask64(int w) noexcept nogil:
+    # A negative `w` (a caller computing "how many bits of this word are
+    # still within range" for a word entirely beyond the value's actual
+    # width) means zero valid bits -- must be handled explicitly: shifting
+    # by a negative amount is undefined behavior in C (unlike Python, where
+    # `1 << -3` raises; here it silently reads garbage, e.g. x86 masks the
+    # shift count to 6 bits, turning `<< -3` into `<< 61`).
     if w >= 64:
         return <unsigned long long>-1
+    if w <= 0:
+        return 0
     return ((<unsigned long long>1) << w) - 1
 
 cdef inline unsigned long long _sig_word_val(SimCtx *c, int sid, int word_index) noexcept nogil:
