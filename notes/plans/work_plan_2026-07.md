@@ -932,6 +932,34 @@ table; no engine data structures leak into semantics.
 allocation. Migrate the pure helpers first; revisit `_expr_width` unification
 as a follow-up once `expr_width` exists and parity tests cover it.
 
+**Result (Phase A+B, July 2026)**: Phase A done as `test_semantics_parity.py`
+(see its module docstring for the full difference table — 3 confirmed
+differences, all resolved in Phase B below). Phase B done:
+`src/veriforge/semantics.py` implements the full API (`const_int`,
+`range_width`, `var_width`, `net_width`, `expr_width`, `expr_signed`),
+stdlib + `model` imports only. `const_int` ports `elaborate._eval_const_expr`'s
+dispatch (env-dict identifier resolution, full unary/binary op tables,
+ternary/concat/replication/range-select/part-select, `$clog2`/`$bits`/
+`$signed`/`$unsigned`/`$pow`), wrapped to catch and return `None` rather than
+raise (Difference 3's resolution); its `RangeSelect` folding also fixes the
+ascending-range case (`(base >> min(msb,lsb))`, not `(base >> lsb)`), a latent
+bug `_eval_const_expr` itself still has. `range_width` uses
+`abs(msb - lsb) + 1` unconditionally (Difference 2's resolution). `expr_width`
+(self-determined, Table 5-22) and `expr_signed` (§5.5/§5.5.1) are new —
+Phase A didn't cover them (explicit non-goal), so they're modeled on the
+already-Icarus-validated logic from item 3.4's `evaluator.py:_expr_signed`/
+`_expr_self_width` fixes (correct `*`/`**` sum-rule, selects always unsigned,
+shift signedness from the left operand only, ternary's both-branches-signed
+rule) rather than `width_inference.py`'s simplified max-rule for `*`, since
+that rule is a known simplification, not the IEEE-correct behavior. Direct
+tests in `tests/test_analysis/test_semantics.py` (24 tests, including the
+ported Phase A fixtures). Added `"semantics": {"model"}` to the layering
+test's `ALLOWED_EDGES`. Full suite green. **Phases C–G not yet started** —
+no consumer has been migrated to delegate to `semantics.py` yet; the old
+per-engine `_const_int`/`_range_width`/`_var_width` copies (including their
+own ascending-range bug in scheduler.py/vm/compiler.py) are unchanged until
+Phase C.
+
 ### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
 
 **Goal**: functionality review §3.1–3.2.

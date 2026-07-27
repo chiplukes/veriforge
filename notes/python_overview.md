@@ -12,6 +12,7 @@ src/veriforge/
 ├── preprocessor.py       # Verilog preprocessor (`define/`ifdef/`include/`timescale etc.)
 ├── project.py            # Multi-file project support (parse_file/files/directory, parse cache)
 ├── scaffold.py           # Testbench scaffold + DSL export (build_testbench, build_testbench_plan, generate_python_testbench_skeleton, export_dsl_project)
+├── semantics.py          # Unified width/signedness/const-eval semantics (const_int, range_width, var_width, net_width, expr_width, expr_signed); stdlib+model only
 ├── lark_file/
 │   ├── __init__.py
 │   ├── gen_tree.py       # Grammar tree visualization
