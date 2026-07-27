@@ -878,7 +878,7 @@ check_overview gate green. CLI smoke-tested end-to-end
 (`--generate-python-testbench`) to confirm the moved code path works
 outside the test suite too.
 
-### 4.2 Semantic core unification (L — the big one)
+### 4.2 Semantic core unification (L — the big one) ✅
 
 **Goal**: one implementation of width/signedness/const-eval semantics
 (architecture review item 1). Do this **after** Tier 2 exists — those suites
@@ -1037,8 +1037,30 @@ running, not by manual re-derivation). Added `"semantics"` to
 Full suite green (7761 passed) after Phases E+F landed together (per user
 request to batch more before paying for a ~35-minute full run).
 
-**Phase G not yet started** (guard test: no function named `_const_int`,
-`_range_width`, or `_var_width` defined outside `semantics.py`).
+**Result (Phase G, July 2026)**: added
+`test_no_duplicate_semantics_helpers_outside_semantics_module` to
+`tests/test_project/test_import_layering.py` — AST-walks every file under
+`src/veriforge` (reusing the layering test's own `_iter_source_files`) and
+flags any `def`/nested `def` named `_const_int`, `_range_width`, or
+`_var_width` outside `semantics.py`. Verified it actually catches a
+violation (temporarily reintroduced a `_const_int` def in an unrelated
+file, confirmed the test fails with a clear message, reverted). This
+required actually finishing the "then delete the private helpers and
+update call sites" half of the Phase C-F mechanic, which earlier phases had
+deferred: `sim/scheduler.py`, `sim/vm/compiler.py`, `sim/compiled/codegen.py`,
+and `sim/compiled/_codegen_utils.py` no longer define these three names at
+all — they import them directly from `semantics` aliased to the same
+names (e.g. `from ..semantics import const_int as _const_int`), which is
+invisible to the guard (only `def` counts, not `import ... as`) while
+keeping every internal call site unchanged. `analysis/width_inference.py`
+similarly lost its own `_const_int`/`_range_width` wrappers — its call
+sites now call `const_fold.const_int`/`const_range_width` directly (the
+public, non-underscore names, exempt from the guard since they're
+`const_fold.py`'s own documented public API per the plan's Phase C-F note).
+`notes/architecture.md` gained a "Semantics" paragraph. Full gate (ruff,
+mypy, check_overview) and the affected test suites (`test_analysis/`,
+`test_import_layering.py`, `test_sim/test_scheduler.py`) green; item 4.2 is
+complete — all phases (A-G) landed.
 
 ### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
 

@@ -63,6 +63,7 @@ from ..model.nets import Net
 from ..model.parameters import Parameter
 from ..model.ports import Port
 from ..model.variables import Variable, VariableKind
+from .const_fold import const_int, const_range_width
 
 # Operators that always produce a 1-bit result
 _ONE_BIT_BINARY = frozenset({"==", "!=", "<", "<=", ">", ">=", "&&", "||", "===", "!=="})
@@ -92,26 +93,15 @@ _SYSTEM_FUNC_WIDTHS: dict[str, int] = {
 }
 
 
-def _range_width(rng: Range | None) -> int | None:
-    """Extract integer width from a Range [msb:lsb], or None if not constant.
-
-    Uses constant folding so parameterized ranges like ``[WIDTH-1:0]``
-    are resolved when the parameter value is known.
-    """
-    from .const_fold import const_range_width
-
-    return const_range_width(rng)
-
-
 def _declaration_width(decl: VerilogNode) -> int | None:
     """Get the bit width from a Port, Net, Variable, or Parameter declaration."""
     if isinstance(decl, Port):
         if decl.data_type == "integer":
             return 32
-        return _range_width(decl.width)
+        return const_range_width(decl.width)
 
     if isinstance(decl, Net):
-        return _range_width(decl.width)
+        return const_range_width(decl.width)
 
     if isinstance(decl, Variable):
         if decl.kind == VariableKind.INTEGER:
@@ -128,7 +118,7 @@ def _declaration_width(decl: VerilogNode) -> int | None:
             return 32
         if decl.kind == VariableKind.LONGINT:
             return 64
-        return _range_width(decl.width)
+        return const_range_width(decl.width)
 
     if isinstance(decl, Parameter):
         if decl.param_type == "integer":
@@ -136,22 +126,11 @@ def _declaration_width(decl: VerilogNode) -> int | None:
         if decl.param_type == "real":
             return 64
         if decl.width is not None:
-            return _range_width(decl.width)
+            return const_range_width(decl.width)
         # Unranged parameter — try to infer from default value
         return 32  # Verilog default for unsized parameters
 
     return None
-
-
-def _const_int(expr: Expression) -> int | None:
-    """Try to extract a constant integer value from an expression.
-
-    Delegates to ``const_fold.const_int()`` which handles parameter
-    references, arithmetic, and system functions like ``$clog2``.
-    """
-    from .const_fold import const_int
-
-    return const_int(expr)
 
 
 def infer_expr_width(expr: Expression) -> int | None:
@@ -240,7 +219,7 @@ def _infer_width_impl(expr: Expression) -> int | None:  # noqa: PLR0911, PLR0912
 
     # --- Replication ---
     if isinstance(expr, Replication):
-        count = _const_int(expr.count)
+        count = const_int(expr.count)
         value_w = infer_expr_width(expr.value)
         if count is not None and value_w is not None:
             return count * value_w
@@ -255,8 +234,8 @@ def _infer_width_impl(expr: Expression) -> int | None:  # noqa: PLR0911, PLR0912
     # --- RangeSelect ---
     if isinstance(expr, RangeSelect):
         infer_expr_width(expr.target)
-        msb_val = _const_int(expr.msb)
-        lsb_val = _const_int(expr.lsb)
+        msb_val = const_int(expr.msb)
+        lsb_val = const_int(expr.lsb)
         if msb_val is not None and lsb_val is not None:
             return abs(msb_val - lsb_val) + 1
         return None
@@ -265,7 +244,7 @@ def _infer_width_impl(expr: Expression) -> int | None:  # noqa: PLR0911, PLR0912
     if isinstance(expr, PartSelect):
         infer_expr_width(expr.target)
         infer_expr_width(expr.base)
-        width_val = _const_int(expr.width)
+        width_val = const_int(expr.width)
         if width_val is not None:
             return width_val
         return None

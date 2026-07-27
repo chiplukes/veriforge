@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from veriforge.semantics import const_int as _const_int
+
 _WORD_BITS = 64
 _PROCESS_LOOP_LIMIT = 100_000
 _I32_MAX = 0x7FFFFFFF
@@ -100,10 +102,3 @@ def _cy_u64_hex(val: int) -> str:
     if val == 0:
         return "0"
     return f"(<unsigned long long>0x{val:x})"
-
-
-def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
-    """Evaluate an expression to a constant integer, or return None."""
-    from veriforge.semantics import const_int  # noqa: PLC0415
-
-    return const_int(expr, param_env)

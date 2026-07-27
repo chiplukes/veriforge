@@ -6,12 +6,12 @@ Tests the ``infer_widths`` / ``infer_expr_width`` functions that populate
 
 import pytest
 
+from veriforge.analysis.const_fold import const_range_width
 from veriforge.analysis.width_inference import (
     infer_expr_width,
     infer_widths,
     infer_widths_in_module,
     _declaration_width,
-    _range_width,
 )
 from veriforge.model.expressions import (
     BinaryOp,
@@ -429,13 +429,13 @@ class TestHelperFunctions:
     """Tests for internal helper functions."""
 
     def test_range_width_none(self):
-        assert _range_width(None) == 1
+        assert const_range_width(None) == 1
 
     def test_range_width_8bit(self):
-        assert _range_width(make_range(7, 0)) == 8
+        assert const_range_width(make_range(7, 0)) == 8
 
     def test_range_width_1bit(self):
-        assert _range_width(make_range(0, 0)) == 1
+        assert const_range_width(make_range(0, 0)) == 1
 
     def test_declaration_width_port(self):
         assert _declaration_width(Port("x", PortDirection.INPUT, width=make_range(7))) == 8

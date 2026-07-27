@@ -7,10 +7,13 @@ documents where they agree and where they don't, so that Phase B
 (``src/veriforge/semantics.py``) has a written spec to build to instead of
 guessing which of six copies is "the real" behavior.
 
-The seven implementations named in the work plan collapse to six distinct
-call sites once duplication is accounted for (``analysis/width_inference.py``
-already delegates to ``analysis/const_fold.py`` for both ``_const_int`` and
-``_range_width`` — see ``width_inference._const_int``/``_range_width``):
+The seven implementations named in the work plan collapsed to six distinct
+call sites at Phase A time (``analysis/width_inference.py`` used to delegate
+to ``analysis/const_fold.py`` via its own private ``_const_int``/
+``_range_width`` wrappers). As of Phase G, all six delegate directly to
+``semantics.py``, and width_inference's private wrappers were deleted
+(its call sites now call ``const_fold.const_int``/``const_range_width``
+directly) -- the six original call sites, as they stood at Phase A:
 
 1. ``sim/scheduler.py``: ``_const_int``, ``_range_width``, ``_var_width``
 2. ``sim/vm/compiler.py``: same three, near-identical copies
@@ -20,7 +23,8 @@ already delegates to ``analysis/const_fold.py`` for both ``_const_int`` and
    / ``const_int``, ``_range_width`` / ``const_range_width`` (same underlying
    implementation, exposed as two call sites)
 6. ``sim/elaborate.py``: ``_eval_const_expr`` — the shared low-level
-   primitive that (1)-(4) all fall back to for non-literal expressions.
+   primitive that (1)-(4) all fell back to for non-literal expressions
+   (still true today, since ``sim/elaborate.py`` itself is out of scope).
 
 Per the work plan's explicit non-goal, this phase (and the eventual
 ``semantics.py`` module) does **not** cover ``expr_width``/``expr_signed``
@@ -103,9 +107,9 @@ now agree.
 `sim/elaborate._eval_const_expr` *raises* `ValueError`/`TypeError` for an
 expression it cannot evaluate (e.g. one that reads an actual signal, not a
 parameter) — this is intentional; it is the low-level primitive, and all
-five wrapper functions (`scheduler`/`vm`/`compiled_utils`'s `_const_int`,
-`const_fold.const_int`, `width_inference._const_int`) catch this internally
-and return `None` uniformly.
+other wrapper functions (`scheduler`/`vm`/`compiled_utils`'s `_const_int`,
+`const_fold.const_int`, `width_inference`'s own call sites) catch this
+internally and return `None` uniformly.
 
 **Resolution**: `semantics.const_int`'s public contract (per the plan's own
 signature, `-> int | None`) matches the wrapper convention: catch, return
@@ -226,7 +230,7 @@ def _const_int_all(expr, env):
         "scheduler": scheduler_module._const_int(expr, env),
         "vm": vm_compiler_module._const_int(expr, env),
         "compiled_utils": compiled_utils_module._const_int(expr, env),
-        "width_inference": wi_module._const_int(expr),
+        "width_inference": wi_module.const_int(expr),
         "const_fold": const_fold.const_int(expr),
     }
 
@@ -258,7 +262,7 @@ def test_const_int_clog2_derived_parameter_now_agrees_everywhere():
     assert vm_compiler_module._const_int(idx_bits_expr, env) == 4
     assert compiled_utils_module._const_int(idx_bits_expr, env) == 4
     assert _eval_const_expr(idx_bits_expr, env) == 4
-    assert wi_module._const_int(idx_bits_expr) == 4
+    assert wi_module.const_int(idx_bits_expr) == 4
     assert const_fold.const_int(idx_bits_expr) == 4
 
 
@@ -285,7 +289,7 @@ def _range_width_all(rng, env):
         "scheduler": scheduler_module._range_width(rng, env),
         "vm": vm_compiler_module._range_width(rng, env),
         "compiled_codegen": compiled_codegen_module._range_width(rng, env),
-        "width_inference": wi_module._range_width(rng),
+        "width_inference": wi_module.const_range_width(rng),
     }
 
 
@@ -319,7 +323,7 @@ def test_range_width_transitively_agrees_via_the_clog2_fix():
     assert scheduler_module._range_width(idx_range, env) == 4
     assert vm_compiler_module._range_width(idx_range, env) == 4
     assert compiled_codegen_module._range_width(idx_range, env) == 4
-    assert wi_module._range_width(idx_range) == 4
+    assert wi_module.const_range_width(idx_range) == 4
 
 
 def test_range_width_ascending_range_now_agrees_everywhere():
@@ -334,7 +338,7 @@ def test_range_width_ascending_range_now_agrees_everywhere():
     ascending = Range(Literal(0), Literal(7))
 
     assert compiled_codegen_module._range_width(ascending, {}) == 8
-    assert wi_module._range_width(ascending) == 8
+    assert wi_module.const_range_width(ascending) == 8
     assert scheduler_module._range_width(ascending, {}) == 8
     assert vm_compiler_module._range_width(ascending, {}) == 8
 

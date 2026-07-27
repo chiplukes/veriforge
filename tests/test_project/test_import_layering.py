@@ -156,3 +156,37 @@ def test_import_layering():
                 )
 
     assert not violations, "Forbidden module-level import(s) found:\n" + "\n".join(violations)
+
+
+# Names that must only ever be *defined* in semantics.py (work plan item 4.2,
+# Phase G) -- everywhere else should import from there instead of keeping its
+# own copy. An `import ... as _const_int` (etc.) local name binding is fine;
+# this only flags a `def`/nested `def`.
+_SEMANTICS_OWNED_NAMES = {"_const_int", "_range_width", "_var_width"}
+
+
+def _defined_function_names(path: Path) -> list[tuple[str, int]]:
+    """Return (name, lineno) for every function def (top-level or nested) in *path*."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return [
+        (node.name, node.lineno) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def test_no_duplicate_semantics_helpers_outside_semantics_module():
+    """Work plan item 4.2, Phase G: `_const_int`/`_range_width`/`_var_width`
+    must only be defined in `semantics.py` -- every other engine/analysis
+    consumer delegates via `from ...semantics import const_int as _const_int`
+    (etc.), not its own copy. See notes/plans/work_plan_2026-07.md item 4.2."""
+    violations: list[str] = []
+    for path in _iter_source_files():
+        rel_path = path.relative_to(SRC_ROOT).as_posix()
+        if rel_path == "semantics.py":
+            continue
+        for name, lineno in _defined_function_names(path):
+            if name in _SEMANTICS_OWNED_NAMES:
+                violations.append(
+                    f"{rel_path}:{lineno}: defines `{name}` -- delegate to `semantics.{name.lstrip('_')}` instead"
+                )
+
+    assert not violations, "Duplicate semantics helper definition(s) found:\n" + "\n".join(violations)

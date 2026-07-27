@@ -34,9 +34,9 @@ from veriforge.model.expressions import (
 )
 from veriforge.model.statements import SensitivityEdge
 
-from ..semantics import const_int as _semantics_const_int
-from ..semantics import range_width as _semantics_range_width
-from ..semantics import var_width as _semantics_var_width
+from ..semantics import const_int as _const_int
+from ..semantics import range_width as _range_width
+from ..semantics import var_width as _var_width
 from .evaluator import EvalContext, ExpressionEvaluator
 from .executor import StatementExecutor, StopExecution, SuspendExecution
 from .value import Value
@@ -1126,11 +1126,6 @@ def _has_timing(stmt) -> bool:  # noqa: PLR0911
     return False
 
 
-def _range_width(r, param_env: dict[str, int] | None = None) -> int:
-    """Compute the bit-width from a Range object (or default 1)."""
-    return _semantics_range_width(r, param_env)
-
-
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
     """Build a param env with unprefixed aliases for a hierarchically-prefixed signal.
 
@@ -1150,19 +1145,6 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
             if unprefixed not in local:
                 local[unprefixed] = v
     return local
-
-
-def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
-    """Evaluate an expression to an int, handling Literals and constant expressions.
-
-    Falls back to parametric evaluation for expressions like ``2**MLEN/4-1``.
-    """
-    return _semantics_const_int(expr, param_env)
-
-
-def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
-    """Compute the bit-width for a Variable, handling integer/real/time types."""
-    return _semantics_var_width(var, param_env)
 
 
 def _collect_reads(expr: Expression) -> set[str]:

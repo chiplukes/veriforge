@@ -69,19 +69,14 @@ from veriforge.sim.compiled._process_compiler import _ProcessCompilerMixin
 from veriforge.sim.compiled._stmt_emitters import _StmtEmittersMixin
 from veriforge.sim.compiled._wide_emitter import _WideEmitterMixin
 from veriforge.sim.value import Value
-from veriforge.semantics import range_width as semantics_range_width
-from veriforge.semantics import var_width as semantics_var_width
+from veriforge.semantics import range_width as _range_width
+from veriforge.semantics import var_width as _var_width
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
     from veriforge.model.expressions import Range
     from veriforge.model.statements import Statement
     from veriforge.model.variables import Variable
-
-
-def _range_width(r: Range | None, param_env: dict[str, int] | None = None) -> int:
-    """Compute the bit-width from a Range (msb:lsb), defaulting to 1."""
-    return semantics_range_width(r, param_env)
 
 
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
@@ -97,11 +92,6 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
             if unprefixed not in local:
                 local[unprefixed] = value
     return local
-
-
-def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
-    """Width for a variable, respecting special types."""
-    return semantics_var_width(var, param_env)
 
 
 def _dim_depth(dim: Range, param_env=None) -> int:

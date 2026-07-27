@@ -54,20 +54,15 @@ from veriforge.model.statements import (
     WhileLoop,
 )
 
-from ...semantics import const_int as _semantics_const_int
-from ...semantics import range_width as _semantics_range_width
-from ...semantics import var_width as _semantics_var_width
+from ...semantics import const_int as _const_int
+from ...semantics import range_width as _range_width
+from ...semantics import var_width as _var_width
 from ..value import Value
 from .opcodes import Op, instr
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
     from veriforge.model.variables import Variable
-
-
-def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
-    """Evaluate an expression to a constant integer, or return None."""
-    return _semantics_const_int(expr, param_env)
 
 
 # ── Process types ────────────────────────────────────────────────────
@@ -2592,11 +2587,6 @@ def _is_signed_call(expr) -> bool:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _range_width(r, param_env: dict[str, int] | None = None) -> int:
-    """Compute the bit-width from a Range object (or default 1)."""
-    return _semantics_range_width(r, param_env)
-
-
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
     """Build a param env with unprefixed aliases for a hierarchically-prefixed signal."""
     dot = signal_name.rfind(".")
@@ -2610,11 +2600,6 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
             if unprefixed not in local:
                 local[unprefixed] = v
     return local
-
-
-def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
-    """Compute the bit-width for a Variable, handling integer/real/time types."""
-    return _semantics_var_width(var, param_env)
 
 
 def _dim_depth(dim, param_env=None) -> int:

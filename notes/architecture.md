@@ -56,6 +56,41 @@ expression-width inference, constant folding, and lint checks.
 
 See [notes/support_matrix.md](support_matrix.md) for the full coverage status by language surface.
 
+## Semantics
+
+`semantics.py` is the single implementation of constant-expression
+evaluation and width/signedness computation (IEEE 1364-2005 §5.4.1 Table
+5-22, §5.5, §5.5.1) — `const_int`, `range_width`, `var_width`, `net_width`,
+`expr_width`, `expr_signed`. It is deliberately a single module with
+stdlib + `model` imports only: no engine data structures (symbol tables,
+codegen state, `EvalContext`, ...) leak in. Callers that need signal-table
+lookups pass them in as callbacks (`env` for constant identifiers,
+`width_of`/`signed_of` for declared width/signedness).
+
+Every consumer that used to keep its own copy of `_const_int`/
+`_range_width`/`_var_width` — `sim/scheduler.py`, `sim/vm/compiler.py`,
+`sim/compiled/codegen.py` + `_codegen_utils.py`, `analysis/const_fold.py`
+(which `analysis/width_inference.py` itself delegates to) — now delegates
+to `semantics.py`; `const_fold.const_int`/`const_range_width` remain as
+public wrappers (documented API other code still imports by those names).
+`tests/test_project/test_import_layering.py` has a guard test asserting no
+function named `_const_int`, `_range_width`, or `_var_width` is defined
+anywhere outside `semantics.py` — a new copy anywhere else is a layering
+violation caught by CI, not just a style nit.
+
+`semantics.py` does *not* cover the VM/compiled emitters' own
+`_expr_width`/`_expr_signed` (`sim/vm/compiler.py`, `sim/compiled/
+_expr_emitter.py`) — those mix width computation with codegen slot
+allocation and are a deliberate follow-up, not unified here.
+
+See `tests/test_analysis/test_semantics_parity.py` for the characterization
+that produced this module's exact resolved behavior where the prior six
+copies disagreed (module docstring has the full difference table, including
+two real pre-existing bugs it uncovered: an ascending-range width
+miscalculation in `scheduler.py`/`vm/compiler.py`, and a `const_fold.py`
+`FunctionCall`-dispatch bug that made `$clog2`-derived parameters
+unresolvable in some contexts).
+
 ## Code generation
 
 `codegen/verilog_emitter.py` round-trips the model back to Verilog text.
