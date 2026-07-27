@@ -68,18 +68,19 @@ than the LSB (e.g. `output [0:7] busA;`, bit 0 is the MSB) — width is always
   `analysis/width_inference.py`'s (via `const_fold.const_range_width`)
   correctly use `abs(...)` and return `8`.
 - `sim/scheduler.py`'s and `sim/vm/compiler.py`'s `_range_width` fast path
-  (`int(r.msb.value) - int(r.lsb.value) + 1`, no `abs()`) returns `-6` for
+  (`int(r.msb.value) - int(r.lsb.value) + 1`, no `abs()`) returned `-6` for
   `[0:7]` — a **latent, pre-existing bug**, not something introduced by this
-  characterization pass. It has apparently never been hit by the existing
-  test suites (no test declares an ascending-order range), which is exactly
+  characterization pass. It had apparently never been hit by the existing
+  test suites (no test declared an ascending-order range), which is exactly
   the kind of gap this phase exists to surface.
 
 **Resolution**: `semantics.range_width` uses `abs(msb - lsb) + 1`
 unconditionally (matching the compiled engine and width_inference). Phase C
-(reference scheduler migration, done) fixed scheduler.py's copy as a side
-effect; this is flagged explicitly since it's a genuine bug fix bundled into
-a refactor, not a pure behavior-preserving rename. vm/compiler.py's copy is
-fixed the same way in Phase D (not yet done).
+(reference scheduler migration) and Phase D (VM compiler migration), both
+done, fixed scheduler.py's and vm/compiler.py's copies as a side effect;
+this is flagged explicitly since it's a genuine bug fix bundled into a
+refactor, not a pure behavior-preserving rename. All four implementations
+now agree.
 
 **Difference 3 — non-constant expressions: `None` vs. raised `ValueError`.**
 `sim/elaborate._eval_const_expr` *raises* `ValueError`/`TypeError` for an
@@ -275,16 +276,13 @@ def test_range_width_transitively_hits_the_clog2_gap():
     assert wi_module._range_width(idx_range) is None
 
 
-def test_range_width_ascending_range_difference():
-    """Difference 2 (see module docstring): vm/compiler.py's fast path still
-    lacks abs(), giving a negative width for a legal ascending [0:7] range;
-    compiled_codegen/width_inference are correct.
-
-    scheduler.py's copy no longer reproduces this -- item 4.2 Phase C
-    migrated it to delegate to `semantics.range_width` (which uses
-    `abs(msb - lsb) + 1` unconditionally), fixing this bug there as a
-    documented side effect. vm/compiler.py is fixed by the same delegation
-    in Phase D, not yet done."""
+def test_range_width_ascending_range_now_agrees_everywhere():
+    """Difference 2 (see module docstring): was a latent bug where
+    scheduler.py's and vm/compiler.py's `_range_width` fast paths lacked
+    `abs()`, giving a negative width for a legal ascending [0:7] range.
+    Fixed in item 4.2 Phases C and D (both migrated to delegate to
+    `semantics.range_width`, which uses `abs(msb - lsb) + 1`
+    unconditionally) -- all four implementations now agree."""
     from veriforge.model.expressions import Literal, Range
 
     ascending = Range(Literal(0), Literal(7))
@@ -292,10 +290,7 @@ def test_range_width_ascending_range_difference():
     assert compiled_codegen_module._range_width(ascending, {}) == 8
     assert wi_module._range_width(ascending) == 8
     assert scheduler_module._range_width(ascending, {}) == 8
-
-    # Confirmed pre-existing bug, not yet fixed (Phase D) -- documents
-    # current behavior, not desired.
-    assert vm_compiler_module._range_width(ascending, {}) == -6
+    assert vm_compiler_module._range_width(ascending, {}) == 8
 
 
 def test_var_width_special_kinds_agree():

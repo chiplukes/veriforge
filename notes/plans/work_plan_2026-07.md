@@ -963,18 +963,31 @@ wrappers — call sites unchanged). `_lit_int` (scheduler's old Literal fast
 path, now redundant with `semantics.const_int`'s own) deleted. This fixes
 scheduler's ascending-range bug (Difference 2) as a documented side effect;
 `test_semantics_parity.py::test_range_width_ascending_range_difference`
-updated accordingly (now asserts scheduler.py agrees with compiled/
-width_inference; only vm/compiler.py still reproduces the bug, pending Phase
-D). Added `"semantics"` to `ALLOWED_EDGES["sim"]` in the layering test — note
-`from .. import semantics` is invisible to that test's AST scan (it only
-records `ImportFrom.module`, not the imported names, for a bare `from ..
-import X`), so the import was written as `from ..semantics import const_int
-as _semantics_const_int` (etc.) instead, confirmed by temporarily removing
-the allow-list entry and checking the test fails. Full suite green (7757
-passed once the stale parity-test assertion was updated). `_scoped_env`
-(byte-for-byte identical across scheduler/vm/compiled) intentionally left
-duplicated — it's not part of `semantics.py`'s API and Phase G's guard test
-doesn't cover it. **Phases D–G not yet started.**
+updated accordingly. Added `"semantics"` to `ALLOWED_EDGES["sim"]` in the
+layering test — note `from .. import semantics` is invisible to that test's
+AST scan (it only records `ImportFrom.module`, not the imported names, for a
+bare `from .. import X`), so the import was written as `from ..semantics
+import const_int as _semantics_const_int` (etc.) instead, confirmed by
+temporarily removing the allow-list entry and checking the test fails. Full
+suite green. `_scoped_env` (byte-for-byte identical across
+scheduler/vm/compiled) intentionally left duplicated — it's not part of
+`semantics.py`'s API and Phase G's guard test doesn't cover it.
+
+**Result (Phase D, July 2026)**: `sim/vm/compiler.py`'s `_const_int`,
+`_range_width`, `_var_width` migrated the same way (one-line delegations to
+`semantics`, same private-wrapper names, call sites unchanged); no new
+layering-test entry needed since `vm/compiler.py`'s top-level package is
+already `sim` (covered by Phase C's `ALLOWED_EDGES["sim"]` addition). Fixes
+vm/compiler's copy of the ascending-range bug (Difference 2) as a side
+effect — scheduler.py and vm/compiler.py now both agree with
+compiled/width_inference, so
+`test_semantics_parity.py::test_range_width_ascending_range_difference` was
+renamed to `test_range_width_ascending_range_now_agrees_everywhere` and
+rewritten as a 4-way agreement check rather than a documented-gap test.
+`tests/test_sim/` filtered to `vm`/`compiler` (1784 passed, 2 xfailed) and
+the full suite (7758 passed) both green. **Phases E–G not yet started**
+(compiled codegen + `_codegen_utils`, then `analysis/width_inference` +
+`const_fold`, then the Phase G guard test).
 
 ### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
 

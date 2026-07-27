@@ -54,6 +54,9 @@ from veriforge.model.statements import (
     WhileLoop,
 )
 
+from ...semantics import const_int as _semantics_const_int
+from ...semantics import range_width as _semantics_range_width
+from ...semantics import var_width as _semantics_var_width
 from ..value import Value
 from .opcodes import Op, instr
 
@@ -64,20 +67,7 @@ if TYPE_CHECKING:
 
 def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
     """Evaluate an expression to a constant integer, or return None."""
-    if expr is None:
-        return None
-    if isinstance(expr, Literal):
-        try:
-            return int(expr.value)
-        except (ValueError, TypeError):
-            return None
-    try:
-        from ..elaborate import _eval_const_expr  # noqa: PLC0415
-
-        env = param_env if param_env is not None else {}
-        return _eval_const_expr(expr, env)
-    except (ValueError, TypeError):
-        return None
+    return _semantics_const_int(expr, param_env)
 
 
 # ── Process types ────────────────────────────────────────────────────
@@ -2604,24 +2594,7 @@ def _is_signed_call(expr) -> bool:
 
 def _range_width(r, param_env: dict[str, int] | None = None) -> int:
     """Compute the bit-width from a Range object (or default 1)."""
-    if r is None:
-        return 1
-    try:
-        if isinstance(r.msb, Literal) and isinstance(r.lsb, Literal):
-            return int(r.msb.value) - int(r.lsb.value) + 1
-    except (TypeError, ValueError):
-        pass
-    # Fall back to parametric evaluation
-    try:
-        from ..elaborate import _eval_const_expr  # noqa: PLC0415
-
-        env = param_env if param_env is not None else {}
-        msb = _eval_const_expr(r.msb, env)
-        lsb = _eval_const_expr(r.lsb, env)
-        return abs(msb - lsb) + 1
-    except (ValueError, TypeError):
-        pass
-    return 1
+    return _semantics_range_width(r, param_env)
 
 
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
@@ -2641,23 +2614,7 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
 
 def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
     """Compute the bit-width for a Variable, handling integer/real/time types."""
-    from veriforge.model.variables import VariableKind  # noqa: PLC0415
-
-    if var.kind == VariableKind.INTEGER:
-        return 32
-    if var.kind == VariableKind.REAL:
-        return 64
-    if var.kind == VariableKind.TIME:
-        return 64
-    if var.kind == VariableKind.BYTE:
-        return 8
-    if var.kind == VariableKind.SHORTINT:
-        return 16
-    if var.kind == VariableKind.INT:
-        return 32
-    if var.kind == VariableKind.LONGINT:
-        return 64
-    return _range_width(var.width, param_env)
+    return _semantics_var_width(var, param_env)
 
 
 def _dim_depth(dim, param_env=None) -> int:
