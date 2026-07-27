@@ -42,22 +42,39 @@ parameter's default value.** For
 - `analysis/const_fold.py`'s `const_int` (and therefore
   `analysis/width_inference.py`, which delegates to it) returns `None`.
 
-Root cause: `const_fold.const_int`'s `Identifier` case resolves a parameter
-reference via `expr.resolved` (an attribute populated by the name-resolution
-analysis pass for identifiers used in module *body* statements/expressions),
-not via an explicit environment dict. An `Identifier` appearing *inside
-another parameter's own default-value expression* is not resolved by that
-pass, so `expr.resolved` is `None` there and `const_int` gives up.
+**Original (wrong) hypothesis, corrected during Phase F**: this section
+originally attributed the gap to `expr.resolved` being unpopulated for an
+identifier used inside *another parameter's own default-value expression*
+(as opposed to a module body statement). That was never actually verified
+by inspecting the AST directly, and it's false: `analyze_design()` **does**
+resolve `N`'s `Identifier.resolved` to its `Parameter` in this exact
+position (confirmed directly: `N_ident.resolved` is the `N` `Parameter`
+object, not `None`).
 
-**Resolution**: `semantics.const_int` uses the `env`-dict-based mechanism
-(`elaborate._eval_const_expr`'s approach — built once per module via
-`_build_param_env`, threaded through as the `env` parameter) as its
-*primary* resolution path, not `.resolved`-attribute lookup. This is also
-what the plan's proposed signature already implies (`env:
-Mapping[str, int] | None = None`, a parameter, not an implicit
-attribute-based lookup). Phase C+ migrates `const_fold.const_int`'s callers
-to pass an explicit `env` (built once via `_build_param_env` and cached per
-module), which fixes this gap as a side effect rather than as a special case.
+**Actual root cause** (found while migrating `const_fold.const_int` to
+delegate to `semantics.const_int` in Phase F, when a couple of tests here
+kept failing in the *opposite* direction from what this file predicted):
+`analysis/const_fold.py`'s old `const_int`'s `FunctionCall` branch only
+evaluated the call if `expr.is_system` was `True`. The real parser does
+**not** set `is_system=True` for `$clog2`/`$bits`/etc. parsed from source
+text (verified directly: a parsed `$clog2(N)` call has `is_system == False`,
+only its `name` starts with `$`) — `is_system` only comes out `True` for
+hand-built `FunctionCall` nodes in tests that pass it explicitly, which is
+exactly what this file's own fixtures and `test_const_fold.py`'s fixtures
+do, masking the bug from both test suites. `sim/elaborate.py`'s
+`_eval_const_expr` never had this bug — its `FunctionCall` guard is
+`expr.is_system or expr.name.startswith("$")`, so it works on real parsed
+input regardless of `is_system`. `.resolved` was a red herring throughout.
+
+**Resolution**: `semantics.const_int`'s `FunctionCall` handling
+(`_eval_const_func`) dispatches purely on `expr.name` (never consults
+`is_system` at all), so it isn't exposed to this bug in either direction.
+`const_fold.const_int` delegating to it in Phase F fixes this gap as a side
+effect — for both the `env`-dict path (Phase C-E's engines already worked
+around it via `elaborate._eval_const_expr`'s more permissive guard) and the
+`.resolved`-based path (`const_fold`/`width_inference`, which had no such
+workaround and were the only two implementations actually exhibiting the
+bug).
 
 **Difference 2 — ascending (unusual but legal) range `[0:7]`.** IEEE
 1364-2005 permits declaring a net/port with the MSB *numerically smaller*
@@ -102,10 +119,42 @@ literals (`8'hFF`), plain parameter references, arithmetic on parameters
 kind-based widths (`integer`/`real`/`time`/`byte`/`shortint`/`int`/
 `longint`), and hierarchical-name environment scoping (`_scoped_env`,
 verified identical by direct source comparison across all three copies) —
-agree across every implementation that can express the case at all (i.e.
-excluding `width_inference`/`const_fold`'s inherent inability to evaluate
-expressions with no `.resolved` identifiers, which Difference 1 already
-covers as the general form of that gap).**
+agrees across every implementation as of Phase F (all six delegate to
+`semantics.py` for `_const_int`/`_range_width`/`_var_width` as of Phases
+C-F; see each Phase's Result note in the work plan).**
+
+**Difference 4 — bitwise `~`/`~^`/`^~`/reduction ops on a bare constant
+with no known width (found mid-Phase-F, not by this Phase A pass).**
+`analysis/const_fold.py`'s `_unary_op`/`_binary_op` and
+`sim/elaborate.py`'s `_UNARY_OPS`/`_BINARY_OPS` (which items 1-4 above all
+fall back to for non-literal expressions) actually disagree here:
+
+- `~0`: const_fold gives `-1` (raw Python two's-complement semantics);
+  elaborate.py gives `4294967295` (fakes a 32-bit width, matching Verilog's
+  default unsized-integer width for its own generate-block/genvar use case).
+- Reduction `&`, `~&`, `~^` on a bare int (e.g. unary `&0xFF`): const_fold
+  correctly returns `None` ("cannot determine without width" — genuinely
+  ambiguous without a declared bit count); elaborate.py guesses using
+  `v.bit_length()` as a width proxy, which is wrong in general (e.g. a
+  3-bit signal holding `3` has `bit_length() == 2`, not 3).
+- Binary `~^`/`^~` (XNOR): same masking-vs-raw disagreement as unary `~`.
+- `/`, `%` by zero: const_fold returns `None`; elaborate.py's `_BINARY_OPS`
+  returns `0`.
+
+This slipped past Phase A's fixture list (~60 expressions, none of which
+exercised a bare `~`/reduction-op/XNOR/div-by-zero on a constant) and was
+only caught while migrating `const_fold.const_int` itself to delegate to
+`semantics.const_int` in Phase F, when this file's own long-standing
+`tests/test_analysis/test_const_fold.py` (which predates this
+characterization) started failing.
+
+**Resolution** (confirmed with the user mid-Phase-F): `const_fold.py`'s
+behavior is authoritative here, not `elaborate.py`'s — `semantics.const_int`
+was changed to match const_fold (raw `~`/`~^`/`^~`, `None` for
+width-ambiguous reduction ops and for division/modulo by zero).
+`sim/elaborate.py` itself is unchanged (out of migration scope; nothing
+currently delegates to it), so this only affects `semantics.py`'s own
+behavior, which items 1-4 above now delegate to as of Phases C-F.
 """
 
 from __future__ import annotations
@@ -194,10 +243,13 @@ def test_const_int_agrees_on_plain_and_based_literal_parameters():
         assert _eval_const_expr(params[name].default_value, env) == expected
 
 
-def test_const_int_clog2_derived_parameter_difference():
-    """Difference 1 (see module docstring): const_fold/width_inference can't
-    see a parameter referenced inside ANOTHER parameter's own default-value
-    expression (no .resolved there); env-dict-based paths can."""
+def test_const_int_clog2_derived_parameter_now_agrees_everywhere():
+    """Difference 1 (see module docstring): was a real bug in
+    const_fold.py's FunctionCall dispatch (trusted `is_system`, which the
+    real parser doesn't set for `$clog2`), fixed in Phase F by delegating
+    to `semantics.const_int` (which dispatches on `expr.name`, matching
+    `elaborate._eval_const_expr`'s more permissive guard). All six
+    implementations now agree."""
     top = _parse()
     env = _build_param_env(top)
     idx_bits_expr = next(p for p in top.parameters if p.name == "IDX_BITS").default_value
@@ -206,10 +258,8 @@ def test_const_int_clog2_derived_parameter_difference():
     assert vm_compiler_module._const_int(idx_bits_expr, env) == 4
     assert compiled_utils_module._const_int(idx_bits_expr, env) == 4
     assert _eval_const_expr(idx_bits_expr, env) == 4
-
-    # Confirmed gap -- documents current behavior, not desired behavior.
-    assert wi_module._const_int(idx_bits_expr) is None
-    assert const_fold.const_int(idx_bits_expr) is None
+    assert wi_module._const_int(idx_bits_expr) == 4
+    assert const_fold.const_int(idx_bits_expr) == 4
 
 
 def test_const_int_non_constant_expr_is_none_not_raise():
@@ -255,14 +305,13 @@ def test_range_width_agrees_on_literal_and_parametric_ranges():
         assert all(v == expected for v in results.values()), (label, results)
 
 
-def test_range_width_transitively_hits_the_clog2_gap():
+def test_range_width_transitively_agrees_via_the_clog2_fix():
     """A range referencing a `$clog2`-derived parameter (port idx's
-    [IDX_BITS-1:0]) transitively hits Difference 1: width_inference's
-    .resolved-based chain fails evaluating IDX_BITS's own default value
-    ($clog2(N)), since N's reference *inside that default-value expression*
-    has no .resolved -- same root cause as
-    test_const_int_clog2_derived_parameter_difference, just reached via a
-    range instead of a direct parameter lookup."""
+    [IDX_BITS-1:0]) transitively exercises Difference 1's fix:
+    width_inference's chain now evaluates IDX_BITS's own default value
+    ($clog2(N)) correctly, via the same Phase F const_fold.const_int fix as
+    test_const_int_clog2_derived_parameter_now_agrees_everywhere, just
+    reached via a range instead of a direct parameter lookup."""
     top = _parse()
     env = _build_param_env(top)
     idx_range = next(p for p in top.ports if p.name == "idx").width
@@ -270,10 +319,7 @@ def test_range_width_transitively_hits_the_clog2_gap():
     assert scheduler_module._range_width(idx_range, env) == 4
     assert vm_compiler_module._range_width(idx_range, env) == 4
     assert compiled_codegen_module._range_width(idx_range, env) == 4
-
-    # Confirmed gap (same root cause as Difference 1) -- documents current
-    # behavior, not desired behavior.
-    assert wi_module._range_width(idx_range) is None
+    assert wi_module._range_width(idx_range) == 4
 
 
 def test_range_width_ascending_range_now_agrees_everywhere():

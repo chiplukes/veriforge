@@ -31,8 +31,6 @@ from veriforge.analysis.const_fold import (
     const_range_width,
     fold_constants,
     fold_constants_in_module,
-    _binary_op,
-    _unary_op,
 )
 
 
@@ -140,9 +138,6 @@ class TestUnaryOps:
     def test_reduction_and_returns_none(self):
         # Cannot determine without width
         assert const_int(_unop("&", 0xFF)) is None
-
-    def test_unknown_op_returns_none(self):
-        assert _unary_op("???", 5) is None
 
 
 # ===== Binary arithmetic =====
@@ -266,9 +261,6 @@ class TestBinaryLogical:
 
     def test_or_both_false(self):
         assert const_int(_binop("||", 0, 0)) == 0
-
-    def test_unknown_binop(self):
-        assert _binary_op("???", 5, 5) is None
 
 
 # ===== Ternary =====

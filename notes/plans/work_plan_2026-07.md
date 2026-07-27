@@ -985,9 +985,60 @@ compiled/width_inference, so
 renamed to `test_range_width_ascending_range_now_agrees_everywhere` and
 rewritten as a 4-way agreement check rather than a documented-gap test.
 `tests/test_sim/` filtered to `vm`/`compiler` (1784 passed, 2 xfailed) and
-the full suite (7758 passed) both green. **Phases E–G not yet started**
-(compiled codegen + `_codegen_utils`, then `analysis/width_inference` +
-`const_fold`, then the Phase G guard test).
+the full suite (7758 passed) both green.
+
+**Result (Phase E, July 2026)**: `sim/compiled/codegen.py`'s `_range_width`/
+`_var_width` and `sim/compiled/_codegen_utils.py`'s `_const_int` migrated
+the same way. `codegen.py`'s copy was already `abs()`-correct (per Phase
+A), so no behavior change there. No new layering-test entry needed
+(`sim/compiled/*.py`'s top-level package is `sim`, already covered by
+Phase C).
+
+**Result (Phase F, July 2026)**: `analysis/const_fold.py`'s `const_int` now
+delegates to `semantics.const_int`; `const_range_width` unchanged (still
+computes via `const_int`, now indirectly delegating). `width_inference.py`
+needed **no changes at all** — its `_const_int`/`_range_width` already just
+called `const_fold.const_int`/`const_range_width`.
+
+This surfaced two real, previously-undocumented gaps beyond Phase A's
+characterization (both now in `test_semantics_parity.py`'s docstring as
+Difference 4 and a correction to Difference 1):
+
+- **New Difference 4**: `const_fold.py`'s old `_unary_op`/`_binary_op` and
+  `elaborate.py`'s `_UNARY_OPS`/`_BINARY_OPS` (which `semantics.py` had
+  ported verbatim in Phase B) actually disagreed on bare-constant bitwise
+  ops with no known width — `~0` (`-1` vs a 32-bit-masked `4294967295`),
+  width-ambiguous reduction ops `&`/`~&`/`~^` (const_fold correctly returns
+  `None`; elaborate.py guesses via `bit_length()`, which is wrong in
+  general), and div/mod by zero (`None` vs `0`). Confirmed with the user:
+  `const_fold.py`'s behavior is authoritative; `semantics.py`'s operator
+  tables were fixed to match it (raw `~`, `None` for width-ambiguous
+  reduction ops and div/mod-by-zero). `sim/elaborate.py` itself is
+  unchanged — out of migration scope, nothing delegates to it.
+- **Difference 1 correction**: the original Phase A write-up blamed this
+  gap on `Identifier.resolved` being unpopulated for an identifier inside
+  *another parameter's own default-value expression* — verified false by
+  direct inspection (`.resolved` **is** set there). The real bug:
+  `const_fold.py`'s `FunctionCall` branch only evaluated a call when
+  `expr.is_system` was `True`, but the real parser doesn't set that flag
+  for `$clog2`/etc. parsed from source text (only hand-built test fixtures
+  set it explicitly, masking the bug from both const_fold's own tests and
+  this file's Phase A fixtures). `semantics.const_int` dispatches
+  `FunctionCall`s purely on `expr.name`, sidestepping the bug entirely, so
+  delegating fixed this as a side effect.
+
+Deleted now-dead `const_fold.py` functions (`_binary_op`, `_unary_op`,
+`_fold_system_func`) and updated `tests/test_analysis/test_const_fold.py`
+(removed its two tests of the now-deleted `_binary_op`/`_unary_op`
+private helpers; all its other ~70 tests needed no changes — verified by
+running, not by manual re-derivation). Added `"semantics"` to
+`ALLOWED_EDGES["analysis"]` in the layering test.
+
+Full suite green (7761 passed) after Phases E+F landed together (per user
+request to batch more before paying for a ~35-minute full run).
+
+**Phase G not yet started** (guard test: no function named `_const_int`,
+`_range_width`, or `_var_width` defined outside `semantics.py`).
 
 ### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
 

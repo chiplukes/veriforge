@@ -39,6 +39,7 @@ from .model.expressions import (
     UnaryOp,
 )
 from .model.nets import Net
+from .model.parameters import Parameter
 from .model.variables import Variable, VariableKind
 
 __all__ = [
@@ -52,44 +53,49 @@ __all__ = [
 
 # ── Constant expression evaluation ──────────────────────────────────────────
 
-_UNARY_CONST_OPS: dict[str, Callable[[int], int]] = {
-    "~": lambda v: ~v & 0xFFFFFFFF,
-    "!": lambda v: int(not v),
-    "-": lambda v: -v,
+_UNARY_CONST_OPS: dict[str, Callable[[int], int | None]] = {
     "+": lambda v: v,
-    "|": lambda v: int(v != 0),
-    "&": lambda v: int(v == ((1 << v.bit_length()) - 1)) if v >= 0 else 1,
-    "^": lambda v: bin(v & 0xFFFFFFFF).count("1") % 2,
-    "~|": lambda v: int(v == 0),
-    "~&": lambda v: int(v != ((1 << v.bit_length()) - 1)) if v >= 0 else 0,
-    "~^": lambda v: int(bin(v & 0xFFFFFFFF).count("1") % 2 == 0),
-    "^~": lambda v: int(bin(v & 0xFFFFFFFF).count("1") % 2 == 0),
+    "-": lambda v: -v,
+    "~": lambda v: ~v,
+    "!": lambda v: 1 if v == 0 else 0,
+    "|": lambda v: 1 if v != 0 else 0,
+    "~|": lambda v: 1 if v == 0 else 0,
+    "^": lambda v: bin(v).count("1") % 2 if v >= 0 else None,
+    # Reduction AND/NAND/XNOR on a bare constant with no known width are
+    # genuinely ambiguous (there's no declared bit count to reduce over) --
+    # unlike the other reduction ops above, these cannot be approximated.
+    "&": lambda _v: None,
+    "~&": lambda _v: None,
+    "~^": lambda _v: None,
+    "^~": lambda _v: None,
 }
 
-_BINARY_CONST_OPS: dict[str, Callable[[int, int], int]] = {
+_BINARY_CONST_OPS: dict[str, Callable[[int, int], int | None]] = {
     "+": lambda a, b: a + b,
     "-": lambda a, b: a - b,
     "*": lambda a, b: a * b,
-    "/": lambda a, b: a // b if b else 0,
-    "%": lambda a, b: a % b if b else 0,
-    "==": lambda a, b: int(a == b),
-    "!=": lambda a, b: int(a != b),
-    "<": lambda a, b: int(a < b),
-    ">": lambda a, b: int(a > b),
-    "<=": lambda a, b: int(a <= b),
-    ">=": lambda a, b: int(a >= b),
-    "&&": lambda a, b: int(bool(a) and bool(b)),
-    "||": lambda a, b: int(bool(a) or bool(b)),
-    "<<": lambda a, b: a << b,
-    ">>": lambda a, b: a >> b,
-    "<<<": lambda a, b: a << b,
-    ">>>": lambda a, b: a >> b,
+    "/": lambda a, b: a // b if b != 0 else None,
+    "%": lambda a, b: a % b if b != 0 else None,
+    "**": lambda a, b: 0 if b < 0 else a**b,
     "&": lambda a, b: a & b,
     "|": lambda a, b: a | b,
     "^": lambda a, b: a ^ b,
-    "~^": lambda a, b: ~(a ^ b) & 0xFFFFFFFF,
-    "^~": lambda a, b: ~(a ^ b) & 0xFFFFFFFF,
-    "**": lambda a, b: a**b,
+    "~^": lambda a, b: ~(a ^ b),
+    "^~": lambda a, b: ~(a ^ b),
+    "<<": lambda a, b: a << b if b >= 0 else None,
+    ">>": lambda a, b: a >> b if b >= 0 else None,
+    "<<<": lambda a, b: a << b if b >= 0 else None,
+    ">>>": lambda a, b: a >> b if b >= 0 else None,
+    "==": lambda a, b: 1 if a == b else 0,
+    "!=": lambda a, b: 1 if a != b else 0,
+    "<": lambda a, b: 1 if a < b else 0,
+    "<=": lambda a, b: 1 if a <= b else 0,
+    ">": lambda a, b: 1 if a > b else 0,
+    ">=": lambda a, b: 1 if a >= b else 0,
+    "===": lambda a, b: 1 if a == b else 0,
+    "!==": lambda a, b: 1 if a != b else 0,
+    "&&": lambda a, b: 1 if (a != 0 and b != 0) else 0,
+    "||": lambda a, b: 1 if (a != 0 or b != 0) else 0,
 }
 
 
@@ -117,20 +123,26 @@ def _eval_const(expr: Expression, env: Mapping[str, int]) -> int:
             return env[name]
         if expr.name in env:
             return env[expr.name]
-        raise ValueError(f"Unknown identifier {expr.name!r} in constant expression")
+        return _eval_const_via_resolved(expr, env)
     if isinstance(expr, UnaryOp):
         val = _eval_const(expr.operand, env)
         unary_fn = _UNARY_CONST_OPS.get(expr.op)
         if unary_fn is None:
             raise ValueError(f"Unsupported unary operator {expr.op!r} in constant expression")
-        return unary_fn(val)
+        unary_result = unary_fn(val)
+        if unary_result is None:
+            raise ValueError(f"Cannot evaluate unary {expr.op!r} on a bare constant without width info")
+        return unary_result
     if isinstance(expr, BinaryOp):
         left = _eval_const(expr.left, env)
         right = _eval_const(expr.right, env)
         binary_fn = _BINARY_CONST_OPS.get(expr.op)
         if binary_fn is None:
             raise ValueError(f"Unsupported binary operator {expr.op!r} in constant expression")
-        return binary_fn(left, right)
+        binary_result = binary_fn(left, right)
+        if binary_result is None:
+            raise ValueError(f"Cannot evaluate binary {expr.op!r} in constant expression")
+        return binary_result
     if isinstance(expr, TernaryOp):
         cond = _eval_const(expr.condition, env)
         return _eval_const(expr.true_expr if cond else expr.false_expr, env)
@@ -175,6 +187,38 @@ def _eval_const(expr: Expression, env: Mapping[str, int]) -> int:
     if isinstance(expr, FunctionCall):
         return _eval_const_func(expr, env)
     raise ValueError(f"Cannot evaluate {type(expr).__name__} as constant expression")
+
+
+# Guard against infinite recursion from circular parameter references, when
+# resolving an Identifier via `.resolved` (see `_eval_const_via_resolved`).
+_RESOLVING_PARAMS: set[int] = set()
+
+
+def _eval_const_via_resolved(expr: Identifier, env: Mapping[str, int]) -> int:
+    """Fall back to following `Identifier.resolved` to a `Parameter`'s own
+    default-value expression, when *expr*'s name isn't in *env*.
+
+    This is a secondary resolution path -- the `env` dict (built once per
+    module/instance, e.g. via `sim/elaborate.py:_build_param_env`) is
+    `const_int`'s primary mechanism (see its docstring). `.resolved` is
+    populated by the name-resolution analysis pass instead, for identifiers
+    used in module *body* statements/expressions -- the mechanism
+    `analysis/const_fold.py`'s `const_int` historically relied on
+    exclusively. Supporting both here makes `semantics.const_int` a strict
+    superset of both callers' prior behavior, rather than a regression for
+    callers that never pass an `env`.
+    """
+    resolved = expr.resolved
+    if not isinstance(resolved, Parameter) or resolved.default_value is None:
+        raise ValueError(f"Unknown identifier {expr.name!r} in constant expression")
+    pid = id(resolved)
+    if pid in _RESOLVING_PARAMS:
+        raise ValueError(f"Circular parameter reference resolving {expr.name!r}")
+    _RESOLVING_PARAMS.add(pid)
+    try:
+        return _eval_const(resolved.default_value, env)
+    finally:
+        _RESOLVING_PARAMS.discard(pid)
 
 
 def _const_part_width(part: Expression, env: Mapping[str, int]) -> int | None:

@@ -77,6 +77,20 @@ def test_const_int_clog2_derived_parameter():
     assert const_int(idx_bits_expr, env) == 4
 
 
+def test_const_int_resolves_via_dot_resolved_with_no_env():
+    """`const_int` also follows `Identifier.resolved` -> `Parameter` when no
+    `env` is supplied at all -- this is what lets `const_fold.const_int`
+    (Phase F) delegate to `semantics.const_int` without a regression for its
+    existing no-env callers, which relied on the name-resolution analysis
+    pass's `.resolved` attribute rather than an explicit env dict."""
+    top = _parse()
+    nets = {n.name: n for n in top.nets}
+    # wire [W-1:0] c -- msb is `W-1`, an Identifier("W") with .resolved set
+    # to the W parameter by analyze_design(), since it's a body declaration
+    # (not nested inside another parameter's own default-value expression).
+    assert const_int(nets["c"].width.msb) == 7
+
+
 def test_const_int_non_constant_expr_is_none():
     """Difference 3 resolution: never raise, return None."""
     top = _parse()
@@ -91,6 +105,36 @@ def test_const_int_none_expr_is_none():
 
 def test_const_int_no_env_for_identifier_is_none():
     assert const_int(Identifier("UNBOUND")) is None
+
+
+def test_const_int_bitwise_not_and_xnor_use_raw_python_semantics():
+    """Difference 4 resolution: matches const_fold.py, not elaborate.py's
+    32-bit-masking hack (see test_semantics_parity.py's module docstring)."""
+    assert const_int(UnaryOp("~", Literal(0))) == -1
+    assert const_int(BinaryOp("~^", Literal(0xFF), Literal(0x0F))) == -241
+    assert const_int(BinaryOp("^~", Literal(0xFF), Literal(0x0F))) == -241
+
+
+def test_const_int_width_ambiguous_reduction_ops_are_none():
+    """Difference 4 resolution: reduction &/~&/~^ on a bare constant with no
+    declared width are genuinely ambiguous, unlike |/~|/^ (parity, which
+    doesn't need a width) -- must return None, not guess via bit_length()."""
+    assert const_int(UnaryOp("&", Literal(0xFF))) is None
+    assert const_int(UnaryOp("~&", Literal(0xFF))) is None
+    assert const_int(UnaryOp("~^", Literal(0xFF))) is None
+    assert const_int(UnaryOp("|", Literal(0xFF))) == 1
+    assert const_int(UnaryOp("~|", Literal(0))) == 1
+    assert const_int(UnaryOp("^", Literal(0x07))) == 1  # odd parity
+
+
+def test_const_int_division_by_zero_is_none():
+    """Difference 4 resolution: None, not elaborate.py's `0`."""
+    assert const_int(BinaryOp("/", Literal(15), Literal(0))) is None
+    assert const_int(BinaryOp("%", Literal(15), Literal(0))) is None
+
+
+def test_const_int_power_negative_exponent_is_zero():
+    assert const_int(BinaryOp("**", Literal(2), Literal(-1))) == 0
 
 
 def test_const_int_arithmetic_and_shift():

@@ -40,7 +40,7 @@ UTILITY_MODULES = {"_env", "_version"}
 # is architecturally sanctioned), not a requirement (a package need not use
 # everything it's allowed to).
 ALLOWED_EDGES: dict[str, set[str]] = {
-    "analysis": {"model"},
+    "analysis": {"model", "semantics"},
     "codegen": {"model"},
     "convert": {"model"},
     "transforms": {"model"},

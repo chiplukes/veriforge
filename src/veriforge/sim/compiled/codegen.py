@@ -69,6 +69,8 @@ from veriforge.sim.compiled._process_compiler import _ProcessCompilerMixin
 from veriforge.sim.compiled._stmt_emitters import _StmtEmittersMixin
 from veriforge.sim.compiled._wide_emitter import _WideEmitterMixin
 from veriforge.sim.value import Value
+from veriforge.semantics import range_width as semantics_range_width
+from veriforge.semantics import var_width as semantics_var_width
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
@@ -79,20 +81,7 @@ if TYPE_CHECKING:
 
 def _range_width(r: Range | None, param_env: dict[str, int] | None = None) -> int:
     """Compute the bit-width from a Range (msb:lsb), defaulting to 1."""
-    if r is None:
-        return 1
-    if isinstance(r.msb, Literal) and isinstance(r.lsb, Literal):
-        return abs(int(r.msb.value) - int(r.lsb.value)) + 1
-    try:
-        from ..elaborate import _eval_const_expr
-
-        env = param_env if param_env is not None else {}
-        msb = _eval_const_expr(r.msb, env)
-        lsb = _eval_const_expr(r.lsb, env)
-        return abs(msb - lsb) + 1
-    except (ValueError, TypeError):
-        pass
-    return 1
+    return semantics_range_width(r, param_env)
 
 
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
@@ -112,20 +101,7 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
 
 def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
     """Width for a variable, respecting special types."""
-    kind_name = var.kind.name if hasattr(var.kind, "name") else str(var.kind)
-    if kind_name == "INTEGER":
-        return 32
-    if kind_name in ("REAL", "TIME", "REALTIME"):
-        return 64
-    if kind_name == "BYTE":
-        return 8
-    if kind_name == "SHORTINT":
-        return 16
-    if kind_name == "INT":
-        return 32
-    if kind_name == "LONGINT":
-        return 64
-    return _range_width(var.width, param_env)
+    return semantics_var_width(var, param_env)
 
 
 def _dim_depth(dim: Range, param_env=None) -> int:

@@ -104,20 +104,6 @@ def _cy_u64_hex(val: int) -> str:
 
 def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
     """Evaluate an expression to a constant integer, or return None."""
-    from veriforge.model.expressions import Literal  # noqa: PLC0415
+    from veriforge.semantics import const_int  # noqa: PLC0415
 
-    if expr is None:
-        return None
-    if isinstance(expr, Literal):
-        try:
-            return int(expr.value)
-        except (ValueError, TypeError):
-            return None
-    try:
-        from veriforge.sim.elaborate import _eval_const_expr  # noqa: PLC0415
-
-        env = param_env if param_env is not None else {}
-        result = _eval_const_expr(expr, env)  # type: ignore[arg-type]
-        return result if isinstance(result, int) else None
-    except (ValueError, TypeError):
-        return None
+    return const_int(expr, param_env)
