@@ -34,6 +34,9 @@ from veriforge.model.expressions import (
 )
 from veriforge.model.statements import SensitivityEdge
 
+from ..semantics import const_int as _semantics_const_int
+from ..semantics import range_width as _semantics_range_width
+from ..semantics import var_width as _semantics_var_width
 from .evaluator import EvalContext, ExpressionEvaluator
 from .executor import StatementExecutor, StopExecution, SuspendExecution
 from .value import Value
@@ -1125,20 +1128,7 @@ def _has_timing(stmt) -> bool:  # noqa: PLR0911
 
 def _range_width(r, param_env: dict[str, int] | None = None) -> int:
     """Compute the bit-width from a Range object (or default 1)."""
-    if r is None:
-        return 1
-    # Try fast path: both bounds are bare Literals
-    try:
-        if isinstance(r.msb, Literal) and isinstance(r.lsb, Literal):
-            return int(r.msb.value) - int(r.lsb.value) + 1
-    except (TypeError, ValueError):
-        pass
-    # Fall back to parametric evaluation
-    msb = _const_int(r.msb, param_env)
-    lsb = _const_int(r.lsb, param_env)
-    if msb is not None and lsb is not None:
-        return abs(msb - lsb) + 1
-    return 1
+    return _semantics_range_width(r, param_env)
 
 
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
@@ -1162,53 +1152,17 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
     return local
 
 
-def _lit_int(expr) -> int | None:
-    """Extract int value from a Literal expression, or None."""
-    if isinstance(expr, Literal):
-        try:
-            return int(expr.value)
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
 def _const_int(expr, param_env: dict[str, int] | None = None) -> int | None:
     """Evaluate an expression to an int, handling Literals and constant expressions.
 
-    Falls back to ``_eval_const_expr`` for parametric expressions like ``2**MLEN/4-1``.
+    Falls back to parametric evaluation for expressions like ``2**MLEN/4-1``.
     """
-    result = _lit_int(expr)
-    if result is not None:
-        return result
-    if expr is None:
-        return None
-    try:
-        from .elaborate import _eval_const_expr  # noqa: PLC0415
-
-        return _eval_const_expr(expr, param_env or {})
-    except (ValueError, TypeError):
-        return None
+    return _semantics_const_int(expr, param_env)
 
 
 def _var_width(var: Variable, param_env: dict[str, int] | None = None) -> int:
     """Compute the bit-width for a Variable, handling integer/real/time types."""
-    from veriforge.model.variables import VariableKind  # noqa: PLC0415
-
-    if var.kind == VariableKind.INTEGER:
-        return 32
-    if var.kind == VariableKind.REAL:
-        return 64
-    if var.kind == VariableKind.TIME:
-        return 64
-    if var.kind == VariableKind.BYTE:
-        return 8
-    if var.kind == VariableKind.SHORTINT:
-        return 16
-    if var.kind == VariableKind.INT:
-        return 32
-    if var.kind == VariableKind.LONGINT:
-        return 64
-    return _range_width(var.width, param_env)
+    return _semantics_var_width(var, param_env)
 
 
 def _collect_reads(expr: Expression) -> set[str]:

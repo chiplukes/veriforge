@@ -954,11 +954,27 @@ rule) rather than `width_inference.py`'s simplified max-rule for `*`, since
 that rule is a known simplification, not the IEEE-correct behavior. Direct
 tests in `tests/test_analysis/test_semantics.py` (24 tests, including the
 ported Phase A fixtures). Added `"semantics": {"model"}` to the layering
-test's `ALLOWED_EDGES`. Full suite green. **Phases C–G not yet started** —
-no consumer has been migrated to delegate to `semantics.py` yet; the old
-per-engine `_const_int`/`_range_width`/`_var_width` copies (including their
-own ascending-range bug in scheduler.py/vm/compiler.py) are unchanged until
-Phase C.
+test's `ALLOWED_EDGES`. Full suite green.
+
+**Result (Phase C, July 2026)**: `sim/scheduler.py`'s `_const_int`,
+`_range_width`, `_var_width` are now one-line delegations to
+`semantics.const_int`/`range_width`/`var_width` (kept as same-named private
+wrappers — call sites unchanged). `_lit_int` (scheduler's old Literal fast
+path, now redundant with `semantics.const_int`'s own) deleted. This fixes
+scheduler's ascending-range bug (Difference 2) as a documented side effect;
+`test_semantics_parity.py::test_range_width_ascending_range_difference`
+updated accordingly (now asserts scheduler.py agrees with compiled/
+width_inference; only vm/compiler.py still reproduces the bug, pending Phase
+D). Added `"semantics"` to `ALLOWED_EDGES["sim"]` in the layering test — note
+`from .. import semantics` is invisible to that test's AST scan (it only
+records `ImportFrom.module`, not the imported names, for a bare `from ..
+import X`), so the import was written as `from ..semantics import const_int
+as _semantics_const_int` (etc.) instead, confirmed by temporarily removing
+the allow-list entry and checking the test fails. Full suite green (7757
+passed once the stale parity-test assertion was updated). `_scoped_env`
+(byte-for-byte identical across scheduler/vm/compiled) intentionally left
+duplicated — it's not part of `semantics.py`'s API and Phase G's guard test
+doesn't cover it. **Phases D–G not yet started.**
 
 ### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
 

@@ -48,7 +48,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "verilog_parser": {"preprocessor"},
     "project": {"model", "transforms", "verilog_parser", "preprocessor", "analysis"},
     "dsl": {"model", "analysis", "project"},  # `sim` is handled by ALLOWED_FILE_EDGES below
-    "sim": {"model", "analysis"},  # `dsl` is handled by ALLOWED_FILE_EDGES below
+    "sim": {"model", "analysis", "semantics"},  # `dsl` is handled by ALLOWED_FILE_EDGES below
     "refactor": {"model", "analysis", "codegen"},
     "semantics": {"model"},
     "scaffold": {"model", "analysis", "transforms", "verilog_parser", "preprocessor", "project", "sim", "dsl"},

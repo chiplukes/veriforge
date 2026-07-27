@@ -76,9 +76,10 @@ than the LSB (e.g. `output [0:7] busA;`, bit 0 is the MSB) — width is always
 
 **Resolution**: `semantics.range_width` uses `abs(msb - lsb) + 1`
 unconditionally (matching the compiled engine and width_inference). Phase C
-(reference scheduler migration) fixes scheduler.py's copy as a side effect;
-this is flagged explicitly since it's a genuine bug fix bundled into a
-refactor, not a pure behavior-preserving rename.
+(reference scheduler migration, done) fixed scheduler.py's copy as a side
+effect; this is flagged explicitly since it's a genuine bug fix bundled into
+a refactor, not a pure behavior-preserving rename. vm/compiler.py's copy is
+fixed the same way in Phase D (not yet done).
 
 **Difference 3 — non-constant expressions: `None` vs. raised `ValueError`.**
 `sim/elaborate._eval_const_expr` *raises* `ValueError`/`TypeError` for an
@@ -275,18 +276,25 @@ def test_range_width_transitively_hits_the_clog2_gap():
 
 
 def test_range_width_ascending_range_difference():
-    """Difference 2 (see module docstring): scheduler/vm's fast path lacks
-    abs(), giving a negative width for a legal ascending [0:7] range;
-    compiled_codegen/width_inference are correct."""
+    """Difference 2 (see module docstring): vm/compiler.py's fast path still
+    lacks abs(), giving a negative width for a legal ascending [0:7] range;
+    compiled_codegen/width_inference are correct.
+
+    scheduler.py's copy no longer reproduces this -- item 4.2 Phase C
+    migrated it to delegate to `semantics.range_width` (which uses
+    `abs(msb - lsb) + 1` unconditionally), fixing this bug there as a
+    documented side effect. vm/compiler.py is fixed by the same delegation
+    in Phase D, not yet done."""
     from veriforge.model.expressions import Literal, Range
 
     ascending = Range(Literal(0), Literal(7))
 
     assert compiled_codegen_module._range_width(ascending, {}) == 8
     assert wi_module._range_width(ascending) == 8
+    assert scheduler_module._range_width(ascending, {}) == 8
 
-    # Confirmed pre-existing bug -- documents current behavior, not desired.
-    assert scheduler_module._range_width(ascending, {}) == -6
+    # Confirmed pre-existing bug, not yet fixed (Phase D) -- documents
+    # current behavior, not desired.
     assert vm_compiler_module._range_width(ascending, {}) == -6
 
 
