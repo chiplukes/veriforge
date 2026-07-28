@@ -47,6 +47,36 @@ jobs:
           tests/test_formatter/test_formatter.py
           --tb=short -q
 
+  sim-smoke:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra test
+      # Excludes tests/test_sim/compiled/ (Cython, covered by weekly.yml) and
+      # tests/test_dsl/ plus a handful of large cross-engine hardware-example
+      # suites (ibex, darkriscv, structural_patterns, differential harness,
+      # pulp_*) that individually run every test across multiple engines
+      # including a fresh Cython "compiled" build — the full tests/test_sim/
+      # tree measured ~33 min locally with -n 4, and adding tests/test_dsl/
+      # pushed it to ~45 min, both far past a smoke job's ~10-minute budget.
+      # This scope measured ~9 min locally; full coverage still runs via the
+      # `test` job above and the weekly.yml full-regression workflow.
+      - run: >
+          uv run pytest tests/test_sim/
+          --ignore=tests/test_sim/compiled
+          --ignore=tests/test_sim/test_ibex_examples.py
+          --ignore=tests/test_sim/test_darkriscv_constructs.py
+          --ignore=tests/test_sim/test_structural_patterns.py
+          --ignore=tests/test_sim/test_differential.py
+          --ignore=tests/test_sim/test_pulp_ready_valid_examples.py
+          --ignore=tests/test_sim/test_pulp_axi_examples.py
+          --ignore=tests/test_sim/test_pulp_common_cells_examples.py
+          -n 4 --tb=short -q
+
   vm-equivalence:
     needs: lint
     runs-on: ubuntu-latest

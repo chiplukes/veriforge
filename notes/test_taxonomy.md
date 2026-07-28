@@ -67,7 +67,7 @@ Also runs: `mypy src/veriforge/ veriforge_lsp/`, `ruff check .`, and `python too
 ```
 uv run --extra test pytest tests/
   --ignore=tests/test_sim/test_bench_native.py
-  --ignore=tests/test_sim/test_compiled.py
+  --ignore=tests/test_sim/compiled
   --ignore=tests/test_sim/test_sim_sv.py
   --tb=short -q
 ```

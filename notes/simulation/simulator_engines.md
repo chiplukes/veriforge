@@ -195,7 +195,7 @@ Additional sim tests:
 - `test_value.py`, `test_value_widths.py`, `test_vcd.py`
 - `test_hierarchy.py`, `test_memory.py`, `test_generate.py`, `test_function_task.py`
 - `test_sim_sv.py`, `test_precedence_and_fixes.py`, `test_param_width.py`
-- `test_compiled.py` — compiled engine unit tests (4500+ parametrized, most `@pytest.mark.slow`)
+- `compiled/` — compiled engine unit tests, feature-organized package (4600+ parametrized, most `@pytest.mark.slow`)
 - `test_compiled_batch_run_propagation.py`, `test_compiled_latent_risks.py`
 - `test_wide_signal_catchall.py`, `test_multi_domain_runner.py`
 - Endpoint tests: `test_axi_lite_master.py`, `test_axis_endpoints.py`, `test_axis_frame.py`,

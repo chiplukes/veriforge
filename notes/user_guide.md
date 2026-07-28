@@ -1597,8 +1597,8 @@ subset:
 
 | Gap | Current behavior | Good focused repro |
 |-----|------------------|--------------------|
-| Compiled `>64`-bit internals | Partial support only | Wide compiled regressions in `tests/test_sim/test_compiled.py` |
-| Compiled raw-codegen limits | Wide internals and some multi-dimensional subarray semantics remain partial | Focused regressions in `tests/test_sim/test_compiled.py` |
+| Compiled `>64`-bit internals | Partial support only | Wide compiled regressions in `tests/test_sim/compiled/test_wide_ops.py` |
+| Compiled raw-codegen limits | Wide internals and some multi-dimensional subarray semantics remain partial | Focused regressions in `tests/test_sim/compiled/` |
 
 See `notes/known_issues.md` for the maintained issue list and current status.
 

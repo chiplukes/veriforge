@@ -260,7 +260,7 @@ tests/
 │   ├── test_testbench.py          # Testbench API tests (34 tests)
 │   ├── test_vcd.py                # VCD output tests (19 tests)
 │   ├── test_vm.py                 # Bytecode VM engine tests (185 tests)
-│   ├── test_compiled.py           # Compiled Cython engine tests (107 tests)
+│   ├── compiled/                  # Compiled Cython engine tests, feature-organized package (4627 tests)
 │   ├── test_generate.py           # Generate construct elaboration tests (40 tests)
 │   ├── test_hierarchy.py          # Hierarchy flattening + hierarchical signal access tests (62 tests)
 │   ├── test_function_task.py      # User-defined function/task simulation tests (22 tests)

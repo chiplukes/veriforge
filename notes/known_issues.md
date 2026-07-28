@@ -2,11 +2,14 @@
 
 ## Test suite
 
-### test_compiled.py — runtime and cache size
+### tests/test_sim/compiled/ — runtime and cache size
 
-**Status**: Partially addressed (May 2026)
+**Status**: Partially addressed (May 2026). Split from a single 62k-line
+`test_compiled.py` into a feature-organized package (July 2026, work plan
+item 2.5) — same tests, same collected count, now spread across
+`tests/test_sim/compiled/*.py`.
 
-`tests/test_sim/test_compiled.py` is the compiled-engine regression suite.
+`tests/test_sim/compiled/` is the compiled-engine regression suite.
 
 #### Test count and runtime
 
@@ -15,7 +18,7 @@ tests across wide-signal ops and values). They are tagged `@pytest.mark.slow`
 and **skipped by default**. Use `--run-slow` to include them:
 
 ```
-uv run pytest tests/test_sim/test_compiled.py --run-slow
+uv run pytest tests/test_sim/compiled/ --run-slow
 ```
 
 Full count with slow tests enabled: **4516 tests** (down from 6304 after Wave F-4
@@ -30,10 +33,10 @@ never collide:
 
 ```
 # fast path (skip slow): all CPU cores
-uv run pytest tests/test_sim/test_compiled.py -n auto
+uv run pytest tests/test_sim/compiled/ -n auto
 
 # full suite with slow tests: parallel over all cores
-uv run pytest tests/test_sim/test_compiled.py -n auto --run-slow
+uv run pytest tests/test_sim/compiled/ -n auto --run-slow
 ```
 
 #### Cache size
@@ -82,7 +85,8 @@ Root causes found and fixed in `_interp_fast.pyx`:
   the new upper bit(s) were silently left unfilled. Both fixed to check only
   the sign bit (bit `width-1`), matching `Value.sign_extend`.
 
-These were found via `tests/test_sim/test_compiled.py::TestNarrow64BitUnsignedOps`,
+These were found via
+`tests/test_sim/compiled/test_execution.py::TestNarrow64BitUnsignedOps`,
 `tests/test_sim/test_assignment_matrix.py`, and
 `tests/test_sim/test_compiled_edge_shapes.py` (all vm-fast-only failures,
 confirmed pre-existing via `git stash` against item 2.4's commit, not a

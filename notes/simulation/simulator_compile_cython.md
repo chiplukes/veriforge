@@ -704,7 +704,8 @@ break each chain level into O(1) references.
 
 Tested in `TestExpressionTemporaries` (+/- chains), `TestOrChainTemporaries`
 (|/& chains), and `TestTernaryChainTemporaries` (right-recursive mux, the
-actual gfwx-fpga assign 255 pattern) in `test_compiled.py`.
+actual gfwx-fpga assign 255 pattern) in
+`tests/test_sim/compiled/test_codegen_basic.py`.
 
 ### Deferred Always-Block Compilation
 

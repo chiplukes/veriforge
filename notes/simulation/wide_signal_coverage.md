@@ -60,31 +60,31 @@ for operands that have nonzero upper words).
 
 ```
 # All wide signal external I/O tests (5563 total)
-uv run pytest tests/test_sim/test_compiled.py::TestWideSignalExternalIO
+uv run pytest tests/test_sim/compiled/test_external_io_slow.py::TestWideSignalExternalIO
 
 # Logical operator corrections (!, &&, ||)
-uv run pytest tests/test_sim/test_compiled.py::TestWideLogicalOps
+uv run pytest tests/test_sim/compiled/test_wide_ops.py::TestWideLogicalOps
 
 # Arithmetic family (includes divide-by-zero)
-uv run pytest tests/test_sim/test_compiled.py::TestWideUnifiedBehavioralCrossVal
+uv run pytest tests/test_sim/compiled/test_cross_validation.py::TestWideUnifiedBehavioralCrossVal
 
 # Memory element ops
-uv run pytest tests/test_sim/test_compiled.py::TestWideSignalMemory
+uv run pytest tests/test_sim/compiled/test_memories.py::TestWideSignalMemory
 
 # Struct field wide signals
-uv run pytest tests/test_sim/test_compiled.py::TestWideStructFieldSignals
+uv run pytest tests/test_sim/compiled/test_cross_validation.py::TestWideStructFieldSignals
 
 # Edge detection guard
-uv run pytest tests/test_sim/test_compiled.py::TestWideEdgeDetection
+uv run pytest tests/test_sim/compiled/test_wide_ops.py::TestWideEdgeDetection
 
 # Shift family
-uv run pytest tests/test_sim/test_compiled.py::TestWideSignalExternalIO -k "shift_cross"
+uv run pytest tests/test_sim/compiled/test_external_io_slow.py::TestWideSignalExternalIO -k "shift_cross"
 
 # Select / concat family
-uv run pytest tests/test_sim/test_compiled.py::TestWideSignalExternalIO -k "extract_cross or concat_cross"
+uv run pytest tests/test_sim/compiled/test_external_io_slow.py::TestWideSignalExternalIO -k "extract_cross or concat_cross"
 
 # Signed arithmetic
-uv run pytest tests/test_sim/test_compiled.py::TestWideSignalExternalIO -k "signed_shift_cross"
+uv run pytest tests/test_sim/compiled/test_external_io_slow.py::TestWideSignalExternalIO -k "signed_shift_cross"
 ```
 
 ## Architecture Notes

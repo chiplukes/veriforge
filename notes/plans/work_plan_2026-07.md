@@ -430,7 +430,7 @@ cases green; `tests/test_sim/test_vm.py` green; targeted checks against
 Icarus/Verilator-style hand oracles green for narrow/wide, shift ≥ width,
 shift = 0, and unknown-sign-bit cases across all four engines.
 
-### 2.5 Split `test_compiled.py` by feature (M — mechanical)
+### 2.5 Split `test_compiled.py` by feature (M — mechanical) ✅
 
 **Goal**: replace the 62k-line phase-organized file with a feature-organized
 package (functionality review §5.1).
@@ -470,6 +470,38 @@ docs/notes by name).
    equal the count from step 1 (and with `--run-slow` likewise).
 **Accept**: identical collected counts; full compiled suite green locally
 (`-n 8`, per project convention); docs updated.
+
+**Result** (July 2026): Wrote a one-off Python/`ast` script (not committed —
+scratch tooling) rather than manual cut-paste, given the file's scale (65
+top-level classes, 62,120 lines). Verified the 65-class mapping was exact
+(every class assigned exactly once, no gaps, no extras) before touching any
+file. `_shared.py` holds every module-level helper/fixture/constant from
+the original file (some interspersed *between* classes, not just in a
+single leading preamble — `ast`-walked the whole module body, not just the
+top, to catch all of them), exported via an explicit `__all__` so
+underscore-prefixed helpers (most of them) survive `from ._shared import
+*`; `pytestmark` (the Cython/compiler skip guard) is defined once in
+`_shared.py` and picked up correctly by every consumer file via the same
+star-import, since `from X import *` binds real module-level names.
+Ambiguous classes not explicitly named in the table (25 of 65) were
+assigned by reading each one's docstring, not just its name (e.g. all 7
+`TestChar*` "characterize codegen output" classes were kept together in
+`test_codegen_basic.py` rather than scattered by sub-topic, since they're a
+cohesive unit). Collected count matched exactly before and after (4627,
+with and without `--run-slow`) at every stage: right after generation,
+after `ruff format`, and after deleting the original file. Ran every new
+file individually, then the whole package together (784 passed + 3843
+skipped = 4627, exactly matching the original file's own baseline run).
+Updated `pyproject.toml`'s per-file ruff ignore (added `F403`/`F405` for
+the star-import pattern) and every functional/actionable doc reference
+(`tools/validate_compiled_pytest.py`'s 24 hardcoded node IDs,
+`notes/developer_guide.md`, `notes/test_taxonomy.md`, `notes/known_issues.md`,
+`notes/simulation/wide_signal_coverage.md`, `notes/simulation/
+simulator_engines.md`, `notes/simulation/simulator_compile_cython.md`,
+`notes/user_guide.md`, `notes/python_overview.md`) — left historical
+Result notes in this file and the two `*_review_2026-07.md` documents
+untouched, since those describe what was actually run at a past point in
+time before the split existed.
 
 ### 2.6 Fix cross-engine unary `~` self-determined-width bug (M) ✅
 
@@ -609,7 +641,7 @@ green (11606 passed, 61 xfailed).
 
 ## Tier 3 — CI and engine parity
 
-### 3.1 CI sim-smoke job (S)
+### 3.1 CI sim-smoke job (S) ✅
 
 **Goal**: the simulator finally runs in CI (architecture review item 4.1).
 **Steps**: in `.github/workflows/ci.yml` add a job after `lint` (model on the
@@ -636,7 +668,34 @@ that in the workflow comment.
 **Accept**: green run on GitHub Actions; `notes/developer_guide.md` §3 updated
 to describe the new job.
 
-### 3.2 Scheduled full-regression workflow (M)
+**Result** (July 2026): Measured locally first, exactly as prescribed —
+the plan's own "~10 min, drop `tests/test_dsl/` if needed" guidance turned
+out not to hold: `tests/test_sim/` + `tests/test_dsl/` (minus `compiled/`)
+measured ~45 min with `-n 4`; `tests/test_sim/` alone (still minus
+`compiled/`) measured ~33 min on its own. Surfaced this to the user rather
+than silently either blowing past the 10-minute target or unilaterally
+narrowing scope beyond what the plan specified; chosen resolution: exclude
+`tests/test_dsl/` (per the plan's own fallback) plus the handful of large
+cross-engine hardware-example suites individually responsible for most of
+the runtime (`test_ibex_examples.py` ~7:50 for just 148 tests,
+`test_darkriscv_constructs.py` + `test_structural_patterns.py` +
+`test_differential.py` ~3:53 combined, the three `test_pulp_*_examples.py`
+files ~7:29 combined) — each of these runs every test across multiple
+engines including a fresh per-test Cython "compiled" build, which is the
+actual cost driver. Final scope measured ~9:14 locally, added as the
+`sim-smoke` job in `.github/workflows/ci.yml`. `notes/developer_guide.md`
+§3 rewritten to describe all three CI jobs (was describing two; also
+folded in item 3.2's `weekly.yml` description below, landed together).
+YAML validated with `pyyaml` (note the `on:` key parses as the boolean
+`True` under YAML 1.1, not the string `"on"` — a known GitHub Actions/YAML
+quirk, already present in the existing `ci.yml`, not a bug introduced
+here). The exact `sim-smoke` command was run locally end-to-end (not just
+its constituent pieces) and passed. Actually triggering GitHub Actions to
+confirm a live green run requires pushing this commit, which I wasn't
+asked to do — that verification is the one part of the Accept criteria
+left for whoever pushes this branch.
+
+### 3.2 Scheduled full-regression workflow (M) ✅
 
 **Goal**: compiled suite + Icarus validation on a cadence
 (architecture review item 4.2).
@@ -652,6 +711,22 @@ to describe the new job.
 **Accept**: `workflow_dispatch` run is green (trigger manually once);
 developer_guide §3 documents it and drops the "compiled suite is not exercised
 in CI" caveat.
+
+**Result** (July 2026): Landed together with item 3.1 (both touch
+`notes/developer_guide.md` §3, and this item's `icarus` job scope
+overlapped with 3.1's timing investigation). `.github/workflows/weekly.yml`
+created exactly per spec — Monday 06:00 UTC cron + `workflow_dispatch`,
+`compiled` job with `.cycache/` caching keyed on
+`src/veriforge/sim/compiled/**`, `icarus` job installing `iverilog` then
+running `tests/test_validation/`. Both jobs' pytest commands run locally
+end-to-end and passed: `tests/test_sim/compiled/ -n auto --run-slow`
+(784 passed + 3843 skipped without `--run-slow`; full run already
+validated during item 2.5) and `tests/test_validation/ --tb=short -q`
+(115 passed, ~11:24). `notes/developer_guide.md` §3 rewritten, dropping
+the "compiled suite is not exercised in CI" caveat as specified. As with
+3.1, an actual live `workflow_dispatch` trigger requires pushing this
+commit and using the GitHub Actions UI/CLI, which wasn't asked for here —
+left for whoever pushes this branch.
 
 ### 3.3 Cython VM: fix drift, then gate equivalence in CI (M/L)
 

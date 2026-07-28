@@ -33,8 +33,8 @@ uv run pytest tests/test_sim/ --tb=no -q
 uv run pytest tests/test_dsl/ --tb=no -q
 
 # Compiled engine (slow — uses Cython compilation)
-uv run pytest tests/test_sim/test_compiled.py -n auto
-uv run pytest tests/test_sim/test_compiled.py -n auto --run-slow  # ~4500 tests
+uv run pytest tests/test_sim/compiled/ -n auto
+uv run pytest tests/test_sim/compiled/ -n auto --run-slow  # ~4600 tests
 
 # Focused bench/proxy regression (fast)
 uv run pytest tests/test_sim/test_bench_native.py tests/test_sim/test_bench_runtime.py --tb=no -q
@@ -49,22 +49,40 @@ See [notes/test_taxonomy.md](test_taxonomy.md) for test directory layout and pyt
 
 ## 3. CI
 
-GitHub Actions runs two workflows:
+GitHub Actions runs three workflows:
 
 - **`ci.yml`** — runs on every push/PR to `main`:
   - **lint** job: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src/veriforge/ veriforge_lsp/`, `uv run python tools/check_overview.py`
   - **test** job (needs lint): fast test slice (parser/model/analysis/preprocessor/formatter) on Python 3.10/3.11/3.12/3.13
+  - **sim-smoke** job (needs lint): runs `tests/test_sim/` minus
+    `compiled/` and a handful of large cross-engine hardware-example suites
+    (`test_ibex_examples.py`, `test_darkriscv_constructs.py`,
+    `test_structural_patterns.py`, `test_differential.py`,
+    `test_pulp_*_examples.py`) that each run every test across multiple
+    engines including a fresh per-test Cython "compiled" build — those,
+    plus `tests/test_dsl/`, pushed the job well past a smoke test's
+    ~10-minute budget (the full `tests/test_sim/` tree alone measured ~33
+    min locally with `-n 4`). This scope measures ~9 min locally. The
+    excluded suites and `tests/test_dsl/` are *not* covered by any other CI
+    job — run them locally, or add a dedicated job if they need CI
+    coverage; `weekly.yml` below only covers the compiled engine and
+    Icarus cross-validation.
   - **vm-equivalence** job (needs lint): builds the `_interp_fast` Cython
     extension, then runs `tests/test_sim/test_vm.py` +
     `tests/test_sim/test_bench_native.py` twice — once with the extension
     built, once with `VERIFORGE_DISABLE_CYTHON_VM=1` — requiring both green.
     This is the drift gate described in the sync policy above.
+- **`weekly.yml`** — `on: schedule` (Mondays 06:00 UTC) + `workflow_dispatch`:
+  - **compiled** job: `uv run pytest tests/test_sim/compiled/ -n auto
+    --run-slow` (the full ~4600-test compiled-engine suite, not exercised
+    by `ci.yml`). Caches `.cycache/` keyed on a hash of
+    `src/veriforge/sim/compiled/**` to keep reruns fast.
+  - **icarus** job: installs `iverilog`, then runs
+    `tests/test_validation/` (cross-checks the VM/reference engines
+    against Icarus Verilog as an external oracle).
+  - Trigger manually via the Actions tab (`workflow_dispatch`) to validate
+    before a release without waiting for the weekly schedule.
 - **`publish.yml`** — triggered by `v*` tags or `workflow_dispatch`; builds and publishes to PyPI via OIDC trusted publishing
-
-The compiled-engine suite is not exercised in CI — run
-`uv run pytest tests/test_sim/test_compiled.py -n auto --run-slow` locally
-before releases. (Work plan item 3.2, a scheduled `weekly.yml` workflow for
-this, has not landed yet.)
 
 ## 4. Project structure
 

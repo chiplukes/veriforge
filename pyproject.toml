@@ -123,7 +123,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py"                       = ["F403"]
 "tests/**/*.py"                     = ["S311", "S101", "PLR0915", "PLR0913", "PLR2004", "RUF012", "RUF059"]
-"tests/test_sim/test_compiled.py"   = ["RUF005", "RUF034", "RUF043", "F811", "E402"]
+"tests/test_sim/compiled/*.py"      = ["RUF005", "RUF034", "RUF043", "F811", "E402", "F403", "F405"]
 "tests/test_sim/test_sim_sv.py"     = ["E402"]
 "tests/test_model/test_module.py"   = ["F811"]
 "tools/**/*.py"                     = ["S603", "S607", "S110", "S112"]

@@ -1,0 +1,35 @@
+name: Weekly full regression
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compiled:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra test --extra bench
+      - uses: actions/cache@v4
+        with:
+          path: .cycache
+          key: cycache-${{ hashFiles('src/veriforge/sim/compiled/**') }}
+      - run: uv run pytest tests/test_sim/compiled/ -n auto --run-slow --tb=short -q
+
+  icarus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get install -y iverilog
+      - run: uv sync --extra test
+      - run: uv run pytest tests/test_validation/ --tb=short -q
