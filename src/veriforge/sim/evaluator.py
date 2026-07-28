@@ -374,17 +374,17 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
         # -- UnaryOp -----------------------------------------------
         if etype is UnaryOp:
-            # ~ is self-determined (IEEE 1364-2005 §5.5 Table 5-22): evaluate
-            # at operand width only; zero-extension to context happens at the
-            # assignment site.
-            if expr.op == "~":
-                operand = self.eval(expr.operand, ctx)
-                return _eval_unary_op("~", operand)
-            # Unary +/- are context-determined for signed values: resize the
-            # operand to the surrounding context width (see the BinaryOp
-            # arithmetic branch above for why this can narrow, not just
-            # widen, the operand).
-            if expr.op in ("+", "-"):
+            # ~/+/- are context-determined (IEEE 1364-2005 Table 5-22):
+            # resize the operand to the surrounding context width BEFORE
+            # applying the operator (see the BinaryOp arithmetic branch
+            # above for why this can narrow, not just widen, the operand).
+            # `~` used to be treated as self-determined here (evaluate at
+            # the operand's own width, then let zero-extension happen at
+            # the assignment site) -- that's wrong for unsigned operands,
+            # since zero-extension doesn't commute with bitwise complement
+            # (only sign-extension does), confirmed against Icarus/Verilator
+            # (see notes/known_issues.md).
+            if expr.op in ("~", "+", "-"):
                 operand = self.eval(expr.operand, ctx, width, signed_override)
                 if width and operand.width != width:
                     target = max(width, _expr_self_width(expr.operand, ctx))

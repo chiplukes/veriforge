@@ -620,11 +620,10 @@ def _context_determined_unary(op: str, a_val: int, src_w: int, dst_w: int, src_s
 
 
 def _unary_self_determined_cases() -> list[EdgeCase]:
-    # Known bug (see notes/known_issues.md "unary ~ is wrongly self-determined"):
-    # `~a` is computed self-determined (wrong) on reference/vm/vm-fast, and
-    # on the compiled engine's narrow (<=64-bit) path; only the compiled
-    # engine's wide (>64-bit) path happens to already be context-determined
-    # (correct) here. `-a` is context-determined (correct) everywhere.
+    # `~a`/`-a` are context-determined (correct) on all engines -- item 2.6
+    # fixed the last gap (unary `~` on an unsigned operand, wrongly
+    # self-determined on reference/vm/vm-fast and the compiled engine's
+    # narrow path; see notes/known_issues.md).
     cases: list[EdgeCase] = []
     a_val = (1 << 64) | 0x123  # 65-bit value, bit 64 set
     for op, opname in (("~", "not"), ("-", "neg")):
@@ -640,11 +639,6 @@ def _unary_self_determined_cases() -> list[EdgeCase]:
                     top_name="t",
                     drives=(("a", Value(a_val, width=65)),),
                     expected=(("y", Value(expected, width=80)),),
-                    # Only the unsigned `~` case needs this: reference/vm/vm-fast
-                    # are wrong there while compiled is right, so cross-checking
-                    # compiled's correct result against reference's wrong one
-                    # would manufacture a false failure. See _known_engine_bug.
-                    skip_ref_crosscheck=(op == "~" and not signed),
                 )
             )
     return cases
@@ -771,14 +765,9 @@ def _dynamic_part_select_cases() -> list[EdgeCase]:
 def _known_engine_bug(engine: str, case: EdgeCase) -> str | None:
     """Return a known_issues.md-linked reason if *engine* is known-broken for *case*.
 
-    `~` is wrongly self-determined on reference/vm/vm-fast for an unsigned
-    operand (see "Unary `-`/`~` are context-determined, not self-determined"
-    in notes/known_issues.md — item 2.6, not yet fixed). The signed case and
-    the compiled engine's wide-path signedness handling (item 2.3 Part A)
-    were both already fixed and no longer need an xfail here.
+    Item 2.6 (unary `~` wrongly self-determined on reference/vm/vm-fast and
+    the compiled engine's narrow path) is fixed — no known bugs left here.
     """
-    if case.id == "self_det_unary_not_65_to_80_unsigned" and engine != "compiled":
-        return "known reference/vm/vm-fast unary ~ self-determined-width bug (see notes/known_issues.md)"
     return None
 
 

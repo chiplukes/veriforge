@@ -471,7 +471,7 @@ docs/notes by name).
 **Accept**: identical collected counts; full compiled suite green locally
 (`-n 8`, per project convention); docs updated.
 
-### 2.6 Fix cross-engine unary `~` self-determined-width bug (M)
+### 2.6 Fix cross-engine unary `~` self-determined-width bug (M) ✅
 
 **Goal**: found by item 2.2 (see its Result note and
 `notes/known_issues.md`, "Unary `-`/`~` are context-determined, not
@@ -563,7 +563,49 @@ compiler, so fixing it fixes both engines):
 full fast suite + compiled suite green; no test from step 2 left asserting
 the old (wrong) behavior.
 
----
+**Result** (July 2026): Characterized first against Icarus (`~a` for
+`a=4'b0011` in an 8-bit context: correct `252`, all four engines gave the
+buggy `12` before this fix). Fixed in the exact three locations the plan
+named — `sim/evaluator.py` (merged `~` into the `+`/`-` UnaryOp branch),
+`sim/vm/compiler.py` (same merge in `_compile_expr`), `sim/compiled/
+_expr_emitter.py`'s `_emit_unary` (same merge) — fixing vm and vm-fast
+together since they share one bytecode compiler. Fixed one engine at a
+time with a full-suite run after each, exactly as prescribed: after
+reference alone, 7 expected transient failures (the `strict=True` xfail
+flipping to xpass, `test_differential.py` disagreeing since vm/compiled
+were still buggy, and the compiled-vs-reference latent-risks test); after
+vm/compiler.py, down to 4 (the differential harness agreed once vm joined
+reference; only compiled-related mismatches remained); after the compiled
+narrow-path fix, all four engines gave the Icarus-correct `252` and the
+whole suite was green. Removed the now-stale `_known_engine_bug` entry and
+`skip_ref_crosscheck` flag in `test_compiled_edge_shapes.py` (371 passed,
+zero xfails left in that file + `test_compiled_latent_risks.py`).
+`notes/known_issues.md`'s "Unary `-`/`~` are context-determined" entry
+updated to Resolved (all of bugs 1-3 are now fixed, since item 2.3 Part A
+had already landed bug 3 earlier).
+
+A `--run-slow` full regression (not run during the plan's prescribed fast
+suite) caught one real, unrelated pre-existing bug this fix exposed:
+`tests/test_dsl/test_taxi_axis_async_fifo.py::test_async_fifo_prng_stress`
+started failing (FIFO never signaled done). Root cause, found by diffing
+generated `.pyx` before/after (the fix changed exactly one thing:
+`wmask(2)` → `wmask(32)` for a `~m_axis_tvalid_pipe_reg` inside `(~x) >>
+j`, where `j` is a Verilog `integer` for-loop variable, 32 bits by
+default): `sim/compiled/_expr_emitter.py`'s `_expr_width` computed a right
+shift's (`>>`/`>>>`) own width as `max(expr_width(left), expr_width(right))`
+— folding the *shift amount*'s width into the result, when IEEE 1364-2005
+Table 5-22 says a shift's self-determined width is its left operand's width
+only. This was harmless before since nothing consumed that estimate in a
+way that changed a computed value; my `~` fix made `_emit_unary` actually
+use whatever width its caller reports for context-propagation, so the
+inflated 32-bit estimate now corrupted `~m_axis_tvalid_pipe_reg`'s value
+before the shift ran. Fixed by giving `_expr_width` a dedicated `>>`/`>>>`
+case returning `self._expr_width(expr.left)` only (mirroring the existing
+special-casing already present for `<<`/`<<<`). Verified against Icarus
+for the exact failing pattern, re-ran the fast suite (6979 passed, 59
+xfailed), the full compiled suite with `--run-slow` (4625 passed, 2
+xfailed), and the taxi FIFO test file (4 passed). Full `--run-slow` suite
+green (11606 passed, 61 xfailed).
 
 ## Tier 3 — CI and engine parity
 

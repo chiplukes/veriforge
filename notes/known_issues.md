@@ -290,12 +290,14 @@ See `notes/plans/architecture_review_2026-07.md` and
 
 ### Unary `-`/`~` are context-determined, not self-determined (corrects the entry below)
 
-**Status**: Partially resolved. Root-caused and precisely characterized
-July 2026 (work plan item 2.2); the compiled-only bug (3 below) was fixed
-in item 2.3 Part A. The cross-engine bug (1/2 below, reference/vm/vm-fast)
-remains open as item 2.6. Exercised by
+**Status**: Resolved (July 2026). Root-caused and precisely characterized
+in work plan item 2.2; the compiled-only bug (3 below) was fixed in item
+2.3 Part A; the cross-engine bug (1/2 below, reference/vm/vm-fast and the
+compiled narrow path) was fixed in item 2.6 by merging `~` into the same
+context-determined branch as `+`/`-` in `sim/evaluator.py`,
+`sim/vm/compiler.py`, and `sim/compiled/_expr_emitter.py`. Exercised by
 `tests/test_sim/test_compiled_edge_shapes.py` ("self_det_unary_*" cases,
-strict xfail where still wrong).
+all passing, no xfails left).
 **Supersedes**: the previous version of this entry (below, kept struck
 through for history) claimed, citing IEEE 1364-2005 Table 5-22, that unary
 `-`/`~` are *self-determined* to the operand's own width. That claim was
@@ -328,21 +330,28 @@ Part A fixed the actual bug (signedness, not width) — see bug 3 below.
 `seam*_sh{l,r}64` cases in `tests/test_sim/test_compiled_edge_shapes.py`,
 cross-checked against Icarus/Verilator):
 
-1. **`~` is wrongly self-determined on reference, vm, and vm-fast** for an
-   *unsigned* operand (all three engines identically): `~a` is computed at
+1. **`~` was wrongly self-determined on reference, vm, and vm-fast** for an
+   *unsigned* operand (all three engines identically): `~a` was computed at
    `a`'s own width, then zero-extended — the correct result has its
    extension bits all-1, not all-0 (zero-extension does not commute with
    bitwise complement the way sign-extension does, which is why the signed
-   case below happened to already be right). **Status: open — this is
-   item 2.6 in `notes/plans/work_plan_2026-07.md`, not yet fixed.**
+   case below happened to already be right). **Status: resolved (July
+   2026, work plan item 2.6)** — fixed in `sim/evaluator.py`'s
+   `ExpressionEvaluator.eval` and `sim/vm/compiler.py`'s `_compile_expr`
+   by merging the `~` `UnaryOp` case into the same context-determined
+   branch as `+`/`-` (evaluate/compile the operand at the surrounding
+   context width, extending it from its own width first, *before* applying
+   the operator — not the reverse).
    Reproduce:
    ```python
    # module t(input [7:0] a, output [15:0] y); assign y = ~a;
-   # a = 8'd1 -> reference/vm/vm-fast give y=16'h00FE (wrong); correct is 16'hFFFE.
+   # a = 8'd1 -> now gives y=16'hFFFE on all of reference/vm/vm-fast/compiled.
    ```
-2. **Compiled's narrow (<=64-bit) unary path has the same bug as (1)** for
-   `~` on an unsigned operand; `-` is correct on the narrow path at all
-   widths/signedness tested. **Status: open — also item 2.6.**
+2. **Compiled's narrow (<=64-bit) unary path had the same bug as (1)** for
+   `~` on an unsigned operand; `-` was already correct on the narrow path
+   at all widths/signedness tested. **Status: resolved (July 2026, work
+   plan item 2.6)** — fixed in `sim/compiled/_expr_emitter.py`'s
+   `_emit_unary` the same way as (1).
 3. **Compiled's wide (>64-bit) unary path ignored declared signedness
    entirely** for both `~` and `-`: it always zero-extended the operand to
    context width before applying the operator (already correct for an

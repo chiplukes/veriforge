@@ -867,24 +867,15 @@ class Compiler:  # cm:8c1e4a
             if op is None:
                 raise ValueError(f"Unknown unary operator: {expr.op!r}")
 
-            # ~ is self-determined (IEEE 1364-2005 §5.5 Table 5-22): evaluate
-            # at operand width, then extend to context width afterward.
-            if expr.op == "~":
-                self._compile_expr(expr.operand, program)
-                program.append(instr(op))
-                # Target max(width, static width), not `width` alone -- see
-                # the BinaryOp comment above for why.
-                if width:
-                    target = max(width, self._expr_width(expr.operand))
-                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
-                    if eff_signed:
-                        program.append(instr(Op.SIGN_EXT, target, 0))
-                    else:
-                        program.append(instr(Op.RESIZE, target))
-                return
-
-            # Unary +/- are context-determined for signed values.
-            if expr.op in ("+", "-"):
+            # ~/+/- are context-determined (IEEE 1364-2005 Table 5-22):
+            # compile the operand with the surrounding context width, extend
+            # it BEFORE the operator runs. `~` used to be treated as
+            # self-determined here (compile at the operand's own width,
+            # extend the RESULT afterward) -- that's wrong for unsigned
+            # operands, since zero-extension doesn't commute with bitwise
+            # complement (only sign-extension does), confirmed against
+            # Icarus/Verilator (see notes/known_issues.md).
+            if expr.op in ("~", "+", "-"):
                 self._compile_expr(expr.operand, program, width, signed_override)
                 if width:
                     target = max(width, self._expr_width(expr.operand))

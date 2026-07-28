@@ -1176,19 +1176,15 @@ class _ExprEmitterMixin:
         if prefix is None:
             return "0"
 
-        # Bitwise NOT (~) is self-determined: result width = operand width (ow),
-        # regardless of the surrounding context (IEEE 1364-2005 §5.5 Table 5-22).
-        # For signed operands in a wider context, sign-extend the result afterward.
-        if expr.op == "~":
-            operand = self._emit_expr(expr.operand, ow)
-            result = f"((~({operand})) & wmask({ow}))"
-            if self._expr_signed(expr.operand) and width and width > ow:
-                return f"_sign_ext({result}, {ow})"
-            return result
-
-        # Unary +/- are context-determined for signed values: sign-extend the
-        # signed operand from its own width into the evaluation context.
-        if expr.op in ("+", "-"):
+        # ~/+/- are context-determined (IEEE 1364-2005 Table 5-22): evaluate
+        # the operand at the surrounding context width, sign-extending it
+        # from its own width first if signed. `~` used to be treated as
+        # self-determined here (result width = operand width, sign-extend
+        # the RESULT afterward) -- that's wrong for unsigned operands, since
+        # zero-extension doesn't commute with bitwise complement (only
+        # sign-extension does), confirmed against Icarus/Verilator (see
+        # notes/known_issues.md).
+        if expr.op in ("~", "+", "-"):
             eval_width = max(ow, width) if width else ow
             operand = self._emit_expr(expr.operand, eval_width)
             if self._expr_signed(expr.operand) and eval_width > ow:
@@ -1196,6 +1192,8 @@ class _ExprEmitterMixin:
 
             if expr.op == "-":
                 return f"((-({operand})) & wmask({eval_width}))"
+            if expr.op == "~":
+                return f"((~({operand})) & wmask({eval_width}))"
             return f"({operand})"
 
         # Logical NOT (!) — self-determined 1-bit
@@ -1579,6 +1577,17 @@ class _ExprEmitterMixin:
                 if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
                     return lw + int(expr.right.value)
                 return max(lw, self._expr_width(expr.right))
+            if expr.op in (">>", ">>>"):
+                # A shift's self-determined width is its LEFT operand's width
+                # only (IEEE 1364-2005 Table 5-22) -- the shift amount (right
+                # operand) never contributes bits to the result and must not
+                # be folded into a max() here. Without this, a shift amount
+                # that happens to be a wide `integer` (32 bits by Verilog
+                # default) corrupts this into an inflated width estimate,
+                # which then wrongly widens a `~`/`+`/`-` unary operand
+                # nested in the shift's left operand before the operator
+                # runs (see notes/known_issues.md, item 2.6's regression).
+                return self._expr_width(expr.left)
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
         if etype is UnaryOp:
             if expr.op in _REDUCTION_OPS or expr.op == "!":
