@@ -336,26 +336,11 @@ CASES = _build_cases()
 # =====================================================================
 # Known compiled-engine bugs (see notes/known_issues.md)
 #
-# Discovered by this matrix. Filed rather than fixed here (item 2.1 is a
-# test-writing item) and marked strict xfail so a real fix is required to
-# turn them green rather than a change to this file.
+# Discovered by this matrix (item 2.1) and fixed in item 2.7 sub-items 1-2
+# -- no known bugs left here. Kept as an explicit no-args-needed hook
+# (rather than deleted outright) since this is exactly where the next
+# discovered compiled-engine bug from this matrix should be filed.
 # =====================================================================
-
-
-def _known_compiled_bug(case: _Case) -> str | None:
-    """Return a known_issues.md-linked reason if compiled is known-broken for *case*."""
-    # Bug A: blocking/nonblocking bare-identifier assignment drops the x-mask
-    # when both src and dst fit in a single 64-bit word (narrow-path codegen).
-    # Continuous assigns (and port connections, which lower to continuous
-    # assigns) are unaffected; wide (>64-bit) operands on either side use a
-    # different, unaffected codegen path.
-    if case.kind in ("blocking", "nonblocking") and case.src_w <= 64 and case.dst_w <= 64:
-        return "known compiled x-mask loss on narrow blocking/nonblocking bare assignment"
-    # Bug B: wide-emitter sign-extension is wrong for the (65, 80) width pair
-    # specifically, for every kind, whenever the RHS is sign-extended.
-    if (case.src_w, case.dst_w) == (65, 80) and case.variant.sign_extend:
-        return "known compiled wide-emitter sign-extension bug for the 65->80 width pair"
-    return None
 
 
 def _combo_params() -> list:
@@ -363,9 +348,7 @@ def _combo_params() -> list:
     for engine in ENGINES:
         for case in CASES:
             pid = f"{engine}-{case.id}"
-            bug = _known_compiled_bug(case) if engine == "compiled" else None
-            marks = [pytest.mark.xfail(strict=True, reason=bug)] if bug else []
-            params.append(pytest.param(engine, case, id=pid, marks=marks))
+            params.append(pytest.param(engine, case, id=pid))
     return params
 
 

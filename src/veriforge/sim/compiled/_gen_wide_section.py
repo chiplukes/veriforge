@@ -921,6 +921,58 @@ class _GenWideSectionsMixin:
             "",
         ]
 
+        # ── wide_load_signal_s ──────────────────────────────────────────────────
+        # Sign-extending counterpart of wide_load_signal, for loading a
+        # (possibly narrower) signed signal into a wider scratch buffer.
+        # Mirrors _whole_assign_signal_s (templates/narrow_stage.pxi): the
+        # source's own last (partial) word must be sign-extended in place,
+        # not just words strictly beyond the source's own word count --
+        # otherwise a source/dest pair that happens to span the same word
+        # count despite different bit widths (e.g. 65 -> 80) silently
+        # zero-fills instead of sign-extending.
+        L += [
+            "cdef inline void wide_load_signal_s(",
+            "    SimCtx *c, int sid,",
+            "    unsigned long long *dv, unsigned long long *dm, int n) noexcept nogil:",
+            "    cdef int i, words = c.wide_words[sid]",
+            "    cdef int off = c.wide_offset[sid]",
+            "    cdef int sign_bit_local",
+            "    cdef unsigned long long sign_word_v, sign_word_m, sign_fill, src_tail_mask",
+            "    if words > 0:",
+            "        sign_bit_local = (c.width[sid] - 1) - ((words - 1) * 64)",
+            "        sign_word_v = c.wide_val[off + words - 1]",
+            "        sign_word_m = c.wide_mask[off + words - 1]",
+            "    else:",
+            "        sign_bit_local = c.width[sid] - 1",
+            "        sign_word_v = <unsigned long long>c.val[sid]",
+            "        sign_word_m = <unsigned long long>c.mask[sid]",
+            "    if sign_word_m & (<unsigned long long>1 << sign_bit_local):",
+            "        sign_fill = 0",
+            "    elif sign_word_v & (<unsigned long long>1 << sign_bit_local):",
+            "        sign_fill = <unsigned long long>-1",
+            "    else:",
+            "        sign_fill = 0",
+            "    if words > 0:",
+            "        for i in range(n):",
+            "            if i < words - 1:",
+            "                dv[i] = c.wide_val[off + i]",
+            "                dm[i] = c.wide_mask[off + i]",
+            "            elif i == words - 1:",
+            "                src_tail_mask = _word_mask64(sign_bit_local + 1)",
+            "                dv[i] = (c.wide_val[off + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)",
+            "                dm[i] = c.wide_mask[off + i] & src_tail_mask",
+            "            else:",
+            "                dv[i] = sign_fill",
+            "                dm[i] = 0",
+            "    else:",
+            "        dv[0] = <unsigned long long>_sign_ext(c.val[sid], c.width[sid])",
+            "        dm[0] = <unsigned long long>c.mask[sid]",
+            "        for i in range(1, n):",
+            "            dv[i] = sign_fill",
+            "            dm[i] = 0",
+            "",
+        ]
+
         # ── wide_store_signal ──────────────────────────────────────────────────
         # Blocking assign: write scratch → SimCtx, update dirty flag.
         # Mirrors val[sid]/mask[sid] from the low word of the wide array.

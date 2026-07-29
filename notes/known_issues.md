@@ -399,44 +399,128 @@ declared signedness when extending it to `dst_width`.
 
 ### Compiled engine: narrow blocking/nonblocking bare assignment drops the x-mask
 
-**Status**: Open — exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail)
+**Status**: Resolved (July 2026, work plan item 2.7 sub-item 1). Was
+exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail,
+now removed — all cases pass).
 **Found**: July 2026, work plan item 2.1 (cross-engine assignment-semantics matrix)
 
 `b = a;` (blocking, in `always @(*)`) or `b <= a;` (non-blocking, in
-`always @(posedge clk)`) loses the x-mask on the compiled engine whenever
-**both** `a` and `b` are 64 bits or narrower (the single-word/"narrow-path"
-codegen). Driving `a` with any x-contaminated bit and settling leaves `b`
+`always @(posedge clk)`) lost the x-mask on the compiled engine whenever
+**both** `a` and `b` were 64 bits or narrower (the single-word/"narrow-path"
+codegen). Driving `a` with any x-contaminated bit and settling left `b`
 fully-defined (mask forced to 0) instead of propagating the x bit(s).
 Continuous assigns (`assign b = a;`) and port connections (which lower to
-continuous assigns during flattening) are unaffected — only the narrow-path
-procedural-assignment codegen drops the mask. Cases where either side is
-wider than 64 bits are also unaffected (they use a different, correctly
-mask-propagating wide-path codegen).
+continuous assigns during flattening) were unaffected — only the
+narrow-path procedural-assignment codegen dropped the mask. Cases where
+either side is wider than 64 bits were also unaffected (different,
+correctly mask-propagating wide-path codegen).
 
-Reproduce:
+**Root cause**: `sim/compiled/_stmt_emitters.py`'s generic narrow-path LHS
+fallback (used for any bare-identifier blocking/nonblocking RHS not
+matched by one of the specialized shift/multiply/struct-field
+pattern-matchers earlier in `_emit_lhs_write`) computed the RHS's *value*
+via `_emit_expr` but hardcoded the emitted mask update to the literal `0`,
+never consulting `_emit_mask_expr` at all.
+
+**Fix**: compute `rhs_mask = self._emit_mask_expr(rhs, assign_width)`
+alongside the existing `rhs_val`, and emit it (masked to the signal's
+declared width, mirroring the existing value-masking logic) instead of the
+hardcoded `0`. Also needed a new scratch cdef (`_cdm`, alongside the
+existing `_cdv`) declared everywhere `_cdv` is, in
+`sim/compiled/_gen_sections.py`.
+
+**Two more real, previously-latent bugs surfaced once this fix started
+actually consulting the RHS mask** (both were harmless before only because
+this bug's blanket `mask = 0` override happened to paper over them on
+read):
+
+1. `CompiledScheduler.load_memory()` passed the *value* truncation bitmask
+   (e.g. `0xFF` for an 8-bit element) as the *x-mask* argument to
+   `mem_write`/`mem_write_wide` — marking freshly bulk-loaded memory as
+   entirely unknown instead of entirely defined. Fixed to pass `0` (fully
+   defined) for the mask argument, keeping the truncation mask (renamed
+   `value_mask` for clarity) only for the value itself.
+2. `_expr_emitter.py`'s `_emit_mask_expr` had three near-identical
+   "select on a non-Identifier target" fallback paths (`BitSelect`,
+   `RangeSelect`, `PartSelect`) that computed the packed-range base offset
+   with `sig_base = 0 if not isinstance(expr.target, Identifier) else ...`
+   — silently defaulting to 0 for a memory-element target (e.g.
+   `mem[idx][msb:lsb]` on a packed range with a non-zero declared LSB
+   base), extracting the wrong mask bits. The equivalent *value*-side code
+   in `_emit_expr` already had a general `_select_base()` helper
+   (`sim/compiled/codegen.py`) that correctly handles both scalar signals
+   and memory-element targets — the mask side just never called it. Fixed
+   all three call sites to use `_select_base()` instead of the
+   Identifier-only inline check.
+
+Reproduce (now fixed, all four engines agree):
 
 ```python
 sim.drive("a", Value(0, width=8, mask=1))  # a[0] is x
 sim.settle()
-sim.read("b")  # compiled: 8'b00000000 (wrong); reference/vm: 8'b0000000x (correct)
+sim.read("b")  # all engines: 8'b0000000x
 ```
 
 ### Compiled engine: wide-emitter sign-extension wrong for the 65->80 width pair
 
-**Status**: Open — exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail)
+**Status**: Resolved (July 2026, work plan item 2.7 sub-item 2). Was
+exercised by `tests/test_sim/test_assignment_matrix.py` (strict xfail,
+now removed — all cases pass).
 **Found**: July 2026, work plan item 2.1 (cross-engine assignment-semantics matrix)
 
 Assigning a declared-signed (or `$signed()`-cast) 65-bit value into an
-80-bit target zero-extends instead of sign-extending, on the compiled
+80-bit target zero-extended instead of sign-extending, on the compiled
 engine only, and only for this specific (65, 80) width pair — every kind
-tested (continuous assign, blocking, non-blocking, port connection) is
+tested (continuous assign, blocking, non-blocking, port connection) was
 affected. Other width pairs that also cross the 64-bit word boundary
-((63,64), (64,65), (64,63), (65,64), (80,65)) sign-extend correctly, so this
-looks like a narrow gap in the wide-emitter's sign-extension fill logic
-specifically for a src/dst pair that both occupy two 64-bit words (65 bits:
-1 full word + 1 bit; 80 bits: 1 full word + 16 bits) rather than a general
-word-count issue. Not yet root-caused beyond that; likely in the same
-`_wide_emitter.py` family as the wide-emitter unary masking bug above.
+((63,64), (64,65), (64,63), (65,64), (80,65)) sign-extended correctly — the
+bug specifically needed a src/dst pair that both occupy the *same* number
+of 64-bit words (65 bits: 1 full word + 1 bit; 80 bits: 1 full word + 16
+bits — both 2 words) despite the dst having more bits in that shared word.
+
+**Root cause, three separate code paths, all the same bug shape**: each of
+these treats "does this word belong to the source's own last (partial)
+word" and "does this word lie beyond the source's own word count entirely"
+as the same case (copy verbatim vs. fill with `sign_fill`), when they are
+not — a source's own last, partial word needs *its own* unused high bits
+sign-extended in place, separately from whole extension words beyond it.
+That distinction is invisible whenever `dst_words > src_words` (the usual
+case, and where earlier testing happened to concentrate), since then the
+source's last word is copied verbatim (correct — it's already full) and
+the *subsequent* words correctly get `sign_fill`. It only misbehaves when
+`dst_words == src_words` and the source's own last word is partial, which
+first happens at exactly this width pair.
+
+1. `sim/compiled/templates/narrow_stage.pxi`'s `_whole_assign_signal_s`
+   (continuous assign / blocking) and `sim/compiled/templates/
+   narrow_assign.pxi`'s `_whole_stage_signal_s` (non-blocking) — used via
+   `_emit_wide_signal_copy_lines` for a bare-identifier RHS. Also had a
+   latent, separate bug: the sign-bit-position check shifted by the
+   signal's *absolute* width - 1 (e.g. 64) rather than that bit's position
+   *within* its word (0) — undefined behavior in C for a 64-bit type,
+   only coincidentally landing on the right bit on platforms whose shift
+   instruction wraps the count mod 64 (verified this is why the `$signed`
+   cast-form cases below weren't affected by this half of the bug: they
+   never reached this function in the first place).
+2. `sim/compiled/_gen_wide_section.py`'s `wide_load_signal` (used by the
+   newer recursive scratch-space emitter, `_wide_emitter.py`'s
+   `_emit_wide_expr_to_scratch`, reached by a `$signed()`/`$unsigned()`
+   cast-wrapped RHS or any other expression shape not matched by the
+   dedicated bare-identifier path above) had no sign-extension concept at
+   all — it always zero-fills, appropriate for most of its other callers
+   but wrong for a narrower *signed* Identifier operand widening into a
+   wider destination.
+
+**Fix**: (1) rewrote both `_whole_assign_signal_s`/`_whole_stage_signal_s`
+to sign-extend the source's own last word's unused high bits in place
+(computing a proper word-local sign-bit index instead of the UB-prone
+absolute one) before applying the destination's per-word tail mask; (2)
+added a new sign-extending counterpart, `wide_load_signal_s`, and threaded
+a `signed_override: bool | None` parameter through
+`_emit_wide_expr_to_scratch`'s recursive call graph so a `$signed`/
+`$unsigned` cast can force the extension mode for a narrower Identifier
+operand (`None` falls back to the identifier's own declared signedness,
+matching pre-existing behavior for every other expression shape).
 
 ### Compiled engine: narrow-path shift by exactly the word width (64) is a no-op
 

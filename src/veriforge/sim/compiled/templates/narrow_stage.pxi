@@ -51,28 +51,47 @@ cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noe
     cdef int dst_offset = c.wide_offset[dst_sid]
     cdef int src_offset = c.wide_offset[src_sid]
     cdef int i, remaining_w, changed = 0
-    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill
+    cdef int sign_bit_local
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill, src_tail_mask
     cdef long long new_v, new_m
     if src_words > 0:
-        # wide source: sign bit lives in top bit of last source word
+        # wide source: sign bit lives in top bit of last source word --
+        # sign_bit_local is that bit's position WITHIN the word (never the
+        # signal's absolute width - 1, which would shift by >= 64 here,
+        # undefined behavior in C and only coincidentally correct on
+        # platforms whose shift instruction wraps the count mod 64).
+        sign_bit_local = (c.width[src_sid] - 1) - ((src_words - 1) * 64)
         sign_word_v = c.wide_val[src_offset + src_words - 1]
         sign_word_m = c.wide_mask[src_offset + src_words - 1]
     else:
+        sign_bit_local = c.width[src_sid] - 1
         sign_word_v = <unsigned long long>c.val[src_sid]
         sign_word_m = <unsigned long long>c.mask[src_sid]
     # Determine fill word: -1 (all 1s) if sign bit is 1, else 0
-    if sign_word_m & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+    if sign_word_m & (<unsigned long long>1 << sign_bit_local):
         sign_fill = 0  # sign bit is x/z → fill with 0 (conservative)
-    elif sign_word_v & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+    elif sign_word_v & (<unsigned long long>1 << sign_bit_local):
         sign_fill = <unsigned long long>-1
     else:
         sign_fill = 0
     if dst_words > 0:
         for i in range(dst_words):
             if src_words > 0:
-                if i < src_words:
+                if i < src_words - 1:
                     word_v = c.wide_val[src_offset + i]
                     word_m = c.wide_mask[src_offset + i]
+                elif i == src_words - 1:
+                    # Source's own last (partial) word: sign-extend its
+                    # meaningful bits out to a full 64-bit word before the
+                    # destination's own tail mask is applied below -- a
+                    # verbatim word copy would leave the extension bits
+                    # within this *shared* word un-sign-extended whenever
+                    # src and dst happen to occupy the same word count
+                    # despite different bit widths (e.g. 65 -> 80, both 2
+                    # words).
+                    src_tail_mask = _word_mask64(sign_bit_local + 1)
+                    word_v = (c.wide_val[src_offset + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)
+                    word_m = c.wide_mask[src_offset + i] & src_tail_mask
                 else:
                     word_v = sign_fill
                     word_m = 0

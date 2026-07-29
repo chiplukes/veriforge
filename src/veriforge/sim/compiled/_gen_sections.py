@@ -426,6 +426,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 parts.extend(hoisted_et_cdefs)
                 if any("_cdv" in ln for ln in body_lines):
                     parts.append("    cdef long long _cdv")
+                if any("_cdm" in ln for ln in body_lines):
+                    parts.append("    cdef long long _cdm")
                 if any("_clhs" in ln for ln in body_lines):
                     parts.append("    cdef long long _clhs")
                 if any("_sfv" in ln for ln in body_lines):
@@ -519,6 +521,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                         decls.append("    cdef long long _clhs")
                     if "_cdv" in joined:
                         decls.append("    cdef long long _cdv")
+                    if "_cdm" in joined:
+                        decls.append("    cdef long long _cdm")
                     if "_sfv" in joined:
                         decls.append("    cdef long long _sfv")
                     if "_mchg" in joined:
@@ -601,6 +605,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                         decls.append("    cdef long long _clhs")
                     if "_cdv" in joined:
                         decls.append("    cdef long long _cdv")
+                    if "_cdm" in joined:
+                        decls.append("    cdef long long _cdm")
                     if "_sfv" in joined:
                         decls.append("    cdef long long _sfv")
                     if "_mchg" in joined:
@@ -985,6 +991,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("        cdef long long _clhs")
             if any("_cdv" in ln for ln in self._initial_lines):
                 lines.append("        cdef long long _cdv")
+            if any("_cdm" in ln for ln in self._initial_lines):
+                lines.append("        cdef long long _cdm")
             if any("_sfv" in ln for ln in self._initial_lines):
                 lines.append("        cdef long long _sfv")
             if any("_mchg" in ln for ln in self._initial_lines):

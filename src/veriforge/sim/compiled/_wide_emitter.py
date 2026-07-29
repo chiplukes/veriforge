@@ -3500,6 +3500,8 @@ class _WideEmitterMixin:
         n_words: int,
         dst_width: int,
         indent: int,
+        *,
+        signed_override: bool | None = None,
     ) -> list[str] | None:
         """Recursively evaluate *expr* into scratch slot *slot*.
 
@@ -3509,6 +3511,11 @@ class _WideEmitterMixin:
 
         ``n_words``  — number of 64-bit words in each scratch array.
         ``dst_width`` — actual bit width of the result (for tail masking).
+        ``signed_override`` — if set, forces sign- (True) or zero- (False)
+        extension for a narrower Identifier source, overriding the signal's
+        own declared signedness (used by the ``$signed``/``$unsigned`` cast
+        cases below). ``None`` means "use the signal's own declared
+        signedness", the same as an uncast identifier.
         """
         pad = "    " * indent
         et = type(expr)
@@ -3518,6 +3525,13 @@ class _WideEmitterMixin:
             name = self._identifier_name(expr)
             sid = self._signal_map.get(name)
             if sid is not None:
+                src_signed = (
+                    signed_override
+                    if signed_override is not None
+                    else (sid < len(self._signal_signed) and self._signal_signed[sid])
+                )
+                if src_signed and dst_width > self._signal_widths[sid]:
+                    return [f"{pad}wide_load_signal_s(c, {sid}, _sc{slot}_v, _sc{slot}_m, {n_words})"]
                 return [f"{pad}wide_load_signal(c, {sid}, _sc{slot}_v, _sc{slot}_m, {n_words})"]
 
             # Try struct field or memory element field access.
@@ -3965,11 +3979,19 @@ class _WideEmitterMixin:
             self._free_scratch(pslot)
             return lines
 
-        # ── FunctionCall ($signed/$unsigned are transparent in wide context) ──
+        # ── FunctionCall ($signed/$unsigned force the extension mode for a
+        # narrower Identifier operand -- otherwise transparent) ──
         if et is FunctionCall:
             fname = expr.name.lower()
             if fname in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
-                return self._emit_wide_expr_to_scratch(expr.arguments[0], slot, n_words, dst_width, indent)
+                return self._emit_wide_expr_to_scratch(
+                    expr.arguments[0],
+                    slot,
+                    n_words,
+                    dst_width,
+                    indent,
+                    signed_override=(fname == "$signed"),
+                )
             return None
 
         return None

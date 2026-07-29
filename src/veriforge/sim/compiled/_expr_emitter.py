@@ -1889,11 +1889,10 @@ class _ExprEmitterMixin:
                     return f"(_wmem{mid}_extract_mask(c, ({idx}), {index}) & 1)"
             target_m = self._emit_mask_expr(expr.target, self._expr_width(expr.target))
             index = self._emit_index_expr(expr.index)
-            # Adjust for non-zero base offset
-            if tname is not None:
-                base = self._signal_bases.get(tname, 0)
-                if base != 0:
-                    index = f"(({index}) - {base})"
+            # Adjust for non-zero base offset (scalar signal or memory-element packed base)
+            base = self._select_base(expr.target)
+            if base != 0:
+                index = f"(({index}) - {base})"
             return f"(({target_m}) >> ({index})) & 1"
 
         if etype is RangeSelect:
@@ -1978,10 +1977,8 @@ class _ExprEmitterMixin:
                         return self._emit_wide_mem_dynamic_slice_expr(mid, idx, f"({lsb})", sel_w, mask=True)
                     return f"(_wmem{mid}_extract_mask(c, ({idx}), ({lsb})) & _word_mask64({sel_w}))"
             target_m = self._emit_mask_expr(expr.target, self._expr_width(expr.target))
-            # Determine base offset
-            sig_base = 0
-            if isinstance(expr.target, Identifier):
-                sig_base = self._signal_bases.get(self._identifier_name(expr.target), 0)
+            # Determine base offset (scalar signal or memory-element packed base)
+            sig_base = self._select_base(expr.target)
             if isinstance(expr.msb, Literal) and isinstance(expr.lsb, Literal):
                 msb_val = int(expr.msb.value) - sig_base
                 lsb_val = int(expr.lsb.value) - sig_base
@@ -2069,11 +2066,10 @@ class _ExprEmitterMixin:
                     return f"(_wmem{mid}_extract_mask(c, ({idx}), {lsb_expr}) & _word_mask64({width_expr}))"
             target_m = self._emit_mask_expr(expr.target, self._expr_width(expr.target))
             base = self._emit_expr(expr.base, 32)
-            # Adjust for non-zero base offset
-            if isinstance(expr.target, Identifier):
-                sig_base = self._signal_bases.get(self._identifier_name(expr.target), 0)
-                if sig_base != 0:
-                    base = f"(({base}) - {sig_base})"
+            # Adjust for non-zero base offset (scalar signal or memory-element packed base)
+            sig_base = self._select_base(expr.target)
+            if sig_base != 0:
+                base = f"(({base}) - {sig_base})"
             if isinstance(expr.width, Literal):
                 pw = int(expr.width.value)
                 mask_hex = _cy_hex((1 << pw) - 1)

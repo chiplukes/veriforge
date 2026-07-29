@@ -391,6 +391,7 @@ class _StmtEmittersMixin:
             old_et = self._et_pending
             self._et_pending = []
             rhs_val = self._emit_expr(rhs, assign_width)
+            rhs_mask = self._emit_mask_expr(rhs, assign_width)
             et_lines = [f"{pad}{t}" for t in self._et_pending]
             self._et_pending = old_et
             assign_rhs = (
@@ -398,20 +399,26 @@ class _StmtEmittersMixin:
                 if sid in self._unmasked_signal_ids
                 else f"({rhs_val}) & wmask({self._signal_widths[sid]})"
             )
+            assign_mask = (
+                f"({rhs_mask})"
+                if sid in self._unmasked_signal_ids
+                else f"({rhs_mask}) & wmask({self._signal_widths[sid]})"
+            )
             if is_nba:
                 return [
                     *et_lines,
                     f"{pad}c.nba_val[{sid}] = {assign_rhs}",
-                    f"{pad}c.nba_mask[{sid}] = 0",
+                    f"{pad}c.nba_mask[{sid}] = {assign_mask}",
                     f"{pad}c.nba_dirty[{sid}] = 1",
                     f"{pad}c.nba_pending = 1",
                 ]
             return [
                 *et_lines,
                 f"{pad}_cdv = {assign_rhs}",
-                f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
+                f"{pad}_cdm = {assign_mask}",
+                f"{pad}if _cdv != c.val[{sid}] or _cdm != c.mask[{sid}]:",
                 f"{pad}    c.val[{sid}] = _cdv",
-                f"{pad}    c.mask[{sid}] = 0",
+                f"{pad}    c.mask[{sid}] = _cdm",
                 f"{pad}    c.dirty[{sid}] = 1",
             ]
 

@@ -637,12 +637,21 @@ class TestForLoopCodegen:
 
     def test_for_loop_compile_and_run(self, compiler):
         """For loop with local variable compiles and runs correctly."""
-        # for (i = 0; i < 4; i = i + 1)  out = out | (1 << i);
+        # out = 0; for (i = 0; i < 4; i = i + 1)  out = out | (1 << i);
         # Expect out = 0b1111 = 15
+        #
+        # The explicit `out = 0;` before the loop matters for x-mask
+        # precision, not just style: `out` is never otherwise initialized,
+        # and the OR-accumulation pattern only makes bits *definitely* 1 as
+        # each loop iteration ORs in a known-1 bit -- any bit never touched
+        # by the loop (here, bits 4-7, since in_a=4 only iterates i=0..3)
+        # stays x if `out`'s prior value was x, per precise 4-state
+        # semantics (x | 0 = x, only x | 1 = 1 resolves definitely).
         mod = Module("for_run")
         mod.nets.append(Net("in_a", NetKind.WIRE, width=Range(Literal(3, width=32), Literal(0, width=32))))
         mod.nets.append(Net("out", NetKind.WIRE, width=Range(Literal(7, width=32), Literal(0, width=32))))
 
+        zero_init = BlockingAssign(Identifier("out"), Literal(0))
         init = BlockingAssign(Identifier("i"), Literal("0"))
         cond = BinaryOp("<", Identifier("i"), Identifier("in_a"))
         update = BlockingAssign(Identifier("i"), BinaryOp("+", Identifier("i"), Literal("1")))
@@ -656,7 +665,9 @@ class TestForLoopCodegen:
         )
         loop = ForLoop(init, cond, update, body)
 
-        mod.always_blocks.append(AlwaysBlock(loop, sensitivity_type=SensitivityType.COMBINATIONAL))
+        mod.always_blocks.append(
+            AlwaysBlock(SeqBlock([zero_init, loop]), sensitivity_type=SensitivityType.COMBINATIONAL)
+        )
 
         cg = CythonCodegen()
         pyx = cg.generate(mod)

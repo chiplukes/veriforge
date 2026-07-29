@@ -1046,13 +1046,13 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         if mid is None:
             raise ValueError(f"Unknown memory {name!r}. Available: {list(self._codegen.mem_map)}")
         ew, _depth = self._codegen.mem_info[mid]
-        mask = (1 << ew) - 1
+        value_mask = (1 << ew) - 1
         for i, v in enumerate(data):
-            v = int(v) & mask
+            v = int(v) & value_mask
             if ew > 64:
-                self._sim.mem_write_wide(mid, i, v, mask)
+                self._sim.mem_write_wide(mid, i, v, 0)
             else:
-                self._sim.mem_write(mid, i, _to_i64(v), _to_i64(mask))
+                self._sim.mem_write(mid, i, _to_i64(v), _to_i64(0))
 
     def dump_memory(self, name: str, count: int) -> list[int]:
         """Read *count* elements from a named DSL memory and return as a list."""

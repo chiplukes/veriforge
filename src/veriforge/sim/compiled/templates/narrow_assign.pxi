@@ -6002,25 +6002,39 @@ cdef inline void _whole_stage_signal_s(SimCtx *c, int dst_sid, int src_sid) noex
     cdef int dst_offset = c.wide_offset[dst_sid]
     cdef int src_offset = c.wide_offset[src_sid]
     cdef int i, remaining_w
-    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill
+    cdef int sign_bit_local
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill, src_tail_mask
     if src_words > 0:
+        # sign_bit_local is the sign bit's position WITHIN the last word
+        # (never the signal's absolute width - 1, which would shift by
+        # >= 64 here -- undefined behavior in C).
+        sign_bit_local = (c.width[src_sid] - 1) - ((src_words - 1) * 64)
         sign_word_v = c.wide_val[src_offset + src_words - 1]
         sign_word_m = c.wide_mask[src_offset + src_words - 1]
     else:
+        sign_bit_local = c.width[src_sid] - 1
         sign_word_v = <unsigned long long>c.val[src_sid]
         sign_word_m = <unsigned long long>c.mask[src_sid]
-    if sign_word_m & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+    if sign_word_m & (<unsigned long long>1 << sign_bit_local):
         sign_fill = 0
-    elif sign_word_v & (<unsigned long long>1 << (c.width[src_sid] - 1)):
+    elif sign_word_v & (<unsigned long long>1 << sign_bit_local):
         sign_fill = <unsigned long long>-1
     else:
         sign_fill = 0
     if dst_words > 0:
         for i in range(dst_words):
             if src_words > 0:
-                if i < src_words:
+                if i < src_words - 1:
                     word_v = c.wide_val[src_offset + i]
                     word_m = c.wide_mask[src_offset + i]
+                elif i == src_words - 1:
+                    # Source's own last (partial) word: sign-extend its
+                    # meaningful bits out to a full 64-bit word -- see
+                    # _whole_assign_signal_s (narrow_stage.pxi) for the
+                    # full rationale (both share this bug/fix).
+                    src_tail_mask = _word_mask64(sign_bit_local + 1)
+                    word_v = (c.wide_val[src_offset + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)
+                    word_m = c.wide_mask[src_offset + i] & src_tail_mask
                 else:
                     word_v = sign_fill
                     word_m = 0

@@ -639,6 +639,126 @@ xfailed), the full compiled suite with `--run-slow` (4625 passed, 2
 xfailed), and the taxi FIFO test file (4 passed). Full `--run-slow` suite
 green (11606 passed, 61 xfailed).
 
+### 2.7 Fix remaining known compiled-engine correctness gaps (M/L)
+
+**Goal**: close out the compiled-engine-specific bugs found (but deliberately
+not fixed) during items 2.1 and 3.4, all currently documented in
+`notes/known_issues.md`. Appended here out of numeric sequence, same as
+2.6 — no ordering dependency between the four sub-items below, but each
+changes compiled-engine codegen output, so treat each with the same care
+as 2.6: fix one, run the full fast suite plus the full compiled suite
+(`-n 8 --run-slow`), only then move to the next.
+
+**Four known gaps, all reference/VM-correct, compiled-only**:
+
+1. **Narrow blocking/nonblocking bare assignment drops the x-mask.**
+   `b = a;` (blocking, in `always @(*)`) or `b <= a;` (non-blocking, in
+   `always @(posedge clk)`) loses the x-mask on the compiled engine
+   whenever *both* `a` and `b` are 64 bits or narrower (the single-word
+   "narrow-path" codegen) — driving `a` with an x-contaminated bit and
+   settling leaves `b` fully-defined instead of propagating the x bit(s).
+   Continuous assigns and anything wider than 64 bits are unaffected
+   (different, correctly mask-propagating code paths). Found in item 2.1;
+   exercised as a strict `xfail` in `tests/test_sim/test_assignment_matrix.py`
+   — remove the xfail once fixed. See `notes/known_issues.md` for the
+   exact repro.
+2. **Wide-emitter sign-extension wrong for the (65, 80)-bit width pair
+   specifically.** A declared-signed (or `$signed()`-cast) 65-bit value
+   assigned into an 80-bit target zero-extends instead of sign-extending,
+   on the compiled engine only, only for this one width pair — every other
+   word-boundary-crossing pair tested ((63,64), (64,65), (64,63), (65,64),
+   (80,65)) sign-extends correctly. Not yet root-caused beyond "likely in
+   `_wide_emitter.py`'s fill logic, probably the same family as the wide
+   unary masking bug fixed in item 2.3." Found in item 2.1; exercised as a
+   strict `xfail` in `test_assignment_matrix.py`.
+3. **Ternary/context-determined-operator codegen never got the
+   `signed_override`-threading fix.** Item 3.4 fixed the conditional
+   operator's own-combined-signedness rule (IEEE 1364-2005 §5.5.1) in
+   `sim/evaluator.py` and `sim/vm/compiler.py`, but explicitly deferred the
+   equivalent fix in `sim/compiled/_expr_emitter.py`/`_wide_emitter.py` —
+   a separate, much larger codegen architecture. Running
+   `tests/test_sim/test_differential.py` with `VERIFORGE_DIFF_COMPILED=1`
+   shows the divergences directly; this is the largest of the four
+   sub-items (likely warrants its own characterize-first pass, mirroring
+   item 4.2 Phase A's methodology, given the architectural gap between the
+   two codegens).
+4. **Compiled engine's 64-bit-width limit is only partially resolved.**
+   External signal round-trips for `width > 64` work, but internal
+   compiled expression/assignment/NBA/dirty-propagation codegen still has
+   remaining single-word assumptions in places, affecting wide AXI buses
+   (128/256/512-bit), wide memory interfaces, and large (>64-bit total)
+   concatenations. Reference/VM are unaffected (Python `int` handles
+   arbitrary widths natively). See `notes/plans/architecture_review_2026-07.md`
+   and `notes/simulation/wide_signal_coverage.md` for prior investigation
+   and potential approaches — this sub-item is the largest and least
+   scoped of the four; consider splitting it into its own work-plan item
+   once a concrete fix shape emerges, rather than forcing it through this
+   item's one-fix-at-a-time cadence.
+
+**Steps** (per sub-item): characterize against Icarus/Verilator first for
+sub-items 1-2 (small, well-isolated); root-cause sub-item 3 by comparing
+`_expr_emitter.py`'s ternary codegen against `sim/vm/compiler.py`'s
+already-fixed version; scope sub-item 4 with a spike before committing to
+an approach (it may be too large for a single PR — see the note above).
+Fix, verify against the relevant strict-`xfail` test (removing it once
+green) or new regression test, run the full suite, then move to the next
+sub-item.
+**Accept**: sub-items 1-2's `xfail` markers removed and green; sub-item 3
+verified via `VERIFORGE_DIFF_COMPILED=1` differential runs with no
+remaining ternary-related divergences (or a narrower, explicitly documented
+residual gap); sub-item 4 either resolved or rescoped into a dedicated
+follow-up item with a concrete plan. `notes/known_issues.md` updated to
+Resolved for whichever sub-items land.
+
+**Result (sub-item 1, July 2026)**: Fixed. Root cause:
+`sim/compiled/_stmt_emitters.py`'s generic narrow-path LHS fallback (used
+for any bare-identifier blocking/nonblocking RHS not matched by the
+specialized shift/multiply/struct-field pattern-matchers earlier in
+`_emit_lhs_write`) computed the RHS *value* via `_emit_expr` but hardcoded
+the mask update to the literal `0`, never consulting `_emit_mask_expr` at
+all. Fixed by computing and emitting the real RHS mask (needed a new
+scratch cdef, `_cdm`, declared everywhere `_cdv` already is, in
+`_gen_sections.py`). This exposed two further real, previously-latent bugs
+once mask propagation actually started working end to end: (a)
+`CompiledScheduler.load_memory()` passed the *value* truncation bitmask as
+the *x-mask* argument to `mem_write`/`mem_write_wide` — marking freshly
+loaded memory as entirely unknown instead of entirely defined; (b)
+`_expr_emitter.py`'s `_emit_mask_expr` had three near-identical "select on
+a non-Identifier target" fallback paths (`BitSelect`/`RangeSelect`/
+`PartSelect`) that silently defaulted the packed-range base offset to 0
+for a memory-element target instead of calling the already-existing
+`_select_base()` helper the *value*-side code already used. Full detail
+in `notes/known_issues.md`. Full fast suite green (7027 passed), full
+compiled suite green with `--run-slow` (4625 passed, 2 xfailed —
+sub-item 2's cases; one more real bug found and fixed along the way, a
+missing zero-initialization in `TestForLoopCodegen::
+test_for_loop_compile_and_run`'s own hand-built test fixture that had
+been silently relying on this bug to pass).
+
+**Result (sub-item 2, July 2026)**: Fixed. Root cause: **three** separate
+code paths shared the same bug shape — conflating "this word is the
+source's own last, partial word" with "this word lies entirely beyond the
+source's own word count," when a partial last word needs its own unused
+high bits sign-extended in place, distinct from pure extension words.
+This is invisible whenever `dst_words > src_words` (where earlier testing
+concentrated) and only manifests when `dst_words == src_words` with a
+partial source last word — first true at exactly the (65, 80) pair. Fixed
+in `templates/narrow_stage.pxi`'s `_whole_assign_signal_s`,
+`templates/narrow_assign.pxi`'s `_whole_stage_signal_s` (also had a
+latent, separate UB bug: sign-bit-position check shifted by the signal's
+*absolute* width instead of its position within its own word — undefined
+behavior in C, only coincidentally correct via x86's shift-count-wraps-
+mod-64 behavior), and a new `wide_load_signal_s` primitive in
+`_gen_wide_section.py` plus a `signed_override` parameter threaded through
+`_wide_emitter.py`'s `_emit_wide_expr_to_scratch` recursion (the newer
+recursive scratch-space emitter's `wide_load_signal` had no sign-extension
+concept at all, needed for the `$signed()`/`$unsigned()` cast-form cases
+which reach it instead of the bare-identifier path above). Full detail in
+`notes/known_issues.md`. Full assignment matrix green (648 passed, 0
+xfailed — the last two known bugs from item 2.1 are now both fixed). Full
+fast suite green (7038 passed), full compiled suite green with
+`--run-slow` (4625 passed, 2 xfailed — unrelated pre-existing xfails).
+
 ## Tier 3 — CI and engine parity
 
 ### 3.1 CI sim-smoke job (S) ✅
@@ -728,7 +848,7 @@ the "compiled suite is not exercised in CI" caveat as specified. As with
 commit and using the GitHub Actions UI/CLI, which wasn't asked for here —
 left for whoever pushes this branch.
 
-### 3.3 Cython VM: fix drift, then gate equivalence in CI (M/L)
+### 3.3 Cython VM: fix drift, then gate equivalence in CI (M/L) ✅
 
 **Goal**: `vm-fast` with the built extension must match the pure-Python VM —
 the compiled VM is a keeper (decision recorded July 2026; the pure-Python VM
@@ -785,7 +905,7 @@ scheduled) that builds the extension and runs the VM selection twice with
 `VERIFORGE_DISABLE_CYTHON_VM=1` paths. Sync policy added to
 `developer_guide.md` §5; `setup.py` docstring and `known_issues.md` updated.
 
-### 3.4 Randomized differential harness (M)
+### 3.4 Randomized differential harness (M) ✅
 
 **Goal**: generated cross-engine conformance testing
 (architecture review item 2), complementing the deterministic suites of
@@ -860,7 +980,7 @@ substantially larger undertaking (a different, much bigger codegen
 architecture than `sim/vm/compiler.py`). Running the harness with
 `VERIFORGE_DIFF_COMPILED=1` shows this.
 
-### 3.5 `Simulator.engine_report()` (S/M)
+### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible
 (functionality review §1 suggestion 2).
@@ -893,7 +1013,7 @@ Documented in both `simulator_engines.md` and `public_api.md`.
 
 ## Tier 4 — Structural projects (one at a time, in this order)
 
-### 4.1 Break the package cycles + layering test (M)
+### 4.1 Break the package cycles + layering test (M) ✅
 
 **Goal**: architecture review item 6.
 **Steps**:
