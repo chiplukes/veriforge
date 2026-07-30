@@ -979,19 +979,30 @@ class Compiler:  # cm:8c1e4a
 
         # -- BitSelect (memory read or scalar bit-select) --
         if etype is BitSelect:
+            # A bit-select is always unsigned in its own right (IEEE
+            # 1364-2005 §5.5.1) -- but when nested inside a
+            # $signed()-wrapped context (signed_override True, forced by
+            # an outer FunctionCall/ternary/bitwise-op), a wider requested
+            # `width` needs sign-, not zero-, extension. Without this, a
+            # bit-select nested one level deeper than an assignment's own
+            # top-level RHS (e.g. a ternary branch) never gets extended at
+            # all -- mirrors the identical fix in `sim/evaluator.py`.
             if type(expr.target) is Identifier and self._is_memory(self._resolve_id_name(expr.target)):
                 mid = self.mem_map[self._resolve_id_name(expr.target)]
                 self._compile_expr(expr.index, program)
                 program.append(instr(Op.LOAD_MEM, mid))
-                return
-            self._compile_expr(expr.target, program)
-            self._compile_expr(expr.index, program)
-            self._append_base_adjust(program, self._select_base(expr.target))
-            program.append(instr(Op.BIT_SELECT))
+            else:
+                self._compile_expr(expr.target, program)
+                self._compile_expr(expr.index, program)
+                self._append_base_adjust(program, self._select_base(expr.target))
+                program.append(instr(Op.BIT_SELECT))
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
         # -- RangeSelect --
         if etype is RangeSelect:
+            # Same signed_override reasoning as BitSelect above.
             self._compile_expr(expr.target, program)
             self._compile_expr(expr.msb, program)
             base = self._select_base(expr.target)
@@ -999,6 +1010,8 @@ class Compiler:  # cm:8c1e4a
             self._compile_expr(expr.lsb, program)
             self._append_base_adjust(program, base)
             program.append(instr(Op.RANGE_SELECT))
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
         # -- Replication --
@@ -1016,6 +1029,7 @@ class Compiler:  # cm:8c1e4a
 
         # -- PartSelect --
         if etype is PartSelect:
+            # Same signed_override reasoning as BitSelect above.
             self._compile_expr(expr.target, program)
             self._compile_expr(expr.base, program)
             self._append_base_adjust(program, self._select_base(expr.target))
@@ -1024,10 +1038,32 @@ class Compiler:  # cm:8c1e4a
                 program.append(instr(Op.PART_SEL_UP))
             else:
                 program.append(instr(Op.PART_SEL_DOWN))
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
         # -- FunctionCall --
         if etype is FunctionCall:
+            fname = expr.name.lower()
+            if fname in ("$signed", "$unsigned") and expr.arguments:
+                # $signed/$unsigned are transparent to VALUE -- they only
+                # mark the expression's signedness for the ENCLOSING
+                # context's extension decision. `_compile_function_call`'s
+                # own $signed/$unsigned branch compiles the argument
+                # self-determined with no width, which only happens to
+                # work when $signed(...) is the assignment's own top-level
+                # RHS (a separate post-hoc sign-extend emitted by the
+                # caller covers for it there). Nested one level deeper --
+                # e.g. a ternary branch -- that top-level cover doesn't
+                # reach, and the cast's own argument never gets extended
+                # to the ternary's combined width at all (mirrors the
+                # identical fix in `sim/evaluator.py`; confirmed wrong
+                # against Icarus for `{3{(a0 ? $signed(a4[4:2]) : a3)}}`).
+                # $signed/$unsigned ALWAYS force their own decision here,
+                # discarding whatever signed_override was passed in from
+                # further out.
+                self._compile_expr(expr.arguments[0], program, width, fname == "$signed")
+                return
             self._compile_function_call(expr, program)
             return
 

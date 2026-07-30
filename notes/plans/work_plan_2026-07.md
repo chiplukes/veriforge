@@ -780,12 +780,36 @@ VERIFORGE_DIFF_CASES=100`, 10 batches) is fully green; the full fast suite
 and `tests/test_sim/test_compiled_edge_shapes.py`'s `seam*_overflow`
 regressions (which the bitwise-op width fix initially broke, then fixed
 once combined with the unpacked-array self-width fix) are green.
-**Residual gap**: a larger differential run (`VERIFORGE_DIFF_CASES=300` at
-an alternate seed) still finds further compiled-engine-only divergences —
-documented in `notes/known_issues.md` as an explicitly open, not-yet-
-characterized architectural area (the wide emitter's per-node-type
-width/signedness reimplementation), warranting its own follow-up
-characterize-first pass rather than continued one-off patching.
+**Continued (second wave, same day)**: rather than keep fuzzing-and-patching
+one divergence at a time, did a systematic audit of every node-type branch
+in `_wide_emitter.py`'s `_emit_wide_expr_to_scratch` for the same two bug
+shapes (missing `signed_override` handling; fill-boundary using
+`n_words` instead of `dst_width`) — found and fixed three more real gaps
+(`Literal`, `BitSelect`, `Concatenation`'s own aggregate result), and
+introduced a shared `_wide_sign_extend_to_dst_lines()` helper to replace
+the duplicated hand-rolled fill logic. While re-verifying, found and fixed
+an actual **reference-engine** bug (present in both `sim/evaluator.py` and
+`sim/vm/compiler.py`) that had been masquerading as compiled-engine
+divergences: `eval()`/`_compile_expr()`'s `$signed`/`$unsigned`
+`FunctionCall` handling, and separately `BitSelect`/`RangeSelect`/
+`PartSelect`, ignored their `width`/`signed_override` parameters entirely
+— correct only when reached from an assignment's own top-level RHS (where
+a separate post-hoc statement-level step covers for it), wrong one level
+of nesting deeper (e.g. a ternary branch). Confirmed via Icarus that the
+compiled engine was already right and reference was wrong for
+`{3{(a0 ? $signed(a4[4:2]) : a3)}}` — a reminder that a harness divergence
+should be checked against Icarus, not assumed to be compiled's fault. The
+larger differential run (`VERIFORGE_DIFF_CASES=300` at an alternate seed)
+improved from 8/30 to 13/30 passing batches; full detail (including the
+still-open residual gap) in `notes/known_issues.md`, which now also notes
+this reference-oracle caveat directly. **Residual gap**: the remaining
+~17 failing batches at that larger case count are believed to be more
+instances of the same two bug shapes in constructs not yet isolated —
+still an open, not-yet-exhaustively-characterized architectural area
+(both the wide emitter and the reference/VM engines reimplement
+width/signedness propagation independently, per-node-type, rather than
+sharing `semantics.py`'s already-unified logic), warranting a dedicated
+follow-up characterize-first pass rather than continued one-off patching.
 
 ## Tier 3 — CI and engine parity
 

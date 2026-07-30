@@ -480,18 +480,30 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 if index.is_defined:
                     mem_data, elem_w = ctx._memories[target_name]
                     idx = int(index)
-                    if 0 <= idx < len(mem_data):
-                        return mem_data[idx]
-                    return Value.x(elem_w)
-                mem_data, elem_w = ctx._memories[target_name]
-                return Value.x(elem_w)
-            target = self.eval(expr.target, ctx)
-            index = self.eval(expr.index, ctx)
-            if index.is_defined:
-                idx = int(index)
-                idx -= _select_base(expr.target, ctx)
-                return target[idx]
-            return Value.x(1)
+                    result = mem_data[idx] if 0 <= idx < len(mem_data) else Value.x(elem_w)
+                else:
+                    _mem_data, elem_w = ctx._memories[target_name]
+                    result = Value.x(elem_w)
+            else:
+                target = self.eval(expr.target, ctx)
+                index = self.eval(expr.index, ctx)
+                if index.is_defined:
+                    idx = int(index)
+                    idx -= _select_base(expr.target, ctx)
+                    result = target[idx]
+                else:
+                    result = Value.x(1)
+            # A bit-select is always unsigned in its own right (IEEE
+            # 1364-2005 §5.5.1) -- but when nested inside a
+            # $signed()-wrapped context (signed_override True, forced by an
+            # outer FunctionCall/ternary/bitwise-op), a wider requested
+            # `width` needs sign-, not zero-, extension. Without this, a
+            # bit-select nested one level deeper than an assignment's own
+            # top-level RHS (e.g. a ternary branch) never gets extended at
+            # all -- confirmed wrong against Icarus.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
+            return result
 
         # -- RangeSelect -------------------------------------------
         if etype is RangeSelect:
@@ -503,9 +515,14 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 base = _select_base(expr.target, ctx)
                 m -= base
                 l -= base
-                return target[m:l]
-            w = (int(msb) - int(lsb) + 1) if msb.is_defined and lsb.is_defined else 1
-            return Value.x(w)
+                result = target[m:l]
+            else:
+                w = (int(msb) - int(lsb) + 1) if msb.is_defined and lsb.is_defined else 1
+                result = Value.x(w)
+            # Same signed_override reasoning as BitSelect above.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
+            return result
 
         # -- Replication -------------------------------------------
         if etype is Replication:
@@ -555,19 +572,42 @@ class ExpressionEvaluator:  # cm:7e8b5d
         if etype is PartSelect:
             target = self.eval(expr.target, ctx)
             base = self.eval(expr.base, ctx)
-            width = self.eval(expr.width, ctx)
-            if base.is_defined and width.is_defined:
-                w = int(width)
+            part_w = self.eval(expr.width, ctx)
+            if base.is_defined and part_w.is_defined:
+                w = int(part_w)
                 b = int(base)
                 b -= _select_base(expr.target, ctx)
-                if expr.direction == "+:":
-                    return target[b + w - 1 : b]
-                else:  # "-:"
-                    return target[b : b - w + 1]
-            return Value.x(1)
+                result = target[b + w - 1 : b] if expr.direction == "+:" else target[b : b - w + 1]
+            else:
+                result = Value.x(1)
+            # Same signed_override reasoning as BitSelect above.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
+            return result
 
         # -- FunctionCall ------------------------------------------
         if etype is FunctionCall:
+            fname = expr.name.lower()
+            if fname in ("$signed", "$unsigned") and expr.arguments:
+                # $signed/$unsigned are transparent to VALUE -- they only
+                # mark the expression's signedness for the ENCLOSING
+                # context's extension decision. `_eval_function_call`
+                # (below) evaluates the argument self-determined with no
+                # width, which only happens to work when $signed(...) is
+                # the assignment's own top-level RHS (a SEPARATE post-hoc
+                # `_maybe_sign_extend` step at the statement-executor
+                # level covers for it there). Nested one level deeper --
+                # e.g. a ternary branch, `$signed(a4[4:2])` inside
+                # `cond ? $signed(a4[4:2]) : a3` -- that top-level cover
+                # doesn't reach, and the cast's own argument never gets
+                # extended to the ternary's combined width at all.
+                # Confirmed wrong against Icarus for
+                # `{3{(a0 ? $signed(a4[4:2]) : a3)}}`. `$signed`/
+                # `$unsigned` ALWAYS force their own decision here,
+                # discarding whatever signed_override was passed in from
+                # further out (mirrors the compiled engine's
+                # `_wide_emitter.py` FunctionCall case).
+                return self.eval(expr.arguments[0], ctx, width, fname == "$signed")
             return self._eval_function_call(expr, ctx)
 
         # -- StringLiteral -----------------------------------------

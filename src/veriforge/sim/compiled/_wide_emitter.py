@@ -3604,6 +3604,18 @@ class _WideEmitterMixin:
             for wi in range(n_words):
                 lines.append(f"{pad}_sc{slot}_v[{wi}] = {_cy_u64_hex(val_words[wi])}")
                 lines.append(f"{pad}_sc{slot}_m[{wi}] = {_cy_u64_hex(mask_words[wi])}")
+            # _literal_wide_words always zero-fills beyond the literal's own
+            # declared width -- correct for an unsigned literal, but wrong
+            # for a declared-signed literal (e.g. `4'sb1000` = -8) whose own
+            # top bit is 1: that needs sign-extension into a wider
+            # destination, same as a signed Identifier/RangeSelect/etc.
+            # `signed_override`, when set (a $signed() cast or an enclosing
+            # ternary/bitwise-op's forced signedness), takes precedence over
+            # the literal's own declared signedness, same as everywhere else.
+            eff_signed = signed_override if signed_override is not None else expr.signed
+            lit_w = self._expr_width(expr)
+            if eff_signed and lit_w < dst_width:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(lit_w), indent))
             return lines
 
         # ── BitSelect ───────────────────────────────────────────────────────
@@ -3625,26 +3637,20 @@ class _WideEmitterMixin:
             mask_expr = self._emit_mask_expr(expr, 1)
             if signed_override:
                 # An explicit $signed() cast forces sign-extension of this
-                # 1-bit value across the *entire* destination, including
-                # the rest of its own first word (not just subsequent
-                # words -- a 1-bit value's "own last word" is word 0, so
-                # bits 1-63 of word 0 need filling too, same class of gap
-                # as _whole_assign_signal_s / wide_load_signal_s): bit=1
-                # sign-extends to all-1s (a 1-bit two's-complement 1
-                # represents -1), bit=0 to all-0s; if the bit itself is
-                # x/z, fill with 0 (conservative, matching
-                # wide_load_signal_s's identical choice).
-                fill = (
-                    f"(0 if (<unsigned long long>({mask_expr}) & 1) else "
-                    f"<unsigned long long>(-(<long long>(<unsigned long long>({val_expr}) & 1))))"
-                )
+                # 1-bit value: bit=1 sign-extends to all-1s (a 1-bit two's-
+                # complement 1 represents -1), bit=0 to all-0s, and if the
+                # bit itself is x/z, the fill is x/z too (not forced to a
+                # defined 0 -- that earlier "conservative" choice was wrong,
+                # see wide_load_signal_s's identical fix elsewhere in this
+                # file). Reuses the shared sign-extend-to-dst-width helper
+                # (bounds the fill to dst_width, not n_words -- needed when
+                # this BitSelect is a small concat member) after seeding
+                # word 0 with the raw 1-bit result.
                 lines = [
-                    f"{pad}_sc{slot}_v[0] = {fill}",
+                    f"{pad}_sc{slot}_v[0] = <unsigned long long>({val_expr}) & 1",
                     f"{pad}_sc{slot}_m[0] = <unsigned long long>({mask_expr}) & 1",
                 ]
-                for wi in range(1, n_words):
-                    lines.append(f"{pad}_sc{slot}_v[{wi}] = {fill}")
-                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, "1", indent))
                 return lines
             lines = [
                 f"{pad}_sc{slot}_v[0] = <unsigned long long>({val_expr}) & 1",
@@ -4144,6 +4150,18 @@ class _WideEmitterMixin:
                     self._free_scratch(tmpslot)
                 self._free_scratch(pslot)
                 bit_offset += pw
+            # A concatenation is always unsigned in its OWN right (IEEE
+            # 1364-2005 SS5.5.1), so bits beyond its own total width
+            # (bit_offset, after the loop) are normally zero -- but when
+            # the WHOLE concatenation is wrapped in `$signed(...)`
+            # (signed_override True) and the destination is wider, those
+            # bits must instead sign-extend from the concat's own top bit.
+            # Individual MEMBERS never see signed_override (concat members
+            # are always self-determined, per the omitted keyword in the
+            # recursive call above) -- this only concerns the concat's own
+            # aggregate result.
+            if signed_override and bit_offset < dst_width:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(bit_offset), indent))
             return lines
 
         # ── Replication ──────────────────────────────────────────────────────

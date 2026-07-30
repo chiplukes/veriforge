@@ -198,14 +198,18 @@ each (see `VERIFORGE_DIFF_SEED`/`VERIFORGE_DIFF_CASES` in the test file):
 **Update (July 2026, work plan item 2.7 sub-item 3)**: the compiled-engine
 `signed_override`-threading gap described above is now fixed — see the new
 "Compiled-engine ternary/context-determined-operator codegen" section below,
-which also documents a large family of related bugs (in ALL FOUR engines,
-not just compiled) that the differential harness surfaced once it was
-finally run with `VERIFORGE_DIFF_COMPILED=1` for real. The harness's default
-run still excludes the compiled engine (opt in via
-`VERIFORGE_DIFF_COMPILED=1`) because a larger-than-default case count
-(`VERIFORGE_DIFF_CASES=300`+) at alternate seeds still surfaces further
-compiled-engine-only divergences in the wide emitter's width/signedness
-propagation — see that section's "Residual gap" note.
+which also documents a large family of related bugs across all four
+engines (including, importantly, a REFERENCE-engine bug that had been
+masquerading as compiled-engine divergences) that the differential
+harness surfaced once it was finally run with `VERIFORGE_DIFF_COMPILED=1`
+for real. The harness's default run still excludes the compiled engine
+(opt in via `VERIFORGE_DIFF_COMPILED=1`) because a larger-than-default
+case count (`VERIFORGE_DIFF_CASES=300`+) at alternate seeds still
+surfaces further divergences of the same shapes — see that section's
+"Residual gap" note. **When the harness reports a compiled-engine
+divergence, check it against Icarus before assuming compiled is at
+fault** — the harness's reference-engine oracle has itself had real bugs
+in this area.
 
 ### Compiled-engine ternary/context-determined-operator codegen, and a wide family of related width/signedness/x-propagation bugs
 
@@ -413,19 +417,92 @@ alongside the above (not introduced by this work)**:
   known-nonzero/known-zero short-circuit fix as the wide-path version
   above.
 
-**Residual gap (not fixed)**: the default-seed differential run
-(`VERIFORGE_DIFF_CASES=100`) is fully green, but a larger case count at
-alternate seeds (`VERIFORGE_DIFF_CASES=300 VERIFORGE_DIFF_SEED=<other>`)
-still surfaces further compiled-engine-only divergences (roughly 20 of 30
-batches at last check) — almost certainly more instances of the same
-"wide emitter's width/signedness propagation" bug family documented above,
-in constructs not yet isolated. This is a large, open-ended architectural
-area (the wide emitter reimplements width/signedness propagation
-independently, per-node-type, rather than sharing `semantics.py`'s
-already-unified logic — see item 4.2's explicit non-goal), not yet fully
-characterized; a dedicated follow-up pass (mirroring item 4.2 Phase A's
-characterize-first methodology) is warranted before considering this area
-closed.
+**Second wave (July 2026, same work-plan item, continued)**: a systematic
+audit of every node-type branch in `_wide_emitter.py`'s
+`_emit_wide_expr_to_scratch` (rather than continuing to fuzz-and-patch one
+divergence at a time) found three more real compiled-engine gaps of the
+exact same shape as above, all missed by the first pass because the
+default-seed 100-case differential run happened not to exercise them:
+- `Literal` never consulted `signed_override` at all — a declared-signed
+  literal (`4'sb1000` = -8) whose own top bit is 1, or any literal used as
+  a $signed()-wrapped/ternary-forced-signed operand, always zero-extended
+  into a wider destination instead of sign-extending.
+- `BitSelect`'s `signed_override` branch had the identical
+  fill-boundary-uses-n_words-not-dst_width bug as the RangeSelect/
+  PartSelect/struct-field/reduction cases already fixed, AND separately
+  forced the extension fill to a defined 0 whenever the selected bit
+  itself was x/z ("conservative", matching the OLD, since-corrected
+  `wide_load_signal_s` choice) instead of propagating x/z into the filled
+  region.
+- `Concatenation`'s own aggregate result ignored an INCOMING
+  `signed_override` entirely (individual concat MEMBERS correctly never
+  see it, per IEEE — only the concatenation's own total value can be
+  wrapped, e.g. `$signed({a, b})`) — always zero-filled beyond the
+  concat's own total width instead of sign-extending when the whole
+  concatenation was cast.
+
+A new shared helper, `_WideEmitterMixin._wide_sign_extend_to_dst_lines()`,
+replaced the various hand-rolled/duplicated fill-loop implementations
+across all of these cases (Literal, BitSelect, RangeSelect, PartSelect,
+struct-field ×2, reduction-ops, `!`, bitwise-op-result, Concatenation,
+Replication) — it sign-extends via `wide_sign_extend` and then applies an
+explicit tail mask, since `wide_sign_extend`'s own `n` parameter only
+understands whole words and would otherwise over-fill a `dst_width` that
+isn't a multiple of 64.
+
+**A pre-existing REFERENCE-engine bug found while re-verifying the above**:
+while chasing what looked like yet another compiled-engine divergence
+(`{3{(a0 ? $signed(a4[4:2]) : a3)}}`, a replication of a ternary), Icarus
+confirmed the COMPILED engine was actually already correct and the
+REFERENCE engine (the differential harness's oracle) was wrong — an
+important reminder that this harness's "expected" side is not infallible,
+and a diverging result should be checked against Icarus before assuming
+the compiled engine is at fault. Root cause, present in **both**
+`sim/evaluator.py` and `sim/vm/compiler.py` (structurally parallel, same
+bug independently): `eval()`/`_compile_expr()`'s `FunctionCall` dispatch
+for `$signed`/`$unsigned` evaluates/compiles its argument SELF-DETERMINED
+(no width, no signed_override) and returns that directly — which only
+happens to produce the right answer when the `$signed(...)` call is the
+assignment's own top-level RHS, where a SEPARATE post-hoc step
+(`_maybe_sign_extend` in `executor.py`/`scheduler.py`, or the equivalent
+statement-level sign-extend in the VM compiler) covers for it. One level
+of nesting deeper — e.g. a ternary branch, `cond ? $signed(a4[4:2]) : a3`
+— that top-level cover never runs, and the cast's own argument never gets
+extended to the ternary's combined width at all. The SAME architectural
+gap existed one layer further down: `eval()`'s `BitSelect`/`RangeSelect`/
+`PartSelect` branches (a bit-/range-/part-select is always unsigned in its
+own right per IEEE 1364-2005 §5.5.1, but a `$signed()` wrapper or an
+outer ternary/bitwise-op's forced signedness still needs to sign-extend it
+when the requested `width` is wider) ignored their `width`/
+`signed_override` parameters entirely — fixed the same way, and
+`sim/vm/compiler.py`'s equivalent `BitSelect`/`RangeSelect`/`PartSelect`
+compilation got the identical `SIGN_EXT`/`RESIZE`-opcode-emission fix. The
+compiled engine's own `$signed`/`$unsigned` handling (both narrow, via an
+inline `_sign_ext(...)` wrap baked directly into the emitted expression
+string at the point of use, and wide, via `signed_override` threaded all
+the way through `_emit_wide_expr_to_scratch`) never had this gap — it
+doesn't defer to a separate post-hoc statement-level step the way
+reference/VM do, so nesting depth was never an issue there.
+
+**Residual gap (not fully characterized)**: after both waves above, the
+default-seed differential run (`VERIFORGE_DIFF_CASES=100`) remains fully
+green, and a larger run (`VERIFORGE_DIFF_CASES=300` at an alternate seed)
+improved from 8/30 to 13/30 passing batches. The remaining ~17 failing
+batches are believed to be more instances of the same two bug shapes
+(wide-emitter fill-boundary/signed_override gaps in a node-type case not
+yet exercised, and/or the same "nested $signed()/select ignores
+width/signed_override" shape in a construct not yet isolated), but this
+is not yet confirmed case-by-case. This is a large, open-ended
+architectural area (both the wide emitter and the reference/VM engines
+reimplement width/signedness propagation independently, per-node-type,
+rather than sharing `semantics.py`'s already-unified logic — see item
+4.2's explicit non-goal), not yet exhaustively characterized; a dedicated
+follow-up pass (mirroring item 4.2 Phase A's characterize-first
+methodology, and/or a similarly systematic per-node-type audit of
+`sim/evaluator.py`'s `eval()` for the same width/signed_override-ignoring
+pattern) is warranted before considering this area closed. Any new
+divergence found here should be checked against Icarus before assuming
+compiled is at fault, per the reference-engine bug found above.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
