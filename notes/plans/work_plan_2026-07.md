@@ -802,14 +802,101 @@ should be checked against Icarus, not assumed to be compiled's fault. The
 larger differential run (`VERIFORGE_DIFF_CASES=300` at an alternate seed)
 improved from 8/30 to 13/30 passing batches; full detail (including the
 still-open residual gap) in `notes/known_issues.md`, which now also notes
-this reference-oracle caveat directly. **Residual gap**: the remaining
-~17 failing batches at that larger case count are believed to be more
-instances of the same two bug shapes in constructs not yet isolated —
-still an open, not-yet-exhaustively-characterized architectural area
-(both the wide emitter and the reference/VM engines reimplement
-width/signedness propagation independently, per-node-type, rather than
-sharing `semantics.py`'s already-unified logic), warranting a dedicated
-follow-up characterize-first pass rather than continued one-off patching.
+this reference-oracle caveat directly. **Continued (third wave, same day)**: kept bisecting the `VERIFORGE_DIFF_
+CASES=300` failures one at a time (8/30 → 13/30 → 15/30) — found and fixed,
+in both `sim/evaluator.py` and `sim/vm/compiler.py`: the `Literal` hot-path
+cache lookup ignoring `width`/`signed_override`; `Concatenation`/
+`Replication`'s own AGGREGATE result (distinct from the earlier self-width-
+into-parts fix) ignoring an incoming `signed_override`; and `!`/reduction-
+op's operand evaluated without its own self-determined width (so a nested
+context-determined operator inside it, e.g. `~` in `!(~(cond?a:b))`, never
+got resized). Same bug shape as the second wave, same fix-both-engines
+methodology.
+
+**Continued (fourth wave, same day) — a distinct bug family**: bisecting a
+15/30-wave failure found compiled was actually correct and **reference**
+was wrong (Icarus-confirmed) for a nested-ternary condition with mixed
+known/x bits — a genuinely different bug shape from the width/
+signed_override-propagation family above. `TernaryOp`'s condition
+truthiness check (in all four engines, independently) required the WHOLE
+condition to be bit-defined before picking a branch, falling back to the
+ambiguous x-merge path otherwise — too strict per IEEE 1364-2005: a
+known-1 bit ANYWHERE in the condition makes it definitely true regardless
+of unrelated x/z bits elsewhere, exactly like `!`/`&&`/`||`/reduction-OR
+already correctly implement (`Value.reduce_or` in `sim/value.py`).  Found
+and fixed the identical shape everywhere a condition's truthiness is
+checked: `TernaryOp` in `sim/evaluator.py`; every `If`/`For`/`While`/`Wait`
+condition in `sim/executor.py` (8 call sites, both the plain and coroutine
+executors); `Op.TERNARY`/`JUMP_IF_ZERO`/`JUMP_IF_NONZERO` in
+`sim/vm/interpreter.py`; `OP_TERNARY`/`OP_JUMP_IF_ZERO`/
+`OP_JUMP_IF_NONZERO` in `sim/vm/_interp_fast.pyx` (the JUMP opcodes there
+had a second, more severe bug too — they never consulted the wide-value
+`wflag`/`wv`/`wm` arrays, so a >64-bit if/while condition read stale data
+from the narrow slot entirely); `_emit_ternary_value_mask_exprs` and
+`wide_mux`/`_wide_emitter.py`'s TernaryOp case in the compiled engine
+(`_expr_emitter.py`/`_gen_wide_section.py`/`_wide_emitter.py`); and
+`_emit_while` in `_stmt_emitters.py` (`_emit_if`/`_emit_for` turned out to
+already be correct by construction — they never consult the condition's
+mask at all, which already implements the right semantics given x-bits'
+value bits are conventionally stored as 0). A second, independent bug
+found in the same compiled-engine functions: the ternary condition was
+evaluated at a hardcoded width of 1 instead of its own self-determined
+width, corrupting a NESTED ternary/concat/replication condition's internal
+merge computation (confirmed against Icarus for `a0 * (((|a1[0]) ? a4 :
+{3{a0}}) ? a3 : (~|a5[58:17]))`). Caveat: the `if`/`while`/`for` fixes
+(unlike the fuzzer-generated-expression-tree fixes elsewhere in this item)
+were verified by manual reasoning and pattern-consistency with the
+fuzzer-verified `TernaryOp` sibling fix, not by an automated differential/
+Icarus check, since the fuzzer only generates combinational expressions,
+never control-flow statements — flagged as a good target for future
+statement-level differential coverage. Full detail in `notes/
+known_issues.md`'s fourth-wave entry. Both the default-seed (10/10) and
+the larger-case-count differential run are green after this wave (see
+`known_issues.md` for the exact pass count once the larger run completes).
+
+**Continued (fifth wave, same day)**: kept bisecting `VERIFORGE_DIFF_
+CASES=300` failures (17/30 → 20/30), finding three more distinct bug
+shapes, all confirmed against Icarus and fixed in both the relevant
+narrow and wide compiled-engine emitters: (1) the shift-COUNT operand of
+`<<`/`>>` getting sign-extended when declared `signed`, instead of being
+treated as the unsigned magnitude IEEE 1364-2005 requires; (2) `~`/unary
+`-` widening a self-determined-ALWAYS-1-bit operand (comparisons,
+`&&`/`||`, reduction ops, `!`) to the enclosing context BEFORE
+complementing/negating, instead of operating at the operand's own fixed
+width and extending the RESULT afterward (a new `_is_fixed_self_
+determined()` helper, mirrored across `sim/evaluator.py`/`sim/vm/
+compiler.py`/both compiled emitters, now distinguishes this from the
+regular-signal/arithmetic-operand case where pre-widening IS correct);
+(3) a `$signed()`-wrapped 1-bit condition's raw sign-extended C value
+(e.g. `_sign_ext(1, 1)` = -1 = all 64 bits set) leaking un-masked into
+`wide_mux`'s/`_emit_ternary_value_mask_exprs`'s "known-1-bit" check,
+spuriously forcing a definite branch selection instead of the correct
+ambiguous merge. Full write-up of all three (with the exact Icarus repro
+for each) in `known_issues.md`'s fifth-wave entry.
+
+**Two more distinct bugs found but NOT YET FIXED** (documented in
+`known_issues.md` rather than rushed): a signal wider than 64 bits read
+through the compiled engine's narrow/scalar emitter silently loses every
+bit beyond the first 64 (`_emit_expr`'s Identifier case has no
+`sig_width > 64` handling at all) -- reachable despite `_rhs_needs_wide_
+eval`'s wide-signal catch-all because the continuous-assign codegen path
+apparently doesn't consult that same guard (confirmed via a comb-vs-ff
+asymmetry for byte-identical RHS text: the `always` block's NBA correctly
+routes through the wide emitter, the `assign` wire does not); and
+vm-fast's reduction-AND/NAND opcode(s) likely have the same
+any-x-bails-to-fully-ambiguous precision gap already fixed elsewhere this
+session, just not yet traced into `_interp_fast.pyx` specifically.
+
+**Residual gap**: still a large, open-ended architectural area (the wide
+emitter, the narrow/scalar emitter, and the reference/VM engines each
+reimplement width/signedness/x-propagation independently, per-node-type,
+rather than sharing `semantics.py`'s already-unified logic), not yet
+exhaustively characterized. `known_issues.md` now also lists seven
+specific still-failing `VERIFORGE_DIFF_CASES=300` batches
+(11/12/18/20/25/26/28) that have not yet been individually bisected and
+root-caused -- next-session starting point, using the same isolate-
+single-case-module + compare-against-Icarus methodology used throughout
+this item.
 
 ## Tier 3 — CI and engine parity
 

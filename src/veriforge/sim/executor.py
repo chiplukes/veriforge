@@ -224,7 +224,13 @@ class StatementExecutor:  # cm:c2f9a1
 
         # -- If statement ------------------------------------------
         if stype is IfStatement:
-            cond = self.evaluator.eval(stmt.condition, ctx)
+            # Reduced the same way `!`/`&&`/`||`/ternary conditions are
+            # (Value.reduce_or): a known-1 bit anywhere makes the condition
+            # definitely true regardless of unrelated x/z bits elsewhere --
+            # only "definitely all-zero" is false and only "no known 1, but
+            # some x/z" is genuinely ambiguous. See the identical fix/note
+            # on TernaryOp in evaluator.py.
+            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.then_body:
                     self.execute(stmt.then_body, ctx)
@@ -264,7 +270,8 @@ class StatementExecutor:  # cm:c2f9a1
                     v = ctx.read_signal(signed_var_name)
                     if v.is_defined and v.width > 1 and (v.val >> (v.width - 1)) & 1:
                         break
-                cond = self.evaluator.eval(stmt.condition, ctx)
+                # Reduced via reduce_or -- see TernaryOp in evaluator.py.
+                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -289,7 +296,8 @@ class StatementExecutor:  # cm:c2f9a1
         if stype is WhileLoop:
             iterations = 0
             while True:
-                cond = self.evaluator.eval(stmt.condition, ctx)
+                # Reduced via reduce_or -- see TernaryOp in evaluator.py.
+                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -332,7 +340,13 @@ class StatementExecutor:  # cm:c2f9a1
 
         # -- Wait statement ----------------------------------------
         if stype is WaitStatement:
-            cond = self.evaluator.eval(stmt.condition, ctx)
+            # Reduced the same way `!`/`&&`/`||`/ternary conditions are
+            # (Value.reduce_or): a known-1 bit anywhere makes the condition
+            # definitely true regardless of unrelated x/z bits elsewhere --
+            # only "definitely all-zero" is false and only "no known 1, but
+            # some x/z" is genuinely ambiguous. See the identical fix/note
+            # on TernaryOp in evaluator.py.
+            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.body:
                     self.execute(stmt.body, ctx)
@@ -431,7 +445,13 @@ class StatementExecutor:  # cm:c2f9a1
 
         # -- If statement ------------------------------------------
         if stype is IfStatement:
-            cond = self.evaluator.eval(stmt.condition, ctx)
+            # Reduced the same way `!`/`&&`/`||`/ternary conditions are
+            # (Value.reduce_or): a known-1 bit anywhere makes the condition
+            # definitely true regardless of unrelated x/z bits elsewhere --
+            # only "definitely all-zero" is false and only "no known 1, but
+            # some x/z" is genuinely ambiguous. See the identical fix/note
+            # on TernaryOp in evaluator.py.
+            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.then_body:
                     yield from self.execute_coroutine(stmt.then_body, ctx)
@@ -469,7 +489,8 @@ class StatementExecutor:  # cm:c2f9a1
                     v = ctx.read_signal(signed_var_name)
                     if v.is_defined and v.width > 1 and (v.val >> (v.width - 1)) & 1:
                         break
-                cond = self.evaluator.eval(stmt.condition, ctx)
+                # Reduced via reduce_or -- see TernaryOp in evaluator.py.
+                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -484,7 +505,8 @@ class StatementExecutor:  # cm:c2f9a1
         if stype is WhileLoop:
             iterations = 0
             while True:
-                cond = self.evaluator.eval(stmt.condition, ctx)
+                # Reduced via reduce_or -- see TernaryOp in evaluator.py.
+                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -532,7 +554,13 @@ class StatementExecutor:  # cm:c2f9a1
 
         # -- Wait statement ----------------------------------------
         if stype is WaitStatement:
-            cond = self.evaluator.eval(stmt.condition, ctx)
+            # Reduced the same way `!`/`&&`/`||`/ternary conditions are
+            # (Value.reduce_or): a known-1 bit anywhere makes the condition
+            # definitely true regardless of unrelated x/z bits elsewhere --
+            # only "definitely all-zero" is false and only "no known 1, but
+            # some x/z" is genuinely ambiguous. See the identical fix/note
+            # on TernaryOp in evaluator.py.
+            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.body:
                     yield from self.execute_coroutine(stmt.body, ctx)

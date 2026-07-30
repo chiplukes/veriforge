@@ -588,7 +588,7 @@ cdef int _execute_core(
     cdef int wide_part_nba_max = 0
     cdef int a_wide, b_wide, a_any_x, b_any_x, b_is_zero
     cdef int has_x, red_parity, all_ones, any_one
-    cdef int t_wide, cond_defined, cond_nonzero
+    cdef int t_wide, cond_known1, cond_defined_zero, a_nonzero
     cdef int b_has_x, b_shift_n, b_huge
     cdef int any_x
     cdef unsigned long long known_diff
@@ -2877,17 +2877,41 @@ cdef int _execute_core(
             continue
 
         if op == OP_JUMP_IF_ZERO:
+            # A known-1 bit anywhere makes the condition definitely true
+            # regardless of unrelated x/z bits elsewhere (mirrors
+            # Value.reduce_or / TernaryOp in sim/evaluator.py). The
+            # compiler pushes an if/while/for condition's raw value with no
+            # forced 1-bit reduction (sim/vm/compiler.py's IfStatement/
+            # WhileLoop/ForLoop cases just `_compile_expr(stmt.condition,
+            # program)`), so the condition can be >64 bits wide -- the
+            # narrow a.val/a.mask slot does not hold the real data in that
+            # case (it lives in wv[]/wm[]), so wflag must be checked here,
+            # same as OP_TERNARY above.
             sp -= 1
-            a = stack[sp]
-            if a.mask or a.val == 0:
-                pc = arg1
+            if wflag[sp]:
+                a_nonzero = 0
+                for wi in range(WIDE_WORDS):
+                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: a_nonzero = 1; break
+                if not a_nonzero:
+                    pc = arg1
+            else:
+                a = stack[sp]
+                if not (a.val & ~a.mask):
+                    pc = arg1
             continue
 
         if op == OP_JUMP_IF_NONZERO:
             sp -= 1
-            a = stack[sp]
-            if a.mask == 0 and a.val != 0:
-                pc = arg1
+            if wflag[sp]:
+                a_nonzero = 0
+                for wi in range(WIDE_WORDS):
+                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: a_nonzero = 1; break
+                if a_nonzero:
+                    pc = arg1
+            else:
+                a = stack[sp]
+                if a.val & ~a.mask:
+                    pc = arg1
             continue
 
         if op == OP_DUP:
@@ -3083,31 +3107,35 @@ cdef int _execute_core(
                 # the narrow t.val/t.mask slot does not hold the real data
                 # in that case (it lives in wv[]/wm[]), so it must not be
                 # consulted directly.
+                cond_known1 = 0
                 has_x = 0
-                cond_nonzero = 0
                 for wi in range(WIDE_WORDS):
                     if wm[sp * WIDE_WORDS + wi]: has_x = 1
-                    if wv[sp * WIDE_WORDS + wi]: cond_nonzero = 1
-                cond_defined = not has_x
+                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: cond_known1 = 1
+                cond_defined_zero = (cond_known1 == 0) and (has_x == 0)
             else:
-                cond_defined = t.mask == 0
-                cond_nonzero = t.val != 0
-            if cond_defined:
-                # Condition fully defined — select one operand
-                if cond_nonzero:
-                    stack[sp] = a
-                    wflag[sp] = a_wide
-                    if a_wide:
-                        for wi in range(WIDE_WORDS):
-                            wv[sp * WIDE_WORDS + wi] = wv[(sp + 1) * WIDE_WORDS + wi]
-                            wm[sp * WIDE_WORDS + wi] = wm[(sp + 1) * WIDE_WORDS + wi]
-                else:
-                    stack[sp] = b
-                    wflag[sp] = b_wide
-                    if b_wide:
-                        for wi in range(WIDE_WORDS):
-                            wv[sp * WIDE_WORDS + wi] = wv[(sp + 2) * WIDE_WORDS + wi]
-                            wm[sp * WIDE_WORDS + wi] = wm[(sp + 2) * WIDE_WORDS + wi]
+                cond_known1 = 1 if (t.val & ~t.mask) else 0
+                cond_defined_zero = 1 if (t.mask == 0 and t.val == 0) else 0
+            # A known-1 bit anywhere makes the condition definitely true
+            # regardless of unrelated x/z bits elsewhere (mirrors
+            # Value.reduce_or / TernaryOp in sim/evaluator.py) -- checking
+            # raw full-definedness here treated ANY x/z bit as ambiguous
+            # (triggering the merge branch below) even when a known-1 bit
+            # elsewhere already determined the outcome.
+            if cond_known1:
+                stack[sp] = a
+                wflag[sp] = a_wide
+                if a_wide:
+                    for wi in range(WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = wv[(sp + 1) * WIDE_WORDS + wi]
+                        wm[sp * WIDE_WORDS + wi] = wm[(sp + 1) * WIDE_WORDS + wi]
+            elif cond_defined_zero:
+                stack[sp] = b
+                wflag[sp] = b_wide
+                if b_wide:
+                    for wi in range(WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = wv[(sp + 2) * WIDE_WORDS + wi]
+                        wm[sp * WIDE_WORDS + wi] = wm[(sp + 2) * WIDE_WORDS + wi]
             elif a_wide or b_wide:
                 # Condition has x/z with wide operands: merge bit by bit.
                 # A bit only agrees when it is KNOWN in both branches and

@@ -785,9 +785,18 @@ class Compiler:  # cm:8c1e4a
 
         # -- Literal: load constant --
         if etype is Literal:
+            # A declared-signed literal (e.g. `4'sb1000` = -8) whose own
+            # top bit is 1 needs sign-extension when nested inside a wider
+            # context (a $signed()-wrapped/ternary-forced-signed operand)
+            # -- same gap as BitSelect/RangeSelect/PartSelect above, and
+            # the identical bug already fixed in `sim/evaluator.py` and
+            # the compiled engine's wide emitter.
             val = self._compile_literal(expr)
             cid = self._add_const(val)
             program.append(instr(Op.LOAD_CONST, cid))
+            if width and val.width < width:
+                eff_signed = signed_override if signed_override is not None else expr.signed
+                program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
             return
 
         # -- BinaryOp --
@@ -913,6 +922,33 @@ class Compiler:  # cm:8c1e4a
             # complement (only sign-extension does), confirmed against
             # Icarus/Verilator (see notes/known_issues.md).
             if expr.op in ("~", "+", "-"):
+                if _is_fixed_self_determined(expr.operand):
+                    # The operand's own result is ALWAYS fixed-width
+                    # regardless of context (IEEE 1364-2005 Table 5-22:
+                    # comparisons, &&/||, reduction ops, ! are self-
+                    # determined 1-bit results) -- unlike a regular signal
+                    # or another context-determined operator, it must NOT
+                    # be widened to match `~`/`-`'s context before the
+                    # operator runs. Doing so is wrong for `~`/unary `-`
+                    # specifically (unlike arithmetic operand-widening,
+                    # which is safe since extension commutes with
+                    # addition): zero-extending a 1-bit `&&` result before
+                    # complementing gives the wrong answer. Compile at the
+                    # operand's own fixed width, emit the op, THEN extend
+                    # the RESULT. Confirmed against Icarus for
+                    # `$signed(~({a0, a6, a0} && a7))`; mirrors the
+                    # identical fix in `sim/evaluator.py`.
+                    self._compile_expr(expr.operand, program)
+                    program.append(instr(op))
+                    if width:
+                        result_w = self._expr_width(expr)
+                        if result_w < width:
+                            eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                            if eff_signed:
+                                program.append(instr(Op.SIGN_EXT, width, 0))
+                            else:
+                                program.append(instr(Op.RESIZE, width))
+                    return
                 self._compile_expr(expr.operand, program, width, signed_override)
                 if width:
                     target = max(width, self._expr_width(expr.operand))
@@ -922,7 +958,16 @@ class Compiler:  # cm:8c1e4a
                     else:
                         program.append(instr(Op.RESIZE, target))
             else:
-                self._compile_expr(expr.operand, program)
+                # `!` and the reduction ops are themselves self-determined
+                # (always 1 bit), but their OPERAND is still
+                # self-determined too (IEEE 1364-2005 §5.4.1) -- its OWN
+                # natural width is the context that resizes any nested
+                # context-determined operator within it. Compiling with
+                # width=0 here leaves such a nested operator entirely
+                # unresized -- mirrors the identical fix in
+                # `sim/evaluator.py`; confirmed wrong against Icarus for
+                # `!(~(a2[2] ? a6[49] : a6[38:9]))`.
+                self._compile_expr(expr.operand, program, self._expr_width(expr.operand))
             program.append(instr(op))
             return
 
@@ -975,6 +1020,17 @@ class Compiler:  # cm:8c1e4a
             for part in expr.parts:
                 self._compile_expr(part, program, self._expr_width(part))
             program.append(instr(Op.CONCAT, len(expr.parts)))
+            # A concatenation is always unsigned in its OWN right, so its
+            # own aggregate result normally needs no further extension --
+            # but when the WHOLE concatenation is wrapped in `$signed(...)`
+            # (signed_override True) and requested at a wider `width`,
+            # that aggregate needs sign-extension, not zero-extension.
+            # Individual MEMBERS never see signed_override (compiled
+            # self-determined, per the calls above) -- this only concerns
+            # the concat's own aggregate value. Mirrors the identical fix
+            # in `sim/evaluator.py`.
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
         # -- BitSelect (memory read or scalar bit-select) --
@@ -1020,6 +1076,10 @@ class Compiler:  # cm:8c1e4a
             # Self-determined, same reasoning as Concatenation above.
             self._compile_expr(expr.value, program, self._expr_width(expr.value))
             program.append(instr(Op.REPLICATE))
+            # Same signed_override reasoning as Concatenation's own
+            # aggregate result above.
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
         # -- AssignmentPattern --
@@ -2679,6 +2739,32 @@ _SIGNED_DIVMOD_MAP: dict[str, Op] = {
 def _is_signed_call(expr) -> bool:
     """True when *expr* is ``$signed(...)``."""
     return isinstance(expr, FunctionCall) and expr.name.lower() == "$signed"
+
+
+_FIXED_SELF_DETERMINED_BINOPS = frozenset({"==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"})
+_FIXED_SELF_DETERMINED_UNOPS = frozenset({"&", "|", "^", "~&", "~|", "~^", "^~", "!"})
+
+
+def _is_fixed_self_determined(expr: Expression) -> bool:
+    """True when *expr*'s own result width is ALWAYS fixed at 1 bit
+    (IEEE 1364-2005 Table 5-22's self-determined operators: comparisons,
+    &&/||, reduction ops, !) regardless of any enclosing context.
+
+    Used by the `~`/unary `-` branch of `_compile_expr`: such an operand
+    must never be widened to match `~`/`-`'s enclosing context width
+    BEFORE the operator compiles -- unlike a regular signal or an
+    arithmetic operand (where extension commutes with the operation),
+    extending a bitwise-complement or negation's operand changes which
+    bits get flipped/negated. Only `~`/`-`'s own RESULT should be
+    extended, after the operator runs at the operand's fixed width.
+    Mirrors the identical helper in `sim/evaluator.py`.
+    """
+    etype = type(expr)
+    if etype is BinaryOp:
+        return expr.op in _FIXED_SELF_DETERMINED_BINOPS
+    if etype is UnaryOp:
+        return expr.op in _FIXED_SELF_DETERMINED_UNOPS
+    return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

@@ -31,6 +31,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _NATURAL_WIDTH_OPS,
     _REDUCTION_OPS,
 )
+from veriforge.sim.compiled._expr_emitter import _is_fixed_self_determined
 from veriforge.sim.value import Value
 
 
@@ -3691,6 +3692,40 @@ class _WideEmitterMixin:
             # Identifier further down agrees with this node's own decision.
             if op in {"~", "-"}:
                 prim = "wide_not" if op == "~" else "wide_neg"
+                # EXCEPTION to the "recurse at dst_width" rule above: when
+                # the operand's own result is ALWAYS fixed at 1 bit
+                # regardless of context (IEEE 1364-2005 Table 5-22:
+                # comparisons, &&/||, reduction ops, !), recursing at
+                # dst_width doesn't actually widen the VALUE (the operand's
+                # own wide-emitter case ignores dst_width and always
+                # produces a proper 1-bit result zero-filled into the rest
+                # of the scratch words) -- but `wide_not`/`wide_neg`
+                # afterward then complements/negates ALL dst_width bits of
+                # that zero-filled operand, which is wrong the same way the
+                # narrow emitter's identical bug was (zero-extending a 1-bit
+                # `&&` result before complementing gives `~0...01` instead
+                # of the correct `resize(~1'b1)`). Compute at the operand's
+                # own fixed 1-bit width instead, THEN extend the RESULT.
+                # Confirmed against Icarus for
+                # `$signed(~({a0, a6, a0} && a7)))`; mirrors the identical
+                # fix in `_expr_emitter.py`/`sim/evaluator.py`/
+                # `sim/vm/compiler.py`.
+                if _is_fixed_self_determined(expr.operand):
+                    op_slot = self._alloc_scratch()
+                    lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, 1, 1, indent)
+                    if lines is None:
+                        self._free_scratch(op_slot)
+                        return None
+                    lines.append(f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, 1, 1)")
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    if eff_signed:
+                        lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, "1", indent))
+                    else:
+                        for wi in range(1, n_words):
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    self._free_scratch(op_slot)
+                    return lines
                 op_slot = self._alloc_scratch()
                 lines = self._emit_wide_expr_to_scratch(
                     expr.operand, op_slot, n_words, dst_width, indent, signed_override=signed_override
@@ -3837,7 +3872,17 @@ class _WideEmitterMixin:
                 if llines is None:
                     self._free_scratch(lslot)
                     return None
-                amount_expr = f"<int>({self._emit_expr(expr.right, 32)})"
+                # The shift COUNT is always interpreted as an unsigned
+                # magnitude (IEEE 1364-2005 Table 5-22 / SS5.6) regardless of
+                # its own declared signedness -- e.g. a 1-bit `signed`
+                # shift-count operand holding 1'b1 (value -1 in its own
+                # 1-bit signed representation) must still shift by 1, not by
+                # a sign-extended -1. Passing `signed_override=False` forces
+                # `_emit_expr`'s Identifier case to zero- rather than
+                # sign-extend when widening to the 32-bit `<int>` cast width.
+                # Confirmed against Icarus for `$unsigned(a1) << a0` with a0
+                # declared `signed [0:0]` and a0=1.
+                amount_expr = f"<int>({self._emit_expr(expr.right, 32, False)})"
                 lines = llines
                 if op == ">>>":
                     lines.append(
@@ -3985,8 +4030,34 @@ class _WideEmitterMixin:
         # only covers the <=64-bit destination path; this is the same bug
         # in the separate wide (>64-bit destination) recursive emitter.
         if et is TernaryOp:
-            cond_v_expr = f"<unsigned long long>({self._emit_expr(expr.condition, 1)})"
-            cond_m_expr = f"<unsigned long long>({self._emit_mask_expr(expr.condition, 1)})"
+            # The condition is self-determined (IEEE 1364-2005 Table 5-22):
+            # it must be evaluated at its OWN natural width, not forced down
+            # to 1 bit -- a condition that is itself a further
+            # TernaryOp/Concatenation/Replication uses the incoming width to
+            # size its OWN internal merge/shift computation. Mirrors the
+            # identical fix in the narrow emitter's
+            # `_emit_ternary_value_mask_exprs` (_expr_emitter.py). Note this
+            # scalar reduction is still fundamentally limited to 64 bits by
+            # the `<unsigned long long>` cast below -- a condition wider
+            # than 64 bits can only be evaluated this way, not fully
+            # word-by-word (a documented residual gap, see
+            # notes/known_issues.md).
+            cond_w = self._expr_width(expr.condition)
+            cond_mask_bits = f"wmask({min(cond_w, 64)})"
+            # `_emit_expr`'s raw C `long long` result is only meaningful
+            # within its own `cond_w` bits -- e.g. `$signed(1'b1)` emits
+            # `_sign_ext(1, 1)`, which is -1 (ALL 64 bits set) as a raw C
+            # value, matching the natural C representation of "signed
+            # -1" but NOT scoped to cond_w. `wide_mux` (below) treats
+            # `cond_v`/`cond_m` as its OWN "known-1 bit anywhere forces
+            # true" check (`cond_v & ~cond_m`) -- without masking here
+            # first, those spurious high bits (mask=0, so never excluded
+            # by `~cond_m`) get read as a bogus "known-1", forcing a
+            # branch to be selected outright instead of correctly falling
+            # through to the ambiguous per-word merge. Confirmed against
+            # Icarus for `-($signed((a7 == a2[4])) ? ... : ...)`.
+            cond_v_expr = f"<unsigned long long>(({self._emit_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
+            cond_m_expr = f"<unsigned long long>(({self._emit_mask_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
             tslot = self._alloc_scratch()
             fslot = self._alloc_scratch()
             own_signed = self._expr_signed(expr)

@@ -309,11 +309,22 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- Hot path: Literal (cached) ----------------------------
         if etype is Literal:
             lit_id = id(expr)
-            cached = self._literal_cache.get(lit_id)
-            if cached is not None:
-                return cached
-            v = self._eval_literal(expr)
-            self._literal_cache[lit_id] = v
+            v = self._literal_cache.get(lit_id)
+            if v is None:
+                v = self._eval_literal(expr)
+                self._literal_cache[lit_id] = v
+            # A declared-signed literal (e.g. `4'sb1000` = -8) whose own
+            # top bit is 1 needs sign-extension when nested inside a wider
+            # context (a $signed()-wrapped/ternary-forced-signed operand)
+            # -- same gap as BitSelect/RangeSelect/PartSelect above, and
+            # the identical bug already fixed in the compiled engine's
+            # wide emitter (`_wide_emitter.py`'s Literal case). The cache
+            # only ever stores the self-determined value, never the
+            # extended one, so different call sites requesting different
+            # widths for the same literal AST node stay correct.
+            if width and v.width < width:
+                eff_signed = signed_override if signed_override is not None else expr.signed
+                return v.sign_extend(width) if eff_signed else v.resize(width)
             return v
 
         # -- Hot path: BinaryOp ------------------------------------
@@ -425,13 +436,51 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # (only sign-extension does), confirmed against Icarus/Verilator
             # (see notes/known_issues.md).
             if expr.op in ("~", "+", "-"):
+                if _is_fixed_self_determined(expr.operand):
+                    # The operand's own result is ALWAYS fixed-width
+                    # regardless of context (IEEE 1364-2005 Table 5-22:
+                    # comparisons, &&/||, reduction ops, ! are self-
+                    # determined 1-bit results) -- unlike a regular signal
+                    # or another context-determined operator, it must NOT
+                    # be widened to match `~`/`-`'s context before the
+                    # operator runs. Doing so is wrong for `~`/unary `-`
+                    # specifically (unlike arithmetic BinaryOp operand-
+                    # widening, which is safe since extension commutes with
+                    # addition): zero-extending a 1-bit `&&` result to 96
+                    # bits BEFORE complementing gives `~0...01 = 1...110`
+                    # instead of the correct `resize(~1'b1) = resize(1'b0)
+                    # = 0`. Complement/negate at the operand's own fixed
+                    # width, THEN extend the RESULT. Confirmed against
+                    # Icarus for `$signed(~({a0, a6, a0} && a7))`.
+                    operand = self.eval(expr.operand, ctx)
+                    result = _eval_unary_op(expr.op, operand)
+                    if width and result.width < width:
+                        eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                        return result.sign_extend(width) if eff_signed else result.resize(width)
+                    return result
                 operand = self.eval(expr.operand, ctx, width, signed_override)
                 if width and operand.width != width:
                     target = max(width, _expr_self_width(expr.operand, ctx))
                     eff_signed = signed_override if signed_override is not None else _expr_signed(expr.operand, ctx)
                     operand = operand.sign_extend(target) if eff_signed else operand.resize(target)
             else:
-                operand = self.eval(expr.operand, ctx)
+                # `!` and the reduction ops (&, |, ^, ~&, ~|, ~^, ^~) are
+                # themselves self-determined (always 1 bit), but their
+                # OPERAND is still self-determined too (IEEE 1364-2005
+                # §5.4.1) -- its OWN natural width is the context that
+                # resizes any nested context-determined operator (~,
+                # arithmetic, a ternary) within it. Evaluating with
+                # width=0 here (as opposed to the operand's self-width)
+                # leaves such a nested operator entirely unresized -- the
+                # SAME bug already fixed for Concatenation/Replication
+                # members above, just one operator type over. Confirmed
+                # wrong against Icarus for
+                # `!(~(a2[2] ? a6[49] : a6[38:9]))`, where `~`'s operand
+                # (the ternary, self-width 30) must be evaluated at that
+                # full 30-bit width before `~` runs, not at whichever
+                # branch's own (possibly narrower, e.g. 1-bit) width the
+                # ternary happens to return when given no context.
+                operand = self.eval(expr.operand, ctx, _expr_self_width(expr.operand, ctx))
             return _eval_unary_op(expr.op, operand)
 
         # -- TernaryOp ---------------------------------------------
@@ -443,7 +492,20 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # establishes a *fresh* override for both branches, replacing
             # whatever override (if any) was active from further out.
             own_signed = _expr_signed(expr, ctx)
-            cond = self.eval(expr.condition, ctx)
+            # The condition is reduced to a boolean the same way `!`/`&&`/
+            # `||`/reduction-OR are (Value.reduce_or): a known-1 bit ANYWHERE
+            # makes the condition definitely true regardless of unrelated x/z
+            # bits elsewhere (e.g. a wide concat condition with one x bit and
+            # other known-1 bits) -- only "definitely all-zero" is definitely
+            # false, and only "no known 1, but some x/z" is truly ambiguous
+            # (triggering the branch-merge below). Using raw `cond.is_defined`
+            # here treated ANY x/z bit as ambiguous even when a known-1 bit
+            # elsewhere already determined the outcome -- confirmed wrong
+            # against Icarus for a multi-bit condition like `(|a6) ? {a6[14],
+            # a2[12:6], a6} : a6[15]` where `a2[12:6]` is x but `a6`'s own
+            # bits already make the concatenation condition definitely
+            # nonzero.
+            cond = self.eval(expr.condition, ctx).reduce_or()
             if cond.is_defined:
                 if cond.val:
                     return self.eval(expr.true_expr, ctx, width, own_signed)
@@ -469,6 +531,21 @@ class ExpressionEvaluator:  # cm:7e8b5d
             result = parts[0]
             for p in parts[1:]:
                 result = result.concat(p)
+            # A concatenation is always unsigned in its OWN right (IEEE
+            # 1364-2005 §5.5.1), so its own aggregate result normally
+            # needs no further extension -- but when the WHOLE
+            # concatenation is wrapped in `$signed(...)` (signed_override
+            # True, forced by an outer FunctionCall/ternary/bitwise-op)
+            # and requested at a wider `width`, that aggregate needs
+            # sign-extension, not zero-extension. Individual MEMBERS never
+            # see signed_override (concat members are always
+            # self-determined, per the self-width-only eval() calls
+            # above) -- this only concerns the concat's own aggregate
+            # value. Mirrors the identical fix in the compiled engine's
+            # wide emitter; confirmed wrong against Icarus for
+            # `{2{(a0 ? $signed({a1, a2}) : a3)}}`.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
             return result
 
         # -- BitSelect ---------------------------------------------
@@ -530,8 +607,16 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # Self-determined, same reasoning as Concatenation above.
             inner = self.eval(expr.value, ctx, _expr_self_width(expr.value, ctx))
             if count_val.is_defined:
-                return inner.replicate(int(count_val))
-            return Value.x(inner.width)
+                result = inner.replicate(int(count_val))
+            else:
+                result = Value.x(inner.width)
+            # Same signed_override reasoning as Concatenation's own
+            # aggregate result above -- a replication is always unsigned
+            # in its own right, but `$signed({N{...}})` still needs its
+            # aggregate sign-extended when requested at a wider width.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
+            return result
 
         # -- AssignmentPattern -------------------------------------
         if etype is AssignmentPattern:
@@ -757,6 +842,31 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
         # Read the return value
         return local_ctx.read_signal(func.name)
+
+
+_FIXED_SELF_DETERMINED_BINOPS = frozenset({"==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"})
+_FIXED_SELF_DETERMINED_UNOPS = frozenset({"&", "|", "^", "~&", "~|", "~^", "^~", "!"})
+
+
+def _is_fixed_self_determined(expr: Expression) -> bool:
+    """True when *expr*'s own result width is ALWAYS fixed at 1 bit
+    (IEEE 1364-2005 Table 5-22's self-determined operators: comparisons,
+    &&/||, reduction ops, !) regardless of any enclosing context.
+
+    Used by the `~`/unary `-` branch of `eval()`: such an operand must
+    never be widened to match `~`/`-`'s enclosing context width BEFORE the
+    operator runs -- unlike a regular signal or an arithmetic operand
+    (where extension commutes with the operation), extending a bitwise-
+    complement or negation's operand changes which bits get flipped/
+    negated. Only `~`/`-`'s own RESULT should be extended, after the
+    operator runs at the operand's fixed width.
+    """
+    etype = type(expr)
+    if etype is BinaryOp:
+        return expr.op in _FIXED_SELF_DETERMINED_BINOPS
+    if etype is UnaryOp:
+        return expr.op in _FIXED_SELF_DETERMINED_UNOPS
+    return False
 
 
 # ── Self-determined width (generic max-rule, incl. for '*') ───────────

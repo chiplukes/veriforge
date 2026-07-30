@@ -562,17 +562,26 @@ class _GenWideSectionsMixin:
             "    int n, int dst_width) noexcept nogil:",
             "    cdef int i, remaining_w",
             "    cdef unsigned long long tail_mask, agree_known",
-            "    if cond_m != 0:",
+            # A known-1 bit anywhere in cond_v (i.e. outside cond_m) makes
+            # the condition definitely true regardless of unrelated x/z bits
+            # elsewhere (mirrors Value.reduce_or / TernaryOp in
+            # sim/evaluator.py) -- checking `cond_m != 0` alone treated ANY
+            # x/z bit as fully ambiguous (triggering the per-word merge
+            # below) even when a known-1 bit elsewhere already determined
+            # the outcome. Only `cond_m == 0` (fully defined, and since the
+            # known-1 check above already failed, definitely zero) selects
+            # `b` outright.
+            "    if (cond_v & ~cond_m) != 0:",
+            "        wide_copy(dv, dm, av, am, n, dst_width)",
+            "    elif cond_m == 0:",
+            "        wide_copy(dv, dm, bv, bm, n, dst_width)",
+            "    else:",
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
             "            agree_known = ~am[i] & ~bm[i] & ~(av[i] ^ bv[i]) & tail_mask",
             "            dv[i] = av[i] & agree_known",
             "            dm[i] = tail_mask & ~agree_known",
-            "    elif cond_v != 0:",
-            "        wide_copy(dv, dm, av, am, n, dst_width)",
-            "    else:",
-            "        wide_copy(dv, dm, bv, bm, n, dst_width)",
             "",
         ]
 

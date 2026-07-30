@@ -47,6 +47,30 @@ if TYPE_CHECKING:
     from veriforge.model.expressions import Range
     from veriforge.model.variables import Variable
 
+_FIXED_SELF_DETERMINED_UNOPS = _REDUCTION_OPS | frozenset({"!"})
+
+
+def _is_fixed_self_determined(expr: Expression) -> bool:
+    """True when *expr*'s own result width is ALWAYS fixed at 1 bit
+    (IEEE 1364-2005 Table 5-22's self-determined operators: comparisons,
+    &&/||, reduction ops, !) regardless of any enclosing context.
+
+    Used by `_emit_unary`'s `~`/unary `-` branch: such an operand must
+    never be widened to match `~`/`-`'s enclosing context width BEFORE the
+    operator runs -- unlike a regular signal or an arithmetic operand
+    (where extension commutes with the operation), extending a bitwise-
+    complement or negation's operand changes which bits get flipped/
+    negated. Only `~`/`-`'s own RESULT should be extended, after the
+    operator runs at the operand's fixed width. Mirrors the identical
+    helper in `sim/evaluator.py`/`sim/vm/compiler.py`.
+    """
+    etype = type(expr)
+    if etype is BinaryOp:
+        return expr.op in _COMPARISON_OPS
+    if etype is UnaryOp:
+        return expr.op in _FIXED_SELF_DETERMINED_UNOPS
+    return False
+
 
 class _ExprEmitterMixin:
     """Mixin providing expression and signal-walk emitters for CythonCodegen."""
@@ -549,7 +573,19 @@ class _ExprEmitterMixin:
         return f"((((<object>1) << {width})) - 1)"
 
     def _emit_ternary_value_mask_exprs(self, expr: TernaryOp, width: int, *, py: bool) -> tuple[str, str] | None:
-        cond = self._emit_expr(expr.condition, 1)
+        # The condition is self-determined (IEEE 1364-2005 Table 5-22): it
+        # must be evaluated at its OWN natural width, not forced down to 1
+        # bit. Most node types (comparisons, reductions, `!`) are already
+        # self-determined 1-bit results regardless of the width passed in,
+        # so passing 1 "worked" for those by coincidence -- but a condition
+        # that is itself a further TernaryOp/Concatenation/Replication uses
+        # the incoming width to size its OWN internal merge/shift
+        # computation (e.g. a nested ternary condition's `wmask(width)`
+        # truncating its ambiguous-branch merge down to 1 bit, corrupting
+        # every bit but the LSB). Confirmed wrong against Icarus for
+        # `a0 * (((|a1[0]) ? a4 : {3{a0}}) ? a3 : (~|a5[58:17]))`.
+        cond_w = self._expr_width(expr.condition)
+        cond = self._emit_expr(expr.condition, cond_w)
         # IEEE 1364-2005 §5.5.1: the ternary's OWN combined signedness
         # (signed only if BOTH branches are signed) governs sign- vs
         # zero-extension of whichever branch is selected -- not each
@@ -582,7 +618,7 @@ class _ExprEmitterMixin:
             # specific code path.
             true_expr = self._emit_py_expr(expr.true_expr, tw)
             false_expr = self._emit_py_expr(expr.false_expr, fw)
-            cond_mask = self._emit_py_mask_expr(expr.condition, 1)
+            cond_mask = self._emit_py_mask_expr(expr.condition, cond_w)
             true_mask = self._emit_py_mask_expr(expr.true_expr, tw)
             false_mask = self._emit_py_mask_expr(expr.false_expr, fw)
             width_mask = self._emit_py_width_mask(width)
@@ -595,7 +631,7 @@ class _ExprEmitterMixin:
         else:
             true_expr = self._emit_expr(expr.true_expr, width, own_signed)
             false_expr = self._emit_expr(expr.false_expr, width, own_signed)
-            cond_mask = self._emit_mask_expr(expr.condition, 1)
+            cond_mask = self._emit_mask_expr(expr.condition, cond_w)
             true_mask = self._emit_mask_expr(expr.true_expr, tw)
             false_mask = self._emit_mask_expr(expr.false_expr, fw)
             width_mask = f"wmask({width})"
@@ -604,8 +640,33 @@ class _ExprEmitterMixin:
         known_mask = f"((~((({true_expr}) ^ ({false_expr})) | ({true_mask}) | ({false_mask}))) & {width_mask})"
         merged_value = f"(({true_expr}) & ({known_mask}))"
         merged_mask = f"(({width_mask}) ^ ({known_mask}))"
-        value_expr = f"(({merged_value}) if ({cond_mask}) else (({true_expr}) if ({cond}) else ({false_expr})))"
-        mask_expr = f"(({merged_mask}) if ({cond_mask}) else (({true_mask}) if ({cond}) else ({false_mask})))"
+        # A known-1 bit anywhere in the condition makes it definitely true
+        # regardless of unrelated x/z bits elsewhere (mirrors Value.reduce_or
+        # / TernaryOp in sim/evaluator.py) -- checking `cond_mask` alone here
+        # treated ANY x/z bit in the condition as fully ambiguous (triggering
+        # the merge below) even when a known-1 bit elsewhere already
+        # determined the outcome. Only "cond_mask == 0" (fully defined, and
+        # since cond_known1 is false, definitely zero) selects the false
+        # branch outright.
+        #
+        # `cond`/`cond_mask` must be masked to `cond_w` bits before this
+        # check: `_emit_expr`'s raw C `long long` result is only meaningful
+        # within its own `cond_w` bits -- e.g. `$signed(1'b1)` emits
+        # `_sign_ext(1, 1)`, which is -1 (ALL 64 bits set) as a raw C value,
+        # matching the natural C representation of "signed -1" but NOT
+        # scoped to cond_w. Without masking, those spurious high bits
+        # (cond_mask=0 there, so never excluded by `~cond_mask`) get read
+        # as a bogus "known-1", forcing a branch to be selected outright
+        # instead of correctly falling through to the ambiguous merge.
+        # Confirmed against Icarus for
+        # `-($signed((a7 == a2[4])) ? ... : ...)`.
+        cond_bits = f"wmask({cond_w})"
+        cond_known1 = f"((({cond}) & {cond_bits}) & ~(({cond_mask}) & {cond_bits}))"
+        cond_mask_zero = f"((({cond_mask}) & {cond_bits}) == 0)"
+        value_expr = (
+            f"(({true_expr}) if ({cond_known1}) else (({false_expr}) if {cond_mask_zero} else ({merged_value})))"
+        )
+        mask_expr = f"(({true_mask}) if ({cond_known1}) else (({false_mask}) if {cond_mask_zero} else ({merged_mask})))"
         return value_expr, mask_expr
 
     def _emit_py_expr(self, expr: Expression, width: int) -> str | None:  # noqa: PLR0911
@@ -1102,7 +1163,17 @@ class _ExprEmitterMixin:
             op_width = width
 
         left = self._emit_expr(expr.left, op_width, signed_override)
-        right = self._emit_expr(expr.right, op_width, signed_override)
+        # The shift COUNT is always interpreted as an unsigned magnitude
+        # (IEEE 1364-2005 Table 5-22 / SS5.6) regardless of its own declared
+        # signedness -- e.g. a 1-bit `signed` shift-count operand holding
+        # 1'b1 (value -1 in its own 1-bit signed representation) must still
+        # shift by 1, not by a sign-extended -1. `signed_override=False`
+        # forces `_emit_expr`'s Identifier case to zero- rather than
+        # sign-extend when widening to `op_width`. Confirmed against Icarus
+        # for `$unsigned(a1) << a0` with a0 declared `signed [0:0]` and
+        # a0=1 (mirrors the identical fix in `_wide_emitter.py`).
+        right_signed_override = False if expr.op in ("<<", ">>", "<<<", ">>>") else signed_override
+        right = self._emit_expr(expr.right, op_width, right_signed_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
@@ -1220,6 +1291,35 @@ class _ExprEmitterMixin:
         # sign-extension does), confirmed against Icarus/Verilator (see
         # notes/known_issues.md).
         if expr.op in ("~", "+", "-"):
+            if _is_fixed_self_determined(expr.operand):
+                # The operand's own result is ALWAYS fixed-width regardless
+                # of context (IEEE 1364-2005 Table 5-22: comparisons,
+                # &&/||, reduction ops, ! are self-determined 1-bit
+                # results) -- unlike a regular signal or another context-
+                # determined operator, it must NOT be widened to match
+                # `~`/`-`'s context before the operator runs. Doing so is
+                # wrong for `~`/unary `-` specifically (unlike arithmetic
+                # operand-widening, which is safe since extension commutes
+                # with addition): zero-extending a 1-bit `&&` result before
+                # complementing gives the wrong answer. Evaluate at the
+                # operand's own fixed width, apply the operator, THEN
+                # extend the RESULT. Confirmed against Icarus for
+                # `$signed(~({a0, a6, a0} && a7)))`; mirrors the identical
+                # fix in `sim/evaluator.py`/`sim/vm/compiler.py`.
+                operand = self._emit_expr(expr.operand, ow)
+                if expr.op == "-":
+                    core = f"((-({operand})) & wmask({ow}))"
+                elif expr.op == "~":
+                    core = f"((~({operand})) & wmask({ow}))"
+                else:
+                    core = f"({operand})"
+                eval_width = max(ow, width) if width else ow
+                if eval_width <= ow:
+                    return core
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if eff_signed:
+                    return f"(_sign_ext({core}, {ow}) & wmask({eval_width}))"
+                return f"(({core}) & wmask({eval_width}))"
             eval_width = max(ow, width) if width else ow
             operand = self._emit_expr(expr.operand, eval_width, signed_override)
             eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)

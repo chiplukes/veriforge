@@ -2019,7 +2019,18 @@ class _StmtEmittersMixin:
         lines = [
             f"{pad}{iter_name} = 0",
             f"{pad}while True:",
-            f"{inner_pad}if ({cond_mask}) != 0 or not ({cond}):",
+            # A known-1 bit anywhere makes the condition definitely true
+            # regardless of unrelated x/z bits elsewhere (mirrors
+            # Value.reduce_or / TernaryOp in sim/evaluator.py) -- checking
+            # `cond_mask != 0` alone here broke the loop on ANY x/z bit even
+            # when a known-1 bit elsewhere already determined the loop
+            # should continue. `_emit_if`/`_emit_for` get this right for
+            # free by not consulting the mask at all (an x/z bit's value
+            # bit is conventionally stored as 0, so a plain truthiness
+            # check on `cond` already implements "known-1 forces true,
+            # else false") -- this loop's explicit mask check needs the
+            # same three-way logic instead.
+            f"{inner_pad}if not (({cond}) & ~({cond_mask})):",
             f"{inner_pad}    break",
         ]
 

@@ -725,16 +725,20 @@ class Interpreter:  # cm:e3f1b4
                 continue
 
             if op == Op.JUMP_IF_ZERO:
+                # A known-1 bit anywhere makes the condition definitely
+                # true regardless of unrelated x/z bits elsewhere (mirrors
+                # Value.reduce_or / TernaryOp in sim/evaluator.py) -- only
+                # "definitely all-zero, no known 1" jumps (treated as
+                # false), which also covers the fully-ambiguous "some x/z,
+                # no known 1" case.
                 val = s_pop()
-                if not val.is_defined:
-                    pc = arg1  # x/z treated as false
-                elif val.val == 0:
+                if not (val.val & ~val.mask):
                     pc = arg1
                 continue
 
             if op == Op.JUMP_IF_NONZERO:
                 val = s_pop()
-                if val.is_defined and val.val != 0:
+                if val.val & ~val.mask:
                     pc = arg1
                 continue
 
@@ -951,9 +955,17 @@ class Interpreter:  # cm:e3f1b4
                 false_val = s_pop()
                 true_val = s_pop()
                 cond = s_pop()
-                if cond.mask == 0:
-                    # Condition fully defined: pick one branch
-                    s_append(true_val if cond.val != 0 else false_val)
+                # A known-1 bit anywhere makes the condition definitely
+                # true regardless of unrelated x/z bits elsewhere (mirrors
+                # Value.reduce_or / TernaryOp in sim/evaluator.py) -- using
+                # raw `cond.mask == 0` here treated ANY x/z bit as
+                # ambiguous (triggering the merge below) even when a
+                # known-1 bit elsewhere already determined the outcome.
+                if cond.val & ~cond.mask:
+                    s_append(true_val)
+                elif cond.mask == 0:
+                    # Condition fully defined and zero: pick false branch
+                    s_append(false_val)
                 else:
                     # Condition has x/z: merge true/false bit by bit. A bit
                     # only agrees when it is KNOWN in both branches and has
