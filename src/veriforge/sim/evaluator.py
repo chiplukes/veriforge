@@ -893,7 +893,27 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         if expr.hierarchy:
             name = ".".join(expr.hierarchy) + "." + name
         v = ctx._signals.get(name)
-        return v.width if v is not None else 32
+        if v is not None:
+            return v.width
+        # Struct field access ("base.field") is not a flat `ctx._signals`
+        # entry -- eval()'s own Identifier hot path already falls back to
+        # `_resolve_struct_field_value` for this case (see the "Check for
+        # struct field access" comment there). This helper needs the same
+        # fallback: without it, a struct field's self-determined width
+        # silently defaulted to 32 regardless of its true (often narrower)
+        # width, which is normally harmless UNTIL that wrong width gets
+        # used to force-extend an enclosing self-determined construct's
+        # OWN aggregate result (e.g. a single-field-struct's Concatenation
+        # wrapper, sized via this exact function, then zero-extended from
+        # 16 to a bogus 32 bits before a further Replication multiplies
+        # that already-corrupted value) -- confirmed wrong (regression)
+        # against a `{N{struct.field}}` repro for
+        # `mst_w_data_int_r = {UpsizeFactor{wr_w_q.data}}` in the PULP AXI
+        # lite DW converter example.
+        struct_val = _resolve_struct_field_value(name, ctx)
+        if struct_val is not None:
+            return struct_val.width
+        return 32
     if etype is Literal:
         return expr.width or 32
     if etype is BitSelect:
