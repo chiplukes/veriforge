@@ -195,15 +195,237 @@ each (see `VERIFORGE_DIFF_SEED`/`VERIFORGE_DIFF_CASES` in the test file):
   + shift)` construction in both `evaluator.py` and `sim/vm/interpreter.py`,
   which had the identical crash risk for a huge self-determined shift amount.
 
-**Deferred (not fixed)**: the compiled engine's ternary/context-determined
-operator codegen (`sim/compiled/_expr_emitter.py`, `_wide_emitter.py`) never
-received the `signed_override`-threading fix described above for the
-conditional operator — it is a separate, much larger codegen architecture
-than `sim/vm/compiler.py`, and replicating the fix there is a substantial
-follow-up, not yet scheduled. Running the harness with
-`VERIFORGE_DIFF_COMPILED=1` will show ternary-related compiled-engine
-divergences; this is why the harness's default run does not include the
-compiled engine (see the module docstring in `test_differential.py`).
+**Update (July 2026, work plan item 2.7 sub-item 3)**: the compiled-engine
+`signed_override`-threading gap described above is now fixed — see the new
+"Compiled-engine ternary/context-determined-operator codegen" section below,
+which also documents a large family of related bugs (in ALL FOUR engines,
+not just compiled) that the differential harness surfaced once it was
+finally run with `VERIFORGE_DIFF_COMPILED=1` for real. The harness's default
+run still excludes the compiled engine (opt in via
+`VERIFORGE_DIFF_COMPILED=1`) because a larger-than-default case count
+(`VERIFORGE_DIFF_CASES=300`+) at alternate seeds still surfaces further
+compiled-engine-only divergences in the wide emitter's width/signedness
+propagation — see that section's "Residual gap" note.
+
+### Compiled-engine ternary/context-determined-operator codegen, and a wide family of related width/signedness/x-propagation bugs
+
+**Status**: Substantially resolved (July 2026, work plan item 2.7 sub-item
+3). The originally-scoped fix (threading `signed_override` through the
+compiled engine's ternary codegen, mirroring `sim/evaluator.py`/
+`sim/vm/compiler.py`) led to root-causing and fixing a much larger family of
+real, independently-reproducible bugs across **all four** engines
+(reference, vm, vm-fast, compiled) — the differential fuzzer harness
+(`tests/test_sim/test_differential.py`) had never actually been run with
+`VERIFORGE_DIFF_COMPILED=1` before, so none of these had been caught. All
+fixes below were verified against Icarus Verilog and/or first-principles
+IEEE 1364-2005 derivation before applying; the default-seed 10-batch
+differential run (`VERIFORGE_DIFF_COMPILED=1 VERIFORGE_DIFF_CASES=100`) is
+now fully green.
+
+**Compiled engine — the original scope**:
+- `_wide_emitter.py`'s `_emit_wide_expr_to_scratch` TernaryOp case now
+  computes `own_signed` once and forces it (never the branch's own
+  signedness) into both branches' recursive calls at the FULL destination
+  width, matching the already-correct narrow-path pattern from item 3.4.
+- `UnaryOp` (`~`/`-`) and `BinaryOp` (bitwise/arithmetic) cases in the same
+  file now thread `signed_override` into their operand recursions, and
+  (for `~`/`-`/`+`) recurse directly at the full `dst_width` rather than
+  the operand's own self-width followed by a post-hoc wrap — computing
+  `~x` at x's own narrow self-width then zero/sign-padding the *result* is
+  not equivalent to extending x to the context width first and
+  complementing all of it.
+- The narrow (`_expr_emitter.py`) `_emit_expr`/`_emit_unary`/`_emit_binary`
+  got the equivalent `signed_override` threading.
+
+**Compiled engine — bugs found while verifying the above**:
+- `RangeSelect`/`PartSelect`/struct-field/reduction-op/`!`/bitwise-op-result
+  scratch fills, when `signed_override` forces sign-extension, called
+  `wide_sign_extend(..., n_words, ...)` — filling all the way to the
+  scratch array's max word count for the WHOLE statement, not just up to
+  THIS call's own `dst_width`. Harmless when `dst_width` happens to equal
+  `n_words*64` (the common top-level-assignment case, which is why the
+  original sub-item-2 fix didn't catch it), but corrupts a small
+  `$signed()`-wrapped concatenation MEMBER (e.g. `{a, $signed(b[3:0])}`)
+  by smearing the sign fill into the *next* concat member's shared scratch
+  words. Fixed with a new shared helper,
+  `_WideEmitterMixin._wide_sign_extend_to_dst_lines()`, which sign-extends
+  and then applies an explicit tail mask so the result is bounded to
+  exactly `dst_width` bits (not just whole words) — `wide_sign_extend`'s
+  own `n` parameter only understands whole words.
+- `RangeSelect`/`PartSelect`'s `_emit_wide_expr_to_scratch` cases (and the
+  two struct-field-access variants) previously had NO `signed_override`
+  handling at all — always zero-filled beyond the slice's own width,
+  wrong for `$signed(a4[24:19])` assigned into a wider destination.
+- `_WIDE_BINARY_PRIMS` (bitwise `&`/`|`/`^`/`~^`/`^~`) recursed into each
+  operand at the operand's OWN self-width instead of `max(both operands'
+  self-widths)` — the same bug class as the (already-fixed) `~`/`-` gap,
+  just for `BinaryOp` — e.g. `$signed(!a4) ^ a1` (`!a4` self-width 1,
+  `a1` self-width 8) lost the sign-extension of the 1-bit operand before
+  combining. Fixed by computing `op_width = max(lw, rw)` and recursing
+  both operands there (matching `_expr_emitter.py`'s `_NATURAL_WIDTH_OPS`
+  handling), then a separate post-hoc sign-extension of the RESULT (not
+  each operand) to the enclosing `dst_width` using the whole BinaryOp's
+  combined signedness.
+- Reduction ops (`&`/`|`/`^`/`~&`/`~|`/`~^`/`^~`) and `!` had the identical
+  "always unsigned, zero-fill beyond bit 0" gap when `$signed()`-wrapped —
+  fixed the same way.
+- `_WIDE_CMP_PRIMS` (`==`/`!=`/`<`/`<=`/`>`/`>=`) recursed into each
+  operand using the OUTER destination's own word count (`n_words`) instead
+  of `n_operands` (sized for `max(operand widths)`) — comparing a 234-bit
+  concatenation against a 1-bit value truncated the wider operand's
+  scratch array to 2 words when it needed 4, reading garbage beyond that
+  and (in one case) corrupting an unrelated scratch slot badly enough to
+  trigger a C stack-smashing abort. Fixed by using `n_operands` for the
+  operand recursion and adding a new `_expr_max_internal_width()` scanner
+  (recurses into every operand, not just each node's own self-determined
+  RESULT width) so the top-level statement's scratch-array sizing
+  (`_emit_wide_lhs_write_new`) also accounts for a comparison's internal
+  operand width, not just the comparison's own always-1-bit result.
+- `wide_cmp_eq`/`wide_cmp_ne` (in `_gen_wide_section.py`) set `dm[0] = 1 if
+  has_x else 0` unconditionally, never checking whether a KNOWN mismatch
+  had already resolved the comparison to a definite result — mirrors
+  `Value._cmp`'s existing "==`/`!=` short-circuit" precision note
+  (a known-differing bit resolves the comparison regardless of x/z bits
+  elsewhere). Also switched the mismatch check from "skip the whole word
+  if either word has ANY x/z bit" to a proper bit-level
+  `(av[i]^bv[i]) & ~am[i] & ~bm[i]` check — a word can have some x/z bits
+  and some known-mismatching bits at the same time.
+- `&&`/`||`'s wide-path result mask (`_sc{slot}_m[0] = bl_m | br_m`) had
+  the same missing-short-circuit shape — fixed using `wide_reduce_or`'s
+  already-correct per-operand truthiness/definedness to implement the
+  proper `Value.logical_and`/`logical_or` precision rule (a known-nonzero
+  operand forces `||` definitely true regardless of the other operand's
+  x/z bits; a known-EXACTLY-zero operand forces `&&` definitely false).
+
+**Reference engine (`sim/evaluator.py`) — bugs found while cross-checking
+against the compiled fixes above (these predate this work, independently
+reachable, not introduced by it)**:
+- `Concatenation`/`Replication`/`AssignmentPattern`'s positional-parts
+  branch evaluated each part with `self.eval(p, ctx)` (width=0, the
+  default) — leaving any context-determined operator WITHIN a concat/
+  replication member (a nested `~`, arithmetic, or ternary) entirely
+  unresized, since context-determined resizing is gated on a nonzero
+  width being passed in. Each part is self-determined (IEEE 1364-2005
+  §5.4.1): its OWN natural width is the context that should resize a
+  nested context-determined operator within it. Fixed by evaluating each
+  part with `width=_expr_self_width(part, ctx)`.
+- `BinaryOp` bitwise ops (`&`/`|`/`^`/`~^`/`^~`) extended each operand
+  straight to the OUTER enclosing `width` using that operand's OWN
+  individual signedness — the same architectural bug as the compiled
+  engine's `_WIDE_BINARY_PRIMS` gap above, and fixed the same way: combine
+  at `op_width = max(both operands' self-determined widths)` first (each
+  operand evaluated there, using its own signedness), THEN extend the
+  RESULT separately to the outer `width` using the whole expression's own
+  combined signedness. The naive "extend each operand straight to outer
+  width" approach lets one signed operand's sign-extension (e.g. of an x
+  value) smear across the whole outer width even when the operator's own
+  combined signedness is unsigned.
+- `_expr_self_width`'s `BitSelect` case unconditionally returned `1`,
+  correct for a true scalar bit-select (`a[3]`) but wrong for unpacked-
+  ARRAY element access using the same AST node shape (`arr[3]` where
+  `arr` is `logic [31:0] arr[5]` — a full 32-bit element read, not a
+  single bit). This is a long-standing latent bug (masked everywhere else
+  `_expr_self_width` is used, since it's only ever consulted as a floor
+  alongside an outer context width that already dominated the wrong `1`)
+  that only became fatal once the new bitwise-op fix above relied on it
+  as the SOLE determinant of `op_width` — confirmed via a real regression
+  in `ibex_alu.sv`'s RV32B butterfly network (`invbutterfly_result &
+  butterfly_mask_not[stg]`, an unpacked-array element read). Fixed by
+  checking `ctx._memory_names`/`ctx._memories`, mirroring
+  `sim/vm/compiler.py`'s `_expr_width`, which already made this
+  distinction correctly.
+- `_expr_self_width` didn't special-case `<<`/`<<<`: a left-shift's
+  self-determined width needs `left_width + shift_amount` (for a constant
+  shift amount), not `max(left, right)` — otherwise `hi << 32` (`hi` 31
+  bits) is underestimated at 32 bits instead of 63, silently truncating
+  the shifted-in bits once that underestimate is used as an operand's
+  evaluation width. Confirmed via `tests/test_sim/test_compiled_edge_shapes.py`'s
+  `seam*_overflow` cases (`lo | (hi << 32)`, the intermediate-overflow
+  class from work item 2.2). Mirrors `sim/vm/compiler.py`'s `_expr_width`,
+  which already had this special case.
+- `_expr_signed`'s `UnaryOp` case only special-cased `!` as always-
+  unsigned; all other reduction ops (`&`/`|`/`^`/`~&`/`~|`/`~^`/`^~`) fell
+  through to "signed if operand is signed" — wrong, since reduction ops
+  ALWAYS produce an unsigned 1-bit result regardless of operand
+  signedness (IEEE 1364-2005 §5.5.1). `~& a4` (`a4` declared signed) on a
+  non-all-1s value should give a defined `1` zero-extended into a wider
+  context, but instead sign-extended to all-1s.
+- `_expr_signed`'s `BinaryOp` case didn't special-case comparisons
+  (`==`/`!=`/`<`/`<=`/`>`/`>=`) or logical ops (`&&`/`||`) — these ALWAYS
+  produce an unsigned 1-bit result (IEEE 1364-2005 Table 5-22) regardless
+  of operand signedness, but fell through to "signed if both operands
+  signed." `(a == b)` with both operands declared signed, assigned into a
+  wider destination, sign-extended a `1` result to all-1s instead of
+  zero-extending to `1`.
+- `_merge_xz` (used when a ternary's condition is x/z: bitwise-agreement
+  merge of both branches per IEEE 1364-2005 Table 5-4) computed `agree =
+  ~(a.val^b.val) & ~(a.mask^b.mask)` — treating two x/z bits as
+  "agreeing" whenever their (val, mask) *representations* happened to
+  match, which is always true since this codebase pairs x/z with a
+  placeholder `val=0`. Two genuinely-unknown branches should stay
+  unknown, not collapse to a defined `0`. Fixed to require BOTH operands
+  known (`~mask`) AND equal, not just representation-equal.
+  `semantics.py`, `sim/compiled/_expr_emitter.py`'s narrow ternary merge,
+  and `_wide_emitter.py`'s `wide_mux` were all ALREADY correct (built or
+  verified after item 3.4/2.6); only `sim/evaluator.py` had the bug.
+
+**`sim/vm/compiler.py` (bytecode compiler) — same-shaped bugs, since it's
+a structurally parallel (but independently written) engine**:
+- `_expr_width`'s `BitSelect` case already correctly distinguished
+  memory-element access from a true scalar bit-select (no bug there), but
+  its `BinaryOp` case had the identical missing-shift-special-case bug as
+  `_expr_self_width` above, AND `_expr_signed`'s `UnaryOp`/`BinaryOp`
+  cases had the identical missing-reduction/comparison-always-unsigned
+  bugs — fixed the same way. `_compile_expr`'s bitwise-op branch got the
+  same `op_width = max(...)` restructuring as `eval()`'s.
+
+**`sim/value.py` / VM interpreters — X-propagation precision bugs, found
+alongside the above (not introduced by this work)**:
+- `Value.reduce_and()` returned x whenever ANY bit was x/z, never checking
+  whether a KNOWN-0 bit had already resolved the result to definite `0`
+  (mirrors the ALREADY-correct `reduce_or`, which does check for a
+  known-1). `sim/vm/interpreter.py` and `sim/vm/_interp_fast.pyx`'s
+  `OP_RED_AND` (both its narrow and wide-condition branches) called
+  `Value.reduce_and()`/had an inlined copy of the same bug and needed the
+  identical fix (the compiled engine's `wide_reduce_and` primitive was
+  already correct).
+- `Value.logical_not()` (`!`) had the same shape: returned x whenever ANY
+  bit was x/z, without checking for a known-1 bit first (which should
+  force `!x` to definite `0`). `_interp_fast.pyx`'s `OP_LOG_NOT` had an
+  inlined copy of the same bug.
+- The compiled engine's own narrow-path mask computation for reduction
+  ops (`_expr_emitter.py`'s `_emit_mask_expr` UnaryOp branch) had a
+  BLANKET fallback (`return self._emit_mask_expr(expr.operand, ow)`,
+  passing the operand's raw multi-bit mask straight through) for ALL
+  unary ops including reductions — wrong for `&`/`~&` (needs the
+  known-0-forces-definite check) and `|`/`~|`/`!` (needs the
+  known-1-forces-definite check); only `~`/`+`/`-`/`^`-family reductions
+  (which genuinely have no absorbing bit value) were fine with the
+  blanket pass-through. Fixed with explicit per-op mask expressions.
+- The compiled engine's narrow-path `==`/`!=` mask computation
+  (`_emit_mask_expr`'s `BinaryOp` fallback, `lm | rm`) had the same
+  missing-short-circuit gap as `wide_cmp_eq`/`wide_cmp_ne` above — a
+  known-differing bit should resolve `==`/`!=` to a definite result
+  regardless of x/z bits elsewhere; `<`/`<=`/`>`/`>=`/`&&`/`||` correctly
+  keep the blanket `lm | rm` fallback (they genuinely need full certainty,
+  matching `Value._cmp`'s non-`==` branch). The compiled engine's `&&`/
+  `||` mask computation had the identical gap and needed the identical
+  known-nonzero/known-zero short-circuit fix as the wide-path version
+  above.
+
+**Residual gap (not fixed)**: the default-seed differential run
+(`VERIFORGE_DIFF_CASES=100`) is fully green, but a larger case count at
+alternate seeds (`VERIFORGE_DIFF_CASES=300 VERIFORGE_DIFF_SEED=<other>`)
+still surfaces further compiled-engine-only divergences (roughly 20 of 30
+batches at last check) — almost certainly more instances of the same
+"wide emitter's width/signedness propagation" bug family documented above,
+in constructs not yet isolated. This is a large, open-ended architectural
+area (the wide emitter reimplements width/signedness propagation
+independently, per-node-type, rather than sharing `semantics.py`'s
+already-unified logic — see item 4.2's explicit non-goal), not yet fully
+characterized; a dedicated follow-up pass (mirroring item 4.2 Phase A's
+characterize-first methodology) is warranted before considering this area
+closed.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

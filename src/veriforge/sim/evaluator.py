@@ -338,6 +338,46 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     target = max(width, _expr_self_width(expr.left, ctx))
                     eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
                     left = left.sign_extend(target) if eff_signed else left.resize(target)
+            # Bitwise ops: combine at the OPERATOR's own natural width
+            # (max of the two operands' self-determined widths) first, each
+            # operand extended using its OWN individual signedness only far
+            # enough to align with the other -- NOT extended straight to
+            # some wider outer `width` using its own signedness, which
+            # would let one signed operand's sign-extension (e.g. of an X
+            # value) smear across the whole outer width even when the
+            # OPERATOR's own combined signedness (both operands signed) --
+            # which is what should govern the outer extension -- is
+            # unsigned. The result is then extended separately to `width`
+            # using the whole BinaryOp's own combined signedness. Confirmed
+            # against a from-scratch IEEE 1364-2005 SS5.5.2 derivation (see
+            # notes/known_issues.md); mirrors the identical fix already
+            # applied to the compiled engine's wide emitter.
+            elif op in ("&", "|", "^", "~^", "^~"):
+                # Evaluate each operand AT op_width (not the outer `width`):
+                # a nested context-determined operator (e.g. a shift) needs
+                # to see this operator's own op_width as ITS context in
+                # order to extend correctly BEFORE running (a shift's own
+                # "extend left operand" step is gated on a nonzero width
+                # being passed in -- self-determined (width=0) evaluation
+                # would skip it entirely, e.g. `lo | (hi << 32)` would
+                # shift `hi` out completely since 32 >= hi's own un-extended
+                # width). op_width itself must still come from each
+                # operand's OWN self-determined width (not the outer
+                # `width`), per the docstring above.
+                op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                left = self.eval(expr.left, ctx, op_width, signed_override)
+                right = self.eval(expr.right, ctx, op_width, signed_override)
+                if left.width != op_width:
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                    left = left.sign_extend(op_width) if eff_signed else left.resize(op_width)
+                if right.width != op_width:
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.right, ctx)
+                    right = right.sign_extend(op_width) if eff_signed else right.resize(op_width)
+                result = _eval_binary_op(op, left, right)
+                if width and result.width != width:
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                    result = result.sign_extend(width) if eff_signed else result.resize(width)
+                return result
             else:
                 left = self.eval(expr.left, ctx, width, signed_override)
                 right = self.eval(expr.right, ctx, width, signed_override)
@@ -417,7 +457,15 @@ class ExpressionEvaluator:  # cm:7e8b5d
         if etype is Concatenation:
             if not expr.parts:
                 return Value(0, width=0)
-            parts = [self.eval(p, ctx) for p in expr.parts]
+            # Each member is self-determined (IEEE 1364-2005 §5.4.1): its
+            # OWN natural width is the "context" that resizes any
+            # context-determined operator (~, arithmetic, a nested ternary)
+            # within it. Evaluating with width=0 (the eval() default) would
+            # leave those nested operators entirely unresized -- confirmed
+            # wrong against Icarus for e.g. `{a, (~(cond ? ~x : y))}` where
+            # `~x` needs to be sign-extended to match `y`'s width *before*
+            # the outer `~` runs (see notes/known_issues.md).
+            parts = [self.eval(p, ctx, _expr_self_width(p, ctx)) for p in expr.parts]
             result = parts[0]
             for p in parts[1:]:
                 result = result.concat(p)
@@ -462,7 +510,8 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- Replication -------------------------------------------
         if etype is Replication:
             count_val = self.eval(expr.count, ctx)
-            inner = self.eval(expr.value, ctx)
+            # Self-determined, same reasoning as Concatenation above.
+            inner = self.eval(expr.value, ctx, _expr_self_width(expr.value, ctx))
             if count_val.is_defined:
                 return inner.replicate(int(count_val))
             return Value.x(inner.width)
@@ -490,7 +539,8 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 return result.resize(width) if width and result.width != width else result
 
             if expr.positional:
-                parts = [self.eval(part, ctx) for part in expr.positional]
+                # Self-determined, same reasoning as Concatenation above.
+                parts = [self.eval(part, ctx, _expr_self_width(part, ctx)) for part in expr.positional]
                 result = _concat_values(parts)
                 return result.resize(width) if width and result.width != width else result
 
@@ -697,6 +747,20 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
     if etype is Literal:
         return expr.width or 32
     if etype is BitSelect:
+        # BitSelect also represents unpacked-array ELEMENT access (e.g.
+        # `arr[4]` where `arr` is `logic [31:0] arr[5]`) -- that reads a
+        # full element, not a single bit, so self-width must be the
+        # element's own width, not 1 (mirrors `sim/vm/compiler.py`'s
+        # `_expr_width`, which already distinguishes the two cases). This
+        # was previously masked by every OTHER caller of
+        # `_expr_self_width` using it only as a floor alongside an outer
+        # context width that already dominated the wrong `1` -- exposed
+        # once a caller (bitwise-op width propagation) relies on it alone.
+        if type(expr.target) is Identifier:
+            tname = _identifier_name(expr.target)
+            if tname in ctx._memory_names:
+                _mem_data, elem_w = ctx._memories[tname]
+                return elem_w
         return 1
     if etype is RangeSelect:
         if isinstance(expr.msb, Literal) and isinstance(expr.lsb, Literal):
@@ -715,6 +779,22 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
     if etype is BinaryOp:
         if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
             return 1
+        if expr.op in ("<<", "<<<"):
+            # Left-shift's self-determined width needs left_width + shift
+            # amount, not just max() -- otherwise `hi << 32` (hi 31 bits)
+            # gets underestimated at 32 bits instead of 63, silently
+            # truncating away the shifted-in bits (mirrors
+            # `sim/vm/compiler.py`'s `_expr_width`, which has the identical
+            # special case and the same rationale in its own docstring).
+            lw = _expr_self_width(expr.left, ctx)
+            if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
+                return lw + int(expr.right.value)
+            return max(lw, _expr_self_width(expr.right, ctx))
+        if expr.op in (">>", ">>>"):
+            # A shift's self-determined width is its LEFT operand's width
+            # only -- the shift amount never contributes bits to the
+            # result (mirrors `sim/vm/compiler.py`'s `_expr_width`).
+            return _expr_self_width(expr.left, ctx)
         return max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
     if etype is UnaryOp:
         if expr.op in ("&", "|", "^", "~&", "~|", "~^", "^~", "!"):
@@ -777,9 +857,13 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             cache[id(expr)] = False
         return False
 
-    # -- UnaryOp: signed if operand is signed ------------------------------
+    # -- UnaryOp: signed if operand is signed, EXCEPT reduction ops --------
+    # `!` and all reduction ops (&, |, ^, ~&, ~|, ~^, ^~) always produce an
+    # unsigned 1-bit result regardless of the operand's own signedness
+    # (IEEE 1364-2005 SS5.5.1) -- only the context-determined pass-through
+    # ops (~, +, -) inherit the operand's signedness.
     if etype is UnaryOp:
-        if expr.op == "!":  # logical NOT → always unsigned 1-bit
+        if expr.op in ("!", "&", "|", "^", "~&", "~|", "~^", "^~"):
             result = False
             if cache is not None:
                 cache[id(expr)] = result
@@ -789,10 +873,15 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             cache[id(expr)] = result
         return result
 
-    # -- BinaryOp: for shift, only left operand counts; otherwise both ----
+    # -- BinaryOp: for shift, only left operand counts; comparisons and
+    # logical ops always produce an unsigned 1-bit result regardless of
+    # operand signedness (IEEE 1364-2005 SS5.5.1, Table 5-22); otherwise
+    # both operands must be signed ------------------------------------
     if etype is BinaryOp:
         if expr.op in ("<<", ">>", "<<<", ">>>"):
             result = _expr_signed(expr.left, ctx, cache)
+        elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+            result = False
         else:
             result = _expr_signed(expr.left, ctx, cache) and _expr_signed(expr.right, ctx, cache)
         if cache is not None:
@@ -999,11 +1088,18 @@ def _merge_xz(a: Value, b: Value) -> Value:
     """Merge two Values — bits that agree are kept, others become x.
 
     Used when a ternary condition is x/z: take the bitwise agreement
-    of both branches.
+    of both branches (IEEE 1364-2005 Table 5-4). A bit only "agrees" when
+    it is KNOWN (not x/z) in BOTH operands and has the same value -- two
+    x/z bits do NOT agree just because their (val, mask) representation
+    happens to match (mask=1 pairs with a placeholder val=0 in this
+    codebase's Value encoding); confirmed against Icarus: merging two x/z
+    branches must stay x, not collapse to a defined 0.
     """
     w = max(a.width, b.width)
-    # Bits where both val and mask agree
-    agree = ~(a.val ^ b.val) & ~(a.mask ^ b.mask)
-    new_mask = ~agree & ((1 << w) - 1)
+    wmask = (1 << w) - 1
+    both_known = ~a.mask & ~b.mask & wmask
+    same_value = ~(a.val ^ b.val) & wmask
+    agree = both_known & same_value
+    new_mask = ~agree & wmask
     new_val = a.val & b.val & ~new_mask
     return Value(new_val, width=w, mask=new_mask)

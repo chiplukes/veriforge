@@ -2349,20 +2349,28 @@ cdef int _execute_core(
             sp += 1; continue
 
         if op == OP_LOG_NOT:
+            # A known-1 bit anywhere forces the operand definitely nonzero,
+            # so `!` is definitely 0 regardless of unrelated unknown bits
+            # elsewhere (mirrors OP_LOG_AND/OP_LOG_OR's precision note) --
+            # only "definitely zero" (giving `!` = 1) requires full
+            # certainty. The previous "any x/z bit -> x" check here ran
+            # before checking for a known-1 bit, so it missed that case.
             a = stack[sp - 1]
             if wflag[sp - 1]:
                 has_x = 0
+                any_one = 0
                 for wi in range(WIDE_WORDS):
-                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1; break
-                if has_x:
+                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1
+                    if wv[(sp - 1) * WIDE_WORDS + wi] & ~wm[(sp - 1) * WIDE_WORDS + wi]: any_one = 1
+                if any_one:
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 0
+                elif has_x:
                     stack[sp - 1].val = 0; stack[sp - 1].mask = 1
                 else:
-                    any_one = 0
-                    for wi in range(WIDE_WORDS):
-                        if wv[(sp - 1) * WIDE_WORDS + wi]: any_one = 1; break
-                    stack[sp - 1].val = 0 if any_one else 1
-                    stack[sp - 1].mask = 0
+                    stack[sp - 1].val = 1; stack[sp - 1].mask = 0
                 wflag[sp - 1] = 0
+            elif a.val & ~a.mask:
+                stack[sp - 1].val = 0; stack[sp - 1].mask = 0
             elif a.mask:
                 stack[sp - 1].val = 0; stack[sp - 1].mask = 1
             else:
@@ -2432,27 +2440,39 @@ cdef int _execute_core(
         # ── Reduction ────────────────────────────────────────────
 
         if op == OP_RED_AND:
+            # A known-0 bit forces the result to definite 0 even when other
+            # bits are x/z (mirrors sim/value.py's Value.reduce_and()) --
+            # &v is only x when there is no known-0 bit but at least one
+            # x/z bit. The previous "any x/z bit -> x" shortcut here missed
+            # that case.
             a = stack[sp - 1]
             wmask = mask_for_width(a.width)
             if wflag[sp - 1]:
                 has_x = 0
-                for wi in range(WIDE_WORDS):
-                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1; break
-                if has_x:
+                any_zero = 0
+                wsp = a.width >> 6; bit_in_word = a.width & 63
+                for wi in range(wsp):
+                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1
+                    if (~wv[(sp - 1) * WIDE_WORDS + wi]) & (~wm[(sp - 1) * WIDE_WORDS + wi]):
+                        any_zero = 1
+                if bit_in_word > 0 and wsp < WIDE_WORDS:
+                    tail_mask = (<unsigned long long>1 << bit_in_word) - 1
+                    if wm[(sp - 1) * WIDE_WORDS + wsp] & tail_mask: has_x = 1
+                    if (~wv[(sp - 1) * WIDE_WORDS + wsp]) & (~wm[(sp - 1) * WIDE_WORDS + wsp]) & tail_mask:
+                        any_zero = 1
+                if any_zero:
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 0
+                elif has_x:
                     stack[sp - 1].val = 0; stack[sp - 1].mask = 1
                 else:
-                    all_ones = 1
-                    wsp = a.width >> 6; bit_in_word = a.width & 63
-                    for wi in range(wsp):
-                        if wv[(sp - 1) * WIDE_WORDS + wi] != <unsigned long long>0xFFFFFFFFFFFFFFFF:
-                            all_ones = 0; break
-                    if all_ones and bit_in_word > 0 and wsp < WIDE_WORDS:
-                        if (wv[(sp - 1) * WIDE_WORDS + wsp] & ((<unsigned long long>1 << bit_in_word) - 1)) != ((<unsigned long long>1 << bit_in_word) - 1):
-                            all_ones = 0
-                    stack[sp - 1].val = all_ones; stack[sp - 1].mask = 0
+                    stack[sp - 1].val = 1; stack[sp - 1].mask = 0
                 wflag[sp - 1] = 0
             elif a.mask:
-                stack[sp - 1].val = 0; stack[sp - 1].mask = 1
+                known_mask = wmask & ~a.mask
+                if (a.val & known_mask) != known_mask:
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 0
+                else:
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 1
             else:
                 stack[sp - 1].val = 1 if (a.val & wmask) == wmask else 0
                 stack[sp - 1].mask = 0
@@ -3089,7 +3109,12 @@ cdef int _execute_core(
                             wv[sp * WIDE_WORDS + wi] = wv[(sp + 2) * WIDE_WORDS + wi]
                             wm[sp * WIDE_WORDS + wi] = wm[(sp + 2) * WIDE_WORDS + wi]
             elif a_wide or b_wide:
-                # Condition has x/z with wide operands: merge bit by bit
+                # Condition has x/z with wide operands: merge bit by bit.
+                # A bit only agrees when it is KNOWN in both branches and
+                # has the same value -- two x/z bits do NOT agree just
+                # because their (val, mask) representation happens to
+                # match (see sim/evaluator.py's _merge_xz for the full
+                # rationale; confirmed against Icarus).
                 w = a.width if a.width > b.width else b.width
                 wflag[sp] = 1
                 for wi in range(WIDE_WORDS):
@@ -3097,7 +3122,7 @@ cdef int _execute_core(
                     am_w = wm[(sp + 1) * WIDE_WORDS + wi] if a_wide else (<unsigned long long>a.mask if wi == 0 else 0)
                     bv_w = wv[(sp + 2) * WIDE_WORDS + wi] if b_wide else (<unsigned long long>b.val if wi == 0 else 0)
                     bm_w = wm[(sp + 2) * WIDE_WORDS + wi] if b_wide else (<unsigned long long>b.mask if wi == 0 else 0)
-                    agree_word = ~(av_w ^ bv_w) & ~(am_w ^ bm_w)
+                    agree_word = (~am_w) & (~bm_w) & (~(av_w ^ bv_w))
                     wm[sp * WIDE_WORDS + wi] = ~agree_word
                     wv[sp * WIDE_WORDS + wi] = av_w & bv_w & agree_word
                 # Mask result to w bits
@@ -3116,11 +3141,12 @@ cdef int _execute_core(
                 stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
                 stack[sp].width = w
             else:
-                # Condition has x/z with narrow operands: merge bit by bit
+                # Condition has x/z with narrow operands: merge bit by
+                # bit, same agreement rule as the wide branch above.
                 w = a.width if a.width > b.width else b.width
                 wmask = mask_for_width(w)
-                new_val = ~(a.val ^ b.val) & ~(a.mask ^ b.mask) & wmask
-                new_mask = ~new_val & wmask
+                agree = (~a.mask) & (~b.mask) & (~(a.val ^ b.val)) & wmask
+                new_mask = ~agree & wmask
                 stack[sp].val = a.val & b.val & ~new_mask & wmask
                 stack[sp].mask = new_mask
                 stack[sp].width = w

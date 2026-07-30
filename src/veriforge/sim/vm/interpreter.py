@@ -955,12 +955,19 @@ class Interpreter:  # cm:e3f1b4
                     # Condition fully defined: pick one branch
                     s_append(true_val if cond.val != 0 else false_val)
                 else:
-                    # Condition has x/z: merge true/false bit by bit
+                    # Condition has x/z: merge true/false bit by bit. A bit
+                    # only agrees when it is KNOWN in both branches and has
+                    # the same value -- two x/z bits do NOT agree just
+                    # because their (val, mask) representation happens to
+                    # match (see sim/evaluator.py's _merge_xz for the full
+                    # rationale; confirmed against Icarus).
                     w = max(true_val.width, false_val.width)
                     wmask = _mask_for_width(w)
                     tv = true_val.resize(w)
                     fv = false_val.resize(w)
-                    agree = ~(tv.val ^ fv.val) & ~(tv.mask ^ fv.mask) & wmask
+                    both_known = ~tv.mask & ~fv.mask & wmask
+                    same_value = ~(tv.val ^ fv.val) & wmask
+                    agree = both_known & same_value
                     new_mask = ~agree & wmask
                     new_val = tv.val & fv.val & ~new_mask & wmask
                     s_append(Value(new_val, width=w, mask=new_mask))

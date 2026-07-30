@@ -480,9 +480,17 @@ class Value:  # cm:c8a1e6
     # ── Reduction operators ────────────────────────────────────────────
 
     def reduce_and(self) -> Value:
-        """Unary &v — 1 if all bits are 1."""
+        """Unary &v — 1 if all bits are 1.
+
+        A known-0 bit forces the result to definite 0 even if other bits
+        are x/z (mirrors `reduce_or`'s symmetric known-1-forces-1 rule) --
+        &v is only x when there is no known-0 bit but at least one x/z bit.
+        """
         wmask = _mask_for_width(self.width)
         if self.mask:
+            known_mask = wmask & ~self.mask
+            if (self.val & known_mask) != known_mask:
+                return Value(0, width=1)
             return Value.x(1)
         return Value(1 if (self.val & wmask) == wmask else 0, width=1)
 
@@ -545,10 +553,18 @@ class Value:  # cm:c8a1e6
         return Value.x(1)
 
     def logical_not(self) -> Value:
-        """Verilog ! — logical NOT."""
+        """Verilog ! — logical NOT.
+
+        A known-1 bit anywhere forces the operand definitely nonzero, so
+        `!` is definitely 0 regardless of unrelated unknown bits elsewhere
+        (mirrors `logical_and`/`logical_or`'s precision note) -- only
+        "definitely zero" (giving `!` = 1) requires full certainty.
+        """
+        if self.val & ~self.mask:
+            return Value(0, width=1)
         if self.mask:
             return Value.x(1)
-        return Value(1 if self.val == 0 else 0, width=1)
+        return Value(1, width=1)
 
     # ── Concatenation / Replication ────────────────────────────────────
 

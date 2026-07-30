@@ -52,7 +52,7 @@ cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noe
     cdef int src_offset = c.wide_offset[src_sid]
     cdef int i, remaining_w, changed = 0
     cdef int sign_bit_local
-    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill, src_tail_mask
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill, sign_fill_mask, src_tail_mask
     cdef long long new_v, new_m
     if src_words > 0:
         # wide source: sign bit lives in top bit of last source word --
@@ -67,13 +67,20 @@ cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noe
         sign_bit_local = c.width[src_sid] - 1
         sign_word_v = <unsigned long long>c.val[src_sid]
         sign_word_m = <unsigned long long>c.mask[src_sid]
-    # Determine fill word: -1 (all 1s) if sign bit is 1, else 0
+    # Determine fill word: -1 (all 1s) if sign bit is 1, else 0. When the
+    # sign bit itself is x/z, every fill bit beyond the source's own width
+    # is indeterminate too -- sign_fill_mask carries that (previously the
+    # fill mask was always forced to 0 here, silently dropping the x/z
+    # state whenever a fully/partially-x signed signal was widened).
     if sign_word_m & (<unsigned long long>1 << sign_bit_local):
-        sign_fill = 0  # sign bit is x/z → fill with 0 (conservative)
+        sign_fill = 0
+        sign_fill_mask = <unsigned long long>-1
     elif sign_word_v & (<unsigned long long>1 << sign_bit_local):
         sign_fill = <unsigned long long>-1
+        sign_fill_mask = 0
     else:
         sign_fill = 0
+        sign_fill_mask = 0
     if dst_words > 0:
         for i in range(dst_words):
             if src_words > 0:
@@ -91,16 +98,22 @@ cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noe
                     # words).
                     src_tail_mask = _word_mask64(sign_bit_local + 1)
                     word_v = (c.wide_val[src_offset + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)
-                    word_m = c.wide_mask[src_offset + i] & src_tail_mask
+                    word_m = (c.wide_mask[src_offset + i] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)
                 else:
                     word_v = sign_fill
-                    word_m = 0
+                    word_m = sign_fill_mask
             elif i == 0:
+                # Scalar source's own word: _sign_ext already fills bits
+                # beyond the source's own width with the sign VALUE across
+                # the whole register, but the mask needs the same
+                # tail-mask treatment as the wide-source branch above so
+                # an x/z sign bit propagates there too.
+                src_tail_mask = _word_mask64(sign_bit_local + 1)
                 word_v = <unsigned long long>_sign_ext(c.val[src_sid], c.width[src_sid])
-                word_m = <unsigned long long>c.mask[src_sid]
+                word_m = (<unsigned long long>c.mask[src_sid] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)
             else:
                 word_v = sign_fill
-                word_m = 0
+                word_m = sign_fill_mask
             remaining_w = c.width[dst_sid] - (i * 64)
             tail_mask = _word_mask64(remaining_w)
             word_v &= tail_mask

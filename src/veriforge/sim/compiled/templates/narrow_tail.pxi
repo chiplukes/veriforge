@@ -1,22 +1,37 @@
-cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int src_sid, int lsb) noexcept nogil:
+cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int src_sid, int lsb, int src_width) noexcept nogil:
+    # `src_width` is the RangeSelect/PartSelect's OWN width, which may be
+    # narrower than the destination (e.g. a[68:26] -> 96-bit y): a
+    # select is always unsigned (IEEE 1364-2005 SS5.5.1), so any
+    # destination bits beyond src_width must be zero, not leftover bits
+    # shifted in from further up the source signal -- masking only
+    # against the destination's width (as this used to do) let those
+    # stray high bits leak through when src_width < dst width.
     cdef int dst_words = c.wide_words[dst_sid]
-    cdef int i, src_word, src_shift, remaining_w, changed = 0
-    cdef unsigned long long lo_v, hi_v, lo_m, hi_m, out_v, out_m, tail_mask
+    cdef int i, src_word, src_shift, remaining_w, src_remaining_w, changed = 0
+    cdef unsigned long long lo_v, hi_v, lo_m, hi_m, out_v, out_m, tail_mask, src_mask
     cdef long long new_v, new_m
     if dst_words > 0:
         for i in range(dst_words):
-            src_word = (lsb + (i * 64)) >> 6
-            src_shift = (lsb + (i * 64)) & 63
-            lo_v = _sig_word_val(c, src_sid, src_word)
-            lo_m = _sig_word_mask(c, src_sid, src_word)
-            if src_shift == 0:
-                out_v = lo_v
-                out_m = lo_m
+            src_remaining_w = src_width - (i * 64)
+            if src_remaining_w <= 0:
+                out_v = 0
+                out_m = 0
             else:
-                hi_v = _sig_word_val(c, src_sid, src_word + 1)
-                hi_m = _sig_word_mask(c, src_sid, src_word + 1)
-                out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
-                out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+                src_word = (lsb + (i * 64)) >> 6
+                src_shift = (lsb + (i * 64)) & 63
+                lo_v = _sig_word_val(c, src_sid, src_word)
+                lo_m = _sig_word_mask(c, src_sid, src_word)
+                if src_shift == 0:
+                    out_v = lo_v
+                    out_m = lo_m
+                else:
+                    hi_v = _sig_word_val(c, src_sid, src_word + 1)
+                    hi_m = _sig_word_mask(c, src_sid, src_word + 1)
+                    out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
+                    out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+                src_mask = _word_mask64(src_remaining_w)
+                out_v &= src_mask
+                out_m &= src_mask
             remaining_w = c.width[dst_sid] - (i * 64)
             tail_mask = _word_mask64(remaining_w)
             out_v &= tail_mask
@@ -28,18 +43,25 @@ cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int sr
         new_v = <long long>c.wide_val[c.wide_offset[dst_sid]]
         new_m = <long long>c.wide_mask[c.wide_offset[dst_sid]]
     else:
-        src_word = lsb >> 6
-        src_shift = lsb & 63
-        lo_v = _sig_word_val(c, src_sid, src_word)
-        lo_m = _sig_word_mask(c, src_sid, src_word)
-        if src_shift == 0:
-            out_v = lo_v
-            out_m = lo_m
+        if src_width <= 0:
+            out_v = 0
+            out_m = 0
         else:
-            hi_v = _sig_word_val(c, src_sid, src_word + 1)
-            hi_m = _sig_word_mask(c, src_sid, src_word + 1)
-            out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
-            out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+            src_word = lsb >> 6
+            src_shift = lsb & 63
+            lo_v = _sig_word_val(c, src_sid, src_word)
+            lo_m = _sig_word_mask(c, src_sid, src_word)
+            if src_shift == 0:
+                out_v = lo_v
+                out_m = lo_m
+            else:
+                hi_v = _sig_word_val(c, src_sid, src_word + 1)
+                hi_m = _sig_word_mask(c, src_sid, src_word + 1)
+                out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
+                out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+            src_mask = _word_mask64(src_width)
+            out_v &= src_mask
+            out_m &= src_mask
         tail_mask = _word_mask64(c.width[dst_sid])
         new_v = <long long>(out_v & tail_mask)
         new_m = <long long>(out_m & tail_mask)

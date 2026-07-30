@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from veriforge.model.expressions import (
     BinaryOp,
+    BitSelect,
     Concatenation,
     Expression,
     FunctionCall,
@@ -27,6 +28,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _cy_u64_hex,
     _const_int,
+    _NATURAL_WIDTH_OPS,
     _REDUCTION_OPS,
 )
 from veriforge.sim.value import Value
@@ -3548,9 +3550,24 @@ class _WideEmitterMixin:
                         f"{pad}wide_load_signal(c, {base_sid}, _sc{base_slot}_v, _sc{base_slot}_m, {n_base})",
                         f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m, _sc{base_slot}_v, _sc{base_slot}_m, {field_lsb}, {field_width}, {n_base}, {n_dst})",
                     ]
-                    for wi in range(n_dst, n_words):
-                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    # Same signed_override reasoning as RangeSelect below --
+                    # a struct field is a slice, always unsigned in its own
+                    # right, but a $signed(...) wrapper still needs sign
+                    # extension beyond its own width. The fill must stop at
+                    # dst_width (this call's own requested width), NOT
+                    # n_words (the scratch array's max size for the WHOLE
+                    # statement) -- e.g. a $signed()-wrapped concat member
+                    # only needs its own few bits filled, not the full
+                    # array, otherwise it corrupts neighboring concat
+                    # members sharing the same scratch words.
+                    if signed_override:
+                        lines.extend(
+                            self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(field_width), indent)
+                        )
+                    else:
+                        for wi in range(n_dst, n_words):
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
                     self._free_scratch(base_slot)
                     return lines
                 if kind == "memory":
@@ -3564,9 +3581,14 @@ class _WideEmitterMixin:
                         f"{pad}wide_load_wmem{mid}(c, {addr_expr}, _sc{mem_slot}_v, _sc{mem_slot}_m, {n_elem})",
                         f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m, _sc{mem_slot}_v, _sc{mem_slot}_m, {field_lsb}, {field_width}, {n_elem}, {n_dst})",
                     ]
-                    for wi in range(n_dst, n_words):
-                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    if signed_override:
+                        lines.extend(
+                            self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(field_width), indent)
+                        )
+                    else:
+                        for wi in range(n_dst, n_words):
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
                     self._free_scratch(mem_slot)
                     return lines
 
@@ -3584,6 +3606,55 @@ class _WideEmitterMixin:
                 lines.append(f"{pad}_sc{slot}_m[{wi}] = {_cy_u64_hex(mask_words[wi])}")
             return lines
 
+        # ── BitSelect ───────────────────────────────────────────────────────
+        # Always exactly 1 bit, self-determined and unsigned (IEEE 1364-2005
+        # §5.5.1) regardless of the target's own width or signedness -- reuse
+        # the existing narrow (scalar) emitters, which already correctly
+        # handle bit-selects on wide targets via word-extraction helpers, and
+        # just drop the 1-bit result into scratch word 0. Without this case,
+        # a BitSelect nested anywhere inside a wide-context expression (e.g.
+        # `{a1[0], a3[8:7]}` assigned to a >64-bit destination) makes the
+        # whole recursive emission bail out to None here, silently falling
+        # through to the narrow scalar LHS-write fallback -- which is wrong
+        # for a >64-bit destination (`c.val`/`c.mask` are 64-bit fields) and
+        # was observed to drop the x-mask entirely for NBA assignments,
+        # which -- unlike continuous assigns -- have no separate/redundant
+        # wide-array-updating code path to fall back on.
+        if et is BitSelect:
+            val_expr = self._emit_expr(expr, 1)
+            mask_expr = self._emit_mask_expr(expr, 1)
+            if signed_override:
+                # An explicit $signed() cast forces sign-extension of this
+                # 1-bit value across the *entire* destination, including
+                # the rest of its own first word (not just subsequent
+                # words -- a 1-bit value's "own last word" is word 0, so
+                # bits 1-63 of word 0 need filling too, same class of gap
+                # as _whole_assign_signal_s / wide_load_signal_s): bit=1
+                # sign-extends to all-1s (a 1-bit two's-complement 1
+                # represents -1), bit=0 to all-0s; if the bit itself is
+                # x/z, fill with 0 (conservative, matching
+                # wide_load_signal_s's identical choice).
+                fill = (
+                    f"(0 if (<unsigned long long>({mask_expr}) & 1) else "
+                    f"<unsigned long long>(-(<long long>(<unsigned long long>({val_expr}) & 1))))"
+                )
+                lines = [
+                    f"{pad}_sc{slot}_v[0] = {fill}",
+                    f"{pad}_sc{slot}_m[0] = <unsigned long long>({mask_expr}) & 1",
+                ]
+                for wi in range(1, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = {fill}")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                return lines
+            lines = [
+                f"{pad}_sc{slot}_v[0] = <unsigned long long>({val_expr}) & 1",
+                f"{pad}_sc{slot}_m[0] = <unsigned long long>({mask_expr}) & 1",
+            ]
+            for wi in range(1, n_words):
+                lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+            return lines
+
         # ── UnaryOp ─────────────────────────────────────────────────────────
         if et is UnaryOp:
             op = expr.op
@@ -3594,28 +3665,44 @@ class _WideEmitterMixin:
 
             # Bitwise invert / negate — operator applies at the context
             # (dst_width) width per IEEE 1364-2005 (context-determined, not
-            # self-determined — see notes/known_issues.md). The operand must
-            # therefore be extended to dst_width *before* wide_not/wide_neg
-            # is applied: sign-extend if the operand is declared signed,
-            # otherwise the existing zero-padding from
-            # _emit_wide_expr_to_scratch's leaf cases is already correct.
+            # self-determined — see notes/known_issues.md): the operand must
+            # be extended to the FULL dst_width *before* wide_not/wide_neg
+            # runs, not computed at its own self-width and patched up
+            # afterward -- computing `~x` at x's own narrow self-width then
+            # zero/sign-padding the *result* is not equivalent to extending
+            # x to the context width first and complementing all of it
+            # (e.g. x=0 at width 1: `~x` self-determined = 1, zero-padded =
+            # 0x1 -- but extending x to width 96 first (=0) then
+            # complementing gives 0xFFF...FFF). So recurse directly at
+            # dst_width, exactly like the `+` case above -- the operand's
+            # own recursive emission (leaf or further nested
+            # context-determined operator) already handles the
+            # signed/unsigned extension up to whatever width it is asked
+            # for. `signed_override`, when set (this UnaryOp is itself a
+            # ternary branch), forces that decision instead of the
+            # operand's own declared signedness (IEEE 1364-2005 §5.5.1),
+            # propagated into the recursive call so a nested signed
+            # Identifier further down agrees with this node's own decision.
             if op in {"~", "-"}:
                 prim = "wide_not" if op == "~" else "wide_neg"
                 op_slot = self._alloc_scratch()
-                op_width = self._expr_width(expr.operand)
-                lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, n_words, op_width, indent)
+                lines = self._emit_wide_expr_to_scratch(
+                    expr.operand, op_slot, n_words, dst_width, indent, signed_override=signed_override
+                )
                 if lines is None:
                     self._free_scratch(op_slot)
                     return None
-                if op_width < dst_width and self._expr_signed(expr.operand):
-                    lines.append(f"{pad}wide_sign_extend(_sc{op_slot}_v, _sc{op_slot}_m, {n_words}, {op_width})")
                 lines.append(
                     f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, {n_words}, {dst_width})"
                 )
                 self._free_scratch(op_slot)
                 return lines
 
-            # Reduction operators — 1-bit result in slot[0]; upper words zeroed
+            # Reduction operators — 1-bit result in slot[0]. Always unsigned
+            # in their own right (IEEE 1364-2005 SS5.5.1): upper words are
+            # normally zero, but see the `!` case below for why a
+            # `$signed(...)`-wrapped result (signed_override True) must
+            # instead replicate bit 0's value AND mask into those words.
             _REDUCE_PRIMS: dict[str, tuple[str, bool]] = {
                 "|": ("wide_reduce_or", False),
                 "&": ("wide_reduce_and", True),
@@ -3641,15 +3728,24 @@ class _WideEmitterMixin:
                     )
                 else:
                     lines.append(f"{pad}{prim_name}(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, {op_n})")
-                for wi in range(1, n_words):
-                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
                 if op in {"~|", "~&", "~^", "^~"}:
                     lines.append(f"{pad}_sc{slot}_v[0] = (~_sc{slot}_v[0]) & (~_sc{slot}_m[0]) & 1ULL")
+                if signed_override:
+                    lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, "1", indent))
+                else:
+                    for wi in range(1, n_words):
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
                 self._free_scratch(op_slot)
                 return lines
 
-            # Logical NOT — equivalent to NOR reduction (~|): 1 if operand is all-zero
+            # Logical NOT — equivalent to NOR reduction (~|): 1 if operand is
+            # all-zero. Always unsigned in its own right (IEEE 1364-2005
+            # SS5.5.1), so bits beyond bit 0 are normally zero -- but when
+            # wrapped in `$signed(...)` (signed_override True) and the
+            # destination is wider than 1 bit, those bits must instead
+            # replicate bit 0's own value AND mask (an X result stays X
+            # across the whole sign-extended width), not be forced to zero.
             if op == "!":
                 op_slot = self._alloc_scratch()
                 op_width = self._expr_width(expr.operand)
@@ -3660,9 +3756,12 @@ class _WideEmitterMixin:
                     return None
                 lines.append(f"{pad}wide_reduce_or(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, {op_n})")
                 lines.append(f"{pad}_sc{slot}_v[0] = (~_sc{slot}_v[0]) & (~_sc{slot}_m[0]) & 1ULL")
-                for wi in range(1, n_words):
-                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                if signed_override:
+                    lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, "1", indent))
+                else:
+                    for wi in range(1, n_words):
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
                 self._free_scratch(op_slot)
                 return lines
 
@@ -3676,22 +3775,48 @@ class _WideEmitterMixin:
                 prim = self._WIDE_BINARY_PRIMS[op]
                 lslot = self._alloc_scratch()
                 rslot = self._alloc_scratch()
-                lw = self._expr_width(expr.left)
-                rw = self._expr_width(expr.right)
-                llines = self._emit_wide_expr_to_scratch(expr.left, lslot, n_words, lw, indent)
+                # Bitwise ops (&, |, ^, ~^, ^~) must see all bits of their
+                # OPERANDS before combining -- computing at a narrower
+                # enclosing context would silently drop upper operand bits
+                # (mirrors `_expr_emitter.py`'s `_NATURAL_WIDTH_OPS`
+                # handling). Arithmetic ops (+, -, *, /, %) are fully
+                # context-determined: operands extend straight to the
+                # enclosing dst_width, same as UnaryOp ~/- above.
+                if op in _NATURAL_WIDTH_OPS:
+                    op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                else:
+                    op_width = dst_width
+                llines = self._emit_wide_expr_to_scratch(
+                    expr.left, lslot, n_words, op_width, indent, signed_override=signed_override
+                )
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
-                rlines = self._emit_wide_expr_to_scratch(expr.right, rslot, n_words, rw, indent)
+                rlines = self._emit_wide_expr_to_scratch(
+                    expr.right, rslot, n_words, op_width, indent, signed_override=signed_override
+                )
                 if rlines is None:
                     self._free_scratch(lslot, rslot)
                     return None
                 lines = llines + rlines
+                prim_width = min(op_width, dst_width)
                 lines.append(
                     f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m,"
                     f" _sc{lslot}_v, _sc{lslot}_m,"
-                    f" _sc{rslot}_v, _sc{rslot}_m, {n_words}, {dst_width})"
+                    f" _sc{rslot}_v, _sc{rslot}_m, {n_words}, {prim_width})"
                 )
+                # Bitwise-op result only naturally fills op_width bits; when
+                # the enclosing context is wider, extend the RESULT itself
+                # (sign- or zero-, per this BinaryOp's own effective
+                # signedness) -- not each operand individually, since it's
+                # the combined expression's signedness that governs here
+                # (IEEE 1364-2005 SS5.5.2).
+                if op_width < dst_width:
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    if eff_signed:
+                        lines.extend(
+                            self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(op_width), indent)
+                        )
                 self._free_scratch(lslot, rslot)
                 return lines
 
@@ -3741,12 +3866,19 @@ class _WideEmitterMixin:
                 rslot = self._alloc_scratch()
                 lw = self._expr_width(left_expr)
                 rw = self._expr_width(right_expr)
+                # Operands are compared at max(lw, rw), which can be wider
+                # than the (1-bit) comparison RESULT's own destination word
+                # count -- recurse using n_operands (sized for the widest
+                # OPERAND), not the outer n_words (sized for dst_width),
+                # otherwise the upper words of a wide operand are left
+                # unpopulated/garbage and the comparison reads past what was
+                # actually computed.
                 n_operands = (max(lw, rw) + 63) // 64
-                llines = self._emit_wide_expr_to_scratch(left_expr, lslot, n_words, lw, indent)
+                llines = self._emit_wide_expr_to_scratch(left_expr, lslot, n_operands, lw, indent)
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
-                rlines = self._emit_wide_expr_to_scratch(right_expr, rslot, n_words, rw, indent)
+                rlines = self._emit_wide_expr_to_scratch(right_expr, rslot, n_operands, rw, indent)
                 if rlines is None:
                     self._free_scratch(lslot, rslot)
                     return None
@@ -3792,17 +3924,38 @@ class _WideEmitterMixin:
                 lines = llines + rlines
                 lines.append(f"{pad}wide_reduce_or(_sc{bl_slot}_v, _sc{bl_slot}_m, _sc{lslot}_v, _sc{lslot}_m, {ln})")
                 lines.append(f"{pad}wide_reduce_or(_sc{br_slot}_v, _sc{br_slot}_m, _sc{rslot}_v, _sc{rslot}_m, {rn})")
+                # wide_reduce_or already gives each operand's truthiness
+                # correctly (v=1,m=0 if any known-1 bit; v=0,m=1 if no
+                # known-1 but some x/z; v=0,m=0 if exactly zero) -- a
+                # known-nonzero operand forces || definitely true, and a
+                # known-EXACTLY-zero (v=0,m=0) operand forces && definitely
+                # false, regardless of unrelated x/z bits in the OTHER
+                # operand (mirrors Value.logical_and/logical_or's precision
+                # note in sim/value.py); the previous blanket
+                # `_sc{slot}_m[0] = bl_m | br_m` missed this short-circuit.
                 if op == "&&":
                     lines.append(
-                        f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] & _sc{br_slot}_v[0])"
-                        f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
+                        f"{pad}if (_sc{bl_slot}_m[0] == 0 and _sc{bl_slot}_v[0] == 0)"
+                        f" or (_sc{br_slot}_m[0] == 0 and _sc{br_slot}_v[0] == 0):"
                     )
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 0")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 0")
+                    lines.append(f"{pad}elif _sc{bl_slot}_v[0] != 0 and _sc{br_slot}_v[0] != 0:")
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 1")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 0")
+                    lines.append(f"{pad}else:")
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 0")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 1")
                 else:
-                    lines.append(
-                        f"{pad}_sc{slot}_v[0] = (_sc{bl_slot}_v[0] | _sc{br_slot}_v[0])"
-                        f" & ~(_sc{bl_slot}_m[0] | _sc{br_slot}_m[0]) & 1ULL"
-                    )
-                lines.append(f"{pad}_sc{slot}_m[0] = _sc{bl_slot}_m[0] | _sc{br_slot}_m[0]")
+                    lines.append(f"{pad}if _sc{bl_slot}_v[0] != 0 or _sc{br_slot}_v[0] != 0:")
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 1")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 0")
+                    lines.append(f"{pad}elif _sc{bl_slot}_m[0] == 0 and _sc{br_slot}_m[0] == 0:")
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 0")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 0")
+                    lines.append(f"{pad}else:")
+                    lines.append(f"{pad}    _sc{slot}_v[0] = 0")
+                    lines.append(f"{pad}    _sc{slot}_m[0] = 1")
                 for wi in range(1, n_words):
                     lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
                     lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
@@ -3812,18 +3965,34 @@ class _WideEmitterMixin:
             return None  # unhandled binary op
 
         # ── TernaryOp ───────────────────────────────────────────────────────
+        # IEEE 1364-2005 §5.5.1: the ternary's OWN combined signedness
+        # (signed only if BOTH branches are signed) governs sign- vs
+        # zero-extension of whichever branch is selected -- not each
+        # branch's own individual signedness. Evaluate each branch at the
+        # FULL destination width with that decision forced via
+        # `signed_override` (not each branch's own self-determined width
+        # left to auto-decide), so a branch that is itself a
+        # context-determined operator (UnaryOp ~/+/-, arithmetic BinaryOp,
+        # a signed Identifier) gets its own operand(s) extended using the
+        # override before the operator runs -- mirrors the identical fix
+        # in `_emit_ternary_value_mask_exprs` (_expr_emitter.py), which
+        # only covers the <=64-bit destination path; this is the same bug
+        # in the separate wide (>64-bit destination) recursive emitter.
         if et is TernaryOp:
             cond_v_expr = f"<unsigned long long>({self._emit_expr(expr.condition, 1)})"
             cond_m_expr = f"<unsigned long long>({self._emit_mask_expr(expr.condition, 1)})"
             tslot = self._alloc_scratch()
             fslot = self._alloc_scratch()
-            tw = self._expr_width(expr.true_expr)
-            fw = self._expr_width(expr.false_expr)
-            tlines = self._emit_wide_expr_to_scratch(expr.true_expr, tslot, n_words, tw, indent)
+            own_signed = self._expr_signed(expr)
+            tlines = self._emit_wide_expr_to_scratch(
+                expr.true_expr, tslot, n_words, dst_width, indent, signed_override=own_signed
+            )
             if tlines is None:
                 self._free_scratch(tslot, fslot)
                 return None
-            flines = self._emit_wide_expr_to_scratch(expr.false_expr, fslot, n_words, fw, indent)
+            flines = self._emit_wide_expr_to_scratch(
+                expr.false_expr, fslot, n_words, dst_width, indent, signed_override=own_signed
+            )
             if flines is None:
                 self._free_scratch(tslot, fslot)
                 return None
@@ -3870,9 +4039,22 @@ class _WideEmitterMixin:
                 f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m,"
                 f" _sc{tslot}_v, _sc{tslot}_m, {lsb_expr}, {slice_w_expr}, {n_src}, {n_dst})"
             )
-            for wi in range(n_dst, n_words):
-                lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+            # A range-select is always unsigned in its OWN right (IEEE
+            # 1364-2005 SS5.5.1), so bits beyond its own width are
+            # normally zero -- but when wrapped in `$signed(...)`
+            # (signed_override True) and the destination is wider, those
+            # bits must instead sign-extend from the slice's own top bit.
+            # The fill must stop at dst_width, NOT n_words (the scratch
+            # array's max size for the WHOLE statement) -- e.g. a
+            # $signed()-wrapped concat member only needs its own few bits
+            # filled, not the full array, otherwise it corrupts
+            # neighboring concat members sharing the same scratch words.
+            if signed_override:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, slice_w_expr, indent))
+            else:
+                for wi in range(n_dst, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
             self._free_scratch(tslot)
             return lines
 
@@ -3912,9 +4094,13 @@ class _WideEmitterMixin:
                 f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m,"
                 f" _sc{tslot}_v, _sc{tslot}_m, {lsb_expr}, {width_v}, {n_src}, {n_dst})"
             )
-            for wi in range(n_dst, n_words):
-                lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+            # Same signed_override reasoning as RangeSelect above.
+            if signed_override:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(width_v), indent))
+            else:
+                for wi in range(n_dst, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
             self._free_scratch(tslot)
             return lines
 
@@ -3961,12 +4147,20 @@ class _WideEmitterMixin:
             return lines
 
         # ── Replication ──────────────────────────────────────────────────────
+        # Replication is always unsigned in its OWN right (IEEE 1364-2005
+        # §5.5.1): its natural width is exactly count*elem_width, and
+        # wide_replicate leaves any bits above that zero. But when this node
+        # is itself wrapped in `$signed(...)` (signed_override True) and the
+        # destination context is wider than that natural width, those upper
+        # bits must be sign-filled from the replicated value's own top bit
+        # instead -- confirmed against Icarus (see notes/known_issues.md).
         if et is Replication:
             count = _const_int(expr.count, self._param_env)
             if count is None or count <= 0:
                 return None
             elem_expr = self._normalize_replication_value(expr.value)
             elem_width = self._expr_width(elem_expr)
+            rep_width = count * elem_width
             pslot = self._alloc_scratch()
             lines = self._emit_wide_expr_to_scratch(elem_expr, pslot, n_words, elem_width, indent)
             if lines is None:
@@ -3976,6 +4170,8 @@ class _WideEmitterMixin:
                 f"{pad}wide_replicate(_sc{slot}_v, _sc{slot}_m,"
                 f" _sc{pslot}_v, _sc{pslot}_m, {count}, {elem_width}, {n_words}, {dst_width})"
             )
+            if signed_override and rep_width < dst_width:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(rep_width), indent))
             self._free_scratch(pslot)
             return lines
 
@@ -4066,6 +4262,75 @@ class _WideEmitterMixin:
             return True
         return False
 
+    def _wide_sign_extend_to_dst_lines(
+        self, slot: int, dst_width: int, n_words: int, src_width_expr: str, indent: int
+    ) -> list[str]:
+        """Sign-extend scratch slot *slot* to EXACTLY dst_width bits.
+
+        `wide_sign_extend`'s own `n` parameter only understands whole
+        words -- it always fills every bit through the end of word `n-1`,
+        regardless of how many of those bits actually belong to dst_width.
+        That's wrong whenever dst_width isn't a multiple of 64 (the common
+        case for a small $signed()-wrapped concat member: e.g. dst_width=4
+        needs NO extension at all when it equals the slice's own width,
+        but wide_sign_extend would still smear the sign bit across the
+        rest of word 0 -- corrupting neighboring concat members sharing
+        that scratch word). An explicit tail mask after the call restricts
+        the result to precisely dst_width bits either way.
+        """
+        pad = "    " * indent
+        dst_n = (dst_width + 63) // 64
+        lines = [f"{pad}wide_sign_extend(_sc{slot}_v, _sc{slot}_m, {dst_n}, {src_width_expr})"]
+        tail_bits = dst_width - (dst_n - 1) * 64
+        if tail_bits < 64:
+            lines.append(f"{pad}_sc{slot}_v[{dst_n - 1}] &= _word_mask64({tail_bits})")
+            lines.append(f"{pad}_sc{slot}_m[{dst_n - 1}] &= _word_mask64({tail_bits})")
+        for wi in range(dst_n, n_words):
+            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+        return lines
+
+    def _expr_max_internal_width(self, expr: Expression) -> int:
+        """Maximum bit-width needed anywhere while evaluating *expr*.
+
+        `_expr_width` only reports a node's own self-determined RESULT
+        width -- e.g. always 1 for a comparison, regardless of how wide its
+        operands are. Scratch-array sizing needs the true PEAK width used
+        internally anywhere in the tree (a comparison between a 234-bit
+        concatenation and a 1-bit reduction still needs 234-bit-wide
+        scratch space to hold the concatenation operand), so this recurses
+        into every operand rather than stopping at each node's own
+        self-determined width.
+        """
+        etype = type(expr)
+        own = self._expr_width(expr)
+        if etype is BinaryOp:
+            return max(
+                own,
+                self._expr_width(expr.left),
+                self._expr_width(expr.right),
+                self._expr_max_internal_width(expr.left),
+                self._expr_max_internal_width(expr.right),
+            )
+        if etype is UnaryOp:
+            return max(own, self._expr_width(expr.operand), self._expr_max_internal_width(expr.operand))
+        if etype is TernaryOp:
+            return max(
+                own,
+                self._expr_max_internal_width(expr.condition),
+                self._expr_max_internal_width(expr.true_expr),
+                self._expr_max_internal_width(expr.false_expr),
+            )
+        if etype is Concatenation:
+            return max([own, *(self._expr_max_internal_width(p) for p in expr.parts)])
+        if etype is Replication:
+            return max(own, self._expr_max_internal_width(expr.value))
+        if etype in (RangeSelect, PartSelect, BitSelect):
+            return max(own, self._expr_max_internal_width(expr.target))
+        if etype is FunctionCall:
+            return max([own, *(self._expr_max_internal_width(a) for a in expr.arguments)])
+        return own
+
     def _emit_wide_lhs_write_new(
         self,
         dst_sid: int,
@@ -4084,7 +4349,7 @@ class _WideEmitterMixin:
             return None  # narrow dst — handled by existing path
 
         n_words = max(1, (lhs_w + _WORD_BITS - 1) // _WORD_BITS)
-        max_expr_w = self._expr_width(rhs)
+        max_expr_w = self._expr_max_internal_width(rhs)
         expr_words = (max_expr_w + _WORD_BITS - 1) // _WORD_BITS
         n_words = max(n_words, expr_words)
         n_words = max(n_words, self._module_max_wide_words())

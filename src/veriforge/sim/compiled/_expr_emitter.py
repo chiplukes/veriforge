@@ -150,10 +150,19 @@ class _ExprEmitterMixin:
         del sid, sel_width, context_width
         return val_expr
 
-    def _emit_expr(self, expr: Expression, width: int) -> str:  # noqa: PLR0911, PLR0912
+    def _emit_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911, PLR0912
         """Return a Cython value expression string for *expr*.
 
         *width* is the context width used for masking arithmetic results.
+        *signed_override*, when not ``None``, forces sign- (True) or zero-
+        (False) extension of a narrower Identifier/UnaryOp(~,+,-)/BinaryOp
+        (arithmetic) result, overriding that node's own declared/computed
+        signedness -- used by TernaryOp to apply its own combined
+        signedness (IEEE 1364-2005 §5.5.1) to whichever branch is
+        evaluated, since a branch that is itself a context-determined
+        operator needs its *operand* extended using the override before
+        the operator runs, not just its self-determined-width result
+        wrapped in `_sign_ext` afterward (those are not equivalent).
         """
         etype = type(expr)
 
@@ -165,7 +174,12 @@ class _ExprEmitterMixin:
             if sid is not None:
                 sig_width = self._signal_widths[sid]
                 val = f"c.val[{sid}]"
-                if width > sig_width and sid < len(self._signal_signed) and self._signal_signed[sid]:
+                eff_signed = (
+                    signed_override
+                    if signed_override is not None
+                    else (sid < len(self._signal_signed) and self._signal_signed[sid])
+                )
+                if width > sig_width and eff_signed:
                     val = f"_sign_ext({val}, {sig_width})"
                 return val
             struct_info = self._resolve_struct_storage_access(name)
@@ -220,10 +234,10 @@ class _ExprEmitterMixin:
             cached_v = self._et_node_vals.get(id(expr))
             if cached_v is not None:
                 return cached_v
-            return self._emit_binary(expr, width)
+            return self._emit_binary(expr, width, signed_override)
 
         if etype is UnaryOp:
-            return self._emit_unary(expr, width)
+            return self._emit_unary(expr, width, signed_override)
 
         if etype is TernaryOp:
             # Check if this node's value was already hoisted to a named temp.
@@ -536,40 +550,55 @@ class _ExprEmitterMixin:
 
     def _emit_ternary_value_mask_exprs(self, expr: TernaryOp, width: int, *, py: bool) -> tuple[str, str] | None:
         cond = self._emit_expr(expr.condition, 1)
+        # IEEE 1364-2005 §5.5.1: the ternary's OWN combined signedness
+        # (signed only if BOTH branches are signed) governs sign- vs
+        # zero-extension of whichever branch is selected -- not each
+        # branch's own individual signedness. This is threaded into the
+        # branch's own evaluation as `signed_override` (forced True/False,
+        # never None -- None would mean "fall back to the branch's own
+        # signedness", exactly the bug being fixed here), not applied as a
+        # post-hoc `_sign_ext` wrap around a self-determined-width result:
+        # a branch that is itself a context-determined operator (UnaryOp
+        # ~/+/-, arithmetic BinaryOp, or a signed Identifier)
+        # needs its *operand(s)* extended using the override before the
+        # operator runs -- computing it self-determined then wrapping the
+        # result afterward is not equivalent (e.g. `~a` where `a` is 1 bit:
+        # self-determined-then-wrapped gives a 1-bit `~a` sign-extended,
+        # which is just `a`'s own single bit replicated -- not the same
+        # value as sign-extending `a` to the full width first and THEN
+        # complementing).
+        own_signed = self._expr_signed(expr)
+        tw = self._expr_width(expr.true_expr)
+        fw = self._expr_width(expr.false_expr)
         if py:
-            true_expr = self._emit_py_expr(expr.true_expr, width)
-            false_expr = self._emit_py_expr(expr.false_expr, width)
+            # The Python-bignum sub-emitter (_emit_py_expr/_emit_py_mask_expr,
+            # used for elaboration-time evaluation, not the hot simulation
+            # loop) does not yet support signed_override threading -- keep
+            # the previous self-determined-width + post-hoc-wrap
+            # approximation here. It is a real, documented residual gap
+            # (see notes/known_issues.md) for a branch that is itself a
+            # context-determined operator whose OWN signedness disagrees
+            # with the ternary's combined signedness, evaluated in this
+            # specific code path.
+            true_expr = self._emit_py_expr(expr.true_expr, tw)
+            false_expr = self._emit_py_expr(expr.false_expr, fw)
             cond_mask = self._emit_py_mask_expr(expr.condition, 1)
-            true_mask = self._emit_py_mask_expr(expr.true_expr, width)
-            false_mask = self._emit_py_mask_expr(expr.false_expr, width)
+            true_mask = self._emit_py_mask_expr(expr.true_expr, tw)
+            false_mask = self._emit_py_mask_expr(expr.false_expr, fw)
             width_mask = self._emit_py_width_mask(width)
 
-            # Sign-extend signed branches when context width is larger
-            if self._expr_signed(expr.true_expr):
-                tw = self._expr_width(expr.true_expr)
+            if own_signed:
                 if width > tw and true_expr is not None:
                     true_expr = f"_sign_ext({true_expr}, {tw})"
-            if self._expr_signed(expr.false_expr):
-                fw = self._expr_width(expr.false_expr)
                 if width > fw and false_expr is not None:
                     false_expr = f"_sign_ext({false_expr}, {fw})"
         else:
-            true_expr = self._emit_expr(expr.true_expr, width)
-            false_expr = self._emit_expr(expr.false_expr, width)
+            true_expr = self._emit_expr(expr.true_expr, width, own_signed)
+            false_expr = self._emit_expr(expr.false_expr, width, own_signed)
             cond_mask = self._emit_mask_expr(expr.condition, 1)
-            true_mask = self._emit_mask_expr(expr.true_expr, width)
-            false_mask = self._emit_mask_expr(expr.false_expr, width)
+            true_mask = self._emit_mask_expr(expr.true_expr, tw)
+            false_mask = self._emit_mask_expr(expr.false_expr, fw)
             width_mask = f"wmask({width})"
-
-            # Sign-extend signed branches when context width is larger
-            if self._expr_signed(expr.true_expr):
-                tw = self._expr_width(expr.true_expr)
-                if width > tw:
-                    true_expr = f"_sign_ext({true_expr}, {tw})"
-            if self._expr_signed(expr.false_expr):
-                fw = self._expr_width(expr.false_expr)
-                if width > fw:
-                    false_expr = f"_sign_ext({false_expr}, {fw})"
         if true_expr is None or false_expr is None or cond_mask is None or true_mask is None or false_mask is None:
             return None
         known_mask = f"((~((({true_expr}) ^ ({false_expr})) | ({true_mask}) | ({false_mask}))) & {width_mask})"
@@ -1047,7 +1076,7 @@ class _ExprEmitterMixin:
 
         return None
 
-    def _emit_binary(self, expr: BinaryOp, width: int) -> str:  # noqa: PLR0911
+    def _emit_binary(self, expr: BinaryOp, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911
         op_info = _BINARY_VALUE_OP.get(expr.op)
         if op_info is None:
             return "0"
@@ -1072,21 +1101,27 @@ class _ExprEmitterMixin:
         else:
             op_width = width
 
-        left = self._emit_expr(expr.left, op_width)
-        right = self._emit_expr(expr.right, op_width)
+        left = self._emit_expr(expr.left, op_width, signed_override)
+        right = self._emit_expr(expr.right, op_width, signed_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
         # shifts (left operand handled by the >>_ARITH path).
         # For division/modulus: always sign-extend signed operands from their
         # own width, since C's / and % treat operands as signed only when the
-        # value is at its native signed width.
+        # value is at its native signed width. `signed_override`, when set
+        # (this BinaryOp is itself a ternary branch), forces the same
+        # sign/zero-extension decision for both operands, overriding each
+        # operand's own individual signedness -- matching how a signed
+        # ternary branch is handled everywhere else (IEEE 1364-2005 §5.5.1).
         if expr.op not in _COMPARISON_OPS and expr.op not in ("<<", ">>", "<<<", ">>>"):
-            if self._expr_signed(expr.left):
+            left_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+            right_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
+            if left_signed:
                 lw = self._expr_width(expr.left)
                 if op_width > lw or expr.op in ("/", "%"):
                     left = f"_sign_ext({left}, {lw})"
-            if self._expr_signed(expr.right):
+            if right_signed:
                 rw = self._expr_width(expr.right)
                 if op_width > rw or expr.op in ("/", "%"):
                     right = f"_sign_ext({right}, {rw})"
@@ -1164,7 +1199,7 @@ class _ExprEmitterMixin:
             return f"({core}) & wmask({width})"
         return core
 
-    def _emit_unary(self, expr: UnaryOp, width: int) -> str:
+    def _emit_unary(self, expr: UnaryOp, width: int, signed_override: bool | None = None) -> str:
         ow = self._expr_width(expr.operand)
 
         # Reduction operators → 1-bit result (self-determined)
@@ -1186,8 +1221,9 @@ class _ExprEmitterMixin:
         # notes/known_issues.md).
         if expr.op in ("~", "+", "-"):
             eval_width = max(ow, width) if width else ow
-            operand = self._emit_expr(expr.operand, eval_width)
-            if self._expr_signed(expr.operand) and eval_width > ow:
+            operand = self._emit_expr(expr.operand, eval_width, signed_override)
+            eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
+            if eff_signed and eval_width > ow:
                 operand = f"_sign_ext({operand}, {ow})"
 
             if expr.op == "-":
@@ -1639,14 +1675,23 @@ class _ExprEmitterMixin:
             result = False
 
         elif etype is UnaryOp:
-            if expr.op == "!":
+            # `!` and all reduction ops always produce an unsigned 1-bit
+            # result regardless of the operand's own signedness (IEEE
+            # 1364-2005 §5.5.1) -- only the context-determined
+            # pass-through ops (~, +, -) inherit the operand's signedness.
+            if expr.op in ("!", "&", "|", "^", "~&", "~|", "~^", "^~"):
                 result = False
             else:
                 result = self._expr_signed(expr.operand, cache)
 
         elif etype is BinaryOp:
+            # Comparisons and logical ops always produce an unsigned 1-bit
+            # result regardless of operand signedness (IEEE 1364-2005
+            # §5.5.1, Table 5-22).
             if expr.op in ("<<", ">>", "<<<", ">>>"):
                 result = self._expr_signed(expr.left, cache)
+            elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+                result = False
             else:
                 result = self._expr_signed(expr.left, cache) and self._expr_signed(expr.right, cache)
 
@@ -1729,6 +1774,41 @@ class _ExprEmitterMixin:
                 return cached_m
             lm = self._emit_mask_expr(expr.left, op_width)
             rm = self._emit_mask_expr(expr.right, op_width)
+            if expr.op in ("==", "!="):
+                # A KNOWN bit that differs resolves the comparison to a
+                # definite result regardless of x/z bits elsewhere (mirrors
+                # Value._cmp's "=="/"!=" short-circuit in sim/value.py) --
+                # only fall back to x when no known bit disagrees and at
+                # least one operand still has uncertainty. Unlike
+                # </<=/>/>=  (handled by the generic `lm | rm` fallback
+                # below, which IS correct there per Value._cmp's non-eq
+                # branch), plain (in)equality does NOT go straight to x
+                # just because some bit is unknown.
+                lv = self._emit_expr(expr.left, op_width)
+                rv = self._emit_expr(expr.right, op_width)
+                known_diff = f"((({lv}) ^ ({rv})) & ~({lm}) & ~({rm}) & wmask({op_width}))"
+                return f"(0 if {known_diff} else (({lm}) | ({rm})))"
+            if expr.op in ("&&", "||"):
+                # A known-nonzero (truthy) operand forces || definitely
+                # true, and a known-EXACTLY-zero operand forces &&
+                # definitely false, regardless of unrelated x/z bits in
+                # the OTHER operand (mirrors Value.logical_and/logical_or's
+                # precision note in sim/value.py) -- relies on this
+                # codebase's invariant that a value's bits at masked (x/z)
+                # positions are always 0, so a nonzero raw value implies a
+                # genuine known-1 bit.
+                lv = self._emit_expr(expr.left, op_width)
+                rv = self._emit_expr(expr.right, op_width)
+                if expr.op == "||":
+                    return f"(0 if (({lv}) or ({rv})) else (({lm}) | ({rm})))"
+                l_def_zero = f"(({lm}) == 0 and ({lv}) == 0)"
+                r_def_zero = f"(({rm}) == 0 and ({rv}) == 0)"
+                both_truthy = f"(({lv}) and ({rv}))"
+                return (
+                    f"(0 if ({l_def_zero}) else"
+                    f" (0 if ({r_def_zero}) else"
+                    f" (0 if ({both_truthy}) else (({lm}) | ({rm})))))"
+                )
             if expr.op in {"+", "-"}:
                 return f"(wmask({width}) if (({lm}) | ({rm})) else 0)"
             if (
@@ -1775,6 +1855,21 @@ class _ExprEmitterMixin:
 
         if etype is UnaryOp:
             ow = self._expr_width(expr.operand)
+            if expr.op in _REDUCTION_OPS or expr.op == "!":
+                # A reduction's mask isn't just "pass through the operand's
+                # mask" -- a known-0 bit forces &/~& definitely non-x, and a
+                # known-1 bit forces |/~|/! definitely non-x, even when
+                # other bits are x/z (mirrors the fix to `Value.reduce_and`/
+                # `reduce_or` in sim/value.py). ^/~^/^~ have no absorbing
+                # bit value, so any x bit does force x there.
+                opv = self._emit_expr(expr.operand, ow)
+                opm = self._emit_mask_expr(expr.operand, ow)
+                wm = f"wmask({ow})"
+                if expr.op in {"&", "~&"}:
+                    return f"(0 if ((~({opv})) & (~({opm})) & {wm}) else (1 if (({opm}) & {wm}) else 0))"
+                if expr.op in {"|", "~|", "!"}:
+                    return f"(0 if (({opv}) & (~({opm})) & {wm}) else (1 if (({opm}) & {wm}) else 0))"
+                return f"(1 if (({opm}) & {wm}) else 0)"
             return self._emit_mask_expr(expr.operand, ow)
 
         if etype is TernaryOp:

@@ -394,7 +394,14 @@ class _GenWideSectionsMixin:
         ]
 
         # ── wide_cmp_eq: 1-bit result written to dv[0]/dm[0] ──────────────────
-        # dv[0]=1 if equal and no x/z; dv[0]=0 otherwise; dm[0]=1 if x/z present.
+        # A KNOWN bit that differs between the two operands resolves the
+        # comparison to a definite result regardless of x/z bits elsewhere
+        # (mirrors Value._cmp's "==" / "!=" handling in sim/value.py) --
+        # only fall back to x when no known bit disagrees and at least one
+        # operand still has uncertainty. The mismatch check must be
+        # bit-level (not "skip the whole word if either word has ANY x/z
+        # bit"): a word can have some x/z bits and some known-mismatching
+        # bits at the same time.
         L += [
             "cdef inline void wide_cmp_eq(",
             "    unsigned long long *dv, unsigned long long *dm,",
@@ -405,10 +412,10 @@ class _GenWideSectionsMixin:
             "    for i in range(n):",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
-            "        if am[i] == 0 and bm[i] == 0 and (av[i] & ~am[i]) != (bv[i] & ~bm[i]):",
+            "        if (av[i] ^ bv[i]) & ~am[i] & ~bm[i]:",
             "            equal = 0",
             "    dv[0] = 1 if (equal and not has_x) else 0",
-            "    dm[0] = 1 if has_x else 0",
+            "    dm[0] = 0 if not equal else (1 if has_x else 0)",
             "",
         ]
 
@@ -423,10 +430,10 @@ class _GenWideSectionsMixin:
             "    for i in range(n):",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
-            "        if am[i] == 0 and bm[i] == 0 and (av[i] & ~am[i]) != (bv[i] & ~bm[i]):",
+            "        if (av[i] ^ bv[i]) & ~am[i] & ~bm[i]:",
             "            equal = 0",
-            "    dv[0] = 0 if has_x else (0 if equal else 1)",
-            "    dm[0] = 1 if has_x else 0",
+            "    dv[0] = 1 if not equal else 0",
+            "    dm[0] = 0 if not equal else (1 if has_x else 0)",
             "",
         ]
 
@@ -937,7 +944,7 @@ class _GenWideSectionsMixin:
             "    cdef int i, words = c.wide_words[sid]",
             "    cdef int off = c.wide_offset[sid]",
             "    cdef int sign_bit_local",
-            "    cdef unsigned long long sign_word_v, sign_word_m, sign_fill, src_tail_mask",
+            "    cdef unsigned long long sign_word_v, sign_word_m, sign_fill, sign_fill_mask, src_tail_mask",
             "    if words > 0:",
             "        sign_bit_local = (c.width[sid] - 1) - ((words - 1) * 64)",
             "        sign_word_v = c.wide_val[off + words - 1]",
@@ -947,11 +954,17 @@ class _GenWideSectionsMixin:
             "        sign_word_v = <unsigned long long>c.val[sid]",
             "        sign_word_m = <unsigned long long>c.mask[sid]",
             "    if sign_word_m & (<unsigned long long>1 << sign_bit_local):",
+            "        # Sign bit itself is x/z: every fill word/bit beyond the",
+            "        # source's own width is indeterminate too, not defined 0",
+            "        # (mirrors _whole_assign_signal_s / wide_sign_extend).",
             "        sign_fill = 0",
+            "        sign_fill_mask = <unsigned long long>-1",
             "    elif sign_word_v & (<unsigned long long>1 << sign_bit_local):",
             "        sign_fill = <unsigned long long>-1",
+            "        sign_fill_mask = 0",
             "    else:",
             "        sign_fill = 0",
+            "        sign_fill_mask = 0",
             "    if words > 0:",
             "        for i in range(n):",
             "            if i < words - 1:",
@@ -960,16 +973,23 @@ class _GenWideSectionsMixin:
             "            elif i == words - 1:",
             "                src_tail_mask = _word_mask64(sign_bit_local + 1)",
             "                dv[i] = (c.wide_val[off + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)",
-            "                dm[i] = c.wide_mask[off + i] & src_tail_mask",
+            "                dm[i] = (c.wide_mask[off + i] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)",
             "            else:",
             "                dv[i] = sign_fill",
-            "                dm[i] = 0",
+            "                dm[i] = sign_fill_mask",
             "    else:",
+            "        # word 0 itself has bits beyond the source's own width",
+            "        # (e.g. bits 16..63 for a 16-bit source) -- _sign_ext",
+            "        # already fills those with the sign VALUE across the",
+            "        # whole register, but the mask needs the same tail-mask",
+            "        # treatment as the wide-source branch above so an x/z",
+            "        # sign bit propagates there too, not just into words 1+.",
+            "        src_tail_mask = _word_mask64(sign_bit_local + 1)",
             "        dv[0] = <unsigned long long>_sign_ext(c.val[sid], c.width[sid])",
-            "        dm[0] = <unsigned long long>c.mask[sid]",
+            "        dm[0] = (<unsigned long long>c.mask[sid] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)",
             "        for i in range(1, n):",
             "            dv[i] = sign_fill",
-            "            dm[i] = 0",
+            "            dm[i] = sign_fill_mask",
             "",
         ]
 

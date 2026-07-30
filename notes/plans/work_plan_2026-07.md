@@ -759,6 +759,34 @@ xfailed — the last two known bugs from item 2.1 are now both fixed). Full
 fast suite green (7038 passed), full compiled suite green with
 `--run-slow` (4625 passed, 2 xfailed — unrelated pre-existing xfails).
 
+**Result (sub-item 3, July 2026)**: Substantially fixed — full detail in
+`notes/known_issues.md`'s "Compiled-engine ternary/context-determined-
+operator codegen, and a wide family of related width/signedness/x-
+propagation bugs" section. The originally-scoped fix (threading
+`signed_override` through `_wide_emitter.py`'s TernaryOp/UnaryOp/BinaryOp
+codegen, mirroring items 3.4/2.6's narrow-path pattern) led to
+root-causing and fixing a much larger family of independent, real bugs
+once the differential fuzzer harness was actually run with
+`VERIFORGE_DIFF_COMPILED=1` for the first time — not just in the compiled
+engine, but pre-existing, independently-reachable bugs in the reference
+evaluator, `sim/vm/compiler.py`, `sim/value.py`, and both VM interpreters
+(width/signedness propagation for bitwise ops, concat/replication/
+assignment-pattern self-width, unpacked-array-element self-width,
+left-shift self-width, reduction/comparison/logical-op always-unsigned
+signedness, x/z-aware reduction-AND/logical-NOT/equality/`&&`/`||`
+short-circuiting, and the ternary x-condition bitwise-merge rule). The
+default-seed differential run (`VERIFORGE_DIFF_COMPILED=1
+VERIFORGE_DIFF_CASES=100`, 10 batches) is fully green; the full fast suite
+and `tests/test_sim/test_compiled_edge_shapes.py`'s `seam*_overflow`
+regressions (which the bitwise-op width fix initially broke, then fixed
+once combined with the unpacked-array self-width fix) are green.
+**Residual gap**: a larger differential run (`VERIFORGE_DIFF_CASES=300` at
+an alternate seed) still finds further compiled-engine-only divergences —
+documented in `notes/known_issues.md` as an explicitly open, not-yet-
+characterized architectural area (the wide emitter's per-node-type
+width/signedness reimplementation), warranting its own follow-up
+characterize-first pass rather than continued one-off patching.
+
 ## Tier 3 — CI and engine parity
 
 ### 3.1 CI sim-smoke job (S) ✅

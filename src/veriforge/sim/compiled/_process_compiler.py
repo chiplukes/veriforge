@@ -199,7 +199,10 @@ class _ProcessCompilerMixin:
                         if rhs_lsb >= 0 and (
                             lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or rhs_msb >= _WORD_BITS
                         ):
-                            lines = [f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {rhs_lsb})"]
+                            sel_w = rhs_msb - rhs_lsb + 1
+                            lines = [
+                                f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {rhs_lsb}, {sel_w})"
+                            ]
                             self._processes.append((sensitivity, lines))
                             continue
                     target_name = target.name
@@ -238,7 +241,9 @@ class _ProcessCompilerMixin:
                         else:
                             lsb_expr = None
                         if lsb_expr is not None:
-                            lines = [f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {lsb_expr})"]
+                            lines = [
+                                f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {lsb_expr}, {part_w})"
+                            ]
                             self._processes.append((sensitivity, lines))
                             continue
                     target_name = target.name

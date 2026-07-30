@@ -828,11 +828,48 @@ class Compiler:  # cm:8c1e4a
                         else:
                             program.append(instr(Op.RESIZE, target))
                 self._compile_expr(expr.right, program)  # self-determined
+            # Bitwise ops (IEEE 1364-2005 §5.5.2): combine at the operator's
+            # own natural width (max of the two operands' self-determined
+            # widths) first -- each operand extended using its OWN
+            # individual signedness only far enough to align with the
+            # other, NOT extended straight to some wider outer `width`
+            # using its own signedness (which would let one signed
+            # operand's sign-extension -- e.g. of an X value -- smear
+            # across the whole outer width even when the operator's own
+            # COMBINED signedness, which is what should govern the outer
+            # extension, is unsigned). The combined result is then extended
+            # separately to `width` using the whole BinaryOp's own combined
+            # signedness. Mirrors the identical fix in `sim/evaluator.py`
+            # (see notes/known_issues.md).
+            elif expr.op in ("&", "|", "^", "~^", "^~"):
+                op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                self._compile_expr(expr.left, program, op_width, signed_override)
+                left_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                if left_eff_signed:
+                    program.append(instr(Op.SIGN_EXT, op_width, 0))
+                else:
+                    program.append(instr(Op.RESIZE, op_width))
+                self._compile_expr(expr.right, program, op_width, signed_override)
+                right_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
+                if right_eff_signed:
+                    program.append(instr(Op.SIGN_EXT, op_width, 0))
+                else:
+                    program.append(instr(Op.RESIZE, op_width))
+                op = _BINARY_OP_MAP.get(expr.op)
+                if op is None:
+                    raise ValueError(f"Unknown binary operator: {expr.op!r}")
+                program.append(instr(op))
+                if width and width != op_width:
+                    result_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    if result_eff_signed:
+                        program.append(instr(Op.SIGN_EXT, width, 0))
+                    else:
+                        program.append(instr(Op.RESIZE, width))
+                return
             else:
-                # Context-determined: arithmetic (+,-,*,/,%,**) and
-                # bitwise (&,|,^,~^,^~) — widen both operands. See the shift
-                # branch above for why the target is max(width, static
-                # width), not `width` alone.
+                # Context-determined: arithmetic (+,-,*,/,%,**) — widen both
+                # operands. See the shift branch above for why the target is
+                # max(width, static width), not `width` alone.
                 self._compile_expr(expr.left, program, width, signed_override)
                 if width:
                     target = max(width, self._expr_width(expr.left))
@@ -928,8 +965,15 @@ class Compiler:  # cm:8c1e4a
 
         # -- Concatenation --
         if etype is Concatenation:
+            # Each member is self-determined (IEEE 1364-2005 §5.4.1): its
+            # OWN natural width is the "context" that resizes any
+            # context-determined operator (~, arithmetic, a nested ternary)
+            # within it. Compiling with width=0 (the default) would leave
+            # those nested operators entirely unresized -- confirmed wrong
+            # against Icarus (see notes/known_issues.md), and matches the
+            # identical fix in `sim/evaluator.py`'s reference engine.
             for part in expr.parts:
-                self._compile_expr(part, program)
+                self._compile_expr(part, program, self._expr_width(part))
             program.append(instr(Op.CONCAT, len(expr.parts)))
             return
 
@@ -960,7 +1004,8 @@ class Compiler:  # cm:8c1e4a
         # -- Replication --
         if etype is Replication:
             self._compile_expr(expr.count, program)
-            self._compile_expr(expr.value, program)
+            # Self-determined, same reasoning as Concatenation above.
+            self._compile_expr(expr.value, program, self._expr_width(expr.value))
             program.append(instr(Op.REPLICATE))
             return
 
@@ -1032,8 +1077,9 @@ class Compiler:  # cm:8c1e4a
             return
 
         if expr.positional:
+            # Self-determined, same reasoning as Concatenation above.
             for part in expr.positional:
-                self._compile_expr(part, program)
+                self._compile_expr(part, program, self._expr_width(part))
             program.append(instr(Op.CONCAT, len(expr.positional)))
             total_width = sum(self._expr_width(part) for part in expr.positional)
             if width and total_width != width:
@@ -1786,6 +1832,21 @@ class Compiler:  # cm:8c1e4a
                 "==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||",
             ):  # fmt: skip
                 return 1
+            if expr.op in ("<<", "<<<"):
+                # Left-shift's self-determined width needs left_width +
+                # shift amount, not just max() -- otherwise `hi << 32`
+                # (hi 31 bits) gets underestimated at 32 bits instead of
+                # 63, silently truncating away the shifted-in bits when
+                # this width is used as a bitwise operand's evaluation
+                # width (see the "&"/"|"/"^" branch in `_compile_expr`).
+                lw = self._expr_width(expr.left)
+                if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
+                    return lw + int(expr.right.value)
+                return max(lw, self._expr_width(expr.right))
+            if expr.op in (">>", ">>>"):
+                # A shift's self-determined width is its LEFT operand's
+                # width only -- the shift amount never contributes bits.
+                return self._expr_width(expr.left)
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
 
         if etype is UnaryOp:
@@ -1836,14 +1897,23 @@ class Compiler:  # cm:8c1e4a
             result = False
 
         elif etype is UnaryOp:
-            if expr.op == "!":
+            # `!` and all reduction ops always produce an unsigned 1-bit
+            # result regardless of the operand's own signedness (IEEE
+            # 1364-2005 §5.5.1) -- only the context-determined
+            # pass-through ops (~, +, -) inherit the operand's signedness.
+            if expr.op in ("!", "&", "|", "^", "~&", "~|", "~^", "^~"):
                 result = False
             else:
                 result = self._expr_signed(expr.operand, cache)
 
         elif etype is BinaryOp:
+            # Comparisons and logical ops always produce an unsigned 1-bit
+            # result regardless of operand signedness (IEEE 1364-2005
+            # §5.5.1, Table 5-22).
             if expr.op in ("<<", ">>", "<<<", ">>>"):
                 result = self._expr_signed(expr.left, cache)
+            elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+                result = False
             else:
                 result = self._expr_signed(expr.left, cache) and self._expr_signed(expr.right, cache)
 
