@@ -505,7 +505,22 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # a2[12:6], a6} : a6[15]` where `a2[12:6]` is x but `a6`'s own
             # bits already make the concatenation condition definitely
             # nonzero.
-            cond = self.eval(expr.condition, ctx).reduce_or()
+            # The condition is self-determined (IEEE 1364-2005 Table
+            # 5-22): its OWN natural width is the context that resizes any
+            # nested context-determined operator (~, arithmetic, another
+            # ternary) within it -- evaluating with width=0 here (as
+            # opposed to the condition's self-width) leaves such a nested
+            # operator entirely unresized, the SAME bug already fixed for
+            # Concatenation/Replication members and the `!`/reduction-op
+            # operand above, just one more leaf position. Confirmed wrong
+            # against Icarus for `(($unsigned(a1[5]) ? (a4 ^ a4[1]) :
+            # (~a0)) ? a0 : (^{2{a0}}))`, where `~a0`'s operand must be
+            # zero-extended to the INNER ternary's own 64-bit self-width
+            # (from its other branch `a4 ^ a4[1]`) before `~` runs, not
+            # left at a0's own 1-bit width -- a 1-bit `~a0` (=0) makes the
+            # inner ternary look falsy when the correctly-64-bit-wide
+            # `~a0` (=0xFFFF...FFFE) is actually nonzero.
+            cond = self.eval(expr.condition, ctx, _expr_self_width(expr.condition, ctx)).reduce_or()
             if cond.is_defined:
                 if cond.val:
                     return self.eval(expr.true_expr, ctx, width, own_signed)

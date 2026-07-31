@@ -165,6 +165,35 @@ class _ExprEmitterMixin:
             return "0"
         return "0"
 
+    def _shift_amount_width(self, right: Expression) -> int:
+        """Return the width to request when evaluating a shift's COUNT
+        operand as a self-determined (IEEE 1364-2005 Table 5-22 / SS5.6)
+        expression.
+
+        Normally this is just the operand's own `_expr_width` -- passing
+        anything wider risks a nested context-determined operator (e.g.
+        `~` in `~(cond ? a : b)`) wrongly treating that width as its own
+        enclosing context and widening its operand before the operator
+        runs. But `_expr_width`'s `+`/`-` case deliberately uses a
+        max-of-operands rule with no headroom for the carry bit (by
+        design -- see its own docstring), which is normally fine because
+        callers elsewhere pass a wider *enclosing* context width anyway;
+        for a shift amount evaluated at its OWN tight self-width, that
+        missing bit is real: `_emit_binary`'s `+`/`-` case masks its
+        result to exactly the requested width, so a genuine carry-out
+        (e.g. `1 + 1023` needing 11 bits, not `max(1, 10) = 10`) gets
+        silently truncated away, corrupting the shift amount. Confirmed
+        against Icarus for `a2 >> ((^(a1 ? a5[4:3] : a5)) + a3[25:16])`.
+        A single `max(lw, rw) + 1` is enough for one `+`/`-` node (adding
+        an N-bit and an M<=N-bit number can carry out by at most 1 bit);
+        deeper chains of `+`/`-` could in principle need more, but that's
+        the same pre-existing, documented limitation of `_expr_width`
+        itself, not something this shift-specific helper attempts to fix.
+        """
+        if isinstance(right, BinaryOp) and right.op in ("+", "-"):
+            return self._expr_width(right) + 1
+        return self._expr_width(right)
+
     def _emit_signed_widen(self, val_expr: str, sid: int, sel_width: int, context_width: int) -> str:
         """No-op: a bit-select/range-select/part-select is always unsigned
         (IEEE 1364-2005 §5.5.1) regardless of the sliced signal's own
@@ -1162,18 +1191,33 @@ class _ExprEmitterMixin:
         else:
             op_width = width
 
-        left = self._emit_expr(expr.left, op_width, signed_override)
-        # The shift COUNT is always interpreted as an unsigned magnitude
-        # (IEEE 1364-2005 Table 5-22 / SS5.6) regardless of its own declared
-        # signedness -- e.g. a 1-bit `signed` shift-count operand holding
-        # 1'b1 (value -1 in its own 1-bit signed representation) must still
-        # shift by 1, not by a sign-extended -1. `signed_override=False`
-        # forces `_emit_expr`'s Identifier case to zero- rather than
-        # sign-extend when widening to `op_width`. Confirmed against Icarus
-        # for `$unsigned(a1) << a0` with a0 declared `signed [0:0]` and
-        # a0=1 (mirrors the identical fix in `_wide_emitter.py`).
-        right_signed_override = False if expr.op in ("<<", ">>", "<<<", ">>>") else signed_override
-        right = self._emit_expr(expr.right, op_width, right_signed_override)
+        # `>>` is ALWAYS a logical (unsigned/zero-fill) shift in Verilog
+        # regardless of the left operand's own declared signedness -- only
+        # `>>>` sign-extends. Force unsigned explicitly for `>>` only;
+        # `<<`/`<<<`/`>>>` keep deferring to the operand's own signedness
+        # (or an active override). Confirmed against Icarus for `a2 >>
+        # (...)` with `a2` declared `signed [15:0]` and a shift amount >=
+        # 16; mirrors the identical fix in `_wide_emitter.py`.
+        left_signed_override = False if expr.op == ">>" else signed_override
+        left = self._emit_expr(expr.left, op_width, left_signed_override)
+        # The shift COUNT is self-determined (IEEE 1364-2005 Table 5-22 /
+        # SS5.6): it must be evaluated at its OWN natural width, not
+        # `op_width` (the enclosing context) -- requesting a wider context
+        # here previously let a context-determined operator WITHIN the
+        # amount expression (e.g. `~` in `~(cond ? a : b)`) wrongly widen
+        # its own operand to that context before complementing, corrupting
+        # the amount (`~0` at 32 bits = 0xFFFFFFFF, not the correct 1-bit
+        # `~0 = 1`). Also always interpreted as an unsigned magnitude
+        # regardless of its own declared signedness -- `signed_override=
+        # False` forces zero- rather than sign-extension for any
+        # Identifier reached within it. Confirmed against Icarus for
+        # `$unsigned(a1) << a0` (signedness) and `$signed((!a6[52])) <<
+        # (~(cond ? a4[13] : (~^a1[2])))` (width); mirrors the identical
+        # fix in `_wide_emitter.py`.
+        if expr.op in ("<<", ">>", "<<<", ">>>"):
+            right = self._emit_expr(expr.right, self._shift_amount_width(expr.right), False)
+        else:
+            right = self._emit_expr(expr.right, op_width, signed_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
@@ -1366,7 +1410,17 @@ class _ExprEmitterMixin:
         shift = sum(widths)
         for i, part in enumerate(parts):
             shift -= widths[i]
-            val = self._emit_expr(part, widths[i])
+            # `_emit_expr`'s raw C `long long` result is only meaningful
+            # within its own `widths[i]` bits -- e.g. `$signed(1'b1)`
+            # emits `_sign_ext(1, 1)`, which is -1 (ALL 64 bits set) as a
+            # raw C value, matching the natural C representation of
+            # "signed -1" but NOT scoped to `widths[i]`. Without masking
+            # here first, those spurious high bits bleed into the NEXT
+            # part's own bit range once shifted/OR'd together, corrupting
+            # neighboring concat members. Confirmed against Icarus (via
+            # the identical bug in `_emit_replication` below) for
+            # `{2{$signed((a4 <= a6))}}`.
+            val = f"(({self._emit_expr(part, widths[i])}) & wmask({widths[i]}))"
             if shift >= 64:
                 continue  # would overflow long long, truncated
             elif shift > 0:
@@ -1386,7 +1440,16 @@ class _ExprEmitterMixin:
             else:
                 return "0"  # non-constant replication count not supported in codegen
         val_w = self._expr_width(expr.value)
-        val = self._emit_expr(expr.value, val_w)
+        # `_emit_expr`'s raw C `long long` result is only meaningful within
+        # its own `val_w` bits -- e.g. `$signed(1'b1)` emits `_sign_ext(1,
+        # 1)`, which is -1 (ALL 64 bits set) as a raw C value, matching the
+        # natural C representation of "signed -1" but NOT scoped to
+        # `val_w`. Without masking here first, those spurious high bits
+        # survive the shift+OR tiling below and corrupt every tile but the
+        # last, since each tile is ORed in at its own bit offset assuming
+        # only the low `val_w` bits are meaningful. Confirmed against
+        # Icarus for `a2 << {2{$signed((a4 <= a6))}}`.
+        val = f"(({self._emit_expr(expr.value, val_w)}) & wmask({val_w}))"
         if count <= 1:
             return f"({val})"
         # Build: (val << (val_w*(count-1))) | ... | (val << val_w) | val
@@ -1873,7 +1936,16 @@ class _ExprEmitterMixin:
             if cached_m is not None:
                 return cached_m
             lm = self._emit_mask_expr(expr.left, op_width)
-            rm = self._emit_mask_expr(expr.right, op_width)
+            # The shift COUNT is self-determined -- see the identical note
+            # in `_emit_binary`. Most node types' mask handling already
+            # ignores an over-wide requested width internally (e.g. `~`
+            # recomputes its own self-width), but request the amount's own
+            # width here too for consistency/safety across all operand
+            # shapes rather than relying on that per-node-type accident.
+            if expr.op in ("<<", ">>", "<<<", ">>>"):
+                rm = self._emit_mask_expr(expr.right, self._shift_amount_width(expr.right))
+            else:
+                rm = self._emit_mask_expr(expr.right, op_width)
             if expr.op in ("==", "!="):
                 # A KNOWN bit that differs resolves the comparison to a
                 # definite result regardless of x/z bits elsewhere (mirrors
@@ -1919,6 +1991,15 @@ class _ExprEmitterMixin:
                 and self._expr_width(expr.left.arguments[0]) > _WORD_BITS
             ):
                 return f"(wmask({width}) if (({lm}) | ({rm})) else 0)"
+            if expr.op in ("<<", ">>", "<<<", ">>>"):
+                # An x/z shift COUNT makes the entire shift result x/z --
+                # there's no way to know how many positions to shift, so
+                # the result mask doesn't depend on WHICH bit positions of
+                # the amount are unknown (unlike the generic `lm | rm`
+                # fallback below), only on whether ANY of them are.
+                # Confirmed against Icarus for `a2 >> ((^(a1 ? a5[4:3] :
+                # a5)) + a3[25:16])` with a3 fully x.
+                return f"(wmask({width}) if ({rm}) else ({lm}))"
             # For bitwise OR: known-1 in either input forces result to known-1
             # For bitwise AND: known-0 in either input forces result to known-0
             # Hoist the left sub-expression's value+mask to named temps when in
@@ -1970,6 +2051,18 @@ class _ExprEmitterMixin:
                 if expr.op in {"|", "~|", "!"}:
                     return f"(0 if (({opv}) & (~({opm})) & {wm}) else (1 if (({opm}) & {wm}) else 0))"
                 return f"(1 if (({opm}) & {wm}) else 0)"
+            if expr.op == "-":
+                # Arithmetic negation propagates x the same way the `+`/`-`
+                # BinaryOp mask handling above does: ANY unknown bit
+                # anywhere in the operand makes the WHOLE result unknown
+                # (2's-complement negation's borrow chain can't be
+                # computed with partial unknowns) -- unlike `~` (bitwise
+                # complement) below, which doesn't need this and can just
+                # pass the operand's mask through bit-for-bit unchanged.
+                # Confirmed against Icarus for `-$signed({a0, a1, a7})`
+                # with a1 fully x.
+                opm = self._emit_mask_expr(expr.operand, ow)
+                return f"(wmask({width}) if ({opm}) else 0)"
             return self._emit_mask_expr(expr.operand, ow)
 
         if etype is TernaryOp:
@@ -1999,7 +2092,10 @@ class _ExprEmitterMixin:
             offset = total_w
             for p, pw in zip(parts, part_widths):
                 offset -= pw
-                mask = self._emit_mask_expr(p, pw)
+                # Same masking-before-tiling reasoning as `_emit_concat`'s
+                # value side -- a mask expression isn't guaranteed scoped
+                # to `pw` bits either.
+                mask = f"(({self._emit_mask_expr(p, pw)}) & wmask({pw}))"
                 if offset >= 64:
                     continue
                 elif offset > 0:
@@ -2018,7 +2114,9 @@ class _ExprEmitterMixin:
                 else:
                     return f"wmask({width})"
             val_w = self._expr_width(expr.value)
-            vm = self._emit_mask_expr(expr.value, val_w)
+            # Same masking-before-tiling reasoning as `_emit_replication`'s
+            # value side.
+            vm = f"(({self._emit_mask_expr(expr.value, val_w)}) & wmask({val_w}))"
             if count <= 1:
                 return f"({vm})"
             parts = []

@@ -887,16 +887,65 @@ vm-fast's reduction-AND/NAND opcode(s) likely have the same
 any-x-bails-to-fully-ambiguous precision gap already fixed elsewhere this
 session, just not yet traced into `_interp_fast.pyx` specifically.
 
+**Continued (sixth wave, next day)**: kept bisecting the remaining
+`VERIFORGE_DIFF_CASES=300` failures one at a time (17/30 → 26/30),
+finding and fixing seven more distinct, Icarus-confirmed bugs, all
+documented in detail in `known_issues.md`'s sixth/seventh-wave entries:
+- vm-fast's `OP_RED_NAND` had its own separately-naive x-precision
+  implementation instead of reusing the already-correct `OP_RED_AND`'s.
+- `TernaryOp`'s own condition (one more "leaf ignoring self-determined
+  width" position, same shape as several fixed in earlier waves) in both
+  `sim/evaluator.py` and `sim/vm/compiler.py`.
+- A scratch-slot LIFO-ordering violation in the compiled engine's wide
+  emitter that corrupted `wide_mux`'s condition data (the allocator is a
+  plain stack-depth counter, not a real pool -- freeing out of order let
+  a later allocation silently reuse a still-live slot's number).
+- A reduction operator loading its wide operand at the wrong (inherited,
+  too-small) word count instead of its own required one.
+- Unary `-`'s narrow/scalar mask computation not propagating "any x
+  anywhere makes the WHOLE result x" the way `+`/`-` binary ops already
+  do (only passing the operand's mask through unchanged, correct for `~`
+  but not arithmetic negation).
+- A family of four related shift-operator bugs found together while
+  chasing one regression: the left operand's recursive width capped too
+  low for a `$signed(...)`-wrapped narrow value; `>>` incorrectly
+  sign-extending a declared-`signed` left operand (it must always be
+  logical/unsigned, unlike `>>>`); the shift COUNT evaluated at an
+  arbitrary width instead of its own self-determined one, corrupting a
+  nested context-determined operator within it; and that fix exposing a
+  pre-existing `_expr_width` `+`/`-` carry-bit truncation gap needing a
+  new `_shift_amount_width()` headroom helper.
+- The wide emitter's signed-comparison detection only recognizing a
+  literal `$signed(x) < $signed(y)` syntactic pattern, missing the
+  general case (e.g. a ternary whose combined signedness is true because
+  both branches are individually signed).
+- `_emit_concat`/`_emit_replication` embedding each member's raw C value
+  into shift+OR tiling without masking it to its own self-width first
+  (same root shape as the fourth wave's `wide_mux` pollution bug, just in
+  a different consumer) -- a `$signed(1'b1)`-cast member's raw `-1`
+  representation (all 64 bits set) was corrupting neighboring
+  concat/replication members once shifted into place.
+
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
 reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
-exhaustively characterized. `known_issues.md` now also lists seven
-specific still-failing `VERIFORGE_DIFF_CASES=300` batches
-(11/12/18/20/25/26/28) that have not yet been individually bisected and
-root-caused -- next-session starting point, using the same isolate-
-single-case-module + compare-against-Icarus methodology used throughout
-this item.
+exhaustively characterized. The remaining 4/30 failures at this case count
+all trace back to ONE root cause, documented in detail in
+`known_issues.md`: the compiled engine's narrow/scalar emitter reads a
+signal wider than 64 bits via `c.val[sid]`, which only ever holds its low
+64 bits, whenever a wide signal ends up embedded in a computation that the
+continuous-assign codegen path routes through the SCALAR emitter instead
+of the wide one -- confirmed for a wide reduction operand (case 88), a
+wide signed comparison operand (case 298's residual failures), and very
+likely a deeply-nested wide concatenation (case 111); case 286 remains
+un-root-caused. Locating and fixing the actual continuous-assign
+narrow-vs-wide routing decision (distinct from, and apparently not
+governed by, `_rhs_needs_wide_eval` at `_wide_emitter.py:4437`, per the
+comb-vs-ff codegen asymmetry observed for byte-identical RHS text) is the
+clear next-session starting point -- fixing it in one place would likely
+resolve all three/four remaining failures at once, rather than continuing
+to patch each individual trigger path.
 
 ## Tier 3 — CI and engine parity
 

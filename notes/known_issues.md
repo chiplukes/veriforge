@@ -679,11 +679,154 @@ shapes found while continuing the `VERIFORGE_DIFF_CASES=300` bisection
   against Icarus for `-($signed((a7 == a2[4])) ? $unsigned({3{a3[60]}}) :
   (a5[3:1] ? a4[41] : a6))`.
 
-**Newly-discovered, NOT YET FIXED, distinct bugs found while continuing to
-bisect the fifth wave's remaining failures** (documented here rather than
-rushed, since each needs its own careful root-causing/verification pass
-like the ones above; do not assume these are the same shape as anything
-fixed so far):
+**Sixth wave (July 2026, same work-plan item) -- six more distinct bug
+shapes, all confirmed against Icarus and fixed** (17/30 → 26/30 on
+`VERIFORGE_DIFF_CASES=300`):
+- **vm-fast's `OP_RED_NAND` had its own, separately-naive x-precision
+  implementation instead of reusing `OP_RED_AND`'s already-correct one.**
+  `OP_RED_AND` right above it already implements "a known-0 bit anywhere
+  forces the reduction definitely non-x, even with other x/z bits present"
+  (mirroring `Value.reduce_and`), in both its narrow and wide-value
+  branches -- `OP_RED_NAND` had a from-scratch reimplementation that
+  missed this and fell straight to "any x/z bit -> x". Fixed by mirroring
+  `OP_RED_AND`'s known-0 check (NAND: any known-0 -> definite 1). Confirmed
+  against Icarus for `(~&{(-a6), a7, {a4[16:7], a6[29:16]}}) ? a1[0] :
+  {...}` with `a4` fully x.
+- **`TernaryOp`'s own condition, one leaf position missed by the
+  fourth-wave `reduce_or()` fix.** `eval()`/`_compile_expr()` reduced the
+  condition's ALREADY-EVALUATED value with `.reduce_or()`, but evaluated
+  it at `width=0` (self-determined-but-uncontextualized) instead of the
+  condition's own self-determined width -- the same "leaf ignoring width"
+  bug already fixed for Concatenation/Replication members and the
+  `!`/reduction-op operand, just one more position. When the condition is
+  itself e.g. a nested ternary whose OTHER branch is a wide arithmetic
+  result, a `~`/unary-minus branch nested within it never got resized
+  before running, corrupting the outer condition's truthiness. Fixed by
+  evaluating at `_expr_self_width(expr.condition, ctx)` /
+  `self._expr_width(expr.condition)` in both `sim/evaluator.py` and
+  `sim/vm/compiler.py`. Confirmed against Icarus for `(($unsigned(a1[5]) ?
+  (a4 ^ a4[1]) : (~a0)) ? a0 : (^{2{a0}}))`.
+- **Compiled engine: a scratch-slot LIFO violation corrupted `wide_mux`'s
+  condition data.** The fourth-wave fix routing a wide-signal-touching
+  `TernaryOp` condition through `wide_logical_truth` freed its `cond_slot`
+  scratch allocation before the `truth_slot` holding the reduced result
+  was done being read by the later `wide_mux` call -- `_alloc_scratch`/
+  `_free_scratch` (`codegen.py`) is a plain LIFO stack-depth counter, not
+  a real pool, so freeing out of order let a LATER allocation (`tslot`,
+  for the ternary's true branch) reuse `truth_slot`'s number and silently
+  overwrite the condition's truthiness with the true branch's own data
+  before `wide_mux` read it. Fixed by keeping `cond_slot`/`truth_slot`
+  allocated through to the very end, freed together after `tslot`/`fslot`
+  in one block.
+- **Compiled engine: `_REDUCE_PRIMS` loaded a reduction's operand at the
+  inherited (too-small) `n_words` instead of its own required word
+  count.** `_wide_emitter.py`'s reduction-op handling computed `op_n`
+  (the operand's OWN required word count) correctly for the final
+  `wide_reduce_*` primitive call, but passed the INHERITED `n_words`
+  (sized for the enclosing, possibly-narrower destination) to the
+  recursive LOAD of the operand itself -- when a reduction over a wide
+  (>64-bit) signal is nested inside a narrower enclosing context (e.g.
+  `~^a6` as one AND-operand of a 20-bit subtraction that is itself a
+  ternary condition), `wide_load_signal` only loaded 1 of the 2 words a
+  wide signal actually needs, leaving the rest uninitialized garbage that
+  the reduction then read. Fixed to use `max(n_words, op_n)`, mirroring
+  the already-correct sibling `!` case a few lines below. Confirmed
+  against Icarus for `((^a3) - ({2{a5[21:12]}} & (~^a6))) ? a1 : ...`
+  where `a6` is 80 bits and the enclosing subtraction is only 20.
+- **Compiled engine: unary `-`'s narrow/scalar mask computation just
+  passed the operand's mask through unchanged, instead of propagating
+  "any x anywhere -> the WHOLE result is x" the way `+`/`-` BinaryOp
+  already does.** `~` (bitwise complement) correctly passes its operand's
+  mask through bit-for-bit (complementing doesn't need full-x
+  propagation), but arithmetic negation's 2's-complement borrow chain
+  can't be computed with partial unknowns -- `_emit_mask_expr`'s UnaryOp
+  fallthrough used the SAME pass-through for both, so `-$signed({a0, a1,
+  a7})` with `a1` fully x showed only the 8 specific bit positions
+  corresponding to `a1`'s own position as x, not the whole 10-bit
+  negation result. Fixed by giving `-` its own branch:
+  `wmask(width) if (operand_mask) else 0`. Confirmed against Icarus for
+  `{(-$signed({a0, a1, a7})), a1[7:4]}` with `a1` fully x.
+- **Compiled engine: a family of shift-operator bugs, found together
+  while chasing one regression from the fixes above.** All four:
+  1. A shift's left operand recursive computation was capped at its OWN
+     self-width (`lw`), not `max(lw, dst_width)` -- when it's e.g. a
+     `$signed(...)`-wrapped 1-bit value, that cap stopped the wrapper's
+     own sign-extension from filling anywhere past bit 0. Fixed to widen
+     the recursive `dst_width` when needed.
+  2. Widening that same recursive call exposed a SEPARATE bug: `>>` is
+     ALWAYS a logical (zero-fill) shift in Verilog regardless of the left
+     operand's own declared signedness (only `>>>` sign-extends) -- once
+     the left operand's recursive `dst_width` could exceed its own width,
+     an unqualified recursive call let a plain `signed`-declared
+     Identifier fall back to its OWN declared signedness and get
+     sign-extended, which is wrong specifically for `>>`. Fixed by forcing
+     `signed_override=False` for `>>`'s left operand only, in both the
+     wide and narrow emitters.
+  3. The shift COUNT (self-determined per Table 5-22) was evaluated at a
+     fixed width of 32 bits (`_wide_emitter.py`) or the enclosing
+     `op_width` (`_expr_emitter.py`), purely for `<int>`-cast convenience
+     -- letting a context-determined operator WITHIN the amount (e.g. `~`
+     in `~(cond ? a : b)`) wrongly treat that width as its own context and
+     widen its operand before running, corrupting the amount. Fixed by
+     evaluating the amount at its own self-determined width instead.
+  4. That fix in turn exposed a FOURTH bug: `_expr_width`'s `+`/`-` case
+     deliberately uses a max-of-operands rule with no headroom for the
+     carry bit (documented, pre-existing simplification -- normally fine
+     because callers pass a wider enclosing context anyway), but a shift
+     amount now evaluated at its own tight self-width has no such outer
+     context, so a genuine carry-out got silently masked away. Fixed with
+     a new `_shift_amount_width()` helper that adds 1 bit of headroom
+     specifically when the amount's top-level node is a `+`/`-` BinaryOp.
+  Confirmed against Icarus for `$unsigned(a1) << a0` (signedness),
+  `$signed((!a6[52])) << (~({a0, a0, a5[54]} ? a4[13] : (~^a1[2])))`
+  (left-operand width), `a2 >> ((^(a1 ? a5[4:3] : a5)) + a3[25:16])`
+  (amount width/carry AND the `>>`-is-always-unsigned regression), all in
+  `_wide_emitter.py`; the narrow-emitter counterparts in
+  `_expr_emitter.py` were fixed defensively in parallel (same shape,
+  not independently fuzzer-triggered but the reasoning is identical).
+- **Compiled engine: the wide emitter's signed-comparison detection only
+  recognized a LITERAL `$signed(x) < $signed(y)` syntactic pattern**,
+  missing the general case where either side is signed for some OTHER
+  reason (a ternary whose own combined signedness is true because both
+  branches are individually signed; a plain `signed`-declared Identifier).
+  Using the unsigned comparison primitive on operands that are actually
+  meant to be interpreted as negative silently gives the wrong result.
+  Fixed by deciding signedness via `_expr_signed(expr.left) and
+  _expr_signed(expr.right)` (the same general rule used everywhere else in
+  this codebase), keeping the `$signed(...)`-unwrapping as a separate,
+  independent optimization. Confirmed against Icarus for `(a4[6] ?
+  $signed(a4[52:24]) : (~a6)) < a4`, where only the ternary's `true_expr`
+  is a literal `$signed(...)` call.
+
+**Seventh wave (July 2026, same work-plan item) -- one more distinct bug,
+found while re-running the large batch after the sixth wave** (26/30 on
+`VERIFORGE_DIFF_CASES=300`, up from 17/30 before this session's most
+recent round):
+- **Compiled engine: `_emit_concat`/`_emit_replication` embed each
+  member's raw C value into shift+OR tiling without masking it to its own
+  self-width first.** Same root shape as the fourth-wave `wide_mux`
+  pollution bug, just in a different consumer: `$signed(1'b1)` compiles to
+  `_sign_ext(1, 1)` = -1 = ALL 64 bits set (a legitimate raw C
+  representation of "signed -1", just not scoped to 1 bit) -- embedding
+  that directly into `(val << shift) | ...` without masking first means
+  the spurious high bits survive into the NEXT member's own bit range once
+  shifted, corrupting neighboring concat members or replication tiles.
+  Fixed by masking each member/tile to its own width right where it's
+  read, in both the value (`_emit_concat`/`_emit_replication`) and mask
+  (`_emit_mask_expr`'s Concatenation/Replication cases) computations.
+  Confirmed against Icarus for `a2 << {2{$signed((a4 <= a6))}}`. **Note**:
+  this expression's remaining residual failures (some vectors still
+  mismatch after this fix) are the ALREADY-documented case-88 architectural
+  gap below, not a new bug -- `a4 <= a6` compares a 64-bit and an 80-bit
+  operand via the narrow/scalar comparison path, which reads the 80-bit
+  `a6` via `c.val[sid]` (only its low 64 bits) since `_sign_ext(v, w)` is a
+  no-op for `w >= 64`, silently dropping `a6`'s top 16 bits from the
+  comparison.
+
+**Newly-discovered, NOT YET FIXED, distinct bugs** (documented here rather
+than rushed, since each needs its own careful root-causing/verification
+pass like the ones above; do not assume these are the same shape as
+anything fixed so far):
 - **A signal wider than 64 bits, read through the compiled engine's
   narrow/scalar emitter, silently loses every bit beyond the first 64.**
   `_expr_emitter.py`'s `_emit_expr` Identifier case unconditionally
@@ -709,31 +852,25 @@ fixed so far):
   `_rhs_needs_wide_eval` at `_wide_emitter.py:4437`, not yet located.
   Confirmed wrong against Icarus for
   `{$unsigned((~^(a5[56] ? a5 : a7))), a2[10:7]}` (batch=8, case=88 at
-  `VERIFORGE_DIFF_SEED=1234567`/`VERIFORGE_DIFF_CASES=300`).
-- **vm-fast's reduction-AND-family opcodes may have the same
-  "any-x-bails-to-fully-ambiguous" precision gap already fixed elsewhere
-  this session**, for the reduction inside a NAND used as a ternary
-  condition -- reference gives a fully-defined result while vm-fast gives
-  a mostly-x one for `(~&{(-a6), a7, {a4[16:7], a6[29:16]}}) ? a1[0] :
-  {...}` when `a4` is fully x (batch=29, case=296,
-  `VERIFORGE_DIFF_SEED=1234567`/`VERIFORGE_DIFF_CASES=300`, vector 6).
-  Not yet traced into the specific `_interp_fast.pyx` opcode; likely
-  `OP_RED_AND`/`OP_RED_NAND`'s x-handling missing the "a known-0 bit
-  anywhere forces `&`-reduction definitely 0 (NAND definitely 1)
-  regardless of other x bits" precision rule that `Value.reduce_and` in
-  `sim/value.py` already implements (mirrors this session's `reduce_or`/
-  `logical_and`/`logical_or` precision fixes, just for `&`/`~&`
-  specifically and in the Cython VM specifically).
-- Several other `VERIFORGE_DIFF_SEED=1234567`/`VERIFORGE_DIFF_CASES=300`
-  failures remain un-root-caused as of this writing: batch=11/case=111
-  (a deeply nested concatenation exceeding 96 bits before truncation --
-  possibly the already-documented `_emit_concat`/`_emit_replication`
-  shift≥64 truncation gap above, not yet confirmed), batch=12/case=126,
-  batch=18/case=184, batch=20/case=202, batch=25/case=257,
-  batch=26/case=266, batch=28/case=286 (all `engine=compiled`). Each
-  should be bisected with the same isolate-single-case-module +
-  compare-against-Icarus methodology used throughout this document before
-  fixing.
+  `VERIFORGE_DIFF_SEED=1234567`/`VERIFORGE_DIFF_CASES=300`). This is the
+  ROOT CAUSE most likely responsible for the sixth wave's `_REDUCE_PRIMS`
+  fix above NOT fully resolving every wide-reduction case -- that fix
+  only covers the case where the reduction is itself routed through
+  `_emit_wide_expr_to_scratch`; a reduction reached ONLY through the
+  narrow/scalar comb-assign path (as case 88 is) never gets there at all.
+- batch=11/case=111 (a deeply nested concatenation exceeding 96 bits
+  before truncation) is very likely the SAME comb-assign-routing gap as
+  case 88 above (its generated code also showed the comb assign computed
+  entirely via `c.val[sid]`-based narrow reads for a wide signal) but
+  wasn't independently re-confirmed after the sixth wave's fixes.
+- batch=28/case=286: `{a3[37], (!{2{a6[36]}}), (((a7 ? a1[2] : a3) ?
+  (a4 ? a3[42:8] : a1) : a2[2:0]) ? (~&$signed(a5)) : $signed({3{a0}}))}`
+  -- not yet root-caused; 6 of 8 vectors mismatch with a small, consistent
+  bit-pattern offset between expected and got, suggestive of a
+  fill-boundary or bit-position miscalculation rather than a totally
+  wrong value, but not yet bisected further. Next-session starting point,
+  using the same isolate-single-case-module + compare-against-Icarus
+  methodology used throughout this document.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

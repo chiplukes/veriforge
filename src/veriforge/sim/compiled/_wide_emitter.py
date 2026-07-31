@@ -3758,7 +3758,20 @@ class _WideEmitterMixin:
                 op_slot = self._alloc_scratch()
                 op_width = self._expr_width(expr.operand)
                 op_n = (op_width + 63) // 64
-                lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, n_words, op_width, indent)
+                # Load the operand at ITS OWN required word count, not the
+                # inherited (enclosing) `n_words` -- when the reduction's
+                # own result feeds into a narrower enclosing context (e.g.
+                # `~^a6` as one AND-operand of a 20-bit subtraction, itself
+                # a ternary condition routed through wide scratch),
+                # `n_words` can be smaller than the operand's true width
+                # requires, silently loading only PART of a wide (>64-bit)
+                # signal and leaving the rest of its scratch words
+                # uninitialized garbage that the reduction then reads.
+                # Mirrors the identical, already-correct pattern in the
+                # `!` case right below. Confirmed against Icarus for
+                # `((^a3) - ({2{a5[21:12]}} & (~^a6))) ? a1 : ...` where
+                # `a6` is 80 bits and the enclosing subtraction is only 20.
+                lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, max(n_words, op_n), op_width, indent)
                 if lines is None:
                     self._free_scratch(op_slot)
                     return None
@@ -3868,31 +3881,84 @@ class _WideEmitterMixin:
                 # Source may be wider than destination (e.g. 65-bit >> 4 into 33-bit dst).
                 # Load enough words to capture the full source so the shift sees all bits.
                 n_src = max(n_words, (lw + 63) // 64)
-                llines = self._emit_wide_expr_to_scratch(expr.left, lslot, n_src, lw, indent)
+                # The left operand's OWN recursive computation must be
+                # asked for at least `dst_width` bits, not just its own
+                # narrower self-width `lw` -- a shift's left operand is
+                # context-determined (IEEE 1364-2005 Table 5-22), and when
+                # it's e.g. a `$signed(...)`-wrapped 1-bit value, capping
+                # its recursive `dst_width` at 1 stops that wrapper's own
+                # sign-extension from filling anywhere past bit 0 (the
+                # rest of the scratch words end up zeroed instead of
+                # correctly sign-extended), even though `n_src` above
+                # already correctly sized the WORD COUNT for it. Confirmed
+                # against Icarus for `$signed((!a6[52])) << (...)`.
+                l_dst_width = max(lw, dst_width)
+                # `>>` is ALWAYS a logical (unsigned/zero-fill) shift in
+                # Verilog regardless of the left operand's own declared
+                # signedness -- only `>>>` sign-extends. Before `l_dst_width`
+                # could exceed `lw`, a signed left operand never needed
+                # widening here at all (dst_width==lw), so this never
+                # mattered; now that it can be asked to widen, an
+                # unqualified recursive call would let a plain signed
+                # Identifier fall back to ITS OWN declared signedness (via
+                # `signed_override=None`) and get sign-extended -- wrong for
+                # `>>` specifically. Force unsigned explicitly for `>>` only;
+                # `<<`/`<<<`/`>>>` keep deferring to the operand's own
+                # signedness (or an active override), matching Verilog and
+                # the already-correct `$signed(...) << ...` case. Confirmed
+                # against Icarus for `a2 >> (...)` with `a2` declared
+                # `signed [15:0]` and a shift amount >= 16.
+                l_signed_override = False if op == ">>" else signed_override
+                llines = self._emit_wide_expr_to_scratch(
+                    expr.left, lslot, n_src, l_dst_width, indent, signed_override=l_signed_override
+                )
                 if llines is None:
                     self._free_scratch(lslot)
                     return None
-                # The shift COUNT is always interpreted as an unsigned
-                # magnitude (IEEE 1364-2005 Table 5-22 / SS5.6) regardless of
-                # its own declared signedness -- e.g. a 1-bit `signed`
-                # shift-count operand holding 1'b1 (value -1 in its own
-                # 1-bit signed representation) must still shift by 1, not by
-                # a sign-extended -1. Passing `signed_override=False` forces
-                # `_emit_expr`'s Identifier case to zero- rather than
-                # sign-extend when widening to the 32-bit `<int>` cast width.
-                # Confirmed against Icarus for `$unsigned(a1) << a0` with a0
-                # declared `signed [0:0]` and a0=1.
-                amount_expr = f"<int>({self._emit_expr(expr.right, 32, False)})"
+                # The shift COUNT is self-determined (IEEE 1364-2005 Table
+                # 5-22 / SS5.6): it must be evaluated at its OWN natural
+                # width, never an outer context width -- requesting a
+                # fixed 32 bits here (merely for the `<int>` cast's
+                # convenience) previously let a context-determined
+                # operator WITHIN the amount expression (e.g. `~` in
+                # `~(cond ? a : b)`) wrongly treat 32 as its enclosing
+                # context and widen its own operand to 32 bits before
+                # complementing, corrupting the amount (`~0` at 32 bits =
+                # 0xFFFFFFFF, not the correct 1-bit `~0 = 1`). Also always
+                # interpreted as an unsigned magnitude regardless of its
+                # own declared signedness -- `signed_override=False`
+                # forces zero- rather than sign-extension for any
+                # Identifier reached within it. Confirmed against Icarus
+                # for `$unsigned(a1) << a0` (signedness) and
+                # `$signed((!a6[52])) << (~(cond ? a4[13] : (~^a1[2])))`
+                # (width).
+                amount_w = self._shift_amount_width(expr.right)
+                amount_expr = f"<int>({self._emit_expr(expr.right, amount_w, False)})"
+                amount_mask_expr = self._emit_mask_expr(expr.right, amount_w)
                 lines = llines
+                # An x/z shift COUNT makes the whole shift result x/z
+                # (there's no way to know how many positions to shift) --
+                # the shift primitives below only ever consult the
+                # amount's VALUE, silently treating unknown-position bits
+                # as a bogus concrete shift instead of propagating the
+                # unknown-ness through. Confirmed against Icarus for
+                # `a2 >> ((^(a1 ? a5[4:3] : a5)) + a3[25:16])` with a3
+                # fully x.
+                lines.append(f"{pad}if ({amount_mask_expr}):")
+                for wi in range(n_words):
+                    remaining = dst_width - wi * 64
+                    lines.append(f"{pad}    _sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}    _sc{slot}_m[{wi}] = _word_mask64({remaining})")
+                lines.append(f"{pad}else:")
                 if op == ">>>":
                     lines.append(
-                        f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m,"
+                        f"{pad}    {prim}(_sc{slot}_v, _sc{slot}_m,"
                         f" _sc{lslot}_v, _sc{lslot}_m,"
                         f" {amount_expr}, {n_src}, {lw}, {dst_width})"
                     )
                 else:
                     lines.append(
-                        f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m,"
+                        f"{pad}    {prim}(_sc{slot}_v, _sc{slot}_m,"
                         f" _sc{lslot}_v, _sc{lslot}_m,"
                         f" {amount_expr}, {n_src}, {dst_width})"
                     )
@@ -3901,18 +3967,40 @@ class _WideEmitterMixin:
 
             if op in self._WIDE_CMP_PRIMS:
                 prim, swap = self._WIDE_CMP_PRIMS[op]
-                # Detect $signed(a) <op> $signed(b) → use signed comparison primitive
+                # Use the signed comparison primitive whenever BOTH sides
+                # are genuinely signed per IEEE 1364-2005 §5.5.1 (mirrors
+                # `_expr_signed`'s general rule, used everywhere else in
+                # this codebase) -- NOT only when both are literally a
+                # syntactic `$signed(...)` call. A side can be signed
+                # without being a bare `$signed(...)` node too, e.g. a
+                # ternary whose OWN combined signedness is true (both
+                # branches individually signed) already sign-extends its
+                # selected branch internally when recursed into below, or
+                # a plain Identifier declared `signed`. Using the UNSIGNED
+                # primitive on operands that are actually meant to be
+                # negative silently gives the wrong comparison result.
+                # Confirmed against Icarus for `(a4[6] ? $signed(a4[52:24])
+                # : (~a6)) < a4` where only the ternary's `true_expr` is a
+                # literal `$signed(...)` call but its `false_expr` (`~a6`,
+                # picked here) is signed via `a6`'s own declared
+                # signedness, and `a4` (the RHS) is a plain signed
+                # Identifier -- neither syntactically a `$signed(...)`
+                # call, yet the comparison is fully signed.
                 use_signed = (
-                    op in ("<", "<=", ">", ">=")
-                    and isinstance(expr.left, FunctionCall)
+                    op in ("<", "<=", ">", ">=") and self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                )
+                left_is_signed_call = (
+                    isinstance(expr.left, FunctionCall)
                     and expr.left.name.lower() == "$signed"
                     and len(expr.left.arguments) == 1
-                    and isinstance(expr.right, FunctionCall)
+                )
+                right_is_signed_call = (
+                    isinstance(expr.right, FunctionCall)
                     and expr.right.name.lower() == "$signed"
                     and len(expr.right.arguments) == 1
                 )
-                left_expr = expr.left.arguments[0] if use_signed else expr.left
-                right_expr = expr.right.arguments[0] if use_signed else expr.right
+                left_expr = expr.left.arguments[0] if left_is_signed_call else expr.left
+                right_expr = expr.right.arguments[0] if right_is_signed_call else expr.right
                 lslot = self._alloc_scratch()
                 rslot = self._alloc_scratch()
                 lw = self._expr_width(left_expr)
@@ -4056,8 +4144,60 @@ class _WideEmitterMixin:
             # branch to be selected outright instead of correctly falling
             # through to the ambiguous per-word merge. Confirmed against
             # Icarus for `-($signed((a7 == a2[4])) ? ... : ...)`.
-            cond_v_expr = f"<unsigned long long>(({self._emit_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
-            cond_m_expr = f"<unsigned long long>(({self._emit_mask_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
+            # A condition that reads a signal wider than 64 bits ANYWHERE
+            # in its tree cannot go through the scalar path above at all:
+            # `_emit_expr`'s Identifier case always returns `c.val[sid]`
+            # regardless of the signal's true width, which for a >64-bit
+            # signal only ever holds its LOW word -- and reduction helpers
+            # like `_xor_reduce` then shift that same 64-bit value by
+            # amounts >= 64 (undefined behavior, wraps on typical
+            # platforms) when asked to reduce over the signal's full
+            # (wider) width, silently corrupting the result instead of
+            # just dropping high bits. Route these through wide scratch +
+            # `wide_logical_truth` instead (already-correct: any known-1
+            # bit anywhere -> true, else x if any x/z, else false),
+            # reusing the same real word-by-word storage the rest of the
+            # wide emitter already uses. Confirmed against Icarus for
+            # `((^a3) - ({2{a5[21:12]}} & (~^a6))) ? a1 : ...` where `a6`
+            # is 80 bits.
+            # `_alloc_scratch`/`_free_scratch` is a plain LIFO stack-depth
+            # counter (see codegen.py), not a real slot pool -- slots MUST
+            # be freed in exact reverse-allocation order, or a later
+            # `_alloc_scratch()` call hands out a number that's still
+            # "live" (still holding data another in-flight computation
+            # needs). `cond_slot`/`truth_slot` below therefore stay
+            # allocated all the way through the `tslot`/`fslot` allocation
+            # and the final `wide_mux` call (which reads `cond_v_expr`/
+            # `cond_m_expr`, i.e. `truth_slot`'s data), and are freed
+            # LAST, after `tslot`/`fslot` -- freeing them any earlier
+            # (once briefly attempted here) let `tslot` collide with
+            # `truth_slot`'s number, silently overwriting the
+            # already-computed condition truthiness with the true
+            # branch's own data before `wide_mux` read it.
+            cond_lines: list[str]
+            cond_slot: int | None = None
+            truth_slot: int | None = None
+            if self._expr_uses_wide_signal(expr.condition):
+                cond_n = max(1, (cond_w + 63) // 64)
+                cond_slot = self._alloc_scratch()
+                maybe_cond_lines = self._emit_wide_expr_to_scratch(expr.condition, cond_slot, cond_n, cond_w, indent)
+                if maybe_cond_lines is None:
+                    self._free_scratch(cond_slot)
+                    return None
+                cond_lines = maybe_cond_lines
+                truth_slot = self._alloc_scratch()
+                cond_lines.append(
+                    f"{pad}wide_logical_truth(_sc{truth_slot}_v, _sc{truth_slot}_m,"
+                    f" _sc{cond_slot}_v, _sc{cond_slot}_m, {cond_n})"
+                )
+                cond_v_expr = f"_sc{truth_slot}_v[0]"
+                cond_m_expr = f"_sc{truth_slot}_m[0]"
+            else:
+                cond_lines = []
+                cond_v_expr = f"<unsigned long long>(({self._emit_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
+                cond_m_expr = (
+                    f"<unsigned long long>(({self._emit_mask_expr(expr.condition, cond_w)}) & {cond_mask_bits})"
+                )
             tslot = self._alloc_scratch()
             fslot = self._alloc_scratch()
             own_signed = self._expr_signed(expr)
@@ -4066,14 +4206,18 @@ class _WideEmitterMixin:
             )
             if tlines is None:
                 self._free_scratch(tslot, fslot)
+                if truth_slot is not None:
+                    self._free_scratch(truth_slot, cond_slot)
                 return None
             flines = self._emit_wide_expr_to_scratch(
                 expr.false_expr, fslot, n_words, dst_width, indent, signed_override=own_signed
             )
             if flines is None:
                 self._free_scratch(tslot, fslot)
+                if truth_slot is not None:
+                    self._free_scratch(truth_slot, cond_slot)
                 return None
-            lines = tlines + flines
+            lines = cond_lines + tlines + flines
             lines.append(
                 f"{pad}wide_mux(_sc{slot}_v, _sc{slot}_m,"
                 f" {cond_v_expr}, {cond_m_expr},"
@@ -4081,6 +4225,8 @@ class _WideEmitterMixin:
                 f" _sc{fslot}_v, _sc{fslot}_m, {n_words}, {dst_width})"
             )
             self._free_scratch(tslot, fslot)
+            if truth_slot is not None:
+                self._free_scratch(truth_slot, cond_slot)
             return lines
 
         # ── RangeSelect ─────────────────────────────────────────────────────

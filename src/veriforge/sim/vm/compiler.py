@@ -1002,7 +1002,16 @@ class Compiler:  # cm:8c1e4a
             # condition is x/z it merges bit-by-bit, zero-padding the
             # narrower operand.
             own_signed = self._expr_signed(expr)
-            self._compile_expr(expr.condition, program)  # self-determined
+            # The condition is self-determined (IEEE 1364-2005 Table
+            # 5-22): its OWN natural width is the context that resizes any
+            # nested context-determined operator within it -- compiling
+            # with width=0 here leaves such a nested operator entirely
+            # unresized, the same bug already fixed for the `!`/
+            # reduction-op operand above, one more leaf position. Mirrors
+            # the identical fix in `sim/evaluator.py`; confirmed wrong
+            # against Icarus for `(($unsigned(a1[5]) ? (a4 ^ a4[1]) :
+            # (~a0)) ? a0 : (^{2{a0}}))`.
+            self._compile_expr(expr.condition, program, self._expr_width(expr.condition))
             self._compile_expr(expr.true_expr, program, width, own_signed)
             self._compile_expr(expr.false_expr, program, width, own_signed)
             program.append(instr(Op.TERNARY))

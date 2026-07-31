@@ -2531,27 +2531,41 @@ cdef int _execute_core(
             continue
 
         if op == OP_RED_NAND:
+            # A known-0 bit forces the result to definite 1 (NAND is
+            # definite when the underlying AND is definitely 0) even when
+            # other bits are x/z -- mirrors OP_RED_AND above and
+            # sim/value.py's Value.reduce_nand(). The previous "any x/z
+            # bit -> x" shortcut here missed that case (OP_RED_AND already
+            # has this precision; OP_RED_NAND had its own, separately
+            # naive implementation instead of reusing it).
             a = stack[sp - 1]
             wmask = mask_for_width(a.width)
             if wflag[sp - 1]:
                 has_x = 0
-                for wi in range(WIDE_WORDS):
-                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1; break
-                if has_x:
+                any_zero = 0
+                wsp = a.width >> 6; bit_in_word = a.width & 63
+                for wi in range(wsp):
+                    if wm[(sp - 1) * WIDE_WORDS + wi]: has_x = 1
+                    if (~wv[(sp - 1) * WIDE_WORDS + wi]) & (~wm[(sp - 1) * WIDE_WORDS + wi]):
+                        any_zero = 1
+                if bit_in_word > 0 and wsp < WIDE_WORDS:
+                    tail_mask = (<unsigned long long>1 << bit_in_word) - 1
+                    if wm[(sp - 1) * WIDE_WORDS + wsp] & tail_mask: has_x = 1
+                    if (~wv[(sp - 1) * WIDE_WORDS + wsp]) & (~wm[(sp - 1) * WIDE_WORDS + wsp]) & tail_mask:
+                        any_zero = 1
+                if any_zero:
+                    stack[sp - 1].val = 1; stack[sp - 1].mask = 0
+                elif has_x:
                     stack[sp - 1].val = 0; stack[sp - 1].mask = 1
                 else:
-                    all_ones = 1
-                    wsp = a.width >> 6; bit_in_word = a.width & 63
-                    for wi in range(wsp):
-                        if wv[(sp - 1) * WIDE_WORDS + wi] != <unsigned long long>0xFFFFFFFFFFFFFFFF:
-                            all_ones = 0; break
-                    if all_ones and bit_in_word > 0 and wsp < WIDE_WORDS:
-                        if (wv[(sp - 1) * WIDE_WORDS + wsp] & ((<unsigned long long>1 << bit_in_word) - 1)) != ((<unsigned long long>1 << bit_in_word) - 1):
-                            all_ones = 0
-                    stack[sp - 1].val = 0 if all_ones else 1; stack[sp - 1].mask = 0
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 0
                 wflag[sp - 1] = 0
             elif a.mask:
-                stack[sp - 1].val = 0; stack[sp - 1].mask = 1
+                known_mask = wmask & ~a.mask
+                if (a.val & known_mask) != known_mask:
+                    stack[sp - 1].val = 1; stack[sp - 1].mask = 0
+                else:
+                    stack[sp - 1].val = 0; stack[sp - 1].mask = 1
             else:
                 stack[sp - 1].val = 0 if (a.val & wmask) == wmask else 1
                 stack[sp - 1].mask = 0
