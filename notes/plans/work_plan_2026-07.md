@@ -926,26 +926,56 @@ documented in detail in `known_issues.md`'s sixth/seventh-wave entries:
   representation (all 64 bits set) was corrupting neighboring
   concat/replication members once shifted into place.
 
+**Continued (eighth wave, same day) -- the deferred architectural gap,
+finally found and fixed**: went back to the case-88 gap that earlier
+waves had deliberately deferred as "too deep to chase" and located the
+actual mechanism by directly instrumenting `_emit_wide_lhs_write_new`,
+`_emit_wide_expr_to_scratch`, and `_flatten_concat_identifier_parts`
+rather than continuing to guess from generated-code inspection alone.
+Root cause: `_process_compiler.py`'s `_flatten_concat_identifier_parts`
+(the fast-path optimization `_compile_continuous_assigns` uses to turn a
+wide Concatenation RHS into an efficient word-by-word assign instead of
+the fully general scratch-based emitter) has a fallback for any concat
+member that isn't a plain identifier/select: it computes that member via
+the narrow/scalar emitter, gated only on the member's OWN self-determined
+result width being ≤64 bits -- which says nothing about whether its
+INTERNAL computation reads a signal wider than 64 bits (e.g.
+`$unsigned(~^(cond ? wide_signal : narrow))`, where the reduction's own
+result is 1 bit but its operand touches a 65-bit signal). Fixed by adding
+an `_expr_uses_wide_signal()` check (recursively, at each concat member --
+the same helper `_rhs_needs_wide_eval` already uses for its own top-level
+catch-all) to the fallback, forcing it to bail out and let the assignment
+fall through to the sound, wide-aware `_emit_wide_lhs_write_new` instead.
+Case 88 now passes all 8 vectors; `VERIFORGE_DIFF_CASES=300` improved
+26/30 → 27/30.
+
+**Important correction**: earlier waves' documentation assumed cases
+111/286/298 shared this SAME root cause (based on similar-looking
+symptoms: `c.val[sid]`-based narrow reads for a wide signal, comb-vs-ff
+asymmetry). Re-investigating case 111 after the fix found `_emit_flat_
+concat_whole_assign` IS being reached and IS structurally sound (confirmed
+by direct instrumentation) -- so 111's remaining failure is a DIFFERENT,
+more localized bug, not yet isolated (suspect the multi-word merge logic
+for a Concatenation with mixed identifier and expression-kind parts
+crossing a 64-bit word boundary). Case 298's residual failures are a
+THIRD, independently-confirmed instance of the general "narrow codepath
+meets wide signal" shape, this time in the signed-comparison codegen
+reached via the sixth wave's shift-amount computation. Case 286 remains
+un-root-caused. Full detail on all three in `known_issues.md`'s
+eighth-wave entry, including a recommendation to audit every remaining
+`_emit_expr`/`_emit_mask_expr` call site not already guarded by
+`_expr_uses_wide_signal`, rather than continuing to patch each instance
+the fuzzer happens to trip over individually.
+
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
 reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
-exhaustively characterized. The remaining 4/30 failures at this case count
-all trace back to ONE root cause, documented in detail in
-`known_issues.md`: the compiled engine's narrow/scalar emitter reads a
-signal wider than 64 bits via `c.val[sid]`, which only ever holds its low
-64 bits, whenever a wide signal ends up embedded in a computation that the
-continuous-assign codegen path routes through the SCALAR emitter instead
-of the wide one -- confirmed for a wide reduction operand (case 88), a
-wide signed comparison operand (case 298's residual failures), and very
-likely a deeply-nested wide concatenation (case 111); case 286 remains
-un-root-caused. Locating and fixing the actual continuous-assign
-narrow-vs-wide routing decision (distinct from, and apparently not
-governed by, `_rhs_needs_wide_eval` at `_wide_emitter.py:4437`, per the
-comb-vs-ff codegen asymmetry observed for byte-identical RHS text) is the
-clear next-session starting point -- fixing it in one place would likely
-resolve all three/four remaining failures at once, rather than continuing
-to patch each individual trigger path.
+exhaustively characterized. The remaining 3/30 failures (cases 111, 286,
+298-residual) are each a distinct, not-yet-fully-root-caused bug -- see
+`known_issues.md` for what's known about each, and the "audit every
+narrow-path call site" recommendation above as the clearest next-session
+starting point.
 
 ## Tier 3 — CI and engine parity
 

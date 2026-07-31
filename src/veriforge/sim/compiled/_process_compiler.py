@@ -1248,7 +1248,23 @@ class _ProcessCompilerMixin:
                 if static_width is None:
                     return False
             node_width = self._expr_width(node)
-            if 0 < node_width <= _WORD_BITS:
+            # This fallback computes `node` via the NARROW/SCALAR
+            # `_emit_expr`/`_emit_mask_expr` (sound only for <=64-bit
+            # values) purely because `node`'s OWN self-determined result
+            # width (`node_width`) is small -- e.g. a reduction operator's
+            # result is always 1 bit. But `node`'s INTERNAL computation can
+            # still read a signal wider than 64 bits (e.g.
+            # `$unsigned(~^(cond ? wide_signal : narrow))`), and the narrow
+            # emitter's Identifier case always returns `c.val[sid]`, which
+            # for a >64-bit signal only ever holds its low word --
+            # silently corrupting the result instead of raising an error.
+            # Bail out of this whole-concat-assign optimization in that
+            # case so the caller falls through to `_emit_wide_lhs_write_new`
+            # (the general recursive wide-scratch emitter, which correctly
+            # loads a wide signal's full value). Confirmed against Icarus
+            # for `{$unsigned((~^(a5[56] ? a5 : a7))), a2[10:7]}` where
+            # `a5` is 65 bits.
+            if 0 < node_width <= _WORD_BITS and not self._expr_uses_wide_signal(node):
                 parts.append(
                     ("expr", node_width, self._emit_expr(node, node_width), self._emit_mask_expr(node, node_width))
                 )

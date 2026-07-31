@@ -823,54 +823,114 @@ recent round):
   no-op for `w >= 64`, silently dropping `a6`'s top 16 bits from the
   comparison.
 
+**Eighth wave (July 2026, same work-plan item) -- the case-88 architectural
+gap, FOUND AND FIXED** (26/30 → 27/30 on `VERIFORGE_DIFF_CASES=300`; the
+biggest single fix of this whole multi-session investigation, given how
+long it had been deferred as "too deep to chase right now"):
+- **Root cause, finally located**: `_process_compiler.py`'s
+  `_flatten_concat_identifier_parts` -- the helper `_compile_continuous_
+  assigns` uses to turn a wide (`total_width > 64` or `lhs_w > 64`)
+  Concatenation RHS into an efficient word-by-word `_emit_flat_concat_
+  whole_assign` (instead of falling through to the fully general, scratch-
+  based `_emit_wide_lhs_write_new`) -- has a fallback for any concat member
+  that isn't a plain Identifier/RangeSelect/PartSelect (e.g. `$unsigned(
+  ~^(cond ? wide_signal : narrow))`): it computes that member via the
+  NARROW/SCALAR `_emit_expr`/`_emit_mask_expr`, gated only on the member's
+  OWN self-determined result width being ≤64 bits (`0 < node_width <=
+  _WORD_BITS`). A reduction/comparison/etc.'s own RESULT width being small
+  says nothing about whether its INTERNAL computation reads a signal wider
+  than 64 bits -- and the narrow emitter's Identifier case always returns
+  `c.val[sid]`, which for a >64-bit signal only ever holds its low word.
+  This is confirmed as the actual mechanism behind case 88's failure
+  (`{$unsigned((~^(a5[56] ? a5 : a7))), a2[10:7]}`, `a5` 65 bits): traced
+  by instrumenting `_emit_wide_lhs_write_new` and `_emit_wide_expr_to_
+  scratch` directly (neither was ever even CALLED for the comb assign --
+  confirming this fallback intercepted it before either ever ran) and by
+  instrumenting `_flatten_concat_identifier_parts` itself. The earlier
+  "comb-vs-ff asymmetry" observation (documented in the seventh-wave note,
+  now superseded) was real but was a RED HERRING for the actual mechanism
+  -- the always-block/NBA path doesn't have this SAME fast-path matcher at
+  all, so it always falls through to the sound `_emit_wide_lhs_write_new`,
+  while the comb-assign path's OWN fast-path silently miscomputes instead
+  of falling through.
+- **Fix**: added an `_expr_uses_wide_signal(node)` check (the SAME helper
+  `_rhs_needs_wide_eval` already uses for its own top-level catch-all,
+  just now applied recursively at each concat member too) to the fallback
+  -- when the member touches a signal wider than 64 bits ANYWHERE in its
+  tree, `walk()` now returns `False` for it, making the whole
+  `_flatten_concat_identifier_parts` call fail (return `None`) for that
+  Concatenation, so `_compile_continuous_assigns` correctly falls through
+  to `_emit_wide_lhs_write_new` (the general, scratch-based, genuinely
+  wide-aware emitter) instead. Confirmed against Icarus: case 88 now
+  passes all 8 vectors.
+- **This was NOT actually the same root cause as the still-open case
+  111/286/298-residual failures below**, despite earlier waves'
+  documentation guessing they were related (the "comb-vs-ff asymmetry" and
+  "`c.val[sid]`-based narrow reads" symptoms looked identical from the
+  outside). Re-investigating case 111 after this fix found `_emit_flat_
+  concat_whole_assign` IS being reached and IS correctly building a
+  proper word-by-word, wide-aware computation (confirmed by direct
+  instrumentation: `_flatten_concat_identifier_parts` succeeds, `_emit_
+  flat_concat_whole_assign` is called, and the generated code for both
+  destination words correctly references `_sig_extract_word_val`/mixed
+  "sig"/"expr"-kind parts, not a bare `c.val[sid]`) -- so case 111's
+  remaining failure is a DIFFERENT, more localized bug, most likely inside
+  the multi-word merge/bit-positioning logic for a Concatenation with
+  MIXED "sig" and "expr"-kind flat parts crossing a 64-bit word boundary
+  (`_concat_word_expr`/`_masked_flat_concat_word_exprs` in
+  `_wide_emitter.py`), not yet isolated further.
+
 **Newly-discovered, NOT YET FIXED, distinct bugs** (documented here rather
 than rushed, since each needs its own careful root-causing/verification
 pass like the ones above; do not assume these are the same shape as
-anything fixed so far):
-- **A signal wider than 64 bits, read through the compiled engine's
-  narrow/scalar emitter, silently loses every bit beyond the first 64.**
-  `_expr_emitter.py`'s `_emit_expr` Identifier case unconditionally
-  returns `f"c.val[{sid}]"` with no check for `sig_width > 64` -- for a
-  signal that wide, `c.val[sid]` only mirrors the LOW word of its true
-  storage (`c.wide_val`/`c.wide_offset`/`c.wide_words`), so any bit at
-  position ≥64 is invisible to this codepath. This is normally masked by
-  `_rhs_needs_wide_eval`'s `_expr_uses_wide_signal` catch-all routing a
-  whole statement through the wide emitter whenever it reads a wide
-  signal ANYWHERE in the tree -- but that catch-all is apparently not
-  consulted (or not sufficient) for every codegen path; confirmed via a
-  case where a 65-bit signal (`a5`) is one branch of a ternary that is
-  itself the operand of an XOR-reduction embedded in a small (5-bit)
-  concatenation assigned to a 96-bit wire -- the generated comb-assign
-  code computed the ENTIRE thing via the narrow/scalar emitter
-  (`c.val[6]` for `a5`, i.e. only its low 64 bits), giving the wrong XOR
-  parity (popcount of 64 bits is even; popcount of the true 65 bits is
-  odd) despite the SAME source expression's `always @(posedge clk)`
-  companion (`y_ff`) correctly routing through the wide emitter for the
-  identical RHS. That comb-vs-ff asymmetry for byte-for-byte identical
-  RHS text suggests the continuous-assign codegen path's narrow-vs-wide
-  decision is a *different* code path than the one guarded by
-  `_rhs_needs_wide_eval` at `_wide_emitter.py:4437`, not yet located.
-  Confirmed wrong against Icarus for
-  `{$unsigned((~^(a5[56] ? a5 : a7))), a2[10:7]}` (batch=8, case=88 at
-  `VERIFORGE_DIFF_SEED=1234567`/`VERIFORGE_DIFF_CASES=300`). This is the
-  ROOT CAUSE most likely responsible for the sixth wave's `_REDUCE_PRIMS`
-  fix above NOT fully resolving every wide-reduction case -- that fix
-  only covers the case where the reduction is itself routed through
-  `_emit_wide_expr_to_scratch`; a reduction reached ONLY through the
-  narrow/scalar comb-assign path (as case 88 is) never gets there at all.
-- batch=11/case=111 (a deeply nested concatenation exceeding 96 bits
-  before truncation) is very likely the SAME comb-assign-routing gap as
-  case 88 above (its generated code also showed the comb assign computed
-  entirely via `c.val[sid]`-based narrow reads for a wide signal) but
-  wasn't independently re-confirmed after the sixth wave's fixes.
+anything fixed so far, INCLUDING each other):
+- batch=11/case=111: `{{a2, $unsigned($unsigned(a1)), $unsigned($signed(
+  a3))}, (a1[2:1] ? a3 : (~&{2{a4}})), a5}` -- as detailed above,
+  `_emit_flat_concat_whole_assign` IS reached and appears structurally
+  sound (correct word-splitting, correct signal extraction calls), yet the
+  computed value is still wrong for some vectors. Suspect the
+  "expr"-kind flat part (the ternary, which spans the 64-bit word
+  boundary alongside `a5`) has an off-by-one or incorrect bit-position
+  assumption in how `_concat_word_expr` shifts/masks it into word1 versus
+  word0. Next step: isolate with the same bisection methodology, then
+  manually verify the EXACT bit-for-bit arithmetic of the generated
+  word1 expression against Icarus (do not assume; this session's earlier
+  attempts to hand-verify similarly complex generated expressions were
+  repeatedly wrong on the first pass).
 - batch=28/case=286: `{a3[37], (!{2{a6[36]}}), (((a7 ? a1[2] : a3) ?
   (a4 ? a3[42:8] : a1) : a2[2:0]) ? (~&$signed(a5)) : $signed({3{a0}}))}`
   -- not yet root-caused; 6 of 8 vectors mismatch with a small, consistent
   bit-pattern offset between expected and got, suggestive of a
   fill-boundary or bit-position miscalculation rather than a totally
-  wrong value, but not yet bisected further. Next-session starting point,
-  using the same isolate-single-case-module + compare-against-Icarus
-  methodology used throughout this document.
+  wrong value. Not yet confirmed whether this also routes through
+  `_flatten_concat_identifier_parts`/`_emit_flat_concat_whole_assign` (a
+  plausible next thing to check, given case 111's shape) or a completely
+  separate path.
+- case 298's residual failures (vectors 0, 1, 7 of `a2 << {2{$signed((a4
+  <= a6))}}`, `a6` 80 bits) are a THIRD, independently-confirmed instance
+  of "a signal wider than 64 bits read through a narrow/scalar codepath
+  that doesn't know it's wide" -- this time in `_emit_binary`'s signed
+  comparison codegen (`_sign_ext(c.val[7], 80)` is a no-op since `_sign_
+  ext` only extends when `w < 64`, so the comparison only ever sees `a6`'s
+  low 64 bits), reached via the shift-amount computation
+  (`_shift_amount_width`/`self._emit_expr(expr.right, ...)` in both
+  `_wide_emitter.py` and `_expr_emitter.py`), which -- like the eighth
+  wave's `_flatten_concat_identifier_parts` fallback -- has no
+  `_expr_uses_wide_signal` guard forcing a wide-aware fallback. Fixing
+  this properly likely means teaching comparison operators (and
+  potentially other binary ops) reached through ANY narrow/scalar
+  codepath to detect a wide operand and route through the wide comparison
+  primitives (`wide_cmp_lt` etc., already correct and used by
+  `_emit_wide_expr_to_scratch`'s own `_WIDE_CMP_PRIMS` handling) instead
+  of silently reading `c.val[sid]`. Given this is now the THIRD
+  independently-found instance of the same underlying "narrow codepath
+  meets wide signal" shape (concat-flatten fallback, now fixed; shift
+  amount; and likely more not yet found), a more systematic audit of
+  every `self._emit_expr(...)`/`self._emit_mask_expr(...)` call site that
+  ISN'T already guarded by an `_expr_uses_wide_signal` check may be more
+  productive than continuing to patch each instance as the fuzzer happens
+  to trip over it -- a good candidate for the next dedicated session on
+  this item.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
