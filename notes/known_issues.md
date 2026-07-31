@@ -155,9 +155,22 @@ each (see `VERIFORGE_DIFF_SEED`/`VERIFORGE_DIFF_CASES` in the test file):
   out-of-32-bit-range magnitude to a safe "definitely >= any width" sentinel.
 - **`Value.__mul__`'s sum-width rule leaking through an enclosing
   context-determined operator** (`sim/value.py`, `sim/evaluator.py`) —
-  multiplication's own self-determined width is the SUM of its operand
-  widths (IEEE 1364-2005 Table 5-22), correct when `*` is unconstrained —
-  but when `*` is itself an operand of a further context-determined operator
+  ~~multiplication's own self-determined width is the SUM of its operand
+  widths (IEEE 1364-2005 Table 5-22), correct when `*` is unconstrained~~
+  **Correction (tenth wave, below): verified directly against the IEEE
+  1364-2005 primary text that this claim was wrong all along —
+  self-determined `*` is `max(L(i),L(j))`, the SAME row as `+ - / % & |
+  ^ ^~ ~^`, with no sum-width exception anywhere in Table 5-22. The fix
+  described below (narrowing via `_expr_self_width`'s already-correct
+  max-based floor) was still the right fix and remains valid — only this
+  one sentence's rationale was backwards; `Value.__mul__`'s sum-width
+  behavior is better understood as a deliberate internal-precision
+  detail of the arithmetic primitive, not a self-determined-width rule.
+  This mislabeling is what caused `*`'s matching, still-live bug (the
+  RESULT not being narrowed back to a requested self-determined width
+  when `*` is the node being evaluated, as opposed to an OPERAND of one)
+  to go unnoticed until the tenth wave.** But when `*` is itself an
+  operand of a further context-determined operator
   (e.g. the left side of `>>`), the enclosing context must narrow the
   product to its own width before that operator runs, or the subsequent
   operation's zero/sign-fill lands at the wrong bit position once the
@@ -964,65 +977,96 @@ oracle, confirming this was a reference-engine bug all along, exactly the
 kind of "harness oracle is not infallible" trap flagged repeatedly
 earlier in this investigation.
 
-**Tenth wave -- one further divergence found, investigated, and
-deliberately NOT fixed pending a dedicated follow-up (case 146, only
-visible once the differential run was widened past the historical
-100-case default to 150 cases):**
+**Tenth wave -- the multiplication self-determined-width question,
+resolved** (case 146, only visible once the differential run was widened
+past the historical 100-case default to 150 cases; both the 150-case
+default and the `VERIFORGE_DIFF_CASES=300` large batch are now fully
+green with this fix applied):
 `(-{$signed({2{a7}}), ((a3 ? a1[0] : a6[64]) * (a1[6] < a1[2:0]))})` --
-reference disagrees with compiled/Icarus/Verilator on the multiplication
-member's self-determined width. This traces to a real, unresolved
-tension in the codebase's own model of self-determined `*` width:
+reference (and `sim/vm/compiler.py`) disagreed with compiled/Icarus/
+Verilator on the multiplication member's self-determined width.
+
+**Root cause, confirmed against the IEEE 1364-2005 primary text**
+(`Table 5-22 -- Bit lengths resulting from self-determined expressions`,
+fetched directly rather than relied on from memory or this codebase's
+own prior notes): the table's row for `i op j, where op is: + - * / % &
+| ^ ^~ ~^` gives bit length `max(L(i),L(j))` for ALL of these operators,
+INCLUDING `*` -- there is no separate sum-of-widths row for
+multiplication anywhere in the table. The text immediately above the
+table (a genuinely separate point) only notes: "Multiplication may be
+performed without losing any overflow bits by assigning the result to
+something wide enough to hold it" -- a remark about CONTEXT-DETERMINED
+multiplication (a wider destination lets the full product survive), not
+a claim about the SELF-DETERMINED width used when there is no such
+context (e.g. a concat member). This directly contradicts this
+codebase's own long-standing prior claim ("multiplication's own
+self-determined width is the SUM of its operand widths (IEEE
+1364-2005 Table 5-22)"), which had gone unquestioned since work plan
+item 3.4 and was itself likely the original source of the confusion for
+every prior note that cited it. Independently confirmed empirically
+against BOTH Icarus (`-g2005`) and Verilator: `reg [7:0] a=200,b=200;
+$display("%b",a*b);` truncates to 8 bits (=64), not the 16-bit sum-width
+40000 a sum-width reading would predict.
+- `_expr_self_width()` (`sim/evaluator.py`) and `_expr_width()`
+  (`sim/vm/compiler.py`) already correctly use `max(left,right)` for `*`
+  (no `*`-specific branch; falls through to the generic `BinaryOp`
+  case) -- these were already right, and match Icarus/Verilator.
 - `Value.__mul__` (`sim/value.py`) deliberately computes `width =
-  self.width + other.width` (sum), documented and unit-tested
-  (`tests/test_sim/test_value_widths.py::test_mul_result_width_is_sum`)
-  as "IEEE: multiply result width = sum of operand widths" -- this is a
-  reasonable, probably-correct choice for the underlying arithmetic
-  PRIMITIVE (never lose precision in the raw computation; let the
-  caller's width-resize logic decide how much to keep).
-- But `_expr_self_width()` (`sim/evaluator.py`) -- the function that
-  decides what width to REQUEST when evaluating a self-determined `*`
-  node (e.g. as a concat member, with no wider context available) --
-  already uses `max(left, right)`, NOT sum, for `*` (it falls through to
-  the generic `BinaryOp` case's `max(...)` rule; there is no `*`-specific
-  branch). This matches `sim/vm/compiler.py`'s `_expr_width`, and
-  independently matches BOTH Icarus (`-g2005`) and Verilator's own
-  empirically-observed self-determined-multiplication width (verified
-  directly: `reg [7:0] a=200,b=200; $display("%b",a*b);` truncates to 8
-  bits = 64 on both tools, not the 16-bit sum-width 40000 the strict
-  spec reading would predict for a fully-conformant self-determined
-  context).
-- The actual bug: `eval()`'s generic context-determined arithmetic
-  branch (`+`,`-`,`*`,`/`,`%`,`**`) resizes `*`'s OPERANDS up to `max(width,
-  self_width(operand))` before calling `_eval_binary_op`, but never
-  re-checks the RESULT against the originally-requested `width`
-  afterward -- so when `Value.__mul__`'s sum-width primitive produces a
-  result WIDER than what `_expr_self_width` (correctly, per Icarus/
-  Verilator) requested, that excess is never truncated back down, and a
-  now-too-wide multiplication result corrupts `.concat()`'s bit-packing
-  the same way the ninth-wave's too-NARROW reduction/comparison results
-  did (mirror-image of the same underlying "result width doesn't match
-  the request" defect class).
-- **Why this is deferred rather than fixed now**: whether the fix should
-  be "narrow `eval()`'s arithmetic-branch RESULT back down to `width`
-  after the fact" (treating `Value.__mul__`'s sum-width as an
-  intentional internal-precision detail that every CALLER must already
-  account for -- consistent with `_expr_self_width` already using max
-  for `*`) touches the exact same code path described in the existing
-  "Compiled engine: same `*`-into-shift bug" and `Value.__mul__`'s
-  sum-width" entries above (work plan item 3.4), which were written
-  under the ASSUMPTION that self-determined `*` truly is sum-width per
-  spec and Icarus/Verilator's max-width behavior was itself the
-  nonconformant outlier -- an assumption this investigation now casts
-  real doubt on. Confirmed via `git stash` that this is NOT a regression
-  from this session's other fixes (same mismatch reproduces on the
-  pre-session commit). Given the risk of a wide-reaching, poorly-
-  understood change this late in an already-long session, and that this
-  is a genuinely deep architectural question (not a quick, isolated
-  patch), it is deliberately left open for a dedicated follow-up that
-  starts by re-deriving IEEE 1364-2005 Table 5-22's actual `*` row from
-  the primary text (not from this codebase's own prior notes, which may
-  have been the original source of the confusion) before touching any
-  code.
+  self.width + other.width` (sum) -- kept exactly as-is (still
+  correctly unit-tested by
+  `tests/test_sim/test_value_widths.py::test_mul_result_width_is_sum`,
+  which tests the raw arithmetic PRIMITIVE, a reasonable choice
+  regardless of the self-determined-width question: never lose
+  precision in the raw computation, let the caller's width-resize logic
+  decide how much to keep -- e.g. this is exactly what makes
+  CONTEXT-DETERMINED multiplication like `wire [15:0] p = a*b;` (8-bit
+  `a`,`b`) work correctly without a separate special case).
+- **The actual bug**: `eval()`'s generic context-determined arithmetic
+  branch (`+`,`-`,`*`,`/`,`%`,`**`) resized each OPERAND up to
+  `max(width, self_width(operand))` before calling `_eval_binary_op`,
+  but never re-checked the RESULT against the originally-requested
+  `width` afterward -- so `Value.__mul__`'s (correct, intentional)
+  wider sum-width result was never truncated back down to what
+  `_expr_self_width` (also correct) had actually requested, corrupting
+  `.concat()`'s bit-packing the same mirror-image way the ninth wave's
+  too-NARROW reduction/comparison results did. `sim/vm/compiler.py` had
+  the identical gap: it never emitted a trailing `RESIZE`/`SIGN_EXT`
+  after `Op.MUL` either.
+
+**Fix**: generalized the ninth wave's comparison/`&&`/`||` result-width
+fix into a single, uniform tail shared by every op that reaches it
+(comparisons, shifts, and the arithmetic `+,-,*,/,%,**` branch) --
+`sim/evaluator.py` now checks `result.width != width` unconditionally
+(not just `< width`) and resizes/sign-extends either direction;
+`sim/vm/compiler.py` tracks a statically-known `static_result_w` for
+each op category (1 for comparisons/&&/||; the shift branch's already-
+resized left-operand target for shifts, matching Table 5-22's `L(i)`
+row for `>> << ** >>> <<<`; `target_left + target_right` for `*`
+specifically, `max(target_left, target_right)` for the other arithmetic
+ops -- both exact at compile time since `RESIZE`/`SIGN_EXT` deterministically
+set the runtime width to their target argument) and emits a trailing
+`RESIZE`/`SIGN_EXT` whenever it differs from `width`. For every op other
+than `*`, the resized operands are already each `>= width`, so
+`max(target_left, target_right) >= width` always and no correction was
+ever actually needed there in practice -- confirmed by this fix being a
+verified no-op for every previously-passing case; only `*` triggers real
+narrowing. Confirmed against Icarus for the case-146 expression above,
+and the full differential harness (default 150-case and
+`VERIFORGE_DIFF_CASES=300` large-batch, both with
+`VERIFORGE_DIFF_COMPILED=1`) is green with this fix applied.
+
+**Still open / deliberately out of scope**: the spec text also revealed
+that `**` (power) is actually grouped with the SHIFT row (`>> << ** >>>
+<<<` -> `L(i)`, i.e. the LEFT/base operand's width, with the
+right/exponent operand self-determined), not the `max(L(i),L(j))` row
+this codebase currently treats it under (grouped with `+,-,*,/,%` in
+both `sim/evaluator.py` and `sim/vm/compiler.py`'s arithmetic branch,
+with the exponent treated as context-determined like `+`'s right
+operand rather than self-determined like a shift's amount). This is a
+distinct, unconfirmed-by-fuzzing latent bug (`**` is not in the
+differential fuzzer's generated operator set) -- noted here rather than
+touched, since it's outside this fix's confirmed scope and deserves its
+own Icarus verification pass.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

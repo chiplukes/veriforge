@@ -804,6 +804,7 @@ class Compiler:  # cm:8c1e4a
             # IEEE 1364-2005 §5.4.1: operator categories for width propagation.
             # Comparison/logical ops produce 1-bit — operands are NOT
             # context-determined from the LHS; only from each other.
+            static_result_w = 0
             if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
                 self._compile_expr(expr.left, program)
                 self._compile_expr(expr.right, program)
@@ -836,6 +837,17 @@ class Compiler:  # cm:8c1e4a
                             program.append(instr(Op.SIGN_EXT, target, 0))
                         else:
                             program.append(instr(Op.RESIZE, target))
+                        # A shift's own result width is exactly its (now
+                        # resized) left operand's width (IEEE 1364-2005
+                        # Table 5-22: "L(i)") -- RESIZE/SIGN_EXT above just
+                        # deterministically set the runtime width to
+                        # `target`, so the shift op's result will be
+                        # `target` too. Recorded so the shared tail below
+                        # can narrow it back to `width` if `target > width`
+                        # (self_width(expr.left) exceeded the requested
+                        # context), the same gap as the arithmetic branch's
+                        # `*` case below.
+                        static_result_w = target
                 self._compile_expr(expr.right, program)  # self-determined
             # Bitwise ops (IEEE 1364-2005 §5.5.2): combine at the operator's
             # own natural width (max of the two operands' self-determined
@@ -880,21 +892,42 @@ class Compiler:  # cm:8c1e4a
                 # operands. See the shift branch above for why the target is
                 # max(width, static width), not `width` alone.
                 self._compile_expr(expr.left, program, width, signed_override)
+                target_left = width
                 if width:
-                    target = max(width, self._expr_width(expr.left))
+                    target_left = max(width, self._expr_width(expr.left))
                     eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
                     if eff_signed:
-                        program.append(instr(Op.SIGN_EXT, target, 0))
+                        program.append(instr(Op.SIGN_EXT, target_left, 0))
                     else:
-                        program.append(instr(Op.RESIZE, target))
+                        program.append(instr(Op.RESIZE, target_left))
                 self._compile_expr(expr.right, program, width, signed_override)
+                target_right = width
                 if width:
-                    target = max(width, self._expr_width(expr.right))
+                    target_right = max(width, self._expr_width(expr.right))
                     eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
                     if eff_signed:
-                        program.append(instr(Op.SIGN_EXT, target, 0))
+                        program.append(instr(Op.SIGN_EXT, target_right, 0))
                     else:
-                        program.append(instr(Op.RESIZE, target))
+                        program.append(instr(Op.RESIZE, target_right))
+                # A multiplication's RUNTIME result width (Op.MUL, via
+                # `Value.__mul__`) is deliberately the SUM of its (now
+                # resized) operand widths, not max -- a low-level
+                # internal-precision detail of the Value primitive, NOT
+                # the self-determined width IEEE 1364-2005 Table 5-22
+                # actually specifies for `*` (verified directly against
+                # the primary spec text: `*` shares the same
+                # `max(L(i),L(j))` row as `+ - / % & | ^ ^~ ~^`, matching
+                # Icarus/Verilator's own observed self-determined-`*`
+                # behavior and this file's own `_expr_width`). Every
+                # other op reaching this branch (`+,-,/,%,**`) already
+                # produces `max(target_left, target_right)` at runtime,
+                # which -- since both targets are already >= `width` --
+                # can never be narrower than `width`, so no correction was
+                # ever needed for them; only `*` needs the shared tail
+                # below to narrow its wider-than-requested result back
+                # down. Confirmed against Icarus for `(-{$signed({2{a7}}),
+                # ((a3 ? a1[0] : a6[64]) * (a1[6] < a1[2:0]))})`.
+                static_result_w = target_left + target_right if expr.op == "*" else max(target_left, target_right)
             # Detect signed comparison: both operands must be signed
             if expr.op in _SIGNED_CMP_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_CMP_MAP[expr.op]))
@@ -905,19 +938,30 @@ class Compiler:  # cm:8c1e4a
                 if op is None:
                     raise ValueError(f"Unknown binary operator: {expr.op!r}")
                 program.append(instr(op))
-            # Comparisons/&&/|| are themselves self-determined (always
-            # 1 bit), but that 1-bit RESULT still needs extending to the
-            # caller's requested `width` when embedded in a wider context
-            # (a ternary branch whose other branch is wider, a concat
-            # member wrapped in a further context-determined operator,
-            # etc.) -- this was simply never done here, the same gap as
-            # the sibling UnaryOp reduction/`!` case below. Always
-            # unsigned in its own right (IEEE 1364-2005 Table 5-22),
-            # except when signed_override forces sign-extension. Mirrors
-            # the identical fix in `sim/evaluator.py`; confirmed wrong
-            # against Icarus for `{8'hAA, (cond ? (a == b) : c)}` with
-            # `c` 64 bits.
-            if expr.op in _FIXED_SELF_DETERMINED_BINOPS and width and width > 1:
+            # The RESULT must end up at exactly the caller's requested
+            # `width` (mirroring the already-correct bitwise-op branch
+            # above), not just whatever width the emitted opcode happens
+            # to produce at runtime -- two distinct gaps, both silently
+            # corrupting `.concat()`'s bit-packing whenever this BinaryOp
+            # lands as a ternary branch or concat member (no wider
+            # top-level assignment step around to paper over it):
+            #  - Comparisons/&&/|| are self-determined-always-1-bit (IEEE
+            #    1364-2005 Table 5-22) -- their 1-bit result was simply
+            #    never extended to a wider requested `width` at all.
+            #    Confirmed wrong against Icarus for `{8'hAA, (cond ? (a ==
+            #    b) : c)}` with `c` 64 bits.
+            #  - Multiplication's runtime result (see the arithmetic
+            #    branch above) is the SUM of its operand widths, which is
+            #    virtually always wider than a self-determined `width`
+            #    request and was never narrowed back down. Confirmed
+            #    wrong against Icarus for `(-{$signed({2{a7}}), ((a3 ?
+            #    a1[0] : a6[64]) * (a1[6] < a1[2:0]))})`.
+            # `static_result_w` (1 for comparisons/&&/||, set above for
+            # shifts and the arithmetic branch) is the statically-known
+            # runtime width at this point; mirrors the identical fix in
+            # `sim/evaluator.py`.
+            result_w = 1 if expr.op in _FIXED_SELF_DETERMINED_BINOPS else static_result_w
+            if width and result_w != width:
                 eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
                 if eff_signed:
                     program.append(instr(Op.SIGN_EXT, width, 0))

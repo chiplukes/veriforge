@@ -423,20 +423,46 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 result = _eval_signed_divmod(op, left, right)
             else:
                 result = _eval_binary_op(op, left, right)
-            # Comparisons/&&/|| are themselves self-determined (always
-            # 1 bit), but that 1-bit RESULT still needs extending to the
-            # caller's requested `width` when embedded in a wider context
-            # (a ternary branch whose other branch is wider, a concat
-            # member wrapped in a further context-determined operator,
-            # etc.) -- this was simply never done here, the same gap as
-            # the sibling UnaryOp reduction/`!` case above. Always
-            # unsigned in its own right (IEEE 1364-2005 Table 5-22),
-            # except when signed_override forces sign-extension.
-            # Confirmed wrong against Icarus for `{8'hAA, (cond ? (a ==
-            # b) : c)}` with `c` 64 bits -- the comparison's 1-bit result
-            # was silently packed into the concat as 1 bit wide instead
-            # of the ternary's own 64-bit width.
-            if op in _FIXED_SELF_DETERMINED_BINOPS and width and result.width < width:
+            # The RESULT must end up at exactly the caller's requested
+            # `width` (mirroring the already-correct bitwise-op branch
+            # above), not just whatever width `_eval_binary_op` happened
+            # to produce -- two distinct gaps, both silently corrupting
+            # `.concat()`'s bit-packing whenever this BinaryOp lands as a
+            # ternary branch or concat member (no wider top-level
+            # assignment step around to paper over it):
+            #  - Comparisons/&&/|| are self-determined-always-1-bit (IEEE
+            #    1364-2005 Table 5-22) -- their 1-bit result was simply
+            #    never extended to a wider requested `width` at all.
+            #    Confirmed wrong against Icarus for `{8'hAA, (cond ? (a ==
+            #    b) : c)}` with `c` 64 bits.
+            #  - Per Table 5-22, `+ - * / % &   ^ ^~ ~^` (this includes
+            #    `*`, despite this codebase's `Value.__mul__` deliberately
+            #    computing at the SUM of operand widths as an internal-
+            #    precision detail, verified directly against the IEEE
+            #    1364-2005 primary text) share the SAME self-determined
+            #    `max(L(i),L(j))` rule already correctly implemented by
+            #    the bitwise-op branch above -- but this branch's operand-
+            #    resize step only widens each operand up to `max(width,
+            #    that operand's own self-width)` and never narrows the
+            #    RESULT back down afterward, so `Value.__mul__`'s wider-
+            #    than-requested sum-width result leaked straight through
+            #    uncorrected. Confirmed wrong against Icarus for `(-
+            #    {$signed({2{a7}}), ((a3 ? a1[0] : a6[64]) * (a1[6] <
+            #    a1[2:0]))})` -- both operands are 1-bit self-determined,
+            #    so `_expr_self_width` (already correctly max-based for
+            #    `*`, matching Icarus/Verilator) requests width=1 for the
+            #    whole multiplication, but `Value.__mul__` returns a
+            #    2-bit-wide result (1+1) that was never narrowed back to
+            #    the 1 bit the concat member actually needed, corrupting
+            #    every subsequent bit position in the concat.
+            # Shifts (whose own self-determined width is `L(i)`, i.e. the
+            # already-resized left operand's width, which itself can
+            # exceed `width` the identical way) and signed comparison/
+            # divmod above share this same tail and need the identical
+            # correction. Always unsigned in its own right unless
+            # signed_override or the whole expression's own combined
+            # signedness (§5.5.1) says otherwise.
+            if width and result.width != width:
                 eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
                 return result.sign_extend(width) if eff_signed else result.resize(width)
             return result

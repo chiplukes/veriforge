@@ -989,33 +989,44 @@ was the actual outlier. Full detail (all three fixes, code locations, and
 the Icarus repros used to confirm each) in `known_issues.md`'s
 ninth-wave entry.
 
-**Tenth wave -- one further divergence found and deliberately deferred**
-(case 146, `VERIFORGE_DIFF_CASES=150` default-seed run, not the 300-case
-batch): reference disagrees with compiled/Icarus/Verilator on a
-multiplication's self-determined width when used as a concat member.
-Investigation traced this to a real, unresolved tension between
-`Value.__mul__`'s deliberate sum-of-widths primitive behavior (unit-
-tested) and `_expr_self_width`'s own already-max-based (not sum-based)
-`*` handling, which independently matches Icarus/Verilator's actual
-empirical self-determined-multiplication behavior -- casting doubt on
-this session's (and possibly earlier sessions') assumption that
-self-determined `*` is spec-mandated sum-width. Confirmed via `git
-stash` this is NOT a regression from any fix in this session (reproduces
-identically on the pre-session commit). Deliberately left unfixed rather
-than risk a wide-reaching, poorly-understood change late in the session
--- see `known_issues.md`'s tenth-wave entry for the full reasoning and
-the recommended starting point (re-derive Table 5-22's `*` row from the
-primary IEEE text before touching any code).
+**Tenth wave -- the multiplication self-determined-width question,
+resolved** (case 146, `VERIFORGE_DIFF_CASES=150` default-seed run):
+reference (and `sim/vm/compiler.py`) disagreed with compiled/Icarus/
+Verilator on a multiplication's self-determined width when used as a
+concat member. Root-caused against the IEEE 1364-2005 primary text
+(fetched and read directly, not relied on from memory): Table 5-22's
+row for `+ - * / % & | ^ ^~ ~^` gives `max(L(i),L(j))` for ALL of these,
+including `*` -- there is no sum-of-widths row for multiplication
+anywhere in the table, contradicting this codebase's own long-standing
+prior claim (which had gone unquestioned since this item's original
+scoping). `_expr_self_width`/`_expr_width` already correctly used max
+for `*`; the actual bug was that `eval()`'s and `_compile_expr()`'s
+generic arithmetic branch never narrowed the multiplication's RESULT
+back down to a requested self-determined `width` after `Value.__mul__`'s
+(deliberately, still-correctly) wider sum-width computation -- the same
+"result width doesn't match the request" defect class as the ninth
+wave's reduction/comparison fix, just the mirror-image direction
+(narrowing instead of widening). Fixed by generalizing the ninth wave's
+fix into a single uniform tail (in both engines) that corrects ANY
+op reaching it -- comparisons, shifts, and all of `+,-,*,/,%,**` -- not
+just the previously-gated fixed-1-bit ops. Confirmed via `git stash`
+the bug was NOT a regression from any earlier fix in this session.
+Confirmed against Icarus for the case-146 expression; the default
+150-case AND `VERIFORGE_DIFF_CASES=300` large-batch differential runs
+are both green with this fix applied. Full detail (including a
+noted-but-out-of-scope discovery that `**`/power is actually grouped
+with the SHIFT row in Table 5-22, not `max(L(i),L(j))`, contradicting
+how this codebase currently treats it -- unconfirmed by fuzzing, left
+for a future session) in `known_issues.md`'s tenth-wave entry.
 
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
 reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
 exhaustively characterized. The differential harness itself is now fully
-green at both the default (150-case, apart from the deliberately-deferred
-case 146) and large-batch (300-case) scope. The multiplication
-self-determined-width question above is the clearest next-session
-starting point.
+green at both the default (150-case) and large-batch (300-case) scope.
+The `**`/power width-and-context-determination question noted above is
+the clearest next-session starting point.
 
 ## Tier 3 — CI and engine parity
 
