@@ -3933,9 +3933,38 @@ class _WideEmitterMixin:
                 # `$signed((!a6[52])) << (~(cond ? a4[13] : (~^a1[2])))`
                 # (width).
                 amount_w = self._shift_amount_width(expr.right)
-                amount_expr = f"<int>({self._emit_expr(expr.right, amount_w, False)})"
-                amount_mask_expr = self._emit_mask_expr(expr.right, amount_w)
-                lines = llines
+                aslot: int | None = None
+                if self._expr_uses_wide_signal(expr.right) or self._expr_max_internal_width(expr.right) > _WORD_BITS:
+                    # The shift COUNT either touches a signal wider than 64
+                    # bits somewhere in its own tree (e.g. a comparison
+                    # against an 80-bit operand), or its own internal
+                    # computation exceeds 64 bits even from narrow signals
+                    # (e.g. a reduction over a >64-bit Replication of a
+                    # narrow signal) -- the narrow/scalar emitter below
+                    # represents every Identifier as a single `c.val[sid]`
+                    # word and every intermediate as a single `long long`,
+                    # silently truncating either way, so it must never be
+                    # used here. Route through the wide scratch emitter
+                    # instead (the same _WIDE_CMP_PRIMS/etc. primitives
+                    # already used correctly elsewhere) and read back a
+                    # scalar amount from the low word. Confirmed against
+                    # Icarus for `a2 << {2{$signed((a4 <= a6))}}` with a6
+                    # 80 bits.
+                    amount_n = max(1, (amount_w + 63) // 64)
+                    aslot = self._alloc_scratch()
+                    alines = self._emit_wide_expr_to_scratch(
+                        expr.right, aslot, amount_n, amount_w, indent, signed_override=False
+                    )
+                    if alines is None:
+                        self._free_scratch(lslot, aslot)
+                        return None
+                    lines = llines + alines
+                    amount_expr = f"<int>(_sc{aslot}_v[0])"
+                    amount_mask_expr = " | ".join(f"_sc{aslot}_m[{wi}]" for wi in range(amount_n))
+                else:
+                    lines = llines
+                    amount_expr = f"<int>({self._emit_expr(expr.right, amount_w, False)})"
+                    amount_mask_expr = self._emit_mask_expr(expr.right, amount_w)
                 # An x/z shift COUNT makes the whole shift result x/z
                 # (there's no way to know how many positions to shift) --
                 # the shift primitives below only ever consult the
@@ -3962,7 +3991,10 @@ class _WideEmitterMixin:
                         f" _sc{lslot}_v, _sc{lslot}_m,"
                         f" {amount_expr}, {n_src}, {dst_width})"
                     )
-                self._free_scratch(lslot)
+                if aslot is not None:
+                    self._free_scratch(lslot, aslot)
+                else:
+                    self._free_scratch(lslot)
                 return lines
 
             if op in self._WIDE_CMP_PRIMS:

@@ -1264,7 +1264,27 @@ class _ProcessCompilerMixin:
             # loads a wide signal's full value). Confirmed against Icarus
             # for `{$unsigned((~^(a5[56] ? a5 : a7))), a2[10:7]}` where
             # `a5` is 65 bits.
-            if 0 < node_width <= _WORD_BITS and not self._expr_uses_wide_signal(node):
+            #
+            # `_expr_uses_wide_signal` alone isn't enough: an intermediate
+            # node's own INTERNAL self-determined width can exceed 64 bits
+            # even when every signal it reads is <=64 bits wide -- e.g.
+            # `~&{2{a4}}` with `a4` a plain 64-bit signal has a 128-bit
+            # Replication as the reduction's operand. The narrow emitter
+            # represents that operand as a single `long long` and computes
+            # an all-ones comparison constant sized for the (wrong) 128-bit
+            # width, which can never match a 64-bit-truncated value --
+            # silently producing a wrong (but never x/erroring) constant
+            # result. `_expr_max_internal_width` (already used elsewhere
+            # for wide-scratch sizing) reports the true peak width needed
+            # anywhere in the tree, not just the node's own result width,
+            # so it also catches this case. Confirmed against Icarus for
+            # `{{a2, $unsigned($unsigned(a1)), $unsigned($signed(a3))},
+            # (a1[2:1] ? a3 : (~&{2{a4}})), a5}`.
+            if (
+                0 < node_width <= _WORD_BITS
+                and not self._expr_uses_wide_signal(node)
+                and self._expr_max_internal_width(node) <= _WORD_BITS
+            ):
                 parts.append(
                     ("expr", node_width, self._emit_expr(node, node_width), self._emit_mask_expr(node, node_width))
                 )

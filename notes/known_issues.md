@@ -880,57 +880,149 @@ long it had been deferred as "too deep to chase right now"):
   (`_concat_word_expr`/`_masked_flat_concat_word_exprs` in
   `_wide_emitter.py`), not yet isolated further.
 
-**Newly-discovered, NOT YET FIXED, distinct bugs** (documented here rather
-than rushed, since each needs its own careful root-causing/verification
-pass like the ones above; do not assume these are the same shape as
-anything fixed so far, INCLUDING each other):
-- batch=11/case=111: `{{a2, $unsigned($unsigned(a1)), $unsigned($signed(
-  a3))}, (a1[2:1] ? a3 : (~&{2{a4}})), a5}` -- as detailed above,
-  `_emit_flat_concat_whole_assign` IS reached and appears structurally
-  sound (correct word-splitting, correct signal extraction calls), yet the
-  computed value is still wrong for some vectors. Suspect the
-  "expr"-kind flat part (the ternary, which spans the 64-bit word
-  boundary alongside `a5`) has an off-by-one or incorrect bit-position
-  assumption in how `_concat_word_expr` shifts/masks it into word1 versus
-  word0. Next step: isolate with the same bisection methodology, then
-  manually verify the EXACT bit-for-bit arithmetic of the generated
-  word1 expression against Icarus (do not assume; this session's earlier
-  attempts to hand-verify similarly complex generated expressions were
-  repeatedly wrong on the first pass).
-- batch=28/case=286: `{a3[37], (!{2{a6[36]}}), (((a7 ? a1[2] : a3) ?
-  (a4 ? a3[42:8] : a1) : a2[2:0]) ? (~&$signed(a5)) : $signed({3{a0}}))}`
-  -- not yet root-caused; 6 of 8 vectors mismatch with a small, consistent
-  bit-pattern offset between expected and got, suggestive of a
-  fill-boundary or bit-position miscalculation rather than a totally
-  wrong value. Not yet confirmed whether this also routes through
-  `_flatten_concat_identifier_parts`/`_emit_flat_concat_whole_assign` (a
-  plausible next thing to check, given case 111's shape) or a completely
-  separate path.
-- case 298's residual failures (vectors 0, 1, 7 of `a2 << {2{$signed((a4
-  <= a6))}}`, `a6` 80 bits) are a THIRD, independently-confirmed instance
-  of "a signal wider than 64 bits read through a narrow/scalar codepath
-  that doesn't know it's wide" -- this time in `_emit_binary`'s signed
-  comparison codegen (`_sign_ext(c.val[7], 80)` is a no-op since `_sign_
-  ext` only extends when `w < 64`, so the comparison only ever sees `a6`'s
-  low 64 bits), reached via the shift-amount computation
-  (`_shift_amount_width`/`self._emit_expr(expr.right, ...)` in both
-  `_wide_emitter.py` and `_expr_emitter.py`), which -- like the eighth
-  wave's `_flatten_concat_identifier_parts` fallback -- has no
-  `_expr_uses_wide_signal` guard forcing a wide-aware fallback. Fixing
-  this properly likely means teaching comparison operators (and
-  potentially other binary ops) reached through ANY narrow/scalar
-  codepath to detect a wide operand and route through the wide comparison
-  primitives (`wide_cmp_lt` etc., already correct and used by
-  `_emit_wide_expr_to_scratch`'s own `_WIDE_CMP_PRIMS` handling) instead
-  of silently reading `c.val[sid]`. Given this is now the THIRD
-  independently-found instance of the same underlying "narrow codepath
-  meets wide signal" shape (concat-flatten fallback, now fixed; shift
-  amount; and likely more not yet found), a more systematic audit of
-  every `self._emit_expr(...)`/`self._emit_mask_expr(...)` call site that
-  ISN'T already guarded by an `_expr_uses_wide_signal` check may be more
-  productive than continuing to patch each instance as the fuzzer happens
-  to trip over it -- a good candidate for the next dedicated session on
-  this item.
+**Ninth wave (July 2026, same work-plan item) -- cases 111/286/298-residual
+all resolved, and the reference engine's OWN previously-undetected bug
+turned out to be the dominant root cause** (large-batch differential run
+now 30/30, up from 27/30; default-seed 150-case run now green apart from
+one newly-characterized, deliberately-deferred multiplication-width
+question -- see "Tenth wave" below):
+
+- **Compiled engine: shift-COUNT touching a wide signal through the
+  narrow/scalar emitter (case 298's residual).** `_wide_emitter.py`'s
+  `_WIDE_SHIFT_PRIMS` handling computed the shift amount via
+  `self._emit_expr(expr.right, amount_w, False)` unconditionally -- no
+  `_expr_uses_wide_signal` guard at all, unlike every other narrow-meets-
+  wide site fixed this session. Fixed by routing the amount through
+  `_emit_wide_expr_to_scratch` (reading back a scalar `<int>` from the
+  low scratch word) whenever `_expr_uses_wide_signal(expr.right)` OR
+  `_expr_max_internal_width(expr.right) > _WORD_BITS` (see next bullet
+  for why the second check is also needed here). Confirmed against
+  Icarus: `a2 << {2{$signed((a4 <= a6))}}` (`a6` 80 bits) now passes all
+  8 vectors.
+- **Compiled engine: `_expr_uses_wide_signal` alone is insufficient --
+  an expression's OWN internal width can exceed 64 bits even when every
+  signal it reads is <=64 bits (case 111's actual root cause).**
+  `_flatten_concat_identifier_parts`'s fallback (the eighth-wave fix)
+  only checked `_expr_uses_wide_signal`, which detects a directly-wide
+  *signal*, not a wide *intermediate value* built from narrow signals --
+  e.g. `~&{2{a4}}` with `a4` a plain 64-bit signal: the reduction's
+  operand is a 128-bit `Replication`, but no signal involved is itself
+  >64 bits, so `_expr_uses_wide_signal` said "safe for the narrow
+  emitter" and the narrow reduction codegen built a comparison against a
+  literal 128-bit all-ones constant that a `long long` can never equal,
+  always returning the wrong constant. Fixed by additionally gating on
+  `_expr_max_internal_width(node) <= _WORD_BITS` (already existed,
+  originally only used for scratch-array sizing) -- it recurses into
+  every operand's OWN self-determined width, not just each node's
+  result width, so it catches this case too. Confirmed against Icarus:
+  `{{a2, $unsigned($unsigned(a1)), $unsigned($signed(a3))}, (a1[2:1] ? a3
+  : (~&{2{a4}})), a5}` now passes all 8 vectors.
+- **Reference engine (and `sim/vm/compiler.py`, structurally parallel):
+  a self-determined-fixed-1-bit operator's RESULT was never resized up
+  to a wider requested context width -- the actual dominant bug behind
+  cases 111 AND 286 (the compiled-engine fixes above were real and
+  necessary, but even after both, case 111 still failed until this was
+  found).** `UnaryOp` reduction ops (`&`,`|`,`^`,`~&`,`~|`,`~^`,`^~`) and
+  `!`, and `BinaryOp` comparisons/`&&`/`||`, are self-determined ALWAYS
+  1-bit results (IEEE 1364-2005 Table 5-22) -- but when used as an
+  operand of a WIDER context (a ternary branch whose other branch is
+  wider, a concat member wrapped in a further context-determined
+  operator), the caller passes a nonzero `width` into `eval()`/
+  `_compile_expr()` expecting the result to come back at that width.
+  Every sibling case that computes a fixed-width intermediate then
+  widens it (`~`/unary `-` on such an operand, `BinaryOp` bitwise-op
+  results) already had this "extend the RESULT after computing it"
+  step -- reduction/`!` and comparison/`&&`/`||` simply never did,
+  silently returning a 1-bit-wide `Value` regardless of the requested
+  `width`. Harmless at a TOP-level assignment (a separate post-hoc
+  statement-level resize step covers it there, the same "nesting depth"
+  shape as the second-wave `$signed`/`BitSelect` bug), but corrupts
+  anything that relies on the returned `Value.width` being correct
+  mid-expression -- most visibly `Concatenation.concat()`'s bit-shifting
+  arithmetic, which packs each part using its OWN reported width: a
+  1-bit-wide reduction result silently occupying only 1 bit of a concat
+  instead of its ternary's real (e.g. 63-bit) self-determined width
+  shifts every subsequent bit into the wrong position. Fixed by adding
+  the same "if width and result.width < width: sign_extend/resize"
+  step (always unsigned in its own right per IEEE 1364-2005 §5.5.1,
+  except when `signed_override` forces sign-extension) after computing
+  the reduction/`!`/comparison/`&&`/`||` result, in both
+  `sim/evaluator.py` and `sim/vm/compiler.py` (emitting a trailing
+  `SIGN_EXT`/`RESIZE` opcode for the latter). Confirmed against Icarus
+  for a minimal repro (`{8'hAA, (cond ? (a == b) : c)}` with `c` 64
+  bits) and both full case 111 and case 286 (`{a3[37], (!{2{a6[36]}}),
+  (... ? (~&$signed(a5)) : $signed({3{a0}}))}`) now passing all 8
+  vectors each on every engine.
+
+This was found by NOT trusting the differential harness's own "expected"
+oracle once the compiled-engine fixes above still left case 111 failing
+with a suspicious pattern (the mismatch's high word was entirely zero on
+the compiled side but structured/nonzero on the reference side) --
+building an Icarus testbench for the exact failing vector's values showed
+Icarus agreed with the (newly-fixed) COMPILED engine, not the reference
+oracle, confirming this was a reference-engine bug all along, exactly the
+kind of "harness oracle is not infallible" trap flagged repeatedly
+earlier in this investigation.
+
+**Tenth wave -- one further divergence found, investigated, and
+deliberately NOT fixed pending a dedicated follow-up (case 146, only
+visible once the differential run was widened past the historical
+100-case default to 150 cases):**
+`(-{$signed({2{a7}}), ((a3 ? a1[0] : a6[64]) * (a1[6] < a1[2:0]))})` --
+reference disagrees with compiled/Icarus/Verilator on the multiplication
+member's self-determined width. This traces to a real, unresolved
+tension in the codebase's own model of self-determined `*` width:
+- `Value.__mul__` (`sim/value.py`) deliberately computes `width =
+  self.width + other.width` (sum), documented and unit-tested
+  (`tests/test_sim/test_value_widths.py::test_mul_result_width_is_sum`)
+  as "IEEE: multiply result width = sum of operand widths" -- this is a
+  reasonable, probably-correct choice for the underlying arithmetic
+  PRIMITIVE (never lose precision in the raw computation; let the
+  caller's width-resize logic decide how much to keep).
+- But `_expr_self_width()` (`sim/evaluator.py`) -- the function that
+  decides what width to REQUEST when evaluating a self-determined `*`
+  node (e.g. as a concat member, with no wider context available) --
+  already uses `max(left, right)`, NOT sum, for `*` (it falls through to
+  the generic `BinaryOp` case's `max(...)` rule; there is no `*`-specific
+  branch). This matches `sim/vm/compiler.py`'s `_expr_width`, and
+  independently matches BOTH Icarus (`-g2005`) and Verilator's own
+  empirically-observed self-determined-multiplication width (verified
+  directly: `reg [7:0] a=200,b=200; $display("%b",a*b);` truncates to 8
+  bits = 64 on both tools, not the 16-bit sum-width 40000 the strict
+  spec reading would predict for a fully-conformant self-determined
+  context).
+- The actual bug: `eval()`'s generic context-determined arithmetic
+  branch (`+`,`-`,`*`,`/`,`%`,`**`) resizes `*`'s OPERANDS up to `max(width,
+  self_width(operand))` before calling `_eval_binary_op`, but never
+  re-checks the RESULT against the originally-requested `width`
+  afterward -- so when `Value.__mul__`'s sum-width primitive produces a
+  result WIDER than what `_expr_self_width` (correctly, per Icarus/
+  Verilator) requested, that excess is never truncated back down, and a
+  now-too-wide multiplication result corrupts `.concat()`'s bit-packing
+  the same way the ninth-wave's too-NARROW reduction/comparison results
+  did (mirror-image of the same underlying "result width doesn't match
+  the request" defect class).
+- **Why this is deferred rather than fixed now**: whether the fix should
+  be "narrow `eval()`'s arithmetic-branch RESULT back down to `width`
+  after the fact" (treating `Value.__mul__`'s sum-width as an
+  intentional internal-precision detail that every CALLER must already
+  account for -- consistent with `_expr_self_width` already using max
+  for `*`) touches the exact same code path described in the existing
+  "Compiled engine: same `*`-into-shift bug" and `Value.__mul__`'s
+  sum-width" entries above (work plan item 3.4), which were written
+  under the ASSUMPTION that self-determined `*` truly is sum-width per
+  spec and Icarus/Verilator's max-width behavior was itself the
+  nonconformant outlier -- an assumption this investigation now casts
+  real doubt on. Confirmed via `git stash` that this is NOT a regression
+  from this session's other fixes (same mismatch reproduces on the
+  pre-session commit). Given the risk of a wide-reaching, poorly-
+  understood change this late in an already-long session, and that this
+  is a genuinely deep architectural question (not a quick, isolated
+  patch), it is deliberately left open for a dedicated follow-up that
+  starts by re-deriving IEEE 1364-2005 Table 5-22's actual `*` row from
+  the primary text (not from this codebase's own prior notes, which may
+  have been the original source of the confusion) before touching any
+  code.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

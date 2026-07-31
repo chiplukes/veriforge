@@ -905,6 +905,24 @@ class Compiler:  # cm:8c1e4a
                 if op is None:
                     raise ValueError(f"Unknown binary operator: {expr.op!r}")
                 program.append(instr(op))
+            # Comparisons/&&/|| are themselves self-determined (always
+            # 1 bit), but that 1-bit RESULT still needs extending to the
+            # caller's requested `width` when embedded in a wider context
+            # (a ternary branch whose other branch is wider, a concat
+            # member wrapped in a further context-determined operator,
+            # etc.) -- this was simply never done here, the same gap as
+            # the sibling UnaryOp reduction/`!` case below. Always
+            # unsigned in its own right (IEEE 1364-2005 Table 5-22),
+            # except when signed_override forces sign-extension. Mirrors
+            # the identical fix in `sim/evaluator.py`; confirmed wrong
+            # against Icarus for `{8'hAA, (cond ? (a == b) : c)}` with
+            # `c` 64 bits.
+            if expr.op in _FIXED_SELF_DETERMINED_BINOPS and width and width > 1:
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if eff_signed:
+                    program.append(instr(Op.SIGN_EXT, width, 0))
+                else:
+                    program.append(instr(Op.RESIZE, width))
             return
 
         # -- UnaryOp --
@@ -968,6 +986,27 @@ class Compiler:  # cm:8c1e4a
                 # `sim/evaluator.py`; confirmed wrong against Icarus for
                 # `!(~(a2[2] ? a6[49] : a6[38:9]))`.
                 self._compile_expr(expr.operand, program, self._expr_width(expr.operand))
+                program.append(instr(op))
+                # The OPERATOR's own 1-bit RESULT must still be extended
+                # to the caller's requested `width` when this UnaryOp is
+                # itself embedded in a wider context -- this was simply
+                # never done here, unlike every sibling
+                # self-determined-fixed-width case (`~`/unary `-` on such
+                # an operand above, BinaryOp comparison/&&/|| results)
+                # which all resize their RESULT after computing it at its
+                # own fixed width. Always unsigned in its own right (IEEE
+                # 1364-2005 §5.5.1), except when signed_override forces
+                # sign-extension. Mirrors the identical fix in
+                # `sim/evaluator.py`; confirmed wrong against Icarus for
+                # `(a1[2:1] ? a3 : (~&{2{a4}}))` used as a concat member
+                # alongside a wider sibling.
+                if width and width > 1:
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, width, 0))
+                    else:
+                        program.append(instr(Op.RESIZE, width))
+                return
             program.append(instr(op))
             return
 

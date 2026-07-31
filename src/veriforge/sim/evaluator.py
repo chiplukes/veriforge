@@ -417,11 +417,29 @@ class ExpressionEvaluator:  # cm:7e8b5d
                         right = right.sign_extend(target) if eff_signed else right.resize(target)
             # Detect signed comparison: both operands must be signed
             if op in ("<", "<=", ">", ">=") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
-                return _eval_signed_cmp(op, left, right)
+                result = _eval_signed_cmp(op, left, right)
             # Signed division / modulus: interpret operands as 2's-complement
-            if op in ("/", "%") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
-                return _eval_signed_divmod(op, left, right)
-            return _eval_binary_op(op, left, right)
+            elif op in ("/", "%") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
+                result = _eval_signed_divmod(op, left, right)
+            else:
+                result = _eval_binary_op(op, left, right)
+            # Comparisons/&&/|| are themselves self-determined (always
+            # 1 bit), but that 1-bit RESULT still needs extending to the
+            # caller's requested `width` when embedded in a wider context
+            # (a ternary branch whose other branch is wider, a concat
+            # member wrapped in a further context-determined operator,
+            # etc.) -- this was simply never done here, the same gap as
+            # the sibling UnaryOp reduction/`!` case above. Always
+            # unsigned in its own right (IEEE 1364-2005 Table 5-22),
+            # except when signed_override forces sign-extension.
+            # Confirmed wrong against Icarus for `{8'hAA, (cond ? (a ==
+            # b) : c)}` with `c` 64 bits -- the comparison's 1-bit result
+            # was silently packed into the concat as 1 bit wide instead
+            # of the ternary's own 64-bit width.
+            if op in _FIXED_SELF_DETERMINED_BINOPS and width and result.width < width:
+                eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                return result.sign_extend(width) if eff_signed else result.resize(width)
+            return result
 
         # -- UnaryOp -----------------------------------------------
         if etype is UnaryOp:
@@ -481,6 +499,29 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # branch's own (possibly narrower, e.g. 1-bit) width the
                 # ternary happens to return when given no context.
                 operand = self.eval(expr.operand, ctx, _expr_self_width(expr.operand, ctx))
+                result = _eval_unary_op(expr.op, operand)
+                # The OPERATOR's own 1-bit RESULT must still be extended
+                # to the caller's requested `width` when this UnaryOp is
+                # itself embedded in a wider context (a ternary branch
+                # whose other branch is wider, a concat member wrapped in
+                # a further context-determined operator, etc.) -- this was
+                # simply never done here, unlike every sibling
+                # self-determined-fixed-width case (`~`/unary `-` on such
+                # an operand above, BinaryOp bitwise-op results) which all
+                # resize their RESULT after computing it at its own fixed
+                # width. Always unsigned in its own right (IEEE
+                # 1364-2005 §5.5.1), except when signed_override forces
+                # sign-extension (e.g. `$signed(~&a)` embedded wider).
+                # Confirmed wrong against Icarus for `(a1[2:1] ? a3 :
+                # (~&{2{a4}}))` used as a concat member alongside a wider
+                # sibling -- the reduction's 1-bit result was silently
+                # merged into the concat's bit-packing as if it were only
+                # 1 bit wide instead of the ternary's own 63-bit width,
+                # corrupting every bit position from there on.
+                if width and result.width < width:
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                    return result.sign_extend(width) if eff_signed else result.resize(width)
+                return result
             return _eval_unary_op(expr.op, operand)
 
         # -- TernaryOp ---------------------------------------------

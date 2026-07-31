@@ -967,14 +967,54 @@ eighth-wave entry, including a recommendation to audit every remaining
 `_expr_uses_wide_signal`, rather than continuing to patch each instance
 the fuzzer happens to trip over individually.
 
+**Ninth wave -- cases 111, 286, and 298-residual all resolved**
+(`VERIFORGE_DIFF_CASES=300` improved 27/30 → 30/30, fully green). Two
+more compiled-engine narrow-meets-wide gaps (case 298's shift-count
+never checked `_expr_uses_wide_signal`/`_expr_max_internal_width` at
+all; the eighth-wave concat-flatten fix's `_expr_uses_wide_signal` guard
+alone missed a wide-internal-value-from-narrow-signals case like
+`~&{2{a4}}`, a 128-bit Replication of a 64-bit signal) -- but the
+dominant fix, and the one that actually resolved case 111, was a
+**reference-engine bug**, not a compiled-engine one: `eval()`/
+`_compile_expr()`'s handling of reduction ops/`!`/comparisons/`&&`/`||`
+(all self-determined-fixed-1-bit per Table 5-22) never extended their
+1-bit RESULT to a wider requested context width the way every sibling
+fixed-width case already did, silently returning a too-narrow `Value`
+that corrupted `Concatenation.concat()`'s bit-packing whenever such an
+operator appeared as a ternary branch or nested concat member. Found by
+NOT trusting the harness's own reference oracle once the compiled fixes
+still left case 111 failing -- an Icarus testbench for the exact failing
+vector agreed with the newly-fixed COMPILED engine, confirming reference
+was the actual outlier. Full detail (all three fixes, code locations, and
+the Icarus repros used to confirm each) in `known_issues.md`'s
+ninth-wave entry.
+
+**Tenth wave -- one further divergence found and deliberately deferred**
+(case 146, `VERIFORGE_DIFF_CASES=150` default-seed run, not the 300-case
+batch): reference disagrees with compiled/Icarus/Verilator on a
+multiplication's self-determined width when used as a concat member.
+Investigation traced this to a real, unresolved tension between
+`Value.__mul__`'s deliberate sum-of-widths primitive behavior (unit-
+tested) and `_expr_self_width`'s own already-max-based (not sum-based)
+`*` handling, which independently matches Icarus/Verilator's actual
+empirical self-determined-multiplication behavior -- casting doubt on
+this session's (and possibly earlier sessions') assumption that
+self-determined `*` is spec-mandated sum-width. Confirmed via `git
+stash` this is NOT a regression from any fix in this session (reproduces
+identically on the pre-session commit). Deliberately left unfixed rather
+than risk a wide-reaching, poorly-understood change late in the session
+-- see `known_issues.md`'s tenth-wave entry for the full reasoning and
+the recommended starting point (re-derive Table 5-22's `*` row from the
+primary IEEE text before touching any code).
+
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
 reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
-exhaustively characterized. The remaining 3/30 failures (cases 111, 286,
-298-residual) are each a distinct, not-yet-fully-root-caused bug -- see
-`known_issues.md` for what's known about each, and the "audit every
-narrow-path call site" recommendation above as the clearest next-session
+exhaustively characterized. The differential harness itself is now fully
+green at both the default (150-case, apart from the deliberately-deferred
+case 146) and large-batch (300-case) scope. The multiplication
+self-determined-width question above is the clearest next-session
 starting point.
 
 ## Tier 3 — CI and engine parity
