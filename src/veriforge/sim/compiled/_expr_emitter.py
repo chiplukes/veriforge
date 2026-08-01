@@ -1198,7 +1198,39 @@ class _ExprEmitterMixin:
         # (or an active override). Confirmed against Icarus for `a2 >>
         # (...)` with `a2` declared `signed [15:0]` and a shift amount >=
         # 16; mirrors the identical fix in `_wide_emitter.py`.
-        left_signed_override = False if expr.op == ">>" else signed_override
+        # Division/modulus is NOT "residue-safe" like +/-/* (whose modular
+        # arithmetic gives the same answer regardless of whether each
+        # operand was individually sign- or zero-extended, as long as each
+        # operand's OWN bit pattern is correct at the target width): the
+        # actual division ALGORITHM depends on whether the operand is read
+        # as a two's-complement negative value, and that decision must be
+        # made UNIFORMLY across both operands (IEEE 1364-2005 §5.5.1:
+        # signed division only when BOTH operands are signed). Extending
+        # (and dispatching signed-vs-unsigned division on) each operand by
+        # its own individual signedness -- correct for +/-/* -- is wrong
+        # here: a signed operand paired with an unsigned one must have BOTH
+        # read as unsigned, not the signed one sign-extended and then
+        # misread as a huge unsigned magnitude by an unsigned division.
+        # `div_mod_override` is threaded into BOTH operands' own emission
+        # (propagating into whatever nested operator either one is, exactly
+        # like a ternary's combined signedness overrides its branches) so
+        # this combined decision -- not each operand's own type -- governs
+        # every extension nested within either operand too. Mirrors the
+        # identical fix in `sim/evaluator.py`; confirmed wrong (cross-
+        # engine, against the reference oracle) for `a4 / ((~^a1[0]) | 1)`
+        # (a4 signed and negative, divisor an unsigned reduction-derived
+        # expression) and for `a3 % (a0 | 1)` (a0 a signed 1-bit register
+        # nested inside the divisor's own `|`).
+        div_mod_override = (
+            (
+                signed_override
+                if signed_override is not None
+                else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+            )
+            if expr.op in ("/", "%")
+            else signed_override
+        )
+        left_signed_override = False if expr.op == ">>" else div_mod_override
         left = self._emit_expr(expr.left, op_width, left_signed_override)
         # The shift COUNT is self-determined (IEEE 1364-2005 Table 5-22 /
         # SS5.6): it must be evaluated at its OWN natural width, not
@@ -1225,7 +1257,7 @@ class _ExprEmitterMixin:
         elif expr.op == "**":
             right = self._emit_expr(expr.right, self._expr_width(expr.right), signed_override)
         else:
-            right = self._emit_expr(expr.right, op_width, signed_override)
+            right = self._emit_expr(expr.right, op_width, div_mod_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
@@ -1246,8 +1278,8 @@ class _ExprEmitterMixin:
         # operand's own individual signedness -- matching how a signed
         # ternary branch is handled everywhere else (IEEE 1364-2005 §5.5.1).
         if expr.op not in _COMPARISON_OPS and expr.op not in ("<<", ">>", "<<<", ">>>", "**"):
-            left_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
-            right_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
+            left_signed = div_mod_override if div_mod_override is not None else self._expr_signed(expr.left)
+            right_signed = div_mod_override if div_mod_override is not None else self._expr_signed(expr.right)
             if left_signed:
                 lw = self._expr_width(expr.left)
                 if op_width > lw or expr.op in ("/", "%"):
@@ -1343,12 +1375,39 @@ class _ExprEmitterMixin:
         # C int overflow when small literal << large shift (e.g. 4095 << 20).
         elif expr.op in ("<<", "<<<"):
             core = f"(0 if ({right}) >= 64 else ((<long long>({left})) {c_op} ({right})))"
-        elif expr.op in ("/", "%") and not self._expr_signed(expr.left) and not self._expr_signed(expr.right):
+        elif expr.op in ("/", "%") and not div_mod_override:
             # Unsigned division/modulus: cast both sides to avoid signed C behavior
             # on 64-bit values with MSB=1 stored as negative long long.
             core = f"(<long long>(<unsigned long long>({left}) {c_op} <unsigned long long>({right})))"
         else:
             core = f"(({left}) {c_op} ({right}))"
+        if expr.op in ("&", "|", "^"):
+            # `needs_mask` is False for these -- their natural-width
+            # combination is presumed already bounded by an outer
+            # assignment/context mask. That presumption breaks when this
+            # BinaryOp is embedded as a SUB-expression of another operator
+            # rather than a direct assignment RHS (e.g. the divisor of
+            # `%`): no outer mask ever runs, and an individual operand's
+            # own sign-extension (`_sign_ext`, which fills the full native
+            # C register, not bounded to `op_width`) leaks straight through
+            # as garbage bits above `op_width`. Mask to `op_width` first
+            # (clearing that garbage), THEN -- only if the caller asked for
+            # a wider `width` than this operator's own natural op_width --
+            # extend using the WHOLE EXPRESSION's own combined signedness
+            # (IEEE 1364-2005 §5.5.1), mirroring `sim/evaluator.py`'s
+            # bitwise-op branch. Confirmed wrong (cross-engine, against the
+            # reference oracle) for `a3 % (a0 | 1)` where `a0` is a signed
+            # 1-bit register: `a0`'s own sign-extension leaked past the
+            # `|`'s natural 32-bit width into the divisor once nested
+            # inside the modulus's wider context.
+            if op_width < _WORD_BITS:
+                core = f"(({core}) & wmask({op_width}))"
+            if width and width > op_width:
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if eff_signed:
+                    return f"(_sign_ext({core}, {op_width})) & wmask({width})"
+                return f"({core}) & wmask({width})"
+            return core
         if needs_mask:
             return f"({core}) & wmask({width})"
         return core
@@ -1359,7 +1418,8 @@ class _ExprEmitterMixin:
         # Reduction operators → 1-bit result (self-determined)
         if expr.op in _REDUCTION_OPS:
             operand = self._emit_expr(expr.operand, ow)
-            return self._emit_reduction(expr.op, operand, ow)
+            operand_mask = self._emit_mask_expr(expr.operand, ow)
+            return self._emit_reduction(expr.op, operand, operand_mask, ow)
 
         prefix = _UNARY_PREFIX.get(expr.op)
         if prefix is None:
@@ -1418,26 +1478,62 @@ class _ExprEmitterMixin:
         # Logical NOT (!) — self-determined 1-bit
         operand = self._emit_expr(expr.operand, ow)
         if expr.op == "!":
-            return f"(1 if (({operand}) == 0) else 0)"
+            # Must independently return 0 (not just "whatever the raw,
+            # x-positions-already-zeroed value happens to compute")
+            # whenever the true result is ambiguous -- see the docstring
+            # on `_emit_reduction` below for why this matters even though
+            # a PAIRED mask expression already gets this right elsewhere.
+            # A known-1 bit anywhere in the operand forces `!` definitely
+            # false regardless of x elsewhere; only when there is NO
+            # known-1 bit AND some bit is x is the result genuinely
+            # ambiguous (value must read 0 there, matching the mask).
+            operand_mask = self._emit_mask_expr(expr.operand, ow)
+            wm = f"wmask({ow})"
+            known_one = f"(({operand}) & (~({operand_mask})) & {wm})"
+            any_x = f"(({operand_mask}) & {wm})"
+            return f"(0 if {known_one} else (0 if {any_x} else (1 if (({operand}) & {wm}) == 0 else 0)))"
         return f"({operand})"
 
-    def _emit_reduction(self, op: str, operand: str, width: int) -> str:  # noqa: PLR0911
-        """Emit a reduction operator (result is 1 bit)."""
-        # Use a helper approach: check all bits
+    def _emit_reduction(self, op: str, operand: str, operand_mask: str, width: int) -> str:  # noqa: PLR0911
+        """Emit a reduction operator (result is 1 bit).
+
+        Must independently return 0 whenever the true result is
+        genuinely ambiguous (a known-0 bit forces &/~& definitely
+        non-x, a known-1 bit forces |/~|/! definitely non-x -- mirrors
+        `Value.reduce_and`/`reduce_or` in `sim/value.py`, and the
+        already-correct mask formula in `_emit_mask_expr`'s sibling
+        UnaryOp branch below) -- NOT just compute from the operand's raw
+        (x-positions-already-zeroed) value, which can look spuriously
+        "definite" purely because unknown bits happen to read as 0. Most
+        callers pair this with that mask expression and separately do
+        `value & ~mask` before using the result, which would paper over
+        this -- but `_emit_if`/`_emit_for` (unlike assignment contexts)
+        use this VALUE directly for truthiness with no mask check at
+        all, relying on the "value is 0 wherever the true result is x"
+        convention that every value formula must uphold on its own.
+        Confirmed against Icarus for `if ((-(~&a4[41:23])))` with `a4`
+        fully x -- the old `~&` formula returned 1 (a spurious "definite
+        true") instead of 0, picking the wrong `if` branch.
+        """
         mask = _cy_hex((1 << width) - 1)
+        known_zero = f"((~({operand})) & (~({operand_mask})) & {mask})"
+        known_one = f"(({operand}) & (~({operand_mask})) & {mask})"
+        any_x = f"(({operand_mask}) & {mask})"
         if op == "&":
-            return f"(1 if (({operand}) & {mask}) == {mask} else 0)"
-        if op == "|":
-            return f"(1 if (({operand}) & {mask}) != 0 else 0)"
-        if op == "^":
-            # XOR reduction: count set bits, result is parity
-            return f"_xor_reduce({operand}, {width})"
+            return f"(0 if {known_zero} else (0 if {any_x} else (1 if (({operand}) & {mask}) == {mask} else 0)))"
         if op == "~&":
-            return f"(0 if (({operand}) & {mask}) == {mask} else 1)"
+            return f"(1 if {known_zero} else (0 if {any_x} else (0 if (({operand}) & {mask}) == {mask} else 1)))"
+        if op == "|":
+            return f"(1 if {known_one} else (0 if {any_x} else (1 if (({operand}) & {mask}) != 0 else 0)))"
         if op == "~|":
-            return f"(0 if (({operand}) & {mask}) != 0 else 1)"
+            return f"(0 if {known_one} else (0 if {any_x} else (0 if (({operand}) & {mask}) != 0 else 1)))"
+        if op == "^":
+            # XOR reduction has no absorbing bit -- any x bit anywhere
+            # makes the parity genuinely ambiguous, unlike &/| which can
+            # still resolve definitely via a single known bit.
+            return f"(0 if {any_x} else _xor_reduce({operand}, {width}))"
         if op in ("~^", "^~"):
-            return f"(1 if _xor_reduce({operand}, {width}) == 0 else 0)"
+            return f"(0 if {any_x} else (1 if _xor_reduce({operand}, {width}) == 0 else 0))"
         return "0"
 
     def _emit_concat(self, expr: Concatenation, width: int | None = None) -> str:

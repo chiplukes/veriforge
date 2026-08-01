@@ -1187,6 +1187,179 @@ generated case (96 > 64 always), producing mass spurious failures
 unrelated to the actual expression being fuzzed. Revisit once the wide-
 destination gap above is fixed.
 
+**Twelfth wave (July 2026, work plan item 3.4 phase 1) -- statement-level
+differential fuzzing surfaces six more distinct bugs**: a new fuzzer,
+`tests/test_sim/test_differential_statements.py`, generates random
+`if`/`else if`/`else` chains (mandatory final `else`, blocking assignment)
+inside `always @(*)` blocks -- the first time the differential harness
+exercised blocking assignment inside a combinational process or real
+`if`/`else` condition-truthiness at all (`test_differential.py` only ever
+fuzzes `assign`/NBA expression trees). `VERIFORGE_DIFF_STMT_SEED`/
+`_STMT_CASES`/`_STMT_COMPILED` control it, mirroring `test_differential.py`'s
+knobs. All six bugs below were confirmed against Icarus Verilog before
+fixing and are covered by this new file (8/8 batches green, including
+`VERIFORGE_DIFF_STMT_COMPILED=1`).
+
+- **Nested `$signed($unsigned(x))` cast precedence** (`sim/evaluator.py`,
+  `sim/vm/compiler.py`) -- the OUTERMOST cast in a directly-nested chain
+  governs extension, not whichever cast the naive recursive `eval()`/
+  `_compile_expr()` call happens to reach first. Fixed by unwrapping the
+  whole chain of directly-nested `$signed`/`$unsigned` calls down to the
+  innermost non-cast argument before applying (only) the outermost cast's
+  decision. Confirmed wrong against Icarus for `$unsigned($signed((a <
+  b)))` assigned into a wide destination -- Icarus zero-extends (the outer
+  `$unsigned` wins), but the un-fixed code recursed into the inner
+  `$signed`'s own branch, which force-set `signed_override=True` and
+  sign-extended instead.
+- **`if`/`for`/`while` conditions missing self-determined-width evaluation**
+  (`sim/executor.py`'s 8 condition-check call sites across `execute`/
+  `execute_coroutine`; `sim/vm/compiler.py`'s 3 condition-compile call
+  sites; `sim/compiled/_stmt_emitters.py`'s `_emit_if`/`_emit_for`/
+  `_emit_while`, all hardcoded to width 1) -- a condition is self-
+  determined (IEEE 1364-2005 Table 5-22: it must be evaluated at its OWN
+  natural width, not forced to width 1/0), the same class of bug already
+  fixed for ternary conditions and ternary-nested reductions earlier in
+  this session, just never applied to statement-level conditions because
+  nothing had exercised real `if`/`for`/`while` through the differential
+  harness before. A condition that is itself a further context-determined
+  operator (concatenation, a wide comparison, a nested ternary) was
+  silently truncated before its own internal merge/shift logic ran.
+- **Reduction-op / `!` value-formula x-imprecision** (`sim/compiled/
+  _stmt_emitters.py`'s `_emit_reduction`, `_emit_unary`'s `!` handling) --
+  both computed their VALUE purely from the raw (already x-zeroed) operand
+  bits without independently checking for ambiguity, violating the
+  "value=0 at x positions" invariant that `_emit_if` and other value-only
+  truthiness checks rely on. A known-0 bit forces `&`/`~&` definitely
+  non-x; a known-1 bit forces `|`/`~|`/`!` definitely non-x -- neither was
+  checked, so e.g. a partially-x operand with a known-1 bit present could
+  read back as an incorrectly-ambiguous or incorrectly-zero value. Fixed
+  by rewriting both VALUE formulas to incorporate the same known-0/known-1
+  logic already correctly present in the paired MASK formulas (mirrors
+  `Value.reduce_and`/`reduce_or` in `sim/value.py`); `_emit_reduction`'s
+  signature grew an `operand_mask` parameter it previously lacked.
+- **Scratch-array buffer overflow for wide statement conditions**
+  (`sim/compiled/_stmt_emitters.py`) -- the new `_emit_condition_lines_
+  and_expr` helper (added to give `_emit_if`/`_emit_for`/`_emit_while`
+  their self-determined-width fix above, reusing `wide_logical_truth` the
+  same way wide ternary conditions already did) allocated wide scratch
+  space for a >64-bit condition but never updated
+  `_dynamic_max_wide_words` -- the running peak word-count used to size
+  the module-level `_sc{n}_v[N]`/`_sc{n}_m[N]` C stack arrays -- the way
+  every other wide-scratch consumer (`_emit_wide_lhs_write_new`) already
+  did. Confirmed via direct inspection of generated `.pyx` source
+  (`cdef unsigned long long _sc3_v[2]` declared but code indexing
+  `_sc3_v[2]`, one past the end) -- an actual C buffer overflow, not just
+  a wrong-answer bug. Fixed by adding the identical tracking-update call.
+- **Arithmetic-operand-extension architecture for `+ - * / %`** (`sim/
+  evaluator.py`, `sim/vm/compiler.py`) -- while chasing the nested-cast
+  bug above through a real arithmetic operand (not just a ternary
+  branch), a much deeper, general gap surfaced: the correct model (IEEE
+  1364-2005 §5.5.2, "any context-determined operand shall be the same
+  type and size as the result of the operator") is that each `+ - * / %`
+  operand must be evaluated directly AT THE FULL PROPAGATED TARGET WIDTH
+  (not its own self-width, resized afterward), because a NESTED context-
+  determined operator within it (unary `-`, a further `+`/`-`, a
+  `$signed`/`$unsigned` cast) needs that target width to propagate all
+  the way down through the recursive `eval()`/`_compile_expr()` call and
+  apply its OWN extension decision AT that width -- two's-complement
+  negation does not commute with a later zero-extension, so computing
+  `-a5` (a5 unsigned) at its own self-width and zero-extending the
+  NEGATION RESULT afterward gives a different (wrong) value than zero-
+  extending `a5` first and negating at the full width. Confirmed wrong
+  against Icarus for `(-a5) - {(~&(~|a7)), a2, a6[63]}`. Once each
+  operand is computed at the target width, EACH operand independently
+  uses its OWN natural signedness (not the operator's combined
+  signedness) to decide that extension -- `signed_override` is
+  deliberately NOT forwarded into the per-operand recursive calls, since
+  it describes how the WHOLE binary expression's *result* should later
+  be reinterpreted by an even-further-out cast, not how each operand's
+  own extension is decided. This differs from the bitwise-op branch
+  (`&|^~^^~`), which safely combines at the narrower natural op-width
+  first and extends the RESULT afterward (safe there because bitwise ops
+  have no carry chain; unsafe for `+-*/%`, whose `Value.__add__`-family
+  "any x bit anywhere taints the ENTIRE result" rule needs the full
+  target width's worth of bits present before it runs, or a genuine x
+  elsewhere in a wider-context operand fails to taint the destination's
+  already-resolved extended bits).
+- **`$signed`/`$unsigned` are themselves self-determined, not context-
+  propagating** (`sim/evaluator.py`, `sim/compiled/_wide_emitter.py`) --
+  a second, narrower bug in the SAME area, found only after the
+  arithmetic-operand fix above started routing target widths through
+  casts more aggressively: per Table 5-22, `$signed`/`$unsigned`'s
+  ARGUMENT must be evaluated at the argument's OWN self-determined width,
+  never the width requested by whatever outer context-determined operator
+  is asking for the cast's value -- the cast's only job is deciding sign-
+  vs zero-extension once that (already self-width-computed) result is
+  later widened to the outer width. Passing the outer width straight into
+  the argument used to force a nested context-determined operator inside
+  the cast (e.g. `%`) to propagate that OUTER width into ITS OWN operands
+  too. Confirmed wrong against Icarus for `$signed((a3 % (a0 | 1))) + a1`
+  (a3 unsigned 63 bits): the divisor's own value changed depending on
+  which width its internal `|` was evaluated at.
+- **Division/modulus needs the OPERATOR's combined signedness for operand
+  extension, not each operand's own individual signedness** (`sim/
+  evaluator.py`, `sim/vm/compiler.py`, `sim/compiled/_expr_emitter.py`,
+  `sim/compiled/_wide_emitter.py`) -- unlike `+-*`, whose fixed-width
+  modular arithmetic is invariant to whether each operand was extended by
+  its own individual signedness or a shared one (as long as each
+  operand's own bit pattern is correct at the target width), DIVISION's
+  actual algorithm depends on whether an operand is read as a two's-
+  complement negative value, and per IEEE 1364-2005 §5.5.1 that decision
+  ("signed division" only when BOTH operands are signed) must be made
+  UNIFORMLY across both operands. Extending each operand by its own
+  individual signedness -- correct for `+-*` -- corrupts an unsigned
+  division/modulus whenever one operand happens to be individually
+  signed: its sign-extension gets misread as a huge unsigned magnitude
+  once the (necessarily unsigned, since not both operands are signed)
+  division runs. Confirmed wrong against Icarus for `a4 / ((~^a1[0]) |
+  1)` (a4 signed and negative, divisor an unsigned reduction-derived
+  expression) and `a3 % (a0 | 1)` (a0 a signed 1-bit register nested
+  inside the divisor's own `|`). Fixed by computing a single combined
+  `both_signed` decision per division/modulus BinaryOp and threading it
+  as a forced override into BOTH operands' own recursive evaluation --
+  propagating into whatever nested operator either operand is (exactly
+  like a ternary's combined signedness overrides its branches), so the
+  combined decision governs every extension nested within either operand
+  too, not just its own top-level widening. The `compiled` engine's
+  narrow path (`_expr_emitter.py::_emit_binary`) needed the same
+  combined-vs-individual fix for its own pre-division sign-extension AND
+  its signed-vs-unsigned C-division dispatch (both previously consulted
+  each operand's individual `_expr_signed`); the wide path
+  (`_wide_emitter.py`) needed it threaded into
+  `_emit_wide_expr_to_scratch`'s recursive calls the same way. **Residual
+  gap**: `wide_div`/`wide_mod` (the >64-bit primitives `_gen_wide_
+  section.py` generates) are UNSIGNED-only bit-by-bit implementations --
+  genuinely-signed wide (>64-bit) division was already unimplemented
+  before this fix and remains so; only the unsigned-dispatch case (the
+  one this wave's bugs and the fuzzer's own signal widths actually
+  exercise) is fixed.
+- **Separately, in the same investigation: a pre-existing, compiled-
+  engine-only bitwise-op (`& | ^`) mask leak** (`sim/compiled/
+  _expr_emitter.py::_emit_binary`) -- `&`/`|`/`^` have `needs_mask=False`
+  in `_BINARY_VALUE_OP`, relying on an outer assignment's own final mask
+  to bound their result; that presumption breaks when such a bitwise
+  BinaryOp is embedded as a SUB-expression of another operator (e.g. the
+  divisor of `%`) rather than a direct assignment RHS -- no outer mask
+  ever runs, and an individual operand's own `_sign_ext` call (which
+  fills the full native 64-bit C register, not bounded to the bitwise
+  op's own natural `op_width`) leaked straight through as garbage bits
+  above `op_width` into whatever consumed the raw expression string.
+  Confirmed wrong (cross-engine, against the corrected reference oracle)
+  for `a3 % (a0 | 1)`, where `a0`'s own sign-extension leaked past `|`'s
+  natural 32-bit width into the divisor once nested inside the modulus's
+  wider context. Fixed by explicitly masking to `op_width` before
+  optionally extending to the caller's requested `width` using the whole
+  bitwise expression's own combined signedness, mirroring `sim/
+  evaluator.py`'s already-correct bitwise-op branch.
+
+All eight bugs (six from the primary chain plus the two found mid-
+investigation) were verified via direct Icarus comparison scripts, then
+confirmed clean across a 300-case `VERIFORGE_DIFF_CASES=300
+VERIFORGE_DIFF_COMPILED=1` run of the original expression-tree fuzzer (30/30
+batches), the new statement-level fuzzer (8/8 batches, `_STMT_COMPILED=1`),
+`test_power_operator.py` (60 passed, 1 xfail, unaffected), and the full
+fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n 8`, ~30 min).
+
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
 **Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in

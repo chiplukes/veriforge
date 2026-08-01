@@ -911,49 +911,109 @@ class Compiler:  # cm:8c1e4a
                         program.append(instr(Op.RESIZE, width))
                 return
             else:
-                # Context-determined: arithmetic (+,-,*,/,%) — widen both
-                # operands (`**` is handled separately above -- its
-                # exponent must stay self-determined, not context-
-                # propagated like these operators' right operand). See
-                # the shift branch above for why the target is max(width,
-                # static width), not `width` alone.
-                self._compile_expr(expr.left, program, width, signed_override)
-                target_left = width
-                if width:
-                    target_left = max(width, self._expr_width(expr.left))
-                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
-                    if eff_signed:
-                        program.append(instr(Op.SIGN_EXT, target_left, 0))
-                    else:
-                        program.append(instr(Op.RESIZE, target_left))
-                self._compile_expr(expr.right, program, width, signed_override)
-                target_right = width
-                if width:
-                    target_right = max(width, self._expr_width(expr.right))
-                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
-                    if eff_signed:
-                        program.append(instr(Op.SIGN_EXT, target_right, 0))
-                    else:
-                        program.append(instr(Op.RESIZE, target_right))
-                # A multiplication's RUNTIME result width (Op.MUL, via
-                # `Value.__mul__`) is deliberately the SUM of its (now
-                # resized) operand widths, not max -- a low-level
-                # internal-precision detail of the Value primitive, NOT
-                # the self-determined width IEEE 1364-2005 Table 5-22
-                # actually specifies for `*` (verified directly against
-                # the primary spec text: `*` shares the same
-                # `max(L(i),L(j))` row as `+ - / % & | ^ ^~ ~^`, matching
-                # Icarus/Verilator's own observed self-determined-`*`
-                # behavior and this file's own `_expr_width`). Every
-                # other op reaching this branch (`+,-,/,%,**`) already
-                # produces `max(target_left, target_right)` at runtime,
-                # which -- since both targets are already >= `width` --
-                # can never be narrower than `width`, so no correction was
-                # ever needed for them; only `*` needs the shared tail
-                # below to narrow its wider-than-requested result back
-                # down. Confirmed against Icarus for `(-{$signed({2{a7}}),
-                # ((a3 ? a1[0] : a6[64]) * (a1[6] < a1[2:0]))})`.
-                static_result_w = target_left + target_right if expr.op == "*" else max(target_left, target_right)
+                # Context-determined arithmetic (+,-,*,/,%): each operand
+                # is compiled FIRST at its OWN self-determined width
+                # (respecting whatever internal signedness/cast decisions
+                # it has for THAT computation, without letting the outer
+                # `width` reach down into it), then SEPARATELY extended to
+                # a common target width using the OPERATOR's own COMBINED
+                # signedness (IEEE 1364-2005 SS5.5.2: "any context-
+                # determined operand shall be the SAME TYPE AND SIZE as
+                # the RESULT of the operator") -- NOT the operand's own
+                # individual signedness, which would let e.g. a
+                # $signed(...)-cast operand's sign-extension leak into the
+                # sum even when the OPERATOR's combined signedness
+                # (governed by the OTHER, unsigned operand) says the whole
+                # expression should be unsigned.
+                #
+                # Extending to the COMMON target width BEFORE combining
+                # (rather than combining at a narrower natural width and
+                # extending the RESULT afterward, which works fine for
+                # bitwise ops -- see above) matters specifically for
+                # +/-/*//: they have a carry/borrow chain that can't be
+                # computed with partial unknowns (`Op.ADD` etc., via
+                # `Value.__add__`, already implement "any x bit ANYWHERE
+                # in either operand makes the ENTIRE result x") -- that
+                # rule must see the FULL target width's worth of operand
+                # bits to correctly taint the whole result; combining
+                # narrower and widening the (by-then-already-resolved)
+                # result afterward would incorrectly leave the
+                # destination's extended bits looking definite even when
+                # a genuine x exists elsewhere in a wider-context operand.
+                #
+                # Confirmed against Icarus for `($signed($unsigned({a1,
+                # a0, a1[5]})) + (~|((-a4) ^ a1)))`: with `a0` defined,
+                # the unsigned reduction operand forces the whole
+                # addition's combined signedness unsigned, so the sum
+                # zero-extends into the 96-bit destination regardless of
+                # the cast's own sign-extend decision; with `a0` x, the
+                # ENTIRE 96-bit result must be x, not just the cast
+                # operand's own narrow 10-bit self-width. Mirrors the
+                # identical fix in `sim/evaluator.py`.
+                # Each operand is compiled directly AT the full target
+                # width (not its own self-width, resized afterward) with
+                # `signed_override` reset to None so a nested context-
+                # determined operator (unary `-`, a further `+`/`-`, a
+                # `$signed`/`$unsigned` cast) sees `target` propagate all
+                # the way down through the recursive `_compile_expr` call
+                # and applies its OWN sign/zero-extension decision (e.g.
+                # negating an unsigned operand AFTER it has been RESIZE'd
+                # to the target width, not before) rather than being
+                # compiled at a narrower self-width and passively resized
+                # after the fact -- those two only agree for width-
+                # commuting operators, and unary `-` is not one of them.
+                # Confirmed wrong against Icarus for `(-a5) - {(~&(~|a7)),
+                # a2, a6[63]}` (a5 unsigned, 65 bits): compiling `-a5` at
+                # its own self-width 65 and RESIZE-ing the negation result
+                # to 96 afterward gives a different (wrong) value than
+                # RESIZE-ing `a5` to 96 bits first and negating at that
+                # width, since two's-complement negation does not commute
+                # with zero-extension. Mirrors the identical fix in
+                # `sim/evaluator.py`.
+                #
+                # `signed_override` is intentionally NOT forwarded to the
+                # per-operand `_compile_expr` calls -- it governs how the
+                # whole binary expression's own *result* is interpreted by
+                # an even-further-out cast (handled by the shared tail
+                # below via `static_result_w`), not how each operand's own
+                # extension is decided; each operand always uses its own
+                # natural signedness for that (IEEE 1364-2005 §5.5.2).
+                target = max(width, self._expr_width(expr.left), self._expr_width(expr.right))
+                if expr.op in ("/", "%"):
+                    # Division/modulus is NOT "residue-safe" like +/-/*
+                    # (whose modular arithmetic gives the same answer
+                    # regardless of whether each operand was individually
+                    # sign- or zero-extended, as long as each operand's OWN
+                    # bit pattern is correct at the target width): the
+                    # actual division ALGORITHM depends on whether the
+                    # operand is read as a two's-complement negative value,
+                    # and that decision must be made UNIFORMLY across both
+                    # operands (IEEE 1364-2005 §5.5.1: signed division only
+                    # when BOTH operands are signed). Compiling each operand
+                    # with its own individual signedness -- correct for
+                    # +/-/* -- is wrong here: a signed operand paired with
+                    # an unsigned one must have BOTH read as unsigned (the
+                    # division dispatch below can only be unsigned in that
+                    # case), not the signed one sign-extended and then
+                    # misread as a huge unsigned magnitude by an unsigned
+                    # division. `both_signed` is forced into both recursive
+                    # `_compile_expr` calls so this combined decision --
+                    # not each operand's own type -- governs every
+                    # extension nested within either operand too (a
+                    # `$signed`/`$unsigned` cast reached within either
+                    # operand still wins over this override, exactly like
+                    # every other signed_override use in this function).
+                    # Mirrors the identical fix in `sim/evaluator.py`;
+                    # confirmed wrong against Icarus for `a4 / ((~^a1[0]) |
+                    # 1)` (a4 signed and negative, divisor an unsigned
+                    # reduction-derived expression).
+                    both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                    self._compile_expr(expr.left, program, target, both_signed)
+                    self._compile_expr(expr.right, program, target, both_signed)
+                else:
+                    self._compile_expr(expr.left, program, target, None)
+                    self._compile_expr(expr.right, program, target, None)
+                static_result_w = target + target if expr.op == "*" else target
             # Detect signed comparison: both operands must be signed
             if expr.op in _SIGNED_CMP_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_CMP_MAP[expr.op]))
@@ -1255,7 +1315,42 @@ class Compiler:  # cm:8c1e4a
                 # $signed/$unsigned ALWAYS force their own decision here,
                 # discarding whatever signed_override was passed in from
                 # further out.
-                self._compile_expr(expr.arguments[0], program, width, fname == "$signed")
+                #
+                # Directly-nested casts (`$unsigned($signed(x))`) are the
+                # ONE exception: the OUTERMOST cast governs -- unwrap the
+                # chain here rather than letting this branch recurse and
+                # re-trigger on the inner cast, which would otherwise
+                # re-force its own (now-overridden) decision. Mirrors the
+                # identical fix in `sim/evaluator.py`; found via
+                # statement-level differential fuzzing
+                # (`test_differential_statements.py`, phase 1):
+                # `$unsigned($signed((a < b)))` assigned into a wide
+                # destination must zero-extend (the outer $unsigned
+                # wins), confirmed against Icarus.
+                inner = expr.arguments[0]
+                while (
+                    isinstance(inner, FunctionCall)
+                    and inner.name.lower() in ("$signed", "$unsigned")
+                    and inner.arguments
+                ):
+                    inner = inner.arguments[0]
+                # $signed/$unsigned are themselves SELF-DETERMINED (IEEE
+                # 1364-2005 Table 5-22): compile the argument at its OWN
+                # self-determined width, not the width requested by
+                # whatever outer context-determined operator is asking for
+                # this cast's value -- the cast's job is only to decide
+                # sign- vs zero-extension when the (already self-width-
+                # compiled) result is later widened to that outer `width`.
+                # Compiling `inner` directly at the outer `width` used to
+                # force a nested context-determined operator inside the
+                # cast (e.g. `%`) to propagate that OUTER width into ITS
+                # OWN operands too, which is wrong. Mirrors the identical
+                # fix in `sim/evaluator.py`; confirmed wrong against Icarus
+                # for `$signed((a3 % (a0 | 1))) + a1`.
+                inner_w = self._expr_width(inner)
+                self._compile_expr(inner, program, inner_w, None)
+                if width and inner_w != width:
+                    program.append(instr(Op.SIGN_EXT if fname == "$signed" else Op.RESIZE, width, 0))
                 return
             self._compile_function_call(expr, program)
             return
@@ -1659,7 +1754,15 @@ class Compiler:  # cm:8c1e4a
 
         # -- If statement --
         if stype is IfStatement:
-            self._compile_expr(stmt.condition, program)
+            # Self-determined width, not the default 0 -- see the
+            # identical note on the TernaryOp condition above; without
+            # this, a nested context-determined operator within the
+            # condition (e.g. `~` wrapping a ternary whose branches have
+            # different widths) never gets resized before it runs.
+            # Mirrors the identical fix in `sim/executor.py`'s IfStatement/
+            # ForLoop/WhileLoop condition checks; confirmed wrong against
+            # Icarus for `if ((~((~a4[29:10]) ? (!(~&a0)) : {3{(~&a2)}})))`.
+            self._compile_expr(stmt.condition, program, self._expr_width(stmt.condition))
             jz_idx = len(program)
             program.append(instr(Op.JUMP_IF_ZERO, 0))  # placeholder
 
@@ -1704,7 +1807,15 @@ class Compiler:  # cm:8c1e4a
                     self._compile_expr(BitSelect(stmt.init.lhs, Literal(loop_width - 1)), program)
                     negative_jump_idx = len(program)
                     program.append(instr(Op.JUMP_IF_NONZERO, 0))  # placeholder
-            self._compile_expr(stmt.condition, program)
+            # Self-determined width, not the default 0 -- see the
+            # identical note on the TernaryOp condition above; without
+            # this, a nested context-determined operator within the
+            # condition (e.g. `~` wrapping a ternary whose branches have
+            # different widths) never gets resized before it runs.
+            # Mirrors the identical fix in `sim/executor.py`'s IfStatement/
+            # ForLoop/WhileLoop condition checks; confirmed wrong against
+            # Icarus for `if ((~((~a4[29:10]) ? (!(~&a0)) : {3{(~&a2)}})))`.
+            self._compile_expr(stmt.condition, program, self._expr_width(stmt.condition))
             jz_idx = len(program)
             program.append(instr(Op.JUMP_IF_ZERO, 0))  # placeholder
             if stmt.body:
@@ -1721,7 +1832,15 @@ class Compiler:  # cm:8c1e4a
         # -- While loop --
         if stype is WhileLoop:
             loop_top = len(program)
-            self._compile_expr(stmt.condition, program)
+            # Self-determined width, not the default 0 -- see the
+            # identical note on the TernaryOp condition above; without
+            # this, a nested context-determined operator within the
+            # condition (e.g. `~` wrapping a ternary whose branches have
+            # different widths) never gets resized before it runs.
+            # Mirrors the identical fix in `sim/executor.py`'s IfStatement/
+            # ForLoop/WhileLoop condition checks; confirmed wrong against
+            # Icarus for `if ((~((~a4[29:10]) ? (!(~&a0)) : {3{(~&a2)}})))`.
+            self._compile_expr(stmt.condition, program, self._expr_width(stmt.condition))
             jz_idx = len(program)
             program.append(instr(Op.JUMP_IF_ZERO, 0))  # placeholder
             if stmt.body:

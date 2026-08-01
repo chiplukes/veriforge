@@ -412,30 +412,118 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     result = result.sign_extend(width) if eff_signed else result.resize(width)
                 return result
             else:
-                left = self.eval(expr.left, ctx, width, signed_override)
-                right = self.eval(expr.right, ctx, width, signed_override)
-                # Context-determined: resize both to max(context, operand's
-                # own self-determined width) -- this can WIDEN (extend) or
-                # NARROW (truncate) the operand. Truncation matters when the
-                # operand is itself a further context-determined operator
-                # whose own self-determined width can exceed the enclosing
-                # context (e.g. multiplication's own width is the SUM of its
-                # operand widths per IEEE 1364-2005 §5.4.1, which can easily
-                # exceed an enclosing shift's context width): the enclosing
-                # context wins and the multiply's result must be narrowed to
-                # match before the shift runs, mirroring what real hardware
-                # (and sim/vm/compiler.py, which already does this) does.
-                # `_expr_self_width` is a floor so a genuinely-wide operand
-                # whose width IS its meaning (e.g. a concatenation) is never
-                # narrowed below its own exact width.
-                if width:
-                    if left.width != width:
-                        target = max(width, _expr_self_width(expr.left, ctx))
-                        eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                # Context-determined arithmetic (+,-,*,/,%): each operand
+                # is computed FIRST at its OWN self-determined width
+                # (respecting whatever internal signedness/cast decisions
+                # it has for THAT computation, without letting the outer
+                # `width` reach down into it), then SEPARATELY extended to
+                # a common target width using the OPERATOR's own COMBINED
+                # signedness (IEEE 1364-2005 SS5.5.2: "any context-
+                # determined operand shall be the SAME TYPE AND SIZE as
+                # the RESULT of the operator") -- NOT the operand's own
+                # individual signedness, which would let e.g. a
+                # $signed(...)-cast operand's sign-extension leak into the
+                # sum even when the OPERATOR's combined signedness
+                # (governed by the OTHER, unsigned operand) says the whole
+                # expression should be unsigned.
+                #
+                # Extending to the COMMON target width BEFORE combining
+                # (rather than combining at a narrower natural width and
+                # extending the RESULT afterward, which works fine for
+                # bitwise ops -- see above) matters specifically for
+                # +/-/*//: they have a carry/borrow chain that can't be
+                # computed with partial unknowns, so `Value.__add__` etc.
+                # already implement "any x bit ANYWHERE in either operand
+                # makes the ENTIRE result x" -- that rule must see the
+                # FULL target width's worth of operand bits to correctly
+                # taint the whole result; combining narrower and widening
+                # the (by-then-already-resolved) result afterward would
+                # incorrectly leave the destination's extended bits
+                # looking definite even when a genuine x exists elsewhere
+                # in a wider-context operand.
+                #
+                # Confirmed against Icarus for `($signed($unsigned({a1,
+                # a0, a1[5]})) + (~|((-a4) ^ a1)))`: with `a0` defined,
+                # the unsigned reduction operand forces the whole
+                # addition's combined signedness unsigned, so the sum
+                # zero-extends into the 96-bit destination regardless of
+                # the cast's own sign-extend decision; with `a0` x, the
+                # ENTIRE 96-bit result must be x, not just the cast
+                # operand's own narrow 10-bit self-width.
+                # Each operand is evaluated directly AT the full target
+                # width (not its own self-width, then resized after) so
+                # that a nested context-determined operator (unary `-`, a
+                # further `+`/`-`, a `$signed`/`$unsigned` cast) sees that
+                # target width propagate all the way down through the
+                # recursive `eval()` call and can apply its OWN
+                # sign/zero-extension decision (e.g. negating an unsigned
+                # operand AFTER zero-extending it to the target width, not
+                # before) rather than being computed at a narrower
+                # self-width and passively resized afterward -- those two
+                # are only equivalent for width-commuting operators, and
+                # unary `-` is not one of them. Confirmed wrong against
+                # Icarus for `(-a5) - {(~&(~|a7)), a2, a6[63]}` (a5
+                # unsigned, 65 bits): computing `-a5` at self-width 65 then
+                # zero-extending the negation result to 96 gives a
+                # different (wrong) 96-bit value than zero-extending `a5`
+                # to 96 bits and negating at that width, because two's-
+                # complement negation does not commute with zero-extension.
+                #
+                # `signed_override` is intentionally NOT forwarded to the
+                # per-operand `eval()` calls: it describes how the WHOLE
+                # binary expression's *result* should be interpreted by an
+                # even-further-out cast (handled by the shared tail below),
+                # not how each individual operand's own extension should be
+                # decided -- each operand always uses its own natural
+                # signedness for that (IEEE 1364-2005 §5.5.2), exactly like
+                # `$signed`/`$unsigned` already override only themselves.
+                target = max(width, _expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                if op in ("/", "%"):
+                    # Division/modulus is NOT "residue-safe" like +/-/*
+                    # (whose modular arithmetic gives the same answer
+                    # regardless of whether each operand was individually
+                    # sign- or zero-extended, as long as each operand's OWN
+                    # bit pattern is correct at the target width): the
+                    # actual division ALGORITHM depends on whether the
+                    # operand is read as a two's-complement negative value,
+                    # and that decision must be made UNIFORMLY across both
+                    # operands (IEEE 1364-2005 §5.5.1: signed division only
+                    # when BOTH operands are signed). Extending each
+                    # operand by its own individual signedness -- correct
+                    # for +/-/* -- is wrong here: a signed operand paired
+                    # with an unsigned one must have BOTH read as unsigned
+                    # (the division dispatch below can only be unsigned in
+                    # that case), not the signed one sign-extended and then
+                    # misread as a huge unsigned magnitude by an unsigned
+                    # division. `signed_override=both_signed` is forced
+                    # into both recursive `eval()` calls so this combined
+                    # decision -- not each operand's own type -- governs
+                    # every extension nested within either operand too
+                    # (mirrors how a ternary's combined signedness
+                    # overrides its branches); a `$signed`/`$unsigned` cast
+                    # reached within either operand still wins over this
+                    # override, exactly like every other signed_override
+                    # use in this function. Confirmed wrong against Icarus
+                    # for `a4 / ((~^a1[0]) | 1)` (a4 signed and negative,
+                    # divisor an unsigned reduction-derived expression):
+                    # sign-extending `a4` alone before an unsigned division
+                    # corrupted the dividend into a huge positive
+                    # magnitude.
+                    both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
+                    left = self.eval(expr.left, ctx, target, both_signed)
+                    right = self.eval(expr.right, ctx, target, both_signed)
+                    if left.width != target:
+                        left = left.sign_extend(target) if both_signed else left.resize(target)
+                    if right.width != target:
+                        right = right.sign_extend(target) if both_signed else right.resize(target)
+                else:
+                    left = self.eval(expr.left, ctx, target, None)
+                    right = self.eval(expr.right, ctx, target, None)
+                    if left.width != target:
+                        eff_signed = _expr_signed(expr.left, ctx)
                         left = left.sign_extend(target) if eff_signed else left.resize(target)
-                    if right.width != width:
-                        target = max(width, _expr_self_width(expr.right, ctx))
-                        eff_signed = signed_override if signed_override is not None else _expr_signed(expr.right, ctx)
+                    if right.width != target:
+                        eff_signed = _expr_signed(expr.right, ctx)
                         right = right.sign_extend(target) if eff_signed else right.resize(target)
             # Detect signed comparison: both operands must be signed
             if op in ("<", "<=", ">", ">=") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
@@ -808,7 +896,56 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # discarding whatever signed_override was passed in from
                 # further out (mirrors the compiled engine's
                 # `_wide_emitter.py` FunctionCall case).
-                return self.eval(expr.arguments[0], ctx, width, fname == "$signed")
+                #
+                # Directly-nested casts (`$unsigned($signed(x))`) are the
+                # ONE exception: the OUTERMOST cast is what should govern
+                # -- unwrapping the chain here (rather than letting this
+                # branch recurse and re-trigger on the inner cast) means
+                # the inner cast never gets a chance to re-force its OWN
+                # (now-overridden) decision. Found via statement-level
+                # differential fuzzing (`test_differential_statements.py`,
+                # phase 1): `$unsigned($signed((a < b)))` assigned into a
+                # wide destination -- Icarus zero-extends (the outer
+                # $unsigned wins), but this code previously recursed into
+                # the inner $signed's own branch, which force-set
+                # signed_override=True and sign-extended instead. Every
+                # prior confirmation of "the cast always forces its own
+                # decision" involved exactly one cast layer (a ternary or
+                # bitwise-op supplying the override, never another
+                # $signed/$unsigned) -- that rule is unaffected here.
+                inner = expr.arguments[0]
+                while (
+                    isinstance(inner, FunctionCall)
+                    and inner.name.lower() in ("$signed", "$unsigned")
+                    and inner.arguments
+                ):
+                    inner = inner.arguments[0]
+                # $signed/$unsigned are themselves SELF-DETERMINED (IEEE
+                # 1364-2005 Table 5-22): the argument must be evaluated at
+                # its OWN self-determined width, not the width requested by
+                # whatever outer context-determined operator is asking for
+                # this cast's value -- the cast's job is only to decide
+                # sign- vs zero-extension when the (already self-width-
+                # computed) result is later widened to that outer `width`.
+                # Passing the outer `width` straight into evaluating
+                # `inner` used to force nested context-determined operators
+                # inside the cast (e.g. `%`) to propagate that OUTER width
+                # into THEIR OWN operands too, which is wrong: `%`'s
+                # operands should extend to `%`'s own context (bounded by
+                # its own self-width when nothing external propagates in,
+                # exactly as the self-determined cast wrapping it dictates)
+                # not fall through to an even wider width the cast was
+                # asked to eventually produce. Confirmed wrong against
+                # Icarus for `$signed((a3 % (a0 | 1))) + a1` (a3 unsigned
+                # 63 bits, `a0 | 1` a signed expression evaluating to -1):
+                # propagating the outer 96-bit context into the modulus's
+                # own operands changed the divisor's value from what the
+                # modulus should see at its own (self-determined, un-
+                # propagated) width.
+                result = self.eval(inner, ctx, _expr_self_width(inner, ctx))
+                if width and result.width != width:
+                    return result.sign_extend(width) if fname == "$signed" else result.resize(width)
+                return result
             return self._eval_function_call(expr, ctx)
 
         # -- StringLiteral -----------------------------------------

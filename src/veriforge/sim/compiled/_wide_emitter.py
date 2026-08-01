@@ -3840,14 +3840,44 @@ class _WideEmitterMixin:
                     op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
                 else:
                     op_width = dst_width
+                # Division/modulus is NOT "residue-safe" like +/-/* (whose
+                # modular arithmetic is invariant to whether each operand
+                # was individually sign- or zero-extended, as long as each
+                # operand's OWN bit pattern is correct at the target
+                # width): `wide_div`/`wide_mod` are UNSIGNED-only bit-by-
+                # bit primitives, so the operands fed into them must
+                # already be uniformly reinterpreted as unsigned whenever
+                # the operator's OWN combined signedness (both operands
+                # signed) is false -- extending each operand by its own
+                # individual signedness would let a signed operand's
+                # sign-extension leak in as a huge unsigned magnitude.
+                # `div_mod_override` is threaded into BOTH operands'
+                # scratch computation, propagating into whatever nested
+                # operator either one is (exactly like a ternary's combined
+                # signedness overrides its branches), so this combined
+                # decision -- not each operand's own type -- governs every
+                # extension nested within either operand too. Mirrors the
+                # identical fix in `sim/evaluator.py`/`_expr_emitter.py`;
+                # confirmed wrong (cross-engine, against the reference
+                # oracle) for `a3 % (a0 | 1))` (a0 a signed 1-bit register
+                # nested inside the divisor's own `|`).
+                div_mod_override = (
+                    (
+                        signed_override
+                        if signed_override is not None
+                        else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+                    )
+                    if op in ("/", "%")
+                    else signed_override
+                )
                 llines = self._emit_wide_expr_to_scratch(
-                    expr.left, lslot, n_words, op_width, indent, signed_override=signed_override
+                    expr.left, lslot, n_words, op_width, indent, signed_override=div_mod_override
                 )
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
                 rlines = self._emit_wide_expr_to_scratch(
-                    expr.right, rslot, n_words, op_width, indent, signed_override=signed_override
+                    expr.right, rslot, n_words, op_width, indent, signed_override=div_mod_override
                 )
                 if rlines is None:
                     self._free_scratch(lslot, rslot)
@@ -4447,14 +4477,29 @@ class _WideEmitterMixin:
         if et is FunctionCall:
             fname = expr.name.lower()
             if fname in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
-                return self._emit_wide_expr_to_scratch(
-                    expr.arguments[0],
-                    slot,
-                    n_words,
-                    dst_width,
-                    indent,
-                    signed_override=(fname == "$signed"),
-                )
+                # $signed/$unsigned are themselves SELF-DETERMINED (IEEE
+                # 1364-2005 Table 5-22): the argument must be computed at
+                # its OWN self-determined width, not `dst_width` (the width
+                # requested by whatever outer context-determined operator
+                # is asking for this cast's value) -- the cast's job is
+                # only to decide sign- vs zero-extension when the (already
+                # self-width-computed) scratch contents are widened to
+                # `dst_width` afterward. Forwarding `dst_width` straight
+                # into the argument used to force a nested context-
+                # determined operator inside the cast (e.g. `%`) to
+                # propagate that OUTER width into ITS OWN operands too,
+                # which is wrong. Mirrors the identical fix in
+                # `sim/evaluator.py`/`sim/vm/compiler.py`; confirmed wrong
+                # (cross-engine, against the reference oracle) for
+                # `$signed((a3 % (a0 | 1))) + a1`.
+                inner = expr.arguments[0]
+                inner_w = self._expr_width(inner)
+                lines = self._emit_wide_expr_to_scratch(inner, slot, n_words, inner_w, indent)
+                if lines is None:
+                    return None
+                if dst_width > inner_w and fname == "$signed":
+                    lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(inner_w), indent))
+                return lines
             return None
 
         return None

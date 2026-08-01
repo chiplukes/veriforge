@@ -36,7 +36,7 @@ from veriforge.model.statements import (
     WhileLoop,
 )
 
-from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed, _resolve_struct_write_target
+from .evaluator import EvalContext, ExpressionEvaluator, _expr_self_width, _expr_signed, _resolve_struct_write_target
 from .value import Value
 
 log = logging.getLogger(__name__)
@@ -230,7 +230,7 @@ class StatementExecutor:  # cm:c2f9a1
             # only "definitely all-zero" is false and only "no known 1, but
             # some x/z" is genuinely ambiguous. See the identical fix/note
             # on TernaryOp in evaluator.py.
-            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+            cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.then_body:
                     self.execute(stmt.then_body, ctx)
@@ -271,7 +271,7 @@ class StatementExecutor:  # cm:c2f9a1
                     if v.is_defined and v.width > 1 and (v.val >> (v.width - 1)) & 1:
                         break
                 # Reduced via reduce_or -- see TernaryOp in evaluator.py.
-                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+                cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -297,7 +297,7 @@ class StatementExecutor:  # cm:c2f9a1
             iterations = 0
             while True:
                 # Reduced via reduce_or -- see TernaryOp in evaluator.py.
-                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+                cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -346,7 +346,7 @@ class StatementExecutor:  # cm:c2f9a1
             # only "definitely all-zero" is false and only "no known 1, but
             # some x/z" is genuinely ambiguous. See the identical fix/note
             # on TernaryOp in evaluator.py.
-            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+            cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.body:
                     self.execute(stmt.body, ctx)
@@ -451,7 +451,7 @@ class StatementExecutor:  # cm:c2f9a1
             # only "definitely all-zero" is false and only "no known 1, but
             # some x/z" is genuinely ambiguous. See the identical fix/note
             # on TernaryOp in evaluator.py.
-            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+            cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.then_body:
                     yield from self.execute_coroutine(stmt.then_body, ctx)
@@ -490,7 +490,7 @@ class StatementExecutor:  # cm:c2f9a1
                     if v.is_defined and v.width > 1 and (v.val >> (v.width - 1)) & 1:
                         break
                 # Reduced via reduce_or -- see TernaryOp in evaluator.py.
-                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+                cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -506,7 +506,7 @@ class StatementExecutor:  # cm:c2f9a1
             iterations = 0
             while True:
                 # Reduced via reduce_or -- see TernaryOp in evaluator.py.
-                cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+                cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
                 if not (cond.is_defined and cond.val):
                     break
                 if stmt.body:
@@ -560,7 +560,7 @@ class StatementExecutor:  # cm:c2f9a1
             # only "definitely all-zero" is false and only "no known 1, but
             # some x/z" is genuinely ambiguous. See the identical fix/note
             # on TernaryOp in evaluator.py.
-            cond = self.evaluator.eval(stmt.condition, ctx).reduce_or()
+            cond = self.evaluator.eval(stmt.condition, ctx, _expr_self_width(stmt.condition, ctx)).reduce_or()
             if cond.is_defined and cond.val:
                 if stmt.body:
                     yield from self.execute_coroutine(stmt.body, ctx)

@@ -1862,15 +1862,103 @@ class _StmtEmittersMixin:
             is_nba=is_nba,
         )
 
+    def _emit_condition_lines_and_expr(self, condition: Expression, indent: int) -> tuple[list[str], str, str]:
+        """Return (setup_lines, value_expr, mask_expr) for a statement condition's truthiness check.
+
+        `mask_expr` is only meaningful for callers (`_emit_while`) that
+        explicitly combine it with `value_expr` via `value & ~mask` for
+        the "known-1-bit-anywhere-forces-true" precision rule on the
+        NARROW path -- for the WIDE path, `wide_logical_truth` already
+        bakes that exact precision rule into `value_expr` alone, so
+        `mask_expr` is just the literal `"0"` there (`value & ~0 ==
+        value`, a no-op AND). Callers that only need the value
+        (`_emit_if`/`_emit_for`, which already rely on the "value reads 0
+        wherever the true result is ambiguous" convention) can ignore it.
+
+        The condition's own self-determined width, NOT a hardcoded 1 --
+        harmless when the condition is already self-determined-1-bit (a
+        comparison, reduction, `!`), but wrong when it's itself a further
+        TernaryOp/Concatenation/Replication, whose OWN internal
+        merge/shift computation is sized by the incoming width (the same
+        bug already fixed for `_emit_ternary_value_mask_exprs`'s own
+        condition -- these call sites were never audited for it since
+        the differential fuzzer never generated real `if`/`for`/`while`
+        statements before `test_differential_statements.py`, phase 1).
+        Confirmed against Icarus for `if ((^a3) ? a2 : {2{a7}})` --
+        forcing the ternary's x-merge to compute at width 1 instead of
+        its own 16-bit self-width corrupted every bit beyond bit 0.
+
+        When the condition's own self-determined width exceeds 64 bits,
+        or it touches a signal wider than 64 bits anywhere in its tree
+        (either can happen independently -- a wide `Concatenation`
+        member built entirely from narrow signals still has a wide
+        RESULT width, and a narrow-result reduction can still read a
+        wide signal internally), the narrow scalar `_emit_expr` cannot
+        represent it at all: it only ever returns a single `long long`.
+        Route those through the wide scratch emitter + `wide_logical_truth`
+        instead (the same pattern already used for a wide `TernaryOp`
+        condition in `_wide_emitter.py`, reused here since a statement
+        condition needs the identical "reduce to one known-truth
+        scalar" operation) -- correctly reading/computing every word,
+        not just the low one. Falls back to the narrow path if the wide
+        emitter can't handle this particular condition shape either
+        (preserves whatever the narrow path already did for such cases,
+        rather than turning an existing compile into a hard failure).
+        Confirmed against Icarus for `if ((cond) ? $signed($signed({a6,
+        a5, a1[1:0]})) : $unsigned((~^a4[4])))` where the ternary's own
+        combined width is 147 bits.
+        """
+        pad = "    " * indent
+        w = self._expr_width(condition)
+        wide = (
+            w > _WORD_BITS
+            or self._expr_uses_wide_signal(condition)
+            or self._expr_max_internal_width(condition) > _WORD_BITS
+        )
+        if wide:
+            # Scratch arrays are declared ONCE per combinational/process
+            # function at a FIXED size (`_dynamic_max_wide_words`,
+            # tracked as a running peak across every wide-scratch use in
+            # the module) -- normally only updated inside
+            # `_emit_wide_lhs_write_new` (a wide ASSIGNMENT's own word
+            # count). A wide CONDITION reached only through this helper
+            # (no assignment involved) never went through that path, so
+            # its own word requirement was never counted -- silently
+            # UNDER-sizing the `_sc{n}_v[N]`/`_sc{n}_m[N]` C arrays this
+            # code then indexes past the end of (a real, confirmed stack
+            # buffer overflow, not just a wrong-answer bug). Mirrors the
+            # identical `n_words` computation `_emit_wide_lhs_write_new`
+            # already does. Confirmed via direct .pyx inspection for `if
+            # ((cond) ? $signed($signed({a6, a5, a1[1:0]})) : ...)`,
+            # whose 147-bit ternary needs 3 words but the arrays were
+            # only declared `[2]` (sized for the 96-bit `y_stmt_N`
+            # destination alone) before this fix.
+            cond_n = max(1, (w + 63) // 64)
+            cond_n = max(cond_n, (self._expr_max_internal_width(condition) + 63) // 64)
+            cond_n = max(cond_n, self._module_max_wide_words())
+            self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, cond_n)
+            cond_slot = self._alloc_scratch()
+            cond_lines = self._emit_wide_expr_to_scratch(condition, cond_slot, cond_n, w, indent)
+            if cond_lines is not None:
+                truth_slot = self._alloc_scratch()
+                cond_lines.append(
+                    f"{pad}wide_logical_truth(_sc{truth_slot}_v, _sc{truth_slot}_m,"
+                    f" _sc{cond_slot}_v, _sc{cond_slot}_m, {cond_n})"
+                )
+                self._free_scratch(cond_slot, truth_slot)
+                return cond_lines, f"_sc{truth_slot}_v[0]", "0"
+            self._free_scratch(cond_slot)
+        return [], self._emit_expr(condition, w), self._emit_mask_expr(condition, w)
+
     def _emit_if(self, stmt: IfStatement, indent: int, *, context: str = "process") -> list[str]:
         """Emit if/else as Cython if/else."""
         pad = "    " * indent
         old_et = self._et_pending
         self._et_pending = []
-        cond = self._emit_expr(stmt.condition, 1)
+        cond_setup, cond, _cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent)
         et_lines = [f"{pad}{t}" for t in self._et_pending]
         self._et_pending = old_et
-        lines = [*et_lines, f"{pad}if ({cond}):"]
+        lines = [*cond_setup, *et_lines, f"{pad}if ({cond}):"]
 
         if stmt.then_body:
             body = self._emit_stmt(stmt.then_body, indent + 1, context=context)
@@ -1978,7 +2066,10 @@ class _StmtEmittersMixin:
                 loop_expr = self._emit_expr(stmt.init.lhs, loop_width)
                 lines.append(f"{inner_pad}if ((({loop_expr}) >> {loop_width - 1}) & 1) != 0:")
                 lines.append(f"{inner_pad}    break")
-        cond = self._emit_expr(stmt.condition, 1)
+        # Self-determined width (+ wide-condition routing) -- see
+        # `_emit_condition_lines_and_expr`'s docstring.
+        cond_setup, cond, _cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent + 1)
+        lines.extend(cond_setup)
         lines.append(f"{inner_pad}if not ({cond}):")
         lines.append(f"{inner_pad}    break")
         # body
@@ -2033,12 +2124,14 @@ class _StmtEmittersMixin:
         inner_pad = "    " * (indent + 1)
         temp_index = self._next_temp_index()
         iter_name = f"_lv_while_iters_{temp_index}"
-        cond = self._emit_expr(stmt.condition, 1)
-        cond_mask = self._emit_mask_expr(stmt.condition, 1)
+        # Self-determined width (+ wide-condition routing) -- see
+        # `_emit_condition_lines_and_expr`'s docstring.
+        cond_setup, cond, cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent + 1)
 
         lines = [
             f"{pad}{iter_name} = 0",
             f"{pad}while True:",
+            *cond_setup,
             # A known-1 bit anywhere makes the condition definitely true
             # regardless of unrelated x/z bits elsewhere (mirrors
             # Value.reduce_or / TernaryOp in sim/evaluator.py) -- checking
@@ -2049,7 +2142,11 @@ class _StmtEmittersMixin:
             # bit is conventionally stored as 0, so a plain truthiness
             # check on `cond` already implements "known-1 forces true,
             # else false") -- this loop's explicit mask check needs the
-            # same three-way logic instead.
+            # same three-way logic instead. `cond_mask` is the literal
+            # "0" (a no-op) when `_emit_condition_lines_and_expr` already
+            # routed through the wide-aware path, since
+            # `wide_logical_truth` bakes this same precision rule into
+            # `cond` alone there.
             f"{inner_pad}if not (({cond}) & ~({cond_mask})):",
             f"{inner_pad}    break",
         ]

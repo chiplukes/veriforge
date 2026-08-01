@@ -1305,6 +1305,42 @@ substantially larger undertaking (a different, much bigger codegen
 architecture than `sim/vm/compiler.py`). Running the harness with
 `VERIFORGE_DIFF_COMPILED=1` shows this.
 
+**Phase 1 follow-up — statement-level fuzzing (July 2026)**: extended the
+harness's grammar beyond pure `assign`/NBA expression trees, its original
+scope, to `if`/`else if`/`else` chains with blocking assignment inside
+`always @(*)` — new file `tests/test_sim/test_differential_statements.py`
+(`VERIFORGE_DIFF_STMT_SEED`/`_STMT_CASES`/`_STMT_COMPILED`, same knob
+pattern as `test_differential.py`). This immediately found six more
+distinct bugs, plus two more found mid-investigation while chasing the
+first (all Icarus-confirmed) — full writeup in `notes/known_issues.md`
+under "Randomized differential harness (work plan item 3.4): bugs found
+and fixed" → "Twelfth wave". Highlights: nested `$signed($unsigned(x))`
+cast precedence (outermost cast should govern, naive recursion picked
+whichever was reached first); `if`/`for`/`while` conditions never
+receiving self-determined-width evaluation across all three interpreted/
+compiled engines (hardcoded to width 1/0, the same class of bug already
+fixed for ternary conditions but never applied at the statement level); a
+compiled-engine reduction-op/`!` x-imprecision bug and a genuine C
+scratch-array buffer overflow (not just a wrong-answer bug) found while
+fixing the width propagation; and — the deepest finds — a full redesign
+of arithmetic-operand extension for `+ - * / %` (each operand must see
+the full propagated target width so a nested context-determined operator
+like unary `-` extends correctly before, not after, its own operation
+runs) plus the discovery that `$signed`/`$unsigned` are themselves
+self-determined (their argument must NOT receive the outer target width),
+and that division/modulus specifically needs the OPERATOR's combined
+signedness for operand extension rather than each operand's own
+individual signedness (unlike `+-*`, whose modular arithmetic is
+invariant to that choice). The division fix touched all four engines,
+including a previously-unnoticed, pre-existing compiled-engine-only
+bitwise-op (`&|^`) mask-leak bug surfaced along the way. Verified via a
+300-case run of the original expression-tree fuzzer (30/30 batches,
+`VERIFORGE_DIFF_COMPILED=1`), the new statement fuzzer (8/8 batches,
+`_STMT_COMPILED=1`), `test_power_operator.py` (60 passed, 1 xfail,
+unaffected), and the full fast-suite regression (7107 passed, 1 xfailed,
+0 failed, `-n 8`, ~30 min). Phases 2+ (case statements, for/while loops,
+unpacked arrays, more operators) remain unscheduled future work.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible
