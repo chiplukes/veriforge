@@ -110,6 +110,7 @@ DEF OP_SYS_MONITOR    = 76
 
 DEF OP_SDIV           = 82
 DEF OP_SMOD           = 83
+DEF OP_SPOW           = 84
 
 DEF STACK_MAX         = 256
 DEF NBA_MAX           = 1024
@@ -553,6 +554,7 @@ cdef int _execute_core(
     # Temporaries
     cdef SVal a, b, t
     cdef long long new_val, new_mask
+    cdef long long sa, sb
     cdef int w, i, n
     cdef long long result_val, result_mask
     cdef int result_width
@@ -1449,12 +1451,26 @@ cdef int _execute_core(
             b = stack[sp]
             sp -= 1
             a = stack[sp]
-            w = a.width if a.width > b.width else b.width
+            # IEEE 1364-2005 Table 5-22: `**`'s result width is `L(i)`
+            # (the BASE's own width) -- grouped with the shift-operator
+            # row, not max(L(i),L(j)) -- verified directly against the
+            # primary spec text. `a` (the base) has already been resized
+            # by the compiler to whatever width is actually needed before
+            # this opcode runs, so `a.width` alone is correct; `b`'s
+            # (exponent's) width never contributes. Mirrors the identical
+            # fix in `sim/value.py`'s `Value.__pow__`.
+            w = a.width
             wmask = mask_for_width(w)
             if a.mask or b.mask:
                 stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
             else:
-                # Simple integer power, truncated to width
+                # Simple integer power, truncated to width. Correct even
+                # though `result_val` is a wrapping 64-bit `long long`:
+                # for w <= 64, (a**n) mod 2**w == ((a mod 2**64)**n mod
+                # 2**64) mod 2**w since 2**w divides 2**64, so computing
+                # in the C-native wrapping domain and masking down to `w`
+                # at the end gives the exact same answer as full-precision
+                # math would.
                 result_val = 1
                 n = <int>b.val
                 for i in range(n):
@@ -1462,6 +1478,57 @@ cdef int _execute_core(
                 stack[sp].val = result_val & wmask
                 stack[sp].mask = 0
                 stack[sp].width = w
+            sp += 1
+            continue
+
+        if op == OP_SPOW:
+            sp -= 1
+            b = stack[sp]
+            sp -= 1
+            a = stack[sp]
+            # Signed power: IEEE 1364-2005 SS5.5.1 ("if all operands are
+            # signed, the result will be signed") plus Table 5-6's
+            # negative-base/negative-exponent special values only apply
+            # under a genuinely signed interpretation. Mirrors the
+            # identical fix in `sim/vm/interpreter.py`'s Op.SPOW /
+            # `sim/evaluator.py`'s `_eval_signed_pow`.
+            w = a.width
+            wmask = mask_for_width(w)
+            if a.mask or b.mask:
+                stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
+                sp += 1
+                continue
+            sa = a.val
+            if a.width > 0 and a.width < 64 and (a.val >> (a.width - 1)) & 1:
+                sa = a.val - (<long long>1 << a.width)
+            sb = b.val
+            if b.width > 0 and b.width < 64 and (b.val >> (b.width - 1)) & 1:
+                sb = b.val - (<long long>1 << b.width)
+            if sb == 0:
+                result_val = 1
+            elif sb > 0:
+                result_val = 1
+                n = <int>sb
+                for i in range(n):
+                    result_val = result_val * sa
+            elif sa == 0:
+                # 0 ** (negative) is the table's one genuinely-undefined
+                # ('bx) cell.
+                stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
+                sp += 1
+                continue
+            elif sa == 1:
+                result_val = 1
+            elif sa == -1:
+                result_val = -1 if (sb & 1) else 1
+            else:
+                # |base| > 1, negative exponent: true rational result has
+                # magnitude < 1, truncated toward zero (mirrors the
+                # already-documented `2 ** -1 == 0` example).
+                result_val = 0
+            stack[sp].val = result_val & wmask
+            stack[sp].mask = 0
+            stack[sp].width = w
             sp += 1
             continue
 

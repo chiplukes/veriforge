@@ -849,6 +849,29 @@ class Compiler:  # cm:8c1e4a
                         # `*` case below.
                         static_result_w = target
                 self._compile_expr(expr.right, program)  # self-determined
+            # Power operator: grouped with the SHIFT row in IEEE 1364-2005
+            # Table 5-22 (`>> << ** >>> <<<` -> `L(i)`), not the generic
+            # `max(L(i),L(j))` row `+ - * / %` share -- confirmed directly
+            # against the primary spec text ("In all cases, the second
+            # operand of the power operator shall be treated as
+            # self-determined"). The BASE is context-determined exactly
+            # like a shift's left operand; the EXPONENT is always
+            # self-determined at its own natural width (via
+            # `self._expr_width`, not a bare `_compile_expr` call, so a
+            # nested context-determined operator within it still resizes
+            # correctly before `**` runs). Mirrors the identical fix in
+            # `sim/evaluator.py`.
+            elif expr.op == "**":
+                self._compile_expr(expr.left, program, width, signed_override)
+                if width:
+                    target = max(width, self._expr_width(expr.left))
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
+                    else:
+                        program.append(instr(Op.RESIZE, target))
+                    static_result_w = target
+                self._compile_expr(expr.right, program, self._expr_width(expr.right))
             # Bitwise ops (IEEE 1364-2005 §5.5.2): combine at the operator's
             # own natural width (max of the two operands' self-determined
             # widths) first -- each operand extended using its OWN
@@ -888,9 +911,12 @@ class Compiler:  # cm:8c1e4a
                         program.append(instr(Op.RESIZE, width))
                 return
             else:
-                # Context-determined: arithmetic (+,-,*,/,%,**) — widen both
-                # operands. See the shift branch above for why the target is
-                # max(width, static width), not `width` alone.
+                # Context-determined: arithmetic (+,-,*,/,%) — widen both
+                # operands (`**` is handled separately above -- its
+                # exponent must stay self-determined, not context-
+                # propagated like these operators' right operand). See
+                # the shift branch above for why the target is max(width,
+                # static width), not `width` alone.
                 self._compile_expr(expr.left, program, width, signed_override)
                 target_left = width
                 if width:
@@ -933,6 +959,21 @@ class Compiler:  # cm:8c1e4a
                 program.append(instr(_SIGNED_CMP_MAP[expr.op]))
             elif expr.op in _SIGNED_DIVMOD_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_DIVMOD_MAP[expr.op]))
+            # Signed power: IEEE 1364-2005 §5.5.1 ("if all operands are
+            # signed, the result will be signed") plus Table 5-6's
+            # negative-base/negative-exponent special values only apply
+            # under a genuinely signed interpretation -- Op.POW (used by
+            # the `else` branch below) always treats both operands as
+            # unsigned raw bit patterns, correct for the unsigned case
+            # (an unsigned exponent can never be negative, so Table 5-6's
+            # special cells never trigger) but wrong once either
+            # operand's two's-complement bit pattern is meant to be read
+            # as negative -- and dangerous: a "negative" exponent stored
+            # as a raw unsigned bit pattern is astronomically large,
+            # which Op.POW would previously have tried to compute
+            # directly. Mirrors the identical fix in `sim/evaluator.py`.
+            elif expr.op in _SIGNED_POW_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
+                program.append(instr(_SIGNED_POW_MAP[expr.op]))
             else:
                 op = _BINARY_OP_MAP.get(expr.op)
                 if op is None:
@@ -2031,9 +2072,14 @@ class Compiler:  # cm:8c1e4a
                 if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
                     return lw + int(expr.right.value)
                 return max(lw, self._expr_width(expr.right))
-            if expr.op in (">>", ">>>"):
+            if expr.op in (">>", ">>>", "**"):
                 # A shift's self-determined width is its LEFT operand's
                 # width only -- the shift amount never contributes bits.
+                # `**` (power) shares this SAME row in IEEE 1364-2005
+                # Table 5-22 (`>> << ** >>> <<<` -> `L(i)`, exponent
+                # always self-determined) -- verified directly against
+                # the primary spec text; mirrors the identical fix in
+                # `sim/evaluator.py`'s `_expr_self_width`.
                 return self._expr_width(expr.left)
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
 
@@ -2825,6 +2871,10 @@ _SIGNED_CMP_MAP: dict[str, Op] = {
 _SIGNED_DIVMOD_MAP: dict[str, Op] = {
     "/": Op.SDIV,
     "%": Op.SMOD,
+}
+
+_SIGNED_POW_MAP: dict[str, Op] = {
+    "**": Op.SPOW,
 }
 
 

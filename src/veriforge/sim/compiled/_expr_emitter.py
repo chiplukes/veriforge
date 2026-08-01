@@ -1214,14 +1214,30 @@ class _ExprEmitterMixin:
         # `$unsigned(a1) << a0` (signedness) and `$signed((!a6[52])) <<
         # (~(cond ? a4[13] : (~^a1[2])))` (width); mirrors the identical
         # fix in `_wide_emitter.py`.
+        # `**`'s exponent, like a shift COUNT, is ALWAYS self-determined
+        # (IEEE 1364-2005 SS5.1.5: "In all cases, the second operand of
+        # the power operator shall be treated as self-determined") --
+        # verified directly against the primary spec text; NOT `op_width`
+        # (the base's own context), which every other operator reaching
+        # this branch propagates into its right operand.
         if expr.op in ("<<", ">>", "<<<", ">>>"):
             right = self._emit_expr(expr.right, self._shift_amount_width(expr.right), False)
+        elif expr.op == "**":
+            right = self._emit_expr(expr.right, self._expr_width(expr.right), signed_override)
         else:
             right = self._emit_expr(expr.right, op_width, signed_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
-        # shifts (left operand handled by the >>_ARITH path).
+        # shifts (left operand handled by the >>_ARITH path). `**` is also
+        # skipped here -- its own value-emission branch below sign-extends
+        # BOTH operands to their OWN respective widths unconditionally
+        # (base to `lw`, exponent to its self-determined width), since
+        # `_verilog_ipow` needs a properly full-64-bit-sign-extended
+        # `long long` to correctly detect a negative exponent regardless
+        # of whether `op_width > lw` happens to hold -- that comparison is
+        # about the BASE's context, meaningless for the EXPONENT's
+        # self-determined width.
         # For division/modulus: always sign-extend signed operands from their
         # own width, since C's / and % treat operands as signed only when the
         # value is at its native signed width. `signed_override`, when set
@@ -1229,7 +1245,7 @@ class _ExprEmitterMixin:
         # sign/zero-extension decision for both operands, overriding each
         # operand's own individual signedness -- matching how a signed
         # ternary branch is handled everywhere else (IEEE 1364-2005 §5.5.1).
-        if expr.op not in _COMPARISON_OPS and expr.op not in ("<<", ">>", "<<<", ">>>"):
+        if expr.op not in _COMPARISON_OPS and expr.op not in ("<<", ">>", "<<<", ">>>", "**"):
             left_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
             right_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
             if left_signed:
@@ -1264,9 +1280,32 @@ class _ExprEmitterMixin:
             core = f"(~(({left}) ^ ({right})))"
             return f"({core}) & wmask({width})"
 
-        # Power: use int(pow(...)) since Cython has no ** for C integers
+        # Power: pure-integer via `_verilog_ipow` (IEEE 1364-2005 Table
+        # 5-6), NOT `pow()`/`double` -- floating point is imprecise for
+        # large integers and casting an infinite/negative double back to
+        # an unsigned integer type is undefined behavior in C, both real
+        # risks with the previous `pow(<double>...)` implementation.
+        # Mirrors `sim/value.py`'s `_verilog_pow` / `sim/evaluator.py`'s
+        # `_eval_signed_pow` -- both operands must be signed (the same
+        # all-or-nothing gate used everywhere else in this codebase for
+        # signed comparison/div/mod) before treating either as
+        # potentially negative; `_verilog_ipow` needs each operand
+        # properly sign-extended to the full 64-bit `long long` to
+        # correctly detect a negative exponent (a raw N<64-bit
+        # two's-complement pattern doesn't look negative to C without
+        # this). Confirmed against Icarus.
         if expr.op == "**":
-            return f"(<unsigned long long>pow(<double>({left}), <double>({right}))) & wmask({width})"
+            both_signed = (
+                signed_override
+                if signed_override is not None
+                else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+            )
+            if both_signed:
+                pow_base = f"_sign_ext({left}, {self._expr_width(expr.left)})"
+                pow_exp = f"_sign_ext({right}, {self._expr_width(expr.right)})"
+            else:
+                pow_base, pow_exp = left, right
+            return f"(_verilog_ipow({pow_base}, {pow_exp})) & wmask({width})"
 
         # Arithmetic right shift: preserve the signed operand width before
         # truncating to the surrounding assignment width. A shift amount
@@ -1776,7 +1815,7 @@ class _ExprEmitterMixin:
                 if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
                     return lw + int(expr.right.value)
                 return max(lw, self._expr_width(expr.right))
-            if expr.op in (">>", ">>>"):
+            if expr.op in (">>", ">>>", "**"):
                 # A shift's self-determined width is its LEFT operand's width
                 # only (IEEE 1364-2005 Table 5-22) -- the shift amount (right
                 # operand) never contributes bits to the result and must not
@@ -1786,6 +1825,10 @@ class _ExprEmitterMixin:
                 # which then wrongly widens a `~`/`+`/`-` unary operand
                 # nested in the shift's left operand before the operator
                 # runs (see notes/known_issues.md, item 2.6's regression).
+                # `**` (power) shares this SAME row in Table 5-22 (`>> <<
+                # ** >>> <<<` -> `L(i)`, exponent always self-determined) --
+                # verified directly against the primary spec text; mirrors
+                # the identical fix in `sim/evaluator.py`/`sim/vm/compiler.py`.
                 return self._expr_width(expr.left)
             return max(self._expr_width(expr.left), self._expr_width(expr.right))
         if etype is UnaryOp:
@@ -1944,6 +1987,10 @@ class _ExprEmitterMixin:
             # shapes rather than relying on that per-node-type accident.
             if expr.op in ("<<", ">>", "<<<", ">>>"):
                 rm = self._emit_mask_expr(expr.right, self._shift_amount_width(expr.right))
+            elif expr.op == "**":
+                # `**`'s exponent is always self-determined -- see the
+                # identical note in `_emit_binary`.
+                rm = self._emit_mask_expr(expr.right, self._expr_width(expr.right))
             else:
                 rm = self._emit_mask_expr(expr.right, op_width)
             if expr.op in ("==", "!="):
@@ -2000,6 +2047,24 @@ class _ExprEmitterMixin:
                 # Confirmed against Icarus for `a2 >> ((^(a1 ? a5[4:3] :
                 # a5)) + a3[25:16])` with a3 fully x.
                 return f"(wmask({width}) if ({rm}) else ({lm}))"
+            if expr.op == "**":
+                # `base == 0 and exponent < 0` (IEEE 1364-2005 Table 5-6)
+                # is genuinely undefined ('bx) even when BOTH operands are
+                # fully defined -- independent of the generic `lm | rm`
+                # x-propagation below, which only covers actual x/z bits.
+                # Mirrors `_emit_expr`'s identical signed-gating for
+                # `_verilog_ipow`; unsigned exponents can never be
+                # negative, so this condition never triggers there.
+                both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                if both_signed:
+                    lv = self._emit_expr(expr.left, op_width)
+                    rv = self._emit_expr(expr.right, self._expr_width(expr.right))
+                    base_sx = f"_sign_ext({lv}, {self._expr_width(expr.left)})"
+                    exp_sx = f"_sign_ext({rv}, {self._expr_width(expr.right)})"
+                    undefined = f" or (({base_sx}) == 0 and ({exp_sx}) < 0)"
+                else:
+                    undefined = ""
+                return f"(wmask({width}) if ((({lm}) | ({rm})){undefined}) else 0)"
             # For bitwise OR: known-1 in either input forces result to known-1
             # For bitwise AND: known-0 in either input forces result to known-0
             # Hoist the left sub-expression's value+mask to named temps when in

@@ -79,6 +79,42 @@ cdef inline long long _sign_ext(long long v, int w) noexcept nogil:
         return v | (~((1LL << w) - 1))
     return v
 
+# IEEE 1364-2005 Table 5-6 -- integer power-operator special-value rules,
+# pure-integer (never `pow()`/`double`, which is imprecise for large
+# integers and undefined behavior in C when casting an infinite/negative
+# double back to an unsigned integer type -- both real risks with the
+# previous `<unsigned long long>pow(<double>(...), <double>(...))`
+# implementation this replaces). `base`/`exp` must already be correctly
+# sign- or zero-extended to the full 64-bit `long long` by the caller
+# (via `_sign_ext` for a genuinely signed operand, or passed raw
+# otherwise) -- mirrors `sim/value.py`'s `_verilog_pow` (same rules,
+# verified against the IEEE 1364-2005 primary text and Icarus). The
+# `base == 0 and exp < 0` cell (the table's one genuinely-undefined
+# 'bx case) returns 0 here -- callers must separately detect that exact
+# condition in their own mask expression (a trivial `(base) == 0 and
+# (exp) < 0` check, cheap enough not to need its own helper) and treat
+# this function's return value as unspecified/irrelevant when it holds,
+# the same convention `sim/vm/_interp_fast.pyx`'s OP_SPOW and
+# `sim/vm/interpreter.py`'s Op.SPOW use.
+cdef inline long long _verilog_ipow(long long base, long long exp) noexcept nogil:
+    cdef long long result
+    cdef int i, n
+    if exp == 0:
+        return 1
+    if exp > 0:
+        result = 1
+        n = <int>exp
+        for i in range(n):
+            result = result * base
+        return result
+    if base == 0:
+        return 0
+    if base == 1:
+        return 1
+    if base == -1:
+        return -1 if (exp & 1) else 1
+    return 0
+
 cdef inline int _xor_reduce(long long v, int w) noexcept nogil:
     cdef int i, result = 0
     for i in range(w):

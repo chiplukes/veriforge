@@ -35,6 +35,53 @@ def _mask_for_width(width: int) -> int:
     return m
 
 
+def _verilog_pow(base: int, exp: int) -> int | None:
+    """IEEE 1364-2005 Table 5-6 -- integer power-operator special-value rules.
+
+    *base*/*exp* are plain Python ints, already sign-interpreted by the
+    caller when a signed computation is wanted (so either may be negative);
+    for an unsigned computation both are always >= 0, in which case only
+    the `exp == 0`/`exp > 0` branches below are ever reachable (Python's
+    native `**` already handles that case correctly, including 0**0 == 1).
+
+    Returns ``None`` for the table's single genuinely-undefined cell
+    (`base == 0` and `exp < 0`, IEEE: "the result value is 'bx"); the
+    caller maps that to an all-x `Value`. Otherwise returns the exact
+    mathematical result (which the caller then masks down to the target
+    width via `Value`'s constructor -- arbitrary-precision here, no risk
+    of a lost carry/sign bit before that final truncation).
+
+    Table 5-6 (as verified directly against the IEEE 1364-2005 primary
+    text and cross-checked against Icarus -- the markdown conversion of
+    the source PDF had transposed the table's row/column axis labels,
+    so this was NOT taken at face value from that conversion alone):
+    rows = exponent sign (positive / zero / negative), columns = base
+    magnitude (<-1 / -1 / 0 / 1 / >1). Only the `exp < 0` row has
+    non-obvious cells (a positive exponent, or exponent == 0, is always
+    just direct computation or the anything**0==1 rule respectively,
+    which Python's native `**` already gets right for any base):
+      - base == 0: 'bx (None)
+      - base == 1: 1
+      - base == -1: -1 if exp is odd, else 1 (exp's own parity, despite
+        exp itself being negative -- Python's `%` already returns the
+        mathematically-correct parity for a negative left operand)
+      - |base| > 1: 0 (the true rational result's magnitude is < 1;
+        Verilog's integer power operator truncates toward zero, mirroring
+        the already-documented `2 ** -1 == 0` example from Table 5-8)
+    """
+    if exp == 0:
+        return 1
+    if exp > 0:
+        return base**exp
+    if base == 0:
+        return None
+    if base == 1:
+        return 1
+    if base == -1:
+        return -1 if exp % 2 else 1
+    return 0
+
+
 class Value:  # cm:c8a1e6
     """4-state bit-vector value for Verilog simulation.
 
@@ -627,10 +674,24 @@ class Value:  # cm:c8a1e6
 
     def __pow__(self, other: Value | int) -> Value:
         other = _coerce(other, self.width)
-        w = max(self.width, other.width)
+        # IEEE 1364-2005 Table 5-22: `**`'s self-determined bit length is
+        # `L(i)` (the BASE's own width) -- grouped with the shift-operator
+        # row (`>> << ** >>> <<<`), NOT the `max(L(i),L(j))` row `+ - * /
+        # % & | ^ ^~ ~^` share. The exponent never contributes to the
+        # result width (verified directly against the primary spec text:
+        # "In all cases, the second operand of the power operator shall be
+        # treated as self-determined"). By the time this runs, `self`
+        # (the base) has already been resized by the caller to whatever
+        # width is actually needed (its own self-determined width, or a
+        # wider context-determined target) -- so `self.width` alone is the
+        # correct result width, unlike `max(self.width, other.width)`
+        # which incorrectly let a wide, unrelated exponent inflate the
+        # result. Confirmed via Icarus.
+        w = self.width
         if self.mask or other.mask:
             return Value.x(w)
-        return Value(self.val**other.val, width=w)
+        result = _verilog_pow(self.val, other.val)
+        return Value.x(w) if result is None else Value(result, width=w)
 
 
 def _coerce(v: Value | int, width: int) -> Value:

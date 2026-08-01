@@ -9,6 +9,8 @@ Covers Verilog IEEE 1364-2005 width rules:
   - Assignment truncation / zero-extension via resize
   - Concatenation: result width = sum of operand widths
   - Shift: result width = left operand width
+  - Power: result width = base (left operand) width; exponent is always
+    self-determined and never contributes to the result width
   - Ternary: result width = max(true_val, false_val)
   - x-propagation through mixed-width ops
 """
@@ -82,11 +84,26 @@ class TestArithmeticWidthPromotion:
         assert r.width == 16
 
     def test_power_mixed_widths(self):
+        """IEEE 1364-2005 Table 5-22: `**` result width is the BASE's own
+        width (L(i)) -- the exponent is always self-determined and never
+        contributes to the result width (grouped with the shift-operator
+        row, not the max(L(i),L(j)) row this test previously assumed for
+        `*`-style operators; verified directly against the primary spec
+        text). A too-narrow base width truncates the mathematical result,
+        same as any other assignment/expression truncation.
+        """
+        a = Value(3, width=8)
+        b = Value(4, width=16)
+        r = a**b
+        assert r == 81
+        assert r.width == 8
+
+    def test_power_result_truncates_to_base_width(self):
         a = Value(2, width=8)
         b = Value(10, width=16)
         r = a**b
-        assert r == 1024
-        assert r.width == 16
+        assert r == (1024 & 0xFF)
+        assert r.width == 8
 
 
 # ── Bitwise Width Promotion ──────────────────────────────────────────

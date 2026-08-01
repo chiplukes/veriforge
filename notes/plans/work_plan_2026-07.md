@@ -1019,14 +1019,52 @@ with the SHIFT row in Table 5-22, not `max(L(i),L(j))`, contradicting
 how this codebase currently treats it -- unconfirmed by fuzzing, left
 for a future session) in `known_issues.md`'s tenth-wave entry.
 
+**Eleventh wave -- `**` (power) full fix: width, signedness, and IEEE
+1364-2005 Table 5-6 special values, across all four engines.** Following
+up on the tenth wave's discovery, confirmed THREE independent real bugs:
+(1) width/self-determination -- `**` is grouped with the SHIFT row in
+Table 5-22 (`L(i)`, exponent self-determined), not the generic
+`max(L(i),L(j))` row every engine previously treated it under; (2)
+signedness was entirely unimplemented -- no engine had a signed `**`
+variant at all (unlike `/`/`%`/comparisons, which already do); (3)
+Table 5-6's negative-base/negative-exponent special values (`0**-1` ==
+`'bx`, `2**-1` == `0`, `(-1)**-3` == `-1`, etc.) were not implemented,
+and the compiled engine's old `pow(<double>...)`-based implementation
+carried real undefined-behavior risk (imprecise float math, UB casting
+an infinite/negative double to unsigned). Fixed in all four engines
+(reference, vm, vm-fast, compiled), including a new shared
+`_verilog_pow`/`_verilog_ipow` helper per language boundary implementing
+Table 5-6 once. Verified against Icarus via a new dedicated cross-engine
+test file, `tests/test_sim/test_power_operator.py` (58 assertions, all
+green) -- `**` couldn't just be added to the differential fuzzer's
+operator set because doing so surfaced a separate, pre-existing,
+NOT-fixed gap (below).
+
+**A separate, pre-existing, NOT fixed gap this surfaced**: `**` over a
+>64-bit operand or destination is broken on the two C-based engines --
+`vm-fast`'s `OP_POW`/new `OP_SPOW` never consult the wide word-array
+representation (silently wrong, not even x), and the compiled engine's
+last-resort narrow-scalar assignment fallback (reached because neither
+wide emitter has ever supported `**`) only ever writes the narrow
+`c.val`/`c.mask` slots, never a wide destination's real `c.wide_val`
+storage -- so the signal silently stays at its reset value of 0 forever,
+with zero warning. This is a GENERAL architectural gap (would affect any
+future wide-emitter-unsupported expression assigned to a wide
+destination, not something `**`-specific), pinned as strict xfail in the
+new test file rather than fixed. Given the severity (silent wrong
+simulation results, no warning at all), this is arguably a higher-
+priority next-session item than typical bug-hunting continuation -- full
+detail and a suggested fix direction in `known_issues.md`'s
+eleventh-wave entry.
+
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
 reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
-exhaustively characterized. The differential harness itself is now fully
+exhaustively characterized. The differential harness itself is fully
 green at both the default (150-case) and large-batch (300-case) scope.
-The `**`/power width-and-context-determination question noted above is
-the clearest next-session starting point.
+The wide-operand `**` gap on `vm-fast`/`compiled` noted above is the
+clearest next-session starting point, given its severity.
 
 ## Tier 3 — CI and engine parity
 

@@ -31,7 +31,7 @@ from veriforge.model.expressions import (
 )
 
 from .elaborate import match_assignment_pattern_layout
-from .value import Value
+from .value import Value, _verilog_pow
 
 if TYPE_CHECKING:
     pass
@@ -349,6 +349,28 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     target = max(width, _expr_self_width(expr.left, ctx))
                     eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
                     left = left.sign_extend(target) if eff_signed else left.resize(target)
+            # Power operator: grouped with the SHIFT row in IEEE 1364-2005
+            # Table 5-22 (`>> << ** >>> <<<` -> `L(i)`), not the generic
+            # `max(L(i),L(j))` arithmetic row `+ - * / %` etc. share --
+            # confirmed directly against the primary spec text ("In all
+            # cases, the second operand of the power operator shall be
+            # treated as self-determined"). The BASE (left operand) is
+            # context-determined exactly like a shift's left operand; the
+            # EXPONENT (right operand) is always self-determined at its
+            # own natural width, never the outer context, and (unlike a
+            # shift amount, which only needs its raw magnitude) evaluated
+            # at `_expr_self_width` rather than bare width=0 so a nested
+            # context-determined operator within it still resizes
+            # correctly before `**` runs (the same leaf-width bug already
+            # fixed for every other self-determined position this
+            # session). Confirmed against Icarus.
+            elif op == "**":
+                left = self.eval(expr.left, ctx, width, signed_override)
+                if width and left.width != width:
+                    target = max(width, _expr_self_width(expr.left, ctx))
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                    left = left.sign_extend(target) if eff_signed else left.resize(target)
+                right = self.eval(expr.right, ctx, _expr_self_width(expr.right, ctx))
             # Bitwise ops: combine at the OPERATOR's own natural width
             # (max of the two operands' self-determined widths) first, each
             # operand extended using its OWN individual signedness only far
@@ -421,6 +443,18 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # Signed division / modulus: interpret operands as 2's-complement
             elif op in ("/", "%") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
                 result = _eval_signed_divmod(op, left, right)
+            # Signed power: IEEE 1364-2005 §5.5.1 ("if all operands are
+            # signed, the result will be signed") plus Table 5-6's
+            # negative-base/negative-exponent special values only apply
+            # under a genuinely signed interpretation -- `Value.__pow__`
+            # (used by the `else` branch below) always treats both
+            # operands as unsigned raw bit patterns, which is correct
+            # for the unsigned case (an unsigned exponent can never be
+            # negative, so Table 5-6's special cells never trigger) but
+            # wrong once either operand's two's-complement bit pattern is
+            # meant to be read as negative.
+            elif op == "**" and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
+                result = _eval_signed_pow(left, right)
             else:
                 result = _eval_binary_op(op, left, right)
             # The RESULT must end up at exactly the caller's requested
@@ -1042,10 +1076,15 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
             if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
                 return lw + int(expr.right.value)
             return max(lw, _expr_self_width(expr.right, ctx))
-        if expr.op in (">>", ">>>"):
+        if expr.op in (">>", ">>>", "**"):
             # A shift's self-determined width is its LEFT operand's width
             # only -- the shift amount never contributes bits to the
-            # result (mirrors `sim/vm/compiler.py`'s `_expr_width`).
+            # result (mirrors `sim/vm/compiler.py`'s `_expr_width`). `**`
+            # (power) shares this SAME row in IEEE 1364-2005 Table 5-22
+            # (`>> << ** >>> <<<` -> `L(i)`, with the exponent always
+            # self-determined) -- verified directly against the primary
+            # spec text; NOT the generic `max(L(i),L(j))` row the final
+            # `return` below covers for `+ - * / % & | ^ ^~ ~^`.
             return _expr_self_width(expr.left, ctx)
         return max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
     if etype is UnaryOp:
@@ -1204,6 +1243,23 @@ def _eval_signed_divmod(op: str, left: Value, right: Value) -> Value:
         # Verilog: a % b = a - b * int(a / b)  (remainder matches trunc-div)
         return Value(a - b * int(a / b), width=w)
     raise ValueError(f"Unknown div/mod operator: {op!r}")
+
+
+def _eval_signed_pow(left: Value, right: Value) -> Value:
+    """Signed power, interpreting both operands as two's-complement.
+
+    Result width is the BASE's own width (IEEE 1364-2005 Table 5-22's
+    `L(i)` rule for `**`, mirroring the unsigned `Value.__pow__`) --
+    `left` has already been resized by the caller to whatever width is
+    actually needed before this runs. See `_verilog_pow` (`sim/value.py`)
+    for the Table 5-6 negative-base/negative-exponent special-value
+    rules this delegates to.
+    """
+    w = left.width
+    if left.mask or right.mask:
+        return Value.x(w)
+    result = _verilog_pow(left.as_signed(), right.as_signed())
+    return Value.x(w) if result is None else Value(result, width=w)
 
 
 # ── Binary operator dispatch ──────────────────────────────────────────

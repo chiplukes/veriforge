@@ -1055,18 +1055,122 @@ and the full differential harness (default 150-case and
 `VERIFORGE_DIFF_CASES=300` large-batch, both with
 `VERIFORGE_DIFF_COMPILED=1`) is green with this fix applied.
 
-**Still open / deliberately out of scope**: the spec text also revealed
-that `**` (power) is actually grouped with the SHIFT row (`>> << ** >>>
-<<<` -> `L(i)`, i.e. the LEFT/base operand's width, with the
-right/exponent operand self-determined), not the `max(L(i),L(j))` row
-this codebase currently treats it under (grouped with `+,-,*,/,%` in
-both `sim/evaluator.py` and `sim/vm/compiler.py`'s arithmetic branch,
-with the exponent treated as context-determined like `+`'s right
-operand rather than self-determined like a shift's amount). This is a
-distinct, unconfirmed-by-fuzzing latent bug (`**` is not in the
-differential fuzzer's generated operator set) -- noted here rather than
-touched, since it's outside this fix's confirmed scope and deserves its
-own Icarus verification pass.
+**Eleventh wave -- the `**` (power) operator, full fix (width +
+signedness + IEEE 1364-2005 Table 5-6 special values), across all four
+engines.** The tenth wave's mul-width investigation noticed in passing
+that this codebase's `**` treatment might also be spec-noncompliant;
+following up confirmed THREE independent, real bugs, none previously
+caught because `**` was never covered by the differential fuzzer (not in
+its generated operator set) or any dedicated test file:
+
+1. **Width/self-determination.** Per the primary spec text (Table 5-22:
+   `>> << ** >>> <<<` -> `L(i)`, comment "j is self-determined"; and
+   SS5.1.5: "In all cases, the second operand of the power operator shall
+   be treated as self-determined") -- `**` is grouped with the SHIFT row,
+   not the generic `max(L(i),L(j))` row `+ - * / %` share. Every engine
+   previously treated `**` exactly like `+`/`-`/`*` (context-propagated
+   the exponent into the outer width, used max-width). Fixed by carving
+   `**` into its own branch everywhere, mirroring each engine's existing
+   shift-operator handling: the BASE is context-determined (extended to
+   `max(width, self_width(base))` before the operator runs, exactly like
+   a shift's left operand), the EXPONENT is always evaluated at its own
+   self-determined width (via `_expr_self_width`/`_expr_width`, not a
+   bare width=0 call, so a nested context-determined operator within it
+   still resizes correctly -- the same leaf-width bug class fixed
+   repeatedly elsewhere this session), and the result's own width is the
+   base's width alone.
+2. **Signedness was entirely unimplemented.** `Value.__pow__` (and every
+   engine's direct equivalent) always computed `self.val ** other.val`
+   on raw UNSIGNED bit patterns, with no signed variant at all -- unlike
+   `/`/`%`/comparisons, which already have `_eval_signed_divmod`/
+   `_eval_signed_cmp`-style dispatch gated on both operands being
+   declared signed (IEEE 1364-2005 SS5.5.1: "if all operands are signed,
+   the result will be signed"). Fixed by adding the same all-or-nothing
+   signed dispatch for `**`: `_eval_signed_pow` (`sim/evaluator.py`),
+   `Op.SPOW` (`sim/vm/interpreter.py`, `sim/vm/compiler.py`'s
+   `_SIGNED_POW_MAP`), `OP_SPOW` (`sim/vm/_interp_fast.pyx`, a new
+   opcode appended after `OP_SMOD`), and a signed branch in the compiled
+   engine's `_emit_binary` (`_expr_emitter.py`) that sign-extends both
+   operands via the existing `_sign_ext` helper before calling the new
+   `_verilog_ipow` runtime primitive.
+3. **IEEE 1364-2005 Table 5-6's negative-base/negative-exponent special
+   values were not implemented at all** (e.g. `0 ** -1` == `'bx`
+   specifically, `2 ** -1` == `0`, `(-1) ** -3` == `-1`,
+   `(-1) ** -4` == `1`) -- a negative exponent's raw two's-complement bit
+   pattern would previously just get used directly as an enormous
+   positive magnitude, producing nonsense (or, on the COMPILED engine's
+   old `<unsigned long long>pow(<double>(...), <double>(...))`
+   implementation, real undefined-behavior risk: floating-point `pow()`
+   is imprecise for large integers, and casting an infinite or negative
+   `double` back to `unsigned long long` is UB in C). Table 5-6 itself
+   required care to decode correctly: the markdown conversion of the
+   IEEE 1364-2005 PDF (fetched directly from the primary text rather
+   than trusted from memory or this codebase's own prior notes) had
+   transposed the table's row/column axis labels; the corrected reading
+   (rows = exponent sign, columns = base magnitude) was cross-verified
+   against four independent Icarus results before being trusted. A new
+   shared `_verilog_pow(base, exp) -> int | None` helper (`sim/value.py`,
+   `None` signaling the one genuinely-undefined `'bx` cell) implements
+   the table once, reused by `Value.__pow__`'s unsigned path and
+   `_eval_signed_pow`'s signed path; `sim/vm/interpreter.py`'s `Op.SPOW`
+   imports the same helper; `sim/vm/_interp_fast.pyx`'s `OP_SPOW` and the
+   compiled engine's new `_verilog_ipow` (`templates/narrow_tail.pxi`)
+   are pure-integer Cython/C reimplementations of the identical logic
+   (no shared import possible across the Python/Cython/C boundary).
+
+All three fixes were verified against Icarus Verilog on every engine
+(reference, vm, vm-fast, compiled) via `tests/test_sim/test_power_
+operator.py`, a new dedicated cross-engine regression file (the
+differential fuzzer's own architecture doesn't work for `**` -- see the
+next entry -- so this needed a hand-written suite instead of a fuzzer
+opt-in). 58 assertions pass across all four engines; two cases are
+strict xfail for a separately-scoped, pre-existing gap (below).
+
+**A separate, pre-existing, NOT fixed gap this investigation surfaced**:
+`**` over a >64-bit operand or destination is broken on the two C-based
+engines, in two different ways, neither introduced by (or specific to)
+the fixes above:
+- **`vm-fast`**: neither `OP_POW` nor the new `OP_SPOW` consult the wide
+  (`wflag`/`wv`/`wm`) representation at all -- they only ever read a
+  stack slot's narrow low-word fields. For a >64-bit base or exponent
+  this silently computes a wrong answer (not even a clean crash/x).
+- **`compiled`**: `**` isn't handled by EITHER wide emitter
+  (`_wide_emitter.py`'s recursive scratch emitter, nor the
+  Python-bignum `_emit_py_expr`/`_emit_wide_py_bits_lines` fallback) --
+  true even before this session's fixes, since `**` was essentially
+  never exercised at all previously. When BOTH wide handlers return
+  `None` for a >64-bit-destination assignment,
+  `_compile_continuous_assigns` (`_process_compiler.py`) falls through
+  to its LAST-RESORT fallback (originally meant only for narrow, <=64-bit
+  destinations), which unconditionally writes only
+  `c.val[lhs_sid]`/`c.mask[lhs_sid]` -- **never** the wide destination's
+  actual `c.wide_val`/`c.wide_offset` storage. The signal silently stays
+  at its power-on-reset value of 0 forever, with **no warning or error
+  of any kind**. This is a general architectural gap in that fallback
+  (it would silently no-op for ANY future wide-emitter-unsupported
+  expression assigned to a wide destination, not something specific to
+  `**`) -- confirmed via direct tracing that both wide emitters correctly
+  return `None` and execution reaches this exact fallback. Given the
+  severity (silent incorrect simulation results, not even a crash) this
+  is a strong candidate for a dedicated follow-up, likely fixed by making
+  that fallback either write through to `c.wide_val` for a wide
+  destination or -- probably better, given the narrow emitter can't
+  correctly READ a wide operand either (the same "narrow path meets wide
+  signal" architectural shape this whole session has repeatedly found
+  elsewhere) -- refuse to emit anything for that statement at all and
+  surface a clear compile-time error or a `test_ibex_examples.py`-style
+  "reference executor fallback" warning instead of silently producing
+  nothing. `reference` and `vm` (pure Python, arbitrary-width `int`) are
+  both unaffected. Both cases are pinned as strict xfail in
+  `test_power_operator.py` rather than fixed here.
+
+**Why `**` isn't added to the differential fuzzer's operator set**:
+every fuzzer-generated case assigns to a fixed 96-bit destination
+(`test_differential.py`'s `_build_batch_module`) -- so adding `**` would
+immediately hit the compiled-engine gap above for virtually every
+generated case (96 > 64 always), producing mass spurious failures
+unrelated to the actual expression being fuzzed. Revisit once the wide-
+destination gap above is fixed.
 
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 

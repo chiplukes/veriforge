@@ -141,6 +141,7 @@ class Op(IntEnum):  # cm:5b3d7f
     # ── Signed arithmetic ──────────────────────────────────────────────
     SDIV = auto()  # Signed division (truncates toward zero)
     SMOD = auto()  # Signed modulus (matches trunc-div)
+    SPOW = auto()  # Signed power (IEEE 1364-2005 Table 5-6 special values)
 
 
 # ── Instruction constructor helpers ──────────────────────────────────

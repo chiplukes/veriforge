@@ -13,7 +13,7 @@ Design for speed:
 
 from __future__ import annotations
 
-from ..value import Value, _mask_for_width
+from ..value import Value, _mask_for_width, _verilog_pow
 from .opcodes import Op
 
 import random as _random
@@ -420,6 +420,16 @@ class Interpreter:  # cm:e3f1b4
                 b = s_pop()
                 a = s_pop()
                 s_append(a**b)
+                continue
+
+            if op == Op.SPOW:
+                b = s_pop()
+                a = s_pop()
+                if a.mask or b.mask:
+                    s_append(Value.x(a.width))
+                    continue
+                result = _verilog_pow(a.as_signed(), b.as_signed())
+                s_append(Value.x(a.width) if result is None else Value(result, width=a.width))
                 continue
 
             # ── Bitwise ──────────────────────────────────────────
