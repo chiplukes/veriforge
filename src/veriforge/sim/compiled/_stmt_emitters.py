@@ -388,6 +388,26 @@ class _StmtEmittersMixin:
             if lines is not None:
                 return lines
 
+            # Neither wide emitter could handle this RHS -- the code below
+            # is a LAST-RESORT narrow-scalar path that only ever writes
+            # `c.val`/`c.nba_val` (+ mask), correct ONLY when the
+            # destination's real width is <= _WORD_BITS (those ARE its
+            # storage in that case). For a genuinely wide destination, the
+            # real storage is `c.wide_val`/`c.wide_offset`, which this path
+            # never touches -- so the assignment would silently compile to
+            # code that writes nowhere the signal is actually read from,
+            # leaving it stuck at its prior value forever with no error.
+            # Mirrors the identical guard in `_process_compiler.py`'s
+            # continuous-assign fallback; deliberately general, not tied to
+            # any specific unsupported RHS shape.
+            if self._signal_widths[sid] > _WORD_BITS:
+                raise NotImplementedError(
+                    f"Compiled engine: {'nonblocking' if is_nba else 'blocking'} assignment to "
+                    f"'{name}' ({self._signal_widths[sid]} bits) has an RHS shape not yet "
+                    f"supported for a destination wider than {_WORD_BITS} bits. Use engine='vm' "
+                    f"or engine='reference' for this design, or simplify the expression."
+                )
+
             old_et = self._et_pending
             self._et_pending = []
             rhs_val = self._emit_expr(rhs, assign_width)

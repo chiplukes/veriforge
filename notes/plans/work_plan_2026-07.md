@@ -1040,22 +1040,36 @@ green) -- `**` couldn't just be added to the differential fuzzer's
 operator set because doing so surfaced a separate, pre-existing,
 NOT-fixed gap (below).
 
-**A separate, pre-existing, NOT fixed gap this surfaced**: `**` over a
->64-bit operand or destination is broken on the two C-based engines --
-`vm-fast`'s `OP_POW`/new `OP_SPOW` never consult the wide word-array
-representation (silently wrong, not even x), and the compiled engine's
-last-resort narrow-scalar assignment fallback (reached because neither
-wide emitter has ever supported `**`) only ever writes the narrow
-`c.val`/`c.mask` slots, never a wide destination's real `c.wide_val`
-storage -- so the signal silently stays at its reset value of 0 forever,
-with zero warning. This is a GENERAL architectural gap (would affect any
-future wide-emitter-unsupported expression assigned to a wide
-destination, not something `**`-specific), pinned as strict xfail in the
-new test file rather than fixed. Given the severity (silent wrong
-simulation results, no warning at all), this is arguably a higher-
-priority next-session item than typical bug-hunting continuation -- full
-detail and a suggested fix direction in `known_issues.md`'s
-eleventh-wave entry.
+**Follow-up (same day) -- the `compiled`-engine half of the wide-operand
+gap above fixed (silent corruption -> loud failure), `vm-fast`'s half
+still open.** `**` over a >64-bit operand or destination was broken on
+the two C-based engines in two different ways. `vm-fast`'s `OP_POW`/
+`OP_SPOW` never consult the wide word-array representation (silently
+wrong, not even x) -- confirmed this is genuinely `**`-specific
+(`/`/`%`, already in the differential fuzzer's operator set and
+exercised up to 80-bit operands there, are correctly wide-aware via
+`wide_div`/`wide_mod`), left open as a real but narrow-scope gap (`**`
+on runtime signals wider than 64 bits is very rare in synthesizable
+RTL; the more plausible testbench/behavioral-model use case is served
+well enough by the narrow fix). The `compiled` engine's half was worse
+in kind, not just degree: its last-resort narrow-scalar assignment
+fallback (reached in BOTH `_process_compiler.py`'s continuous-assign
+path and `_stmt_emitters.py`'s procedural blocking/nonblocking path,
+since neither wide emitter has ever supported `**`) only ever wrote the
+narrow `c.val`/`c.mask` slots, never a wide destination's real
+`c.wide_val` storage -- so the signal silently stayed at its reset value
+of 0 forever, with zero warning, for ANY future wide-emitter-unsupported
+expression assigned to a wide destination (not `**`-specific). Fixed
+with a deliberately minimal, safe guard: raise `NotImplementedError`
+(naming the signal/width, suggesting `engine='vm'`/`'reference'`)
+immediately before either fallback would run, converting silent wrong
+results into a clear compile-time failure. This does NOT make `**` (or
+anything else) actually work on wide operands -- that remains future
+work, alongside the `vm-fast` wide-read fix. Verified via two new
+`pytest.raises` tests (continuous assign and nonblocking assign) plus a
+clean full fast-suite regression (confirming no existing passing
+construct depended on the old silent-no-op behavior). Full detail in
+`known_issues.md`'s eleventh-wave entry.
 
 **Residual gap**: still a large, open-ended architectural area (the wide
 emitter, the narrow/scalar emitter, and the reference/VM engines each
@@ -1063,8 +1077,12 @@ reimplement width/signedness/x-propagation independently, per-node-type,
 rather than sharing `semantics.py`'s already-unified logic), not yet
 exhaustively characterized. The differential harness itself is fully
 green at both the default (150-case) and large-batch (300-case) scope.
-The wide-operand `**` gap on `vm-fast`/`compiled` noted above is the
-clearest next-session starting point, given its severity.
+Making `**` actually WORK (not just fail safely) on wide operands --
+`vm-fast`'s wide-read fix for `OP_POW`/`OP_SPOW`, and either compiled-
+engine Python-bignum support or a from-scratch wide `**` primitive -- is
+the clearest next-session starting point, though given how rare
+runtime `**` on >64-bit signals is in practice, it's lower urgency now
+that the silent-corruption risk is closed.
 
 ## Tier 3 — CI and engine parity
 

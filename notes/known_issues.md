@@ -1126,43 +1126,58 @@ next entry -- so this needed a hand-written suite instead of a fuzzer
 opt-in). 58 assertions pass across all four engines; two cases are
 strict xfail for a separately-scoped, pre-existing gap (below).
 
-**A separate, pre-existing, NOT fixed gap this investigation surfaced**:
-`**` over a >64-bit operand or destination is broken on the two C-based
-engines, in two different ways, neither introduced by (or specific to)
-the fixes above:
-- **`vm-fast`**: neither `OP_POW` nor the new `OP_SPOW` consult the wide
-  (`wflag`/`wv`/`wm`) representation at all -- they only ever read a
-  stack slot's narrow low-word fields. For a >64-bit base or exponent
-  this silently computes a wrong answer (not even a clean crash/x).
-- **`compiled`**: `**` isn't handled by EITHER wide emitter
+**A separate, pre-existing gap this investigation surfaced -- the
+`compiled` half now fixed (silent corruption -> loud failure), the
+`vm-fast` half still open**: `**` over a >64-bit operand or destination
+was broken on the two C-based engines, in two different ways, neither
+introduced by (or specific to) the fixes above:
+- **`vm-fast`** (still open): neither `OP_POW` nor the new `OP_SPOW`
+  consult the wide (`wflag`/`wv`/`wm`) representation at all -- they
+  only ever read a stack slot's narrow low-word fields. For a >64-bit
+  base or exponent this silently computes a wrong answer (not even a
+  clean crash/x). Pinned as strict xfail in `test_power_operator.py`.
+- **`compiled`** (fixed): `**` isn't handled by EITHER wide emitter
   (`_wide_emitter.py`'s recursive scratch emitter, nor the
   Python-bignum `_emit_py_expr`/`_emit_wide_py_bits_lines` fallback) --
   true even before this session's fixes, since `**` was essentially
   never exercised at all previously. When BOTH wide handlers return
-  `None` for a >64-bit-destination assignment,
-  `_compile_continuous_assigns` (`_process_compiler.py`) falls through
-  to its LAST-RESORT fallback (originally meant only for narrow, <=64-bit
-  destinations), which unconditionally writes only
+  `None` for a >64-bit-destination assignment, both
+  `_compile_continuous_assigns` (`_process_compiler.py`) AND
+  `_emit_lhs_write` (`_stmt_emitters.py`, the procedural
+  blocking/nonblocking-assignment equivalent) fell through to a
+  LAST-RESORT fallback (originally meant only for narrow, <=64-bit
+  destinations), which unconditionally wrote only
   `c.val[lhs_sid]`/`c.mask[lhs_sid]` -- **never** the wide destination's
-  actual `c.wide_val`/`c.wide_offset` storage. The signal silently stays
-  at its power-on-reset value of 0 forever, with **no warning or error
-  of any kind**. This is a general architectural gap in that fallback
-  (it would silently no-op for ANY future wide-emitter-unsupported
-  expression assigned to a wide destination, not something specific to
-  `**`) -- confirmed via direct tracing that both wide emitters correctly
-  return `None` and execution reaches this exact fallback. Given the
-  severity (silent incorrect simulation results, not even a crash) this
-  is a strong candidate for a dedicated follow-up, likely fixed by making
-  that fallback either write through to `c.wide_val` for a wide
-  destination or -- probably better, given the narrow emitter can't
-  correctly READ a wide operand either (the same "narrow path meets wide
-  signal" architectural shape this whole session has repeatedly found
-  elsewhere) -- refuse to emit anything for that statement at all and
-  surface a clear compile-time error or a `test_ibex_examples.py`-style
-  "reference executor fallback" warning instead of silently producing
-  nothing. `reference` and `vm` (pure Python, arbitrary-width `int`) are
-  both unaffected. Both cases are pinned as strict xfail in
-  `test_power_operator.py` rather than fixed here.
+  actual `c.wide_val`/`c.wide_offset` storage. The signal silently
+  stayed at its power-on-reset value of 0 forever, with **no warning or
+  error of any kind**. This was a general architectural gap in both
+  fallbacks (would have silently no-opped for ANY future
+  wide-emitter-unsupported expression assigned to a wide destination,
+  not something specific to `**`) -- confirmed via direct tracing that
+  both wide emitters correctly return `None` and execution reaches this
+  exact fallback.
+
+  **Fix**: added an explicit guard immediately before each fallback --
+  if the destination's real width exceeds `_WORD_BITS` (64), raise
+  `NotImplementedError` with a clear message (naming the signal, its
+  width, and suggesting `engine='vm'`/`'reference'`) instead of silently
+  emitting code that writes nowhere the signal is actually read from.
+  This does NOT make `**` (or anything else hitting this path) actually
+  WORK on wide operands -- it converts silent, undetectable wrong
+  simulation results into an immediate, clear compile-time failure,
+  which is deliberately the smaller and safer of the two fixes discussed
+  (the larger fix -- real wide-operand support, via either the
+  Python-bignum fallback for `compiled` or a from-scratch wide `**`
+  primitive, plus the matching `vm-fast` wide-read fix above -- remains
+  future work). Verified: raising is confirmed for both the continuous-
+  assign and nonblocking-assign paths in
+  `test_wide_power_destination_raises_on_compiled`
+  (`test_power_operator.py`); the full fast-suite regression (7097+
+  tests) stayed green with this guard in place, confirming no existing,
+  previously-passing construct was relying on this fallback for a
+  genuinely wide (>64-bit) destination. `reference` and `vm` (pure
+  Python, arbitrary-width `int`) were never affected by either half of
+  this gap.
 
 **Why `**` isn't added to the differential fuzzer's operator set**:
 every fuzzer-generated case assigns to a fixed 96-bit destination

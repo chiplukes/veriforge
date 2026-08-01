@@ -338,6 +338,31 @@ class _ProcessCompilerMixin:
                 self._processes.append((sensitivity, lines))
                 continue
 
+            # Neither wide emitter (the recursive scratch emitter, nor the
+            # Python-bignum fallback) could handle this RHS -- the code
+            # below is a LAST-RESORT narrow-scalar path that only ever
+            # writes `c.val[lhs_sid]`/`c.mask[lhs_sid]`, which is correct
+            # ONLY when `lhs_w <= _WORD_BITS` (those ARE the signal's real
+            # storage for a narrow destination). For a >64-bit destination,
+            # the real storage is `c.wide_val`/`c.wide_offset`, which this
+            # path never touches -- so the assignment would silently
+            # compile to code that writes nowhere the signal is actually
+            # read from, leaving it stuck at its reset value forever with
+            # no error. Found via the `**` (power) operator, which has
+            # never had wide-emitter support (confirmed by direct tracing:
+            # both calls above return None for it) -- but this guard is
+            # deliberately general, not `**`-specific, since the same
+            # silent-no-op would hit ANY future RHS shape neither wide
+            # emitter learns to handle. Fail loudly instead.
+            if lhs_w > _WORD_BITS:
+                lhs_name = assign.lhs.name if isinstance(assign.lhs, Identifier) else "<expr>"
+                raise NotImplementedError(
+                    f"Compiled engine: continuous assignment to '{lhs_name}' ({lhs_w} bits) "
+                    f"has an RHS shape not yet supported for a destination wider than "
+                    f"{_WORD_BITS} bits. Use engine='vm' or engine='reference' for this design, "
+                    f"or simplify the expression."
+                )
+
             self._et_count = 0
             self._et_node_masks = {}
             self._et_node_vals = {}

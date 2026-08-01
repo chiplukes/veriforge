@@ -23,20 +23,12 @@ bisection scripts referenced in notes/known_issues.md's write-up for this
 wave) before being encoded as a fixed oracle value in this file, following
 the same cross-engine-parametrized pattern as `test_compiled_edge_shapes.py`.
 
-**Not covered by this file**: `**` used in a >64-bit-destination context
-on the compiled engine. That surfaced a SEPARATE, pre-existing (not
-introduced by the `**` fix) architectural gap: `_compile_continuous_
-assigns`'s last-resort narrow-scalar fallback (used when neither the
-wide-scratch emitter nor the wide-Python-bignum emitter can handle an
-expression -- true for ANY use of `**`, since neither has ever supported
-it) always writes only `c.val[lhs_sid]`/`c.mask[lhs_sid]`, never the wide
-`c.wide_val`/`c.wide_offset` storage a >64-bit destination actually uses
--- so the destination silently stays at its reset value of 0 forever,
-with no warning. This is a general gap (would affect any other
-wide-emitter-unsupported expression type assigned to a wide destination,
-not something specific to `**`) documented in `notes/known_issues.md`
-rather than fixed here; the one case below demonstrating it is a known,
-strict xfail.
+Using `**` on wide (>64-bit) operands also surfaced a SEPARATE,
+pre-existing architectural gap on the two C-based engines (`compiled`,
+`vm-fast`) -- see the "Known, pre-existing, separately-scoped gap"
+section below and `test_wide_power_destination_raises_on_compiled` for
+the loud-failure fix that WAS made for the `compiled` engine's silent
+no-op (making `**` fully WORK on wide operands remains out of scope).
 """
 
 from __future__ import annotations
@@ -172,23 +164,26 @@ _TABLE_5_6_CASES = [
 
 # =====================================================================
 # Known, pre-existing, separately-scoped gap: `**` over a >64-bit
-# operand/destination on the two C-based engines. Neither `OP_POW`/
-# `OP_SPOW` (`_interp_fast.pyx`) nor the compiled engine's `**` codegen
-# consult the wide (`wflag`/`wv`/`wm` or `c.wide_val`) representation at
-# all -- both only ever read a signal's narrow low-word slot. On
-# `vm-fast` this silently computes a WRONG (not just narrow-truncated)
-# answer, since the exponent's own wide/narrow-slot bookkeeping gets
-# misread too. On `compiled` it's worse: neither wide emitter handles
-# `**`, so the top-level assign falls through to the last-resort
-# narrow-scalar fallback in `_compile_continuous_assigns`, which only
-# ever writes `c.val[lhs_sid]`/`c.mask[lhs_sid]` -- never touching the
-# wide destination's real `c.wide_val` storage -- so the signal silently
-# stays at its reset value of 0 forever, with no warning. `reference`
-# and `vm` (pure Python, arbitrary-width `int`) are unaffected. See
-# notes/known_issues.md for the full write-up; this is a general
-# architectural gap (would affect any other wide-emitter-unsupported
-# expression assigned to a wide destination), not something specific to
-# `**`, and deliberately not fixed as part of this fix's scope.
+# operand on the two C-based engines. Neither `OP_POW`/`OP_SPOW`
+# (`_interp_fast.pyx`) nor the compiled engine's `**` codegen consult the
+# wide (`wflag`/`wv`/`wm` or `c.wide_val`) representation at all -- both
+# only ever read a signal's narrow low-word slot.
+#
+# `compiled`'s wide-DESTINATION case is no longer a silent-corruption
+# bug: `_compile_continuous_assigns`/`_emit_lhs_write`'s last-resort
+# narrow-scalar fallback now raises `NotImplementedError` instead of
+# emitting code that writes only `c.val[lhs_sid]` while the real
+# `c.wide_val` storage silently stays at 0 forever -- see
+# `test_wide_power_destination_raises_on_compiled` below, which tests
+# that fix directly. `vm-fast` has no such guard and still silently
+# computes a WRONG (not narrow-truncated, genuinely wrong) answer, since
+# the exponent's own wide/narrow-slot bookkeeping gets misread too --
+# still pinned as strict xfail below. `reference` and `vm` (pure Python,
+# arbitrary-width `int`) are both unaffected either way. See
+# notes/known_issues.md for the full write-up of both the original
+# silent-corruption finding and the loud-failure fix; making `**` fully
+# WORK on wide operands (rather than just failing safely) remains
+# deliberately out of scope.
 # =====================================================================
 
 _WIDE_DEST_CASES = [
@@ -197,7 +192,7 @@ _WIDE_DEST_CASES = [
         source="module t(input clk, input [79:0] wa, output [95:0] y);\n    assign y = wa ** 2'd2;\nendmodule\n",
         drives=(("wa", Value(3, width=80)),),
         expected=(("y", Value(9, width=96)),),
-        xfail_engines=frozenset({"compiled", "vm-fast"}),
+        xfail_engines=frozenset({"vm-fast"}),
     ),
 ]
 
@@ -208,15 +203,19 @@ def _combo_params() -> list:
     params = []
     for engine in ENGINES:
         for case in ALL_CASES:
+            if case in _WIDE_DEST_CASES and engine == "compiled":
+                # Now raises NotImplementedError at compile time rather
+                # than producing any Value to compare -- see
+                # test_wide_power_destination_raises_on_compiled below.
+                continue
             pid = f"{engine}-{case.id}"
             marks = []
             if engine in case.xfail_engines:
                 marks.append(
                     pytest.mark.xfail(
                         strict=True,
-                        reason="compiled engine: ** unsupported by both wide emitters; "
-                        "last-resort narrow fallback silently no-ops for a wide "
-                        "destination (see notes/known_issues.md)",
+                        reason="vm-fast: ** doesn't consult the wide word-array "
+                        "representation for operands >64 bits (see notes/known_issues.md)",
                     )
                 )
             params.append(pytest.param(engine, case, id=pid, marks=marks))
@@ -235,3 +234,35 @@ def test_power_operator(engine: str, case: PowCase) -> None:
         assert actual.mask == oracle_value.mask, (
             f"{case.id} [{engine}]: {name}.mask = {actual.mask:#x}, expected {oracle_value.mask:#x}"
         )
+
+
+@pytest.mark.skipif("compiled" not in ENGINES, reason="compiled engine not available")
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            "module t(input clk, input [79:0] wa, output [95:0] y);\n    assign y = wa ** 2'd2;\nendmodule\n",
+            id="continuous_assign",
+        ),
+        pytest.param(
+            "module t(input clk, input [79:0] wa, output reg [95:0] y);\n"
+            "    always @(posedge clk) begin\n        y <= wa ** 2'd2;\n    end\nendmodule\n",
+            id="nonblocking_assign",
+        ),
+    ],
+)
+def test_wide_power_destination_raises_on_compiled(source: str) -> None:
+    """`**` over a >64-bit destination must fail loudly, not silently no-op.
+
+    Before this fix, `_compile_continuous_assigns`/`_emit_lhs_write`'s
+    last-resort narrow-scalar fallback (reached because neither wide
+    emitter has ever supported `**`) would emit code writing only
+    `c.val[lhs_sid]`/`c.mask[lhs_sid]`, never the wide destination's real
+    `c.wide_val`/`c.wide_offset` storage -- so `y` would silently stay at
+    its reset value of 0 forever, with no warning. Confirmed via direct
+    tracing that both wide emitters correctly return `None` for this RHS
+    before reaching that fallback. Now raises `NotImplementedError` at
+    compile time instead.
+    """
+    with pytest.raises(NotImplementedError, match=r"wider than \d+ bits"):
+        _sim_for(source, "compiled")
