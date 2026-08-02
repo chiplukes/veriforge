@@ -1341,6 +1341,51 @@ unaffected), and the full fast-suite regression (7107 passed, 1 xfailed,
 0 failed, `-n 8`, ~30 min). Phases 2+ (case statements, for/while loops,
 unpacked arrays, more operators) remain unscheduled future work.
 
+**Phase 2 follow-up — clocked/nonblocking statement fuzzing (July 2026)**:
+extended `test_differential_statements.py` to render the SAME randomly
+generated if/else-chain structure a second way — nonblocking (`<=`)
+assignment inside a clocked `always @(posedge clk)` block, alongside the
+existing combinational form — exercising NBA scheduling/deferred-update
+codegen for the first time. Default-scale runs (40 cases) stayed green
+throughout; stress-testing at 150 cases across two seeds surfaced ten more
+distinct, real bugs, all Icarus-confirmed and/or `git stash`-bisected —
+full writeup in `notes/known_issues.md` under "Randomized differential
+harness (work plan item 3.4): bugs found and fixed" → "Thirteenth wave".
+Highlights: a shift-amount sign-extension leak and a genuine
+use-before-define ordering bug in generated Cython (`sim/compiled/
+_stmt_emitters.py`'s `_emit_if`, confirmed via direct `.pyx` inspection);
+comparison operands needing the same context-width propagation already
+fixed for arithmetic, PLUS the discovery (reading the IEEE 1364-2005
+primary text directly) that comparisons need the operator's COMBINED
+signedness rather than each operand's own individual signedness — unlike
+`+ - *`, matching `/ %` instead; the "compute at fixed width, then extend
+result" special case (established for `~` in an earlier wave) was wrongly
+also applied to unary `-`, which needs the opposite (widen-operand-first)
+treatment since arithmetic negation, unlike bitwise complement, commutes
+correctly with prior zero-extension; `TernaryOp` branch selection blindly
+forwarding a caller's `width=0` into the selected branch instead of using
+the ternary's own combined self-width as a floor; three separate compiled-
+engine mask/signedness gaps in `$signed`/`$unsigned` handling, the narrow
+ternary emitter, and the wide comparison emitter, all following the same
+shape (value side correctly sign-extended, mask side silently wasn't); and
+— found by the full fast-suite regression itself, not the fuzzer — a
+truncation bug where `evaluator.py`'s comparison/arithmetic/division
+branches unconditionally resized an operand to a `target` width that a
+static AST-based estimator can legitimately underestimate (e.g. a
+`RangeSelect` with a non-literal, parameter-expression bit range, as in
+`examples/ibex/rtl/ibex_pmp.sv`'s TOR address comparator), silently
+masking away real bits; fixed by only ever widening, never narrowing.
+Verified via both statement-fuzzer seeds (150 cases each, 30/30 batches,
+`_STMT_COMPILED=1`), the original 300-case expression-tree fuzzer (30/30
+batches), `test_power_operator.py` (60 passed, 1 xfail, unaffected), and a
+final full fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n
+8`, ~30 min) — including the 4 tests the truncation bug had broken
+(`test_ibex_pmp_multiphase_cross_engine`, two `TestSignedDeclarationSupport`
+comparison tests, `TestSignedDeclarations::test_signed_comparison`), all
+passing individually and as part of the full suite. Phases 3+ (case
+statements, for/while loops, unpacked arrays, more operators) remain
+unscheduled future work.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

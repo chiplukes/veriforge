@@ -1360,6 +1360,230 @@ batches), the new statement-level fuzzer (8/8 batches, `_STMT_COMPILED=1`),
 `test_power_operator.py` (60 passed, 1 xfail, unaffected), and the full
 fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n 8`, ~30 min).
 
+**Thirteenth wave (July 2026, work plan item 3.4 phase 2) -- clocked/
+nonblocking statement fuzzing surfaces ten more distinct bugs**: extended
+`test_differential_statements.py` to render the SAME randomly generated
+if/else-chain STRUCTURE a second way -- nonblocking (`<=`) assignments
+inside a clocked `always @(posedge clk)` block, alongside the existing
+combinational (`=` inside `always @(*)`) form (see the file's own updated
+docstring for the rng-state snapshot/restore mechanism that keeps both
+variants' condition/RHS trees byte-identical). This exercises NBA
+scheduling/deferred-update codegen that phase 1 never touched. Stress-
+testing at 150 cases across two seeds (default 40-case runs stayed green
+throughout -- these bugs only showed up at larger scale) surfaced ten
+distinct, real bugs, all confirmed against Icarus and/or cross-engine
+agreement, requiring three separate `AskUserQuestion` scope-continuation
+decisions as the investigation kept surfacing deeper, related issues:
+
+- **Shift-amount sign-extension leak** (`sim/compiled/_wide_emitter.py`,
+  the wide shift-count scalar path) -- a `$signed(...)`-wrapped shift
+  count's raw C expression was cast straight to `<int>` without masking
+  to its own natural width first; `_emit_func_call`'s `$signed` branch
+  unconditionally `_sign_ext`s the underlying native C register (fills
+  every bit above the argument's own width with the sign bit, regardless
+  of whether the caller wants that), so a small positive shift amount
+  wrapped in `$signed(...)` read back as a large negative `int`, and the
+  wide shift primitive then shifted the wrong direction. Confirmed wrong
+  against Icarus for `{a1[0], (-a1)} >> $signed({3{a0}})`. Fixed by
+  masking to the shift count's own width (`& wmask(amount_w)`) before the
+  `<int>` cast.
+- **`_emit_if` use-before-define ordering bug**
+  (`sim/compiled/_stmt_emitters.py`) -- `_emit_condition_lines_and_expr`'s
+  wide-condition path can delegate a narrow-enough-to-fit sub-`TernaryOp`
+  (e.g. `(a3 ? a2 : a6[16])` nested inside a larger wide-signal-touching
+  condition) to the narrow emitter's `_et_pending` hoisting mechanism,
+  which appends the computed `_et{n}_v = ...` line to a list flushed
+  separately from the wide condition's own generated lines. `_emit_if`
+  concatenated `[*cond_setup, *et_lines, ...]` -- `cond_setup` (which
+  already CONTAINS a `wide_mux(..., _et0_v, ...)` call referencing the
+  not-yet-computed value) came before `et_lines` (the actual
+  computation), a genuine use-before-define bug in the generated Cython,
+  confirmed via direct `.pyx` inspection. Every other `_et_pending`
+  consumer in this codebase already puts `et_lines` first for exactly
+  this reason. Confirmed wrong against Icarus for `if (a7 & ((a3 ? a2 :
+  a6[16]) ? (a7 ? a2[1] : a6[9]) : (!a2))) ...`. Fixed by swapping the
+  concatenation order to `[*et_lines, *cond_setup, ...]`.
+- **Comparison operands missing context-width propagation**
+  (`sim/evaluator.py`, `sim/vm/compiler.py`) -- `==`/`!=`/`<`/`<=`/`>`/`>=`
+  operands were evaluated purely self-determined (no width propagated at
+  all), which is fine for a plain operand but wrong whenever an operand
+  is ITSELF a further context-determined operator (unary `-`, another
+  `+`/`-`, a `$signed`/`$unsigned` cast): that nested operator needs the
+  comparison's own shared width to propagate all the way down and apply
+  its extension decision AT that width (two's-complement negation does
+  not commute with a later zero-extension). Confirmed wrong against
+  Icarus for `(-{2{a1}}) <= a4` (`a1` unsigned 8 bits, `a4` signed 64
+  bits): negating `{2{a1}}` at its own 16-bit self-width THEN
+  zero-extending the negation result gives a different value than
+  zero-extending `{2{a1}}` to 64 bits first and negating at that width.
+- **Comparisons need the operator's COMBINED signedness, not each
+  operand's own individual signedness** (same two files) -- the initial
+  fix for the bug above extended each comparison operand by its OWN
+  individual signedness (mirroring `+ - *`'s already-correct model), but
+  IEEE 1364-2005 §5.5.2 explicitly says relational/equality operands
+  "affect each other as if they were context-determined operands with a
+  result type ... determined from them" -- i.e. via §5.5.1's normal
+  combining rule ("if any operand is unsigned, the result is unsigned"),
+  the SAME "combined governs both uniformly" model already established
+  for `/ %`, not `+ - *`'s per-operand model. Confirmed wrong
+  (individual-signedness version) against Icarus for `(a5[5:2] < a0)`
+  (`a5[5:2]` an unsigned part-select, `a0` a signed 1-bit register):
+  sign-extending `a0` by its own signedness gave a different comparison
+  outcome than zero-extending it per the comparison's combined
+  (unsigned, since not both operands signed) decision. Fixed by
+  computing `both_signed = _expr_signed(left) and _expr_signed(right)`
+  once and forcing it as the `signed_override` into both operands'
+  recursive evaluation, mirroring the `/ %` fix's own reasoning
+  (`sim/compiled/_expr_emitter.py`'s narrow comparison path and
+  `_wide_emitter.py`'s `_WIDE_CMP_PRIMS` path needed the identical
+  combined-vs-individual correction, described further down).
+- **Unary `-` wrongly inherited `~`'s "compute at the operand's own
+  fixed width, then extend the RESULT" special case** (all four engines:
+  `sim/evaluator.py`, `sim/vm/compiler.py`,
+  `sim/compiled/_expr_emitter.py`, `sim/compiled/_wide_emitter.py`) --
+  this special case (established earlier in the session, confirmed
+  against Icarus for `$signed(~({a0, a6, a0} && a7))`) is correct for
+  `~` specifically, because it is a bitwise, per-bit-independent
+  operation: zero-extending a 1-bit value before complementing flips the
+  newly-added padding bits too, which is wrong. Unary `-` is a genuine
+  two's-complement ARITHMETIC negation, where zero-extending the operand
+  and THEN negating gives exactly the modular wraparound representation
+  of "minus that value" at the wider width -- which is what real
+  hardware (and Icarus) actually compute. Confirmed wrong the other way
+  (compute-at-1-bit-then-extend-result gives `1`, not Icarus's
+  `all-ones`/-1) for `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
+  destination. Fixed by restricting the fixed-width special case to `~`
+  only; unary `-` (like `+`, a no-op either way) always falls through to
+  the normal "widen operand to context width first" path.
+- **`TernaryOp` branch selection blindly forwarding a caller's
+  `width=0`** (`sim/evaluator.py`, `sim/vm/compiler.py`) -- the selected
+  branch was evaluated/compiled at whatever `width` the ternary node
+  itself was called with, including a bare `width=0` self-determined
+  request (e.g. from `&&`/`||`, which never propagate a shared width
+  into their own operands) -- this left a nested context-determined
+  operator WITHIN the selected branch (e.g. `~a0`) unresized at its own
+  narrow width (1 bit) instead of the ternary's TRUE combined width (the
+  max of both branches' self-widths), silently flipping the branch's
+  truthiness. Confirmed wrong against Icarus for `(((-a4[17:9]) ? (~a0) :
+  a3) && a4)`: `~a0` computed at 1 bit (=0, falsy) instead of the
+  ternary's own 63-bit width (=0xFFF...FFE, truthy) made the whole `&&`
+  wrongly false. Fixed by computing `own_width = max(width,
+  self_width(true_expr), self_width(false_expr))` once and using it as
+  the floor for evaluating/compiling whichever branch is selected (or
+  both, in the ambiguous-condition merge case).
+- **Compiled `_emit_mask_expr` had no `$signed`/`$unsigned` case at all**
+  (`sim/compiled/_expr_emitter.py`) -- every OTHER FunctionCall fell
+  through to a generic "OR all argument masks at a hardcoded width of
+  32" fallback, which the value-side `_emit_func_call`'s dedicated
+  `$signed`/`$unsigned` handling never needed (it explicitly `_sign_ext`s
+  the value from the argument's own self-width). The mask side never
+  mirrored that sign-extension, so an unknown (masked) sign bit's
+  ambiguity was silently dropped from the newly sign-filled upper bits,
+  which then read back as spuriously DEFINED zero instead of x.
+  Confirmed wrong (cross-engine, against the reference oracle) for
+  `(|($signed(a2[6:1]) ^ a1))` with `a2` fully x: the top 2 bits of the
+  8-bit XOR read as a defined `2'b11` instead of x, corrupting the
+  reduction's truthiness and, downstream, an `if` statement's branch
+  selection from ambiguous to spuriously true. Fixed by adding a
+  dedicated `$signed`/`$unsigned` case that `_sign_ext`s (for `$signed`)
+  or passes through unchanged (for `$unsigned`) the argument's own mask,
+  exactly mirroring the value side.
+- **Compiled's narrow ternary emitter computed branch masks at
+  self-width, never sign-extending them to match the value side**
+  (`sim/compiled/_expr_emitter.py`'s `_emit_ternary_value_mask_exprs`)
+  -- `true_expr`/`false_expr` are computed at the FULL ternary width
+  with the ternary's own combined signedness `_sign_ext`'d in via
+  `_emit_expr`'s own internal logic, but `true_mask`/`false_mask` were
+  computed via `_emit_mask_expr(expr.true_expr, tw)` at each branch's
+  own self-width `tw` ONLY (`_emit_mask_expr` had no `signed_override`
+  parameter to thread the same decision through). An unknown sign bit's
+  ambiguity in a selected branch (e.g. a signed 1-bit x-valued register)
+  never propagated into the value side's newly sign-filled upper bits,
+  corrupting any downstream precision check that relied on those bits'
+  mask (e.g. `==`'s own known-bit-differs short-circuit). Confirmed
+  wrong for `(a2 ? a0 : a4)` with `a0` a signed 1-bit x-valued register.
+  Fixed two ways: (a) added an optional `signed_override` parameter to
+  `_emit_mask_expr` (mirroring `_emit_expr`'s), used in its `Identifier`
+  case (which previously returned the raw mask register completely
+  unaware of `width`/signedness) and threaded through the BinaryOp
+  comparison/division mask computation the same way the value side's
+  `combined_override` is; (b) in the ternary mask helper itself,
+  explicitly `_sign_ext`s `true_mask`/`false_mask` to the full ternary
+  width when `own_signed`, mirroring the value side's own extension.
+- **Compiled's wide comparison emitter (`_WIDE_CMP_PRIMS` path,
+  `sim/compiled/_wide_emitter.py`) had two related bugs** in the same
+  area: (a) it passed each operand's own self-width (`lw`/`rw`) as
+  `dst_width` into the recursive `_emit_wide_expr_to_scratch` call
+  instead of the comparison's own SHARED width (`max(lw, rw)`) -- an
+  Identifier operand narrower than the other operand only decides to
+  sign-extend via the dedicated `wide_load_signal_s` primitive when its
+  own self-width is less than the REQUESTED `dst_width`; passing its own
+  self-width back as `dst_width` made that check always false, silently
+  falling through to the plain (zero-filling) `wide_load_signal`
+  instead, dropping an x/z sign bit's ambiguity from the extra words.
+  (b) it used `use_signed` (deliberately scoped to `< <= > >=` only,
+  since equality doesn't need a signed-vs-unsigned comparison PRIMITIVE)
+  as the `signed_override` for OPERAND EXTENSION too -- but extension
+  must respect combined signedness for `==`/`!=` exactly like the
+  relational ops; `use_signed` being always-false for equality meant a
+  narrower signed operand's own sign-extension never triggered
+  regardless of its declared signedness. Confirmed wrong (cross-engine,
+  against the reference oracle) for `(a0 == a6)` with `a0` a signed
+  1-bit x-valued register and `a6` a large defined 80-bit signed value:
+  `a0`'s un-sign-extended mask left bits 1-79 looking "definitely 0",
+  so XOR-ing against `a6`'s own nonzero bits in that range falsely
+  triggered `wide_cmp_eq`'s "known bit differs" short-circuit, resolving
+  the comparison as definitely-not-equal instead of correctly ambiguous.
+  Fixed by passing `max(lw, rw)` as `dst_width`, and by computing a
+  separate `combined_signed` variable (covering all of `== != === !==
+  < <= > >=`) used for operand-extension `signed_override`, keeping
+  `use_signed` only for primitive selection.
+- **Truncation bug in `evaluator.py`'s comparison/arithmetic/division
+  branches** -- found by the full fast-suite regression itself (not the
+  fuzzer): `target = max(..., _expr_self_width(left), ...)` uses a
+  STATIC, AST-shape-based width estimate that can UNDER-estimate an
+  operand's true width -- `_expr_self_width`'s `RangeSelect` case falls
+  back to a bare `1` whenever msb/lsb aren't literal AST nodes, which is
+  common for a parameter-expression bit range like
+  `[PMP_ADDR_MSB:PMPGranularity+PMP_ADDR_LSB]` in generated/parameterized
+  RTL (confirmed via `examples/ibex/rtl/ibex_pmp.sv`'s TOR address
+  comparator). The operand's own `eval()` call independently and
+  correctly computes its TRUE width by evaluating msb/lsb as
+  expressions, so it can legitimately end up wider than this
+  under-estimated `target` -- but the subsequent `if left.width !=
+  target: left = left.resize(target)` fired unconditionally on ANY
+  mismatch, including narrowing, and `.resize()` actively MASKS away
+  real bits rather than just relabeling the width. Root-caused via
+  `git stash push -- src/veriforge/sim/evaluator.py` bisection (isolated
+  to evaluator.py), then progressively reverting individual hunks to
+  narrow it down to the comparison branch specifically. Confirmed as the
+  exact cause of 4 real fast-suite regressions:
+  `test_ibex_pmp_multiphase_cross_engine[reference]`,
+  `TestSignedDeclarationSupport::test_signed_net_comparison_works
+  [compiled]`, `test_signed_var_comparison_works[compiled]`, and
+  `TestSignedDeclarations::test_signed_comparison` (the latter three
+  were a SEPARATE regression from the comparison combined-signedness fix
+  above, needing its own explicit `_sign_ext(left, op_width)` at the
+  dispatch point in `_expr_emitter.py`'s narrow comparison path, since
+  `_emit_expr`'s Identifier case only sign-extends when `op_width >
+  sig_width`, leaving the native-register upper bits un-sign-extended
+  whenever the comparison's own `op_width` happened to already equal the
+  operand's self-width). Fixed by changing the guard from `!=` to `<` in
+  all three branches (comparison, division, arithmetic) -- only ever
+  WIDEN, mirroring the pattern already used everywhere else in the file;
+  never narrow a genuinely-wider-than-`target` operand back down.
+
+All ten bugs were verified via direct Icarus comparison scripts and/or
+`git stash` bisection, then confirmed clean across both statement-fuzzer
+seeds (`VERIFORGE_DIFF_STMT_SEED=99999` and `424242`,
+`VERIFORGE_DIFF_STMT_CASES=150`, `_STMT_COMPILED=1`, 30/30 batches each),
+the original 300-case expression-tree fuzzer (30/30 batches,
+`VERIFORGE_DIFF_COMPILED=1`), `test_power_operator.py` (60 passed, 1
+xfail, unaffected), and a final full fast-suite regression (7107 passed,
+1 xfailed, 0 failed, `-n 8`, ~30 min) -- including the 4 tests the
+truncation bug had broken, all now passing individually and as part of
+the full suite.
+
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
 **Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in
