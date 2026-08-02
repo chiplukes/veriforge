@@ -330,17 +330,74 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- Hot path: BinaryOp ------------------------------------
         if etype is BinaryOp:
             op = expr.op
-            # Comparison/logical ops produce 1-bit — operands are NOT
-            # context-determined from the enclosing width; they are only
-            # evaluated self-determined (matching the VM compiler, which
-            # never propagates width into these operands either). Extending
-            # each operand independently to some unrelated outer context
-            # width (using each operand's own signedness) before comparing
-            # would corrupt the comparison whenever the operands' own
-            # signedness differs.
-            if op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+            # `&&`/`||` produce a 1-bit result and their operands are each
+            # independently self-determined -- truthiness doesn't need a
+            # shared width between the two sides (unlike comparisons
+            # below), so no extension/propagation is needed here.
+            if op in ("&&", "||"):
                 left = self.eval(expr.left, ctx)
                 right = self.eval(expr.right, ctx)
+            # Comparison/equality ops produce a 1-bit RESULT (self-
+            # determined outward), but their TWO OPERANDS are mutually
+            # context-determined between each other (IEEE 1364-2005 §5.5.2:
+            # "The relational and equality operators have operands that
+            # are neither fully self-determined nor fully context-
+            # determined. The operands shall affect each other as if they
+            # were context-determined operands with a result type and
+            # size ... determined from them" -- i.e. via §5.5.1's normal
+            # combining rule, "if any operand is unsigned, the result is
+            # unsigned" -- NOT each operand's own individual signedness).
+            # This is exactly `/ %`'s "combined signedness governs BOTH
+            # operands uniformly" model, not `+ - *`'s "each operand uses
+            # its own signedness" model: `both_signed` is computed once
+            # and forced as `signed_override` into BOTH recursive `eval()`
+            # calls, propagating into whatever nested operator either
+            # operand is (so e.g. a nested unary `-` sees the comparison's
+            # OWN combined decision, not its operand's individual type,
+            # exactly like a ternary's combined signedness overrides its
+            # branches) -- and each operand is evaluated directly AT the
+            # shared target width (not its own self-width, resized
+            # afterward) so that width propagates all the way down for
+            # the SAME "unary `-` must negate at its final width, not
+            # self-width-then-extend" reason established for the
+            # arithmetic operand-extension redesign above. Confirmed
+            # wrong (individual-signedness version) against Icarus for
+            # `(a5[5:2] < a0)` (a5[5:2] an unsigned part-select, a0 a
+            # signed 1-bit register): sign-extending `a0` by its OWN
+            # signedness gave a different comparison outcome than zero-
+            # extending it per the comparison's COMBINED (unsigned, since
+            # not both signed) decision.
+            elif op in ("==", "!=", "===", "!==", "<", "<=", ">", ">="):
+                target = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
+                left = self.eval(expr.left, ctx, target, both_signed)
+                right = self.eval(expr.right, ctx, target, both_signed)
+                # `_expr_self_width` is a STATIC, AST-shape-based estimate
+                # (e.g. it falls back to a bare `1` for a RangeSelect whose
+                # msb/lsb aren't literal constants -- common for a
+                # parameter-expression bit range like
+                # `[MSB:GRANULARITY+LSB]` in generated/parameterized RTL)
+                # -- it can UNDER-estimate an operand's true width relative
+                # to what that operand's own `eval()` call actually
+                # computes (which derives the real width dynamically from
+                # the msb/lsb VALUES, always correct). Only ever WIDEN here
+                # (mirrors the `if result.width < width` guard used by
+                # every other "extend to width" tail in this file) --
+                # never narrow a genuinely-wider-than-`target` operand back
+                # down: `.resize()`/`.sign_extend()` to a width smaller
+                # than the operand's own already-correct width would
+                # actively mask away real bits, not just "relabel" it,
+                # corrupting the comparison. Confirmed wrong (cross-
+                # engine, against Icarus) for the ibex PMP TOR address
+                # comparator (`pmp_req_addr_i[c][PMP_ADDR_MSB:
+                # PMPGranularity+PMP_ADDR_LSB] > ...`), whose non-literal
+                # LSB expression made `_expr_self_width` underestimate the
+                # slice at 1 bit and then truncate the real ~30-bit
+                # extracted value down to 1 bit before comparing.
+                if left.width < target:
+                    left = left.sign_extend(target) if both_signed else left.resize(target)
+                if right.width < target:
+                    right = right.sign_extend(target) if both_signed else right.resize(target)
             # Shift operators: only LEFT operand is context-determined
             elif op in ("<<", ">>", "<<<", ">>>"):
                 left = self.eval(expr.left, ctx, width, signed_override)
@@ -512,17 +569,31 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
                     left = self.eval(expr.left, ctx, target, both_signed)
                     right = self.eval(expr.right, ctx, target, both_signed)
-                    if left.width != target:
+                    # Only ever WIDEN here, never narrow -- `target` is a
+                    # floor computed partly from `_expr_self_width`, a
+                    # STATIC AST-shape-based estimate that can UNDER-
+                    # estimate an operand's true width (e.g. a RangeSelect
+                    # whose msb/lsb aren't literal constants falls back to
+                    # a bare `1`); the operand's own `eval()` call above
+                    # already computed its real, correct width dynamically
+                    # and may legitimately be wider than this floor.
+                    # `.resize()`/`.sign_extend()` to a narrower width
+                    # would actively mask away real bits, not just
+                    # relabel it. Mirrors the identical fix in the
+                    # comparison branch above; see its docstring for the
+                    # concrete Icarus-confirmed repro (ibex PMP TOR
+                    # address comparator).
+                    if left.width < target:
                         left = left.sign_extend(target) if both_signed else left.resize(target)
-                    if right.width != target:
+                    if right.width < target:
                         right = right.sign_extend(target) if both_signed else right.resize(target)
                 else:
                     left = self.eval(expr.left, ctx, target, None)
                     right = self.eval(expr.right, ctx, target, None)
-                    if left.width != target:
+                    if left.width < target:
                         eff_signed = _expr_signed(expr.left, ctx)
                         left = left.sign_extend(target) if eff_signed else left.resize(target)
-                    if right.width != target:
+                    if right.width < target:
                         eff_signed = _expr_signed(expr.right, ctx)
                         right = right.sign_extend(target) if eff_signed else right.resize(target)
             # Detect signed comparison: both operands must be signed
@@ -602,22 +673,30 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # (only sign-extension does), confirmed against Icarus/Verilator
             # (see notes/known_issues.md).
             if expr.op in ("~", "+", "-"):
-                if _is_fixed_self_determined(expr.operand):
-                    # The operand's own result is ALWAYS fixed-width
-                    # regardless of context (IEEE 1364-2005 Table 5-22:
-                    # comparisons, &&/||, reduction ops, ! are self-
-                    # determined 1-bit results) -- unlike a regular signal
-                    # or another context-determined operator, it must NOT
-                    # be widened to match `~`/`-`'s context before the
-                    # operator runs. Doing so is wrong for `~`/unary `-`
-                    # specifically (unlike arithmetic BinaryOp operand-
-                    # widening, which is safe since extension commutes with
-                    # addition): zero-extending a 1-bit `&&` result to 96
-                    # bits BEFORE complementing gives `~0...01 = 1...110`
-                    # instead of the correct `resize(~1'b1) = resize(1'b0)
-                    # = 0`. Complement/negate at the operand's own fixed
-                    # width, THEN extend the RESULT. Confirmed against
-                    # Icarus for `$signed(~({a0, a6, a0} && a7))`.
+                # This "compute at the operand's own fixed width, THEN
+                # extend the RESULT" special case applies to `~` ONLY, not
+                # unary `-` (despite both being grouped together above as
+                # "context-determined") -- the two behave differently
+                # under width-extension precisely BECAUSE `~` is a
+                # bitwise, per-bit-independent operation while `-` is a
+                # genuine two's-complement ARITHMETIC negation:
+                # zero-extending a 1-bit value and THEN complementing
+                # flips all the newly-added padding bits too (wrong --
+                # `~` must run at the fixed width first, confirmed against
+                # Icarus for `$signed(~({a0, a6, a0} && a7))`), but
+                # zero-extending a value and THEN negating gives exactly
+                # the modular two's-complement wraparound representation
+                # of "minus that value" at the wider width -- which is
+                # what real hardware (and Icarus) actually computes,
+                # confirmed wrong the other way (compute-at-1-bit-then-
+                # extend-result gives `1`, not Icarus's `all-ones`/-1) for
+                # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
+                # destination. So unary `-` (like `+`, a no-op either way)
+                # always falls through to the normal context-determined
+                # path below -- it must NEVER take this fixed-width
+                # shortcut, even when its operand is itself a comparison/
+                # reduction/&&/||/! result.
+                if expr.op == "~" and _is_fixed_self_determined(expr.operand):
                     operand = self.eval(expr.operand, ctx)
                     result = _eval_unary_op(expr.op, operand)
                     if width and result.width < width:
@@ -710,13 +789,31 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # inner ternary look falsy when the correctly-64-bit-wide
             # `~a0` (=0xFFFF...FFFE) is actually nonzero.
             cond = self.eval(expr.condition, ctx, _expr_self_width(expr.condition, ctx)).reduce_or()
+            # The selected branch must be evaluated at (at least) the
+            # ternary's OWN combined self-determined width -- max of both
+            # branches' self-widths, per IEEE 1364-2005 Table 5-22's
+            # `L(i) = L(j)` context-determined-among-each-other rule for
+            # `?:` -- not whatever `width` this TernaryOp node itself
+            # happened to be called with. Blindly forwarding a caller's
+            # `width=0` (self-determined request, e.g. from `&&`/`||`,
+            # which never propagate a shared width into their operands)
+            # straight into `self.eval(branch, ctx, width, ...)` left a
+            # nested context-determined operator WITHIN the selected
+            # branch (e.g. `~a0`) unresized at its own narrow width (1
+            # bit) instead of the ternary's true combined width (63 bits,
+            # from its other branch) -- silently flipping the branch's
+            # truthiness. Confirmed wrong against Icarus for
+            # `(((-a4[17:9]) ? (~a0) : a3) && a4)`: `~a0` computed at
+            # 1 bit (=0, falsy) instead of the ternary's own 63-bit width
+            # (=0xFFF...FFE, truthy) made the whole `&&` wrongly false.
+            own_width = max(width, _expr_self_width(expr.true_expr, ctx), _expr_self_width(expr.false_expr, ctx))
             if cond.is_defined:
                 if cond.val:
-                    return self.eval(expr.true_expr, ctx, width, own_signed)
+                    return self.eval(expr.true_expr, ctx, own_width, own_signed)
                 else:
-                    return self.eval(expr.false_expr, ctx, width, own_signed)
-            t = self.eval(expr.true_expr, ctx, width, own_signed)
-            f = self.eval(expr.false_expr, ctx, width, own_signed)
+                    return self.eval(expr.false_expr, ctx, own_width, own_signed)
+            t = self.eval(expr.true_expr, ctx, own_width, own_signed)
+            f = self.eval(expr.false_expr, ctx, own_width, own_signed)
             return _merge_xz(t, f)
 
         # -- Concatenation -----------------------------------------

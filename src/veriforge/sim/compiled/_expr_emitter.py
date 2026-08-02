@@ -663,6 +663,31 @@ class _ExprEmitterMixin:
             cond_mask = self._emit_mask_expr(expr.condition, cond_w)
             true_mask = self._emit_mask_expr(expr.true_expr, tw)
             false_mask = self._emit_mask_expr(expr.false_expr, fw)
+            # `_emit_mask_expr` has no `signed_override` parameter (unlike
+            # `_emit_expr`), so `true_mask`/`false_mask` above are computed
+            # at each branch's own self-width `tw`/`fw` ONLY -- they never
+            # see the ternary's `own_signed` sign-extension that
+            # `true_expr`/`false_expr` just received via `_emit_expr`'s
+            # own internal `_sign_ext` call. When `own_signed` and the
+            # branch is narrower than `width`, an ambiguous (masked) sign
+            # bit's unknown-ness must propagate into every newly-filled
+            # upper bit too, exactly like `_emit_mask_expr`'s dedicated
+            # `$signed(...)` case above -- sign-extend the mask here to
+            # match. (When NOT `own_signed`, the value was zero-extended,
+            # and the mask's own upper bits are already correctly 0 by
+            # the same "unsigned values keep upper native-register bits
+            # zero" invariant used throughout this file -- no action
+            # needed.) Confirmed wrong (cross-engine, against the
+            # reference oracle) for `(a2 ? a0 : a4)` with `a0` a signed
+            # 1-bit register value x and `a2` selecting it: the selected
+            # branch's mask stayed 1-bit x instead of being sign-extended
+            # to x across the full 64-bit ternary width, so the ambiguity
+            # was silently dropped from the newly-filled upper bits.
+            if own_signed:
+                if width > tw:
+                    true_mask = f"_sign_ext({true_mask}, {tw})"
+                if width > fw:
+                    false_mask = f"_sign_ext({false_mask}, {fw})"
             width_mask = f"wmask({width})"
         if true_expr is None or false_expr is None or cond_mask is None or true_mask is None or false_mask is None:
             return None
@@ -1198,39 +1223,53 @@ class _ExprEmitterMixin:
         # (or an active override). Confirmed against Icarus for `a2 >>
         # (...)` with `a2` declared `signed [15:0]` and a shift amount >=
         # 16; mirrors the identical fix in `_wide_emitter.py`.
-        # Division/modulus is NOT "residue-safe" like +/-/* (whose modular
-        # arithmetic gives the same answer regardless of whether each
-        # operand was individually sign- or zero-extended, as long as each
-        # operand's OWN bit pattern is correct at the target width): the
-        # actual division ALGORITHM depends on whether the operand is read
-        # as a two's-complement negative value, and that decision must be
-        # made UNIFORMLY across both operands (IEEE 1364-2005 §5.5.1:
-        # signed division only when BOTH operands are signed). Extending
-        # (and dispatching signed-vs-unsigned division on) each operand by
-        # its own individual signedness -- correct for +/-/* -- is wrong
-        # here: a signed operand paired with an unsigned one must have BOTH
-        # read as unsigned, not the signed one sign-extended and then
-        # misread as a huge unsigned magnitude by an unsigned division.
-        # `div_mod_override` is threaded into BOTH operands' own emission
-        # (propagating into whatever nested operator either one is, exactly
-        # like a ternary's combined signedness overrides its branches) so
-        # this combined decision -- not each operand's own type -- governs
-        # every extension nested within either operand too. Mirrors the
-        # identical fix in `sim/evaluator.py`; confirmed wrong (cross-
-        # engine, against the reference oracle) for `a4 / ((~^a1[0]) | 1)`
-        # (a4 signed and negative, divisor an unsigned reduction-derived
-        # expression) and for `a3 % (a0 | 1)` (a0 a signed 1-bit register
-        # nested inside the divisor's own `|`).
-        div_mod_override = (
-            (
+        # Division/modulus and comparison/equality ops are NOT "residue-
+        # safe" like +/-/* (whose modular arithmetic gives the same answer
+        # regardless of whether each operand was individually sign- or
+        # zero-extended, as long as each operand's OWN bit pattern is
+        # correct at the target width): division's ALGORITHM, and a
+        # comparison's numeric ordering, both depend on whether an operand
+        # is read as a two's-complement negative value, and that decision
+        # must be made UNIFORMLY across both operands (IEEE 1364-2005
+        # §5.5.1 for division: signed only when BOTH operands are signed;
+        # §5.5.2 for comparisons: "operands ... affect each other as if
+        # they were context-determined ... with a result type ...
+        # determined from them", i.e. the same combining rule, not each
+        # operand's own individual type). Extending each operand by its
+        # own individual signedness -- correct for +/-/* -- is wrong here:
+        # a signed operand paired with an unsigned one must have BOTH read
+        # as unsigned, not the signed one sign-extended and then misread
+        # as a huge unsigned magnitude. `combined_override` is threaded
+        # into BOTH operands' own emission (propagating into whatever
+        # nested operator either one is, exactly like a ternary's combined
+        # signedness overrides its branches) so this combined decision --
+        # not each operand's own type -- governs every extension nested
+        # within either operand too. Mirrors the identical fix in
+        # `sim/evaluator.py`; confirmed wrong (cross-engine, against the
+        # reference oracle) for `a4 / ((~^a1[0]) | 1)` (a4 signed and
+        # negative, divisor an unsigned reduction-derived expression),
+        # `a3 % (a0 | 1)` (a0 a signed 1-bit register nested inside the
+        # divisor's own `|`), and `(a5[5:2] < a0)` (a5[5:2] an unsigned
+        # part-select, a0 a signed 1-bit register).
+        if expr.op in ("/", "%"):
+            combined_override = (
                 signed_override
                 if signed_override is not None
                 else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
             )
-            if expr.op in ("/", "%")
-            else signed_override
-        )
-        left_signed_override = False if expr.op == ">>" else div_mod_override
+        elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">="):
+            # Unlike division, a comparison's OWN operand typing is
+            # independent of the rest of the expression (IEEE 1364-2005
+            # §5.5.2: "The type and size of the operand shall be
+            # independent of the rest of the expression and vice versa")
+            # -- an outer `signed_override` (e.g. this comparison is
+            # itself a ternary branch) must NOT override this internal
+            # decision, unlike every other use of `signed_override` in
+            # this function.
+            combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+        else:
+            combined_override = signed_override
+        left_signed_override = False if expr.op == ">>" else combined_override
         left = self._emit_expr(expr.left, op_width, left_signed_override)
         # The shift COUNT is self-determined (IEEE 1364-2005 Table 5-22 /
         # SS5.6): it must be evaluated at its OWN natural width, not
@@ -1257,7 +1296,7 @@ class _ExprEmitterMixin:
         elif expr.op == "**":
             right = self._emit_expr(expr.right, self._expr_width(expr.right), signed_override)
         else:
-            right = self._emit_expr(expr.right, op_width, div_mod_override)
+            right = self._emit_expr(expr.right, op_width, combined_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
@@ -1278,8 +1317,8 @@ class _ExprEmitterMixin:
         # operand's own individual signedness -- matching how a signed
         # ternary branch is handled everywhere else (IEEE 1364-2005 §5.5.1).
         if expr.op not in _COMPARISON_OPS and expr.op not in ("<<", ">>", "<<<", ">>>", "**"):
-            left_signed = div_mod_override if div_mod_override is not None else self._expr_signed(expr.left)
-            right_signed = div_mod_override if div_mod_override is not None else self._expr_signed(expr.right)
+            left_signed = combined_override if combined_override is not None else self._expr_signed(expr.left)
+            right_signed = combined_override if combined_override is not None else self._expr_signed(expr.right)
             if left_signed:
                 lw = self._expr_width(expr.left)
                 if op_width > lw or expr.op in ("/", "%"):
@@ -1350,12 +1389,27 @@ class _ExprEmitterMixin:
             return f"((0 if ({sx}) >= 0 else -1) if ({right}) >= 64 else (({sx}) >> ({right}))) & wmask({width})"
 
         if expr.op in _COMPARISON_OPS:
-            # Signed relational comparison: both operands must be sign-extended
-            # from their own widths so C long-long comparison uses 2's-complement.
-            if expr.op in ("<", "<=", ">", ">=") and self._expr_signed(expr.left) and self._expr_signed(expr.right):
-                lw = self._expr_width(expr.left)
-                rw = self._expr_width(expr.right)
-                return f"(1 if (_sign_ext({left}, {lw}) {c_op} _sign_ext({right}, {rw})) else 0)"
+            # `left`/`right` were already extended to `op_width` above using
+            # `combined_override`, but ONLY when `op_width` exceeds the
+            # operand's own self-width -- `_emit_expr`'s Identifier case
+            # skips its `_sign_ext` call entirely when `op_width ==
+            # sig_width` (nothing needs widening from Verilog's own
+            # semantic perspective). That leaves the raw C value's UPPER
+            # native-register bits (beyond `op_width`) at whatever
+            # arbitrary state they were in -- typically 0 by this
+            # codebase's "masked/unsigned values keep upper bits zero"
+            # storage invariant -- so a signed comparison's negative
+            # values (e.g. 8-bit -1, stored as the small POSITIVE value
+            # 255 in the low 8 bits with zero above) get read by C's
+            # native signed `<` as a huge positive number instead of -1.
+            # An explicit `_sign_ext(..., op_width)` here is required
+            # regardless of whether the earlier per-operand step already
+            # ran, to fill the native register correctly before the
+            # comparison instruction executes. Confirmed wrong (cross-
+            # engine, against Icarus) for `reg signed [7:0] a, b; a=-1;
+            # b=1; (a < b)`, which must be true.
+            if expr.op in ("<", "<=", ">", ">=") and combined_override:
+                return f"(1 if (_sign_ext({left}, {op_width}) {c_op} _sign_ext({right}, {op_width})) else 0)"
             # Unsigned relational: cast to unsigned long long so 64-bit values with
             # MSB=1 (stored as negative long long) compare correctly.
             if expr.op in ("<", "<=", ">", ">="):
@@ -1375,7 +1429,7 @@ class _ExprEmitterMixin:
         # C int overflow when small literal << large shift (e.g. 4095 << 20).
         elif expr.op in ("<<", "<<<"):
             core = f"(0 if ({right}) >= 64 else ((<long long>({left})) {c_op} ({right})))"
-        elif expr.op in ("/", "%") and not div_mod_override:
+        elif expr.op in ("/", "%") and not combined_override:
             # Unsigned division/modulus: cast both sides to avoid signed C behavior
             # on 64-bit values with MSB=1 stored as negative long long.
             core = f"(<long long>(<unsigned long long>({left}) {c_op} <unsigned long long>({right})))"
@@ -1434,21 +1488,30 @@ class _ExprEmitterMixin:
         # sign-extension does), confirmed against Icarus/Verilator (see
         # notes/known_issues.md).
         if expr.op in ("~", "+", "-"):
-            if _is_fixed_self_determined(expr.operand):
-                # The operand's own result is ALWAYS fixed-width regardless
-                # of context (IEEE 1364-2005 Table 5-22: comparisons,
-                # &&/||, reduction ops, ! are self-determined 1-bit
-                # results) -- unlike a regular signal or another context-
-                # determined operator, it must NOT be widened to match
-                # `~`/`-`'s context before the operator runs. Doing so is
-                # wrong for `~`/unary `-` specifically (unlike arithmetic
-                # operand-widening, which is safe since extension commutes
-                # with addition): zero-extending a 1-bit `&&` result before
-                # complementing gives the wrong answer. Evaluate at the
-                # operand's own fixed width, apply the operator, THEN
-                # extend the RESULT. Confirmed against Icarus for
-                # `$signed(~({a0, a6, a0} && a7)))`; mirrors the identical
-                # fix in `sim/evaluator.py`/`sim/vm/compiler.py`.
+            # This "evaluate at the operand's own fixed width, THEN extend
+            # the RESULT" special case applies to `~` ONLY, not unary `-`
+            # (despite both being grouped together above as "context-
+            # determined") -- the two behave differently under width-
+            # extension precisely BECAUSE `~` is a bitwise, per-bit-
+            # independent operation while `-` is a genuine two's-
+            # complement ARITHMETIC negation: zero-extending a 1-bit value
+            # and THEN complementing flips all the newly-added padding
+            # bits too (wrong -- `~` must run at the fixed width first,
+            # confirmed against Icarus for `$signed(~({a0, a6, a0} &&
+            # a7))`), but zero-extending a value and THEN negating gives
+            # exactly the modular two's-complement wraparound
+            # representation of "minus that value" at the wider width --
+            # which is what real hardware (and Icarus) actually computes,
+            # confirmed wrong the other way (evaluate-at-1-bit-then-
+            # extend-result gives `1`, not Icarus's `all-ones`/-1) for
+            # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
+            # destination. So unary `-` (like `+`, a no-op either way)
+            # always falls through to the normal context-determined path
+            # below -- it must NEVER take this fixed-width shortcut, even
+            # when its operand is itself a comparison/reduction/&&/||/!
+            # result. Mirrors the identical fix in `sim/evaluator.py`/
+            # `sim/vm/compiler.py`.
+            if expr.op == "~" and _is_fixed_self_determined(expr.operand):
                 operand = self._emit_expr(expr.operand, ow)
                 if expr.op == "-":
                     core = f"((-({operand})) & wmask({ow}))"
@@ -2025,12 +2088,22 @@ class _ExprEmitterMixin:
 
     # ΓöÇΓöÇ Mask expression generation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-    def _emit_mask_expr(self, expr: Expression, width: int) -> str:  # noqa: PLR0911, PLR0912
+    def _emit_mask_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911, PLR0912
         """Return a Cython mask expression string for *expr*.
 
         Mirrors _emit_expr() but tracks x/z mask propagation.  For ternary
         operators the mask follows the selected branch instead of OR-ing all
         branches (the key difference from the naive all-signals OR).
+
+        *signed_override*, when not ``None``, mirrors `_emit_expr`'s
+        parameter of the same name -- most call sites don't pass it (the
+        overwhelming majority of existing callers never needed sign-aware
+        mask extension), but a handful of BinaryOp branches below that
+        already compute a combined-signedness decision for the VALUE side
+        (arithmetic `+ - * / %`, comparisons) thread it through here too,
+        so a signed Identifier operand's mask gets `_sign_ext`'d the same
+        way its value does -- see the Identifier case immediately below
+        for why this matters.
         """
         etype = type(expr)
 
@@ -2040,7 +2113,37 @@ class _ExprEmitterMixin:
                 name = ".".join(expr.hierarchy) + "." + name
             sid = self._signal_map.get(name)
             if sid is not None:
-                return f"c.mask[{sid}]"
+                sig_width = self._signal_widths[sid]
+                mask = f"c.mask[{sid}]"
+                # Mirrors `_emit_expr`'s IDENTICAL Identifier logic for the
+                # VALUE -- this was previously MISSING entirely here: the
+                # raw mask register was returned completely unaware of
+                # `width`/signedness, so a signed Identifier whose VALUE
+                # gets `_sign_ext`'d to a wider context (e.g. by a
+                # comparison's combined-signedness decision) had its mask
+                # silently NOT sign-extended to match -- an x (masked)
+                # sign bit's ambiguity never propagated into the newly-
+                # filled upper bits, which then read back as spuriously
+                # DEFINED zero instead of x, corrupting any downstream
+                # "known bit differs" precision check that relied on
+                # those bits' mask being accurate (e.g. `==`'s own
+                # `known_diff` short-circuit below). Confirmed wrong
+                # (cross-engine, against the reference oracle) for
+                # `(a0 == a6)` with `a0` a signed 1-bit x-valued register
+                # and `a6` a large defined 80-bit value: `a0`'s
+                # un-sign-extended mask left bits 1-79 looking
+                # "definitely 0", so XOR-ing against `a6`'s own nonzero
+                # bits in that range falsely triggered `known_diff`,
+                # resolving the comparison as definitely-not-equal instead
+                # of correctly ambiguous.
+                eff_signed = (
+                    signed_override
+                    if signed_override is not None
+                    else (sid < len(self._signal_signed) and self._signal_signed[sid])
+                )
+                if width > sig_width and eff_signed:
+                    mask = f"_sign_ext({mask}, {sig_width})"
+                return mask
             struct_info = self._resolve_struct_access(name)
             if struct_info is not None:
                 base_sid, offset, field_width = struct_info
@@ -2074,7 +2177,27 @@ class _ExprEmitterMixin:
             cached_m = self._et_node_masks.get(id(expr))
             if cached_m is not None:
                 return cached_m
-            lm = self._emit_mask_expr(expr.left, op_width)
+            # Mirrors `_emit_binary`'s `combined_override`/comparison
+            # `signed_override` computation on the VALUE side: division/
+            # modulus and comparison/equality operands must be extended
+            # (mask included, not just value) using this COMBINED
+            # decision, not each operand's own individual signedness --
+            # see `_emit_binary`'s docstring for the full rationale. Every
+            # other op forwards this function's own incoming
+            # `signed_override` unchanged (e.g. `+ - *` inside a signed
+            # ternary branch still defers to each operand's own type for
+            # its OWN mask, matching the VALUE side's `None`-forwarding).
+            if expr.op in ("/", "%"):
+                mask_override = (
+                    signed_override
+                    if signed_override is not None
+                    else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+                )
+            elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">="):
+                mask_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+            else:
+                mask_override = signed_override
+            lm = self._emit_mask_expr(expr.left, op_width, mask_override)
             # The shift COUNT is self-determined -- see the identical note
             # in `_emit_binary`. Most node types' mask handling already
             # ignores an over-wide requested width internally (e.g. `~`
@@ -2088,7 +2211,7 @@ class _ExprEmitterMixin:
                 # identical note in `_emit_binary`.
                 rm = self._emit_mask_expr(expr.right, self._expr_width(expr.right))
             else:
-                rm = self._emit_mask_expr(expr.right, op_width)
+                rm = self._emit_mask_expr(expr.right, op_width, mask_override)
             if expr.op in ("==", "!="):
                 # A KNOWN bit that differs resolves the comparison to a
                 # definite result regardless of x/z bits elsewhere (mirrors
@@ -2534,6 +2657,31 @@ class _ExprEmitterMixin:
             return f"(({target_m}) >> (({base}) - ({self._emit_expr(expr.width, 32)}) + 1)) & {mask_hex}"
 
         if etype is FunctionCall:
+            fname = expr.name.lower()
+            if fname in {"$signed", "$unsigned"} and expr.arguments:
+                # Mirrors `_emit_func_call`'s VALUE-side handling: `$signed`
+                # sign-extends its argument's raw value from the argument's
+                # OWN self-width up to the native register (via `_sign_ext`,
+                # which fills every bit above that width with the source's
+                # top bit) -- the MASK must be extended the identical way,
+                # or an unknown (masked) sign bit's ambiguity silently gets
+                # dropped from the newly-filled upper bits, which then read
+                # back as spuriously DEFINED zeros instead of x. `$unsigned`
+                # never sign_ext's the value (relies on the "unsigned values
+                # keep upper native-register bits zero" invariant), so its
+                # mask likewise passes through unextended. Confirmed wrong
+                # (cross-engine, against the reference oracle) for
+                # `(|($signed(a2[6:1]) ^ a1))` with `a2` fully x: `$signed`'s
+                # 6-bit-wide all-x argument was sign-extended to a
+                # DEFINED-looking `2'b11` in the top 2 bits of the 8-bit
+                # XOR, instead of staying x -- corrupting the reduction's
+                # truthiness (and, downstream, an `if` statement's branch
+                # selection) from ambiguous to spuriously true.
+                arg_w = self._expr_width(expr.arguments[0])
+                arg_mask = self._emit_mask_expr(expr.arguments[0], arg_w)
+                if fname == "$signed":
+                    return f"_sign_ext({arg_mask}, {arg_w})"
+                return arg_mask
             # For functions, OR all argument masks
             if expr.arguments:
                 parts = [self._emit_mask_expr(a, 32) for a in expr.arguments]

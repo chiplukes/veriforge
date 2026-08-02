@@ -802,12 +802,46 @@ class Compiler:  # cm:8c1e4a
         # -- BinaryOp --
         if etype is BinaryOp:
             # IEEE 1364-2005 §5.4.1: operator categories for width propagation.
-            # Comparison/logical ops produce 1-bit — operands are NOT
-            # context-determined from the LHS; only from each other.
             static_result_w = 0
-            if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
+            # `&&`/`||` produce a 1-bit result and their operands are each
+            # independently self-determined -- truthiness doesn't need a
+            # shared width between the two sides (unlike comparisons
+            # below), so no width propagation is needed here.
+            if expr.op in ("&&", "||"):
                 self._compile_expr(expr.left, program)
                 self._compile_expr(expr.right, program)
+            # Comparison/equality ops produce a 1-bit RESULT (self-
+            # determined outward, not context-determined from the LHS),
+            # but their TWO OPERANDS are mutually context-determined
+            # between each other (IEEE 1364-2005 §5.5.2: "The relational
+            # and equality operators have operands that are neither fully
+            # self-determined nor fully context-determined. The operands
+            # shall affect each other as if they were context-determined
+            # operands with a result type and size ... determined from
+            # them" -- i.e. via §5.5.1's normal combining rule, "if any
+            # operand is unsigned, the result is unsigned" -- NOT each
+            # operand's own individual signedness). This is exactly `/ %`'s
+            # "combined signedness governs BOTH operands uniformly" model,
+            # not `+ - *`'s "each operand uses its own signedness" model:
+            # `both_signed` is computed once and forced as the compiled
+            # `signed_override` into BOTH operands, propagating into
+            # whatever nested operator either operand is (so e.g. a nested
+            # unary `-` sees the comparison's OWN combined decision, not
+            # its operand's individual type) -- and each operand is
+            # compiled directly AT the shared target width (not its own
+            # self-width, resized afterward) so that width propagates all
+            # the way down for the SAME "unary `-` must negate at its
+            # final width, not self-width-then-extend" reason established
+            # for the arithmetic operand-extension redesign above.
+            # Mirrors the identical fix in `sim/evaluator.py`; confirmed
+            # wrong (individual-signedness version) against Icarus for
+            # `(a5[5:2] < a0)` (a5[5:2] an unsigned part-select, a0 a
+            # signed 1-bit register).
+            elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">="):
+                target = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                self._compile_expr(expr.left, program, target, both_signed)
+                self._compile_expr(expr.right, program, target, both_signed)
             # Shift operators — only LEFT operand is context-determined;
             # right is always self-determined.
             elif expr.op in ("<<", ">>", "<<<", ">>>"):
@@ -1085,22 +1119,31 @@ class Compiler:  # cm:8c1e4a
             # complement (only sign-extension does), confirmed against
             # Icarus/Verilator (see notes/known_issues.md).
             if expr.op in ("~", "+", "-"):
-                if _is_fixed_self_determined(expr.operand):
-                    # The operand's own result is ALWAYS fixed-width
-                    # regardless of context (IEEE 1364-2005 Table 5-22:
-                    # comparisons, &&/||, reduction ops, ! are self-
-                    # determined 1-bit results) -- unlike a regular signal
-                    # or another context-determined operator, it must NOT
-                    # be widened to match `~`/`-`'s context before the
-                    # operator runs. Doing so is wrong for `~`/unary `-`
-                    # specifically (unlike arithmetic operand-widening,
-                    # which is safe since extension commutes with
-                    # addition): zero-extending a 1-bit `&&` result before
-                    # complementing gives the wrong answer. Compile at the
-                    # operand's own fixed width, emit the op, THEN extend
-                    # the RESULT. Confirmed against Icarus for
-                    # `$signed(~({a0, a6, a0} && a7))`; mirrors the
-                    # identical fix in `sim/evaluator.py`.
+                # This "compile at the operand's own fixed width, THEN
+                # extend the RESULT" special case applies to `~` ONLY, not
+                # unary `-` (despite both being grouped together above as
+                # "context-determined") -- the two behave differently
+                # under width-extension precisely BECAUSE `~` is a
+                # bitwise, per-bit-independent operation while `-` is a
+                # genuine two's-complement ARITHMETIC negation:
+                # zero-extending a 1-bit value and THEN complementing
+                # flips all the newly-added padding bits too (wrong --
+                # `~` must run at the fixed width first, confirmed against
+                # Icarus for `$signed(~({a0, a6, a0} && a7))`), but
+                # zero-extending a value and THEN negating gives exactly
+                # the modular two's-complement wraparound representation
+                # of "minus that value" at the wider width -- which is
+                # what real hardware (and Icarus) actually computes,
+                # confirmed wrong the other way (compile-at-1-bit-then-
+                # extend-result gives `1`, not Icarus's `all-ones`/-1) for
+                # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
+                # destination. So unary `-` (like `+`, a no-op either way)
+                # always falls through to the normal context-determined
+                # path below -- it must NEVER take this fixed-width
+                # shortcut, even when its operand is itself a comparison/
+                # reduction/&&/||/! result. Mirrors the identical fix in
+                # `sim/evaluator.py`.
+                if expr.op == "~" and _is_fixed_self_determined(expr.operand):
                     self._compile_expr(expr.operand, program)
                     program.append(instr(op))
                     if width:
@@ -1196,8 +1239,23 @@ class Compiler:  # cm:8c1e4a
             # against Icarus for `(($unsigned(a1[5]) ? (a4 ^ a4[1]) :
             # (~a0)) ? a0 : (^{2{a0}}))`.
             self._compile_expr(expr.condition, program, self._expr_width(expr.condition))
-            self._compile_expr(expr.true_expr, program, width, own_signed)
-            self._compile_expr(expr.false_expr, program, width, own_signed)
+            # Each branch must be compiled at (at least) the ternary's OWN
+            # combined self-determined width -- max of both branches' self-
+            # widths, per IEEE 1364-2005 Table 5-22's `L(i) = L(j)`
+            # context-determined-among-each-other rule for `?:` -- not
+            # whatever `width` this TernaryOp node itself happened to be
+            # called with. Blindly forwarding a caller's `width=0` (self-
+            # determined request, e.g. from `&&`/`||`, which never
+            # propagate a shared width into their operands) straight into
+            # `_compile_expr(branch, program, width, ...)` left a nested
+            # context-determined operator WITHIN a branch (e.g. `~a0`)
+            # unresized at its own narrow width (1 bit) instead of the
+            # ternary's true combined width. Mirrors the identical fix in
+            # `sim/evaluator.py`; confirmed wrong against Icarus for
+            # `(((-a4[17:9]) ? (~a0) : a3) && a4)`.
+            own_width = max(width, self._expr_width(expr.true_expr), self._expr_width(expr.false_expr))
+            self._compile_expr(expr.true_expr, program, own_width, own_signed)
+            self._compile_expr(expr.false_expr, program, own_width, own_signed)
             program.append(instr(Op.TERNARY))
             return
 

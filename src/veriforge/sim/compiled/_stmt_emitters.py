@@ -1958,7 +1958,25 @@ class _StmtEmittersMixin:
         cond_setup, cond, _cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent)
         et_lines = [f"{pad}{t}" for t in self._et_pending]
         self._et_pending = old_et
-        lines = [*cond_setup, *et_lines, f"{pad}if ({cond}):"]
+        # `et_lines` (the hoisted `_et{n}_v = ...` declarations for any
+        # narrow-enough-to-delegate TernaryOp sub-node the wide condition
+        # emitter reached, e.g. `(a3 ? a2 : a6[16])` inside a larger
+        # wide-signal-touching condition) MUST come before `cond_setup`,
+        # not after -- `cond_setup` is exactly the code that USES those
+        # hoisted `_et{n}_v` placeholders (e.g. a `wide_mux(...)` call
+        # taking `_et0_v`/`_et0_m` as its condition operand), so emitting
+        # it first referenced an as-yet-uninitialized `cdef long long
+        # _et0_v` in the generated Cython -- a real use-before-define bug,
+        # not just a wrong-answer one (confirmed via direct .pyx
+        # inspection: `_et0_v` was declared bare at the top of the
+        # function, USED by a `wide_mux` call, and only THEN assigned a
+        # few lines later). Every other `_et_pending` consumer in this
+        # codebase (`_process_compiler.py`'s continuous-assign path, the
+        # narrow-scalar LHS-write fallback above) already puts `et_lines`
+        # first for exactly this reason. Confirmed wrong against Icarus
+        # for `if (a7 & ((a3 ? a2 : a6[16]) ? (a7 ? a2[1] : a6[9]) :
+        # (!a2))) ...`.
+        lines = [*et_lines, *cond_setup, f"{pad}if ({cond}):"]
 
         if stmt.then_body:
             body = self._emit_stmt(stmt.then_body, indent + 1, context=context)

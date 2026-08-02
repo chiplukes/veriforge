@@ -3710,7 +3710,22 @@ class _WideEmitterMixin:
                 # `$signed(~({a0, a6, a0} && a7)))`; mirrors the identical
                 # fix in `_expr_emitter.py`/`sim/evaluator.py`/
                 # `sim/vm/compiler.py`.
-                if _is_fixed_self_determined(expr.operand):
+                #
+                # This fixed-width special case applies to `~` ONLY, not
+                # `-` (unary minus): `~` is bitwise/per-bit-independent, so
+                # zero-extending before complementing flips the padding
+                # bits too (wrong, per the confirmed case above) -- but
+                # `-` is a genuine two's-complement ARITHMETIC negation,
+                # where zero-extending the operand and THEN negating gives
+                # exactly the modular wraparound representation of "minus
+                # that value" at the wider width, which is what real
+                # hardware (and Icarus) actually computes. Confirmed wrong
+                # the other way (compute-at-1-bit-then-extend-result gives
+                # `1`, not Icarus's `all-ones`/-1) for
+                # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
+                # destination -- `-` must always fall through to the
+                # normal "recurse at dst_width" path above instead.
+                if op == "~" and _is_fixed_self_determined(expr.operand):
                     op_slot = self._alloc_scratch()
                     lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, 1, 1, indent)
                     if lines is None:
@@ -3993,7 +4008,29 @@ class _WideEmitterMixin:
                     amount_mask_expr = " | ".join(f"_sc{aslot}_m[{wi}]" for wi in range(amount_n))
                 else:
                     lines = llines
-                    amount_expr = f"<int>({self._emit_expr(expr.right, amount_w, False)})"
+                    # Mask to `amount_w` bits before the `<int>` cast: a
+                    # `$signed(...)`-wrapped shift count (or any other
+                    # context-determined sub-expression whose narrow-
+                    # emitter codegen unconditionally sign-extends the
+                    # underlying native C register, e.g. `_emit_func_call`'s
+                    # `$signed` branch, which fills bits beyond its own
+                    # self-width with the sign bit regardless of whether
+                    # the caller only wants those bits read as an unsigned
+                    # magnitude) would otherwise leak that sign-fill
+                    # straight into the `<int>` cast, turning a small
+                    # positive shift amount into a large negative one --
+                    # the shift primitives below then misinterpret a
+                    # negative amount as "shift the other direction"
+                    # instead of the IEEE 1364-2005 SS5.6 rule that a shift
+                    # count is ALWAYS an unsigned magnitude regardless of
+                    # its own signedness/casts. Confirmed wrong against
+                    # Icarus for `{a1[0], (-a1)} >> $signed({3{a0}})`
+                    # assigned into a >64-bit destination (routes through
+                    # this wide path): `$signed({3{a0}})`'s raw 3-bit
+                    # pattern (0b111 = 7 unsigned) was being read back as
+                    # `-1`, and the wide shift primitive then shifted the
+                    # dividend left instead of right.
+                    amount_expr = f"<int>(({self._emit_expr(expr.right, amount_w, False)}) & wmask({amount_w}))"
                     amount_mask_expr = self._emit_mask_expr(expr.right, amount_w)
                 # An x/z shift COUNT makes the whole shift result x/z
                 # (there's no way to know how many positions to shift) --
@@ -4051,6 +4088,24 @@ class _WideEmitterMixin:
                 use_signed = (
                     op in ("<", "<=", ">", ">=") and self._expr_signed(expr.left) and self._expr_signed(expr.right)
                 )
+                # `use_signed` above is deliberately scoped to `< <= > >=`
+                # only (equality doesn't need a signed vs. unsigned
+                # PRIMITIVE -- bit-pattern equality is the same either
+                # way) -- but OPERAND EXTENSION must still respect each
+                # operand's combined signedness for `==`/`!=` too, exactly
+                # like the relational ops: a narrower signed operand (e.g.
+                # a 1-bit signed register) compared against a wider
+                # operand must still be sign-extended to the shared
+                # comparison width, or an x/z sign bit's ambiguity never
+                # propagates into the newly-filled upper words, silently
+                # corrupting `wide_cmp_eq`'s own "known bit differs"
+                # precision check. Using `use_signed` (always False for
+                # `==`/`!=`) as the extension override here was wrong.
+                # Confirmed wrong (cross-engine, against the reference
+                # oracle) for `(a0 == a6)` with `a0` a signed 1-bit
+                # x-valued register and `a6` a large defined 80-bit
+                # signed value.
+                combined_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
                 left_is_signed_call = (
                     isinstance(expr.left, FunctionCall)
                     and expr.left.name.lower() == "$signed"
@@ -4075,11 +4130,46 @@ class _WideEmitterMixin:
                 # unpopulated/garbage and the comparison reads past what was
                 # actually computed.
                 n_operands = (max(lw, rw) + 63) // 64
-                llines = self._emit_wide_expr_to_scratch(left_expr, lslot, n_operands, lw, indent)
+                cmp_w = max(lw, rw)
+                # Thread `combined_signed` (the comparison's own COMBINED
+                # signedness decision, IEEE 1364-2005 §5.5.2 -- computed
+                # above, deliberately NOT `use_signed`, which is scoped to
+                # relational-only) into both recursive calls -- not just
+                # used to pick the comparison PRIMITIVE above -- so a
+                # nested context-determined operator within either operand
+                # (e.g. a unary `-`) sees this combined decision rather
+                # than falling back to its own individual type. Mirrors
+                # the identical fix in `_expr_emitter.py`/
+                # `sim/evaluator.py`/`sim/vm/compiler.py`.
+                #
+                # `dst_width` (4th positional arg) must be `cmp_w` (=
+                # `max(lw, rw)`, the comparison's own SHARED width), not
+                # each operand's own self-width `lw`/`rw` -- an Identifier
+                # operand narrower than the OTHER operand (e.g. a 1-bit
+                # signed register compared against an 80-bit value) only
+                # decides to sign-extend via `wide_load_signal_s` when its
+                # OWN self-width is less than the requested `dst_width`;
+                # passing its own self-width back as `dst_width` makes
+                # that check always false, so it silently falls through to
+                # the plain (zero-filling) `wide_load_signal` instead --
+                # an x/z sign bit's ambiguity never propagates into the
+                # extra (now stale-zero) words, corrupting the
+                # comparison's own "known bit differs" precision check in
+                # `wide_cmp_eq`/etc. `n_operands`-sized scratch already
+                # anticipated this width; only the `dst_width` argument
+                # itself was wrong. Confirmed wrong (cross-engine, against
+                # the reference oracle) for `(a0 == a6)` with `a0` a
+                # signed 1-bit x-valued register and `a6` a large defined
+                # 80-bit value.
+                llines = self._emit_wide_expr_to_scratch(
+                    left_expr, lslot, n_operands, cmp_w, indent, signed_override=combined_signed
+                )
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
-                rlines = self._emit_wide_expr_to_scratch(right_expr, rslot, n_operands, rw, indent)
+                rlines = self._emit_wide_expr_to_scratch(
+                    right_expr, rslot, n_operands, cmp_w, indent, signed_override=combined_signed
+                )
                 if rlines is None:
                     self._free_scratch(lslot, rslot)
                     return None
@@ -4090,7 +4180,7 @@ class _WideEmitterMixin:
                     lines.append(
                         f"{pad}{signed_prim}(_sc{slot}_v, _sc{slot}_m,"
                         f" _sc{a_slot}_v, _sc{a_slot}_m,"
-                        f" _sc{b_slot}_v, _sc{b_slot}_m, {n_operands}, {max(lw, rw)})"
+                        f" _sc{b_slot}_v, _sc{b_slot}_m, {n_operands}, {cmp_w})"
                     )
                 else:
                     lines.append(
