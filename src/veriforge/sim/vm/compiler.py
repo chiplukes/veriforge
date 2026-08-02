@@ -848,24 +848,44 @@ class Compiler:  # cm:8c1e4a
                 if expr.op == ">>>" and self._expr_signed(expr.left):
                     self._compile_expr(expr.left, program)
                 else:
-                    self._compile_expr(expr.left, program, width, signed_override)
+                    # Compile the left operand directly at `target` (max of
+                    # the enclosing context width and its own static
+                    # self-determined width), NOT `width` alone --
+                    # `_compile_expr` for some node types (Replication is
+                    # the confirmed case) directly SIZES its result to
+                    # whatever width it's asked to compile at, so
+                    # requesting the (possibly narrower) outer `width` here
+                    # would already discard bits above `width` DURING
+                    # compilation itself, before the RESIZE/SIGN_EXT below
+                    # ever runs -- widening AFTERWARD only zero-pads on top
+                    # of that already-truncated value; it cannot recover
+                    # bits that were never computed. Target max(width,
+                    # static self-determined width) -- NOT `width` alone.
+                    # Context-determined extension must only ever WIDEN an
+                    # operand, never narrow it below its own natural width
+                    # (an operand can legitimately be wider than the
+                    # enclosing context, e.g. a wide concat feeding a
+                    # narrower assignment; SIGN_EXT/RESIZE truncate when
+                    # the target is smaller than the value's current
+                    # width, which would corrupt the operator's input).
+                    # Using the static estimate as a floor is always safe
+                    # even when it's an overestimate (e.g. expr.left
+                    # contains a ternary, whose static width is
+                    # max(branches) but the actual picked branch may be
+                    # narrower): the target is then still >= the true
+                    # runtime width, so this only ever widens or no-ops,
+                    # never truncates. Confirmed against Icarus
+                    # (cross-engine, vm/vm-fast vs reference/compiled) for
+                    # `({2{$unsigned(a5)}} >> (shift amount between the
+                    # enclosing 96-bit context width and the replication's
+                    # own true 130-bit width))`: bits 96-129 of the
+                    # replication (needed once shifted down into the
+                    # visible low bits) were silently dropped by compiling
+                    # the replication at the narrower 96-bit context width
+                    # first.
+                    target = max(width, self._expr_width(expr.left)) if width else width
+                    self._compile_expr(expr.left, program, target, signed_override)
                     if width:
-                        # Target max(width, static self-determined width) --
-                        # NOT `width` alone. Context-determined extension
-                        # must only ever WIDEN an operand, never narrow it
-                        # below its own natural width (an operand can
-                        # legitimately be wider than the enclosing context,
-                        # e.g. a wide concat feeding a narrower assignment;
-                        # SIGN_EXT/RESIZE truncate when the target is
-                        # smaller than the value's current width, which
-                        # would corrupt the operator's input). Using the
-                        # static estimate as a floor is always safe even
-                        # when it's an overestimate (e.g. expr.left contains
-                        # a ternary, whose static width is max(branches) but
-                        # the actual picked branch may be narrower): the
-                        # target is then still >= the true runtime width, so
-                        # this only ever widens or no-ops, never truncates.
-                        target = max(width, self._expr_width(expr.left))
                         eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
                         if eff_signed:
                             program.append(instr(Op.SIGN_EXT, target, 0))

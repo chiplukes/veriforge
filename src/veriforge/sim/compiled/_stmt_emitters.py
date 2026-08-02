@@ -2002,9 +2002,26 @@ class _StmtEmittersMixin:
         default_lines: list[str] = []
         first = True
 
-        # For casex/casez, we need mask expressions for don't-care matching
+        # For casex/casez, we need mask expressions for don't-care matching.
+        # Plain `case` also needs one: its match rule is exact 4-state
+        # (===) equality, not just value equality -- an x/z-bearing
+        # selector must NOT match a same-valued-but-fully-known item
+        # (matching Verilog's === semantics for `case`, distinct from
+        # casex/casez's wildcard matching below). `_emit_mask_expr`
+        # (width-aware, unlike `_emit_expr_mask`'s own-natural-width-only
+        # mask below) keeps the mask consistently extended/truncated to
+        # the same `sel_w` the value comparison already uses -- item
+        # literals can have a different declared width than the selector
+        # (this fuzzer's differential harness deliberately generates that
+        # mismatch). Confirmed against Icarus (cross-engine) for
+        # `case (a2[14]) 1'b0: ... default: ...` with `a2` fully x: the
+        # previous value-only `==` compared x's conventional "stored as
+        # 0" value against the known literal 0 and wrongly matched,
+        # instead of falling through to `default` like every other engine.
         if is_casex:
             sel_mask = self._emit_expr_mask(stmt.expression)
+        else:
+            sel_mask = self._emit_mask_expr(stmt.expression, sel_w)
 
         for item in stmt.items:
             if item.is_default:
@@ -2021,7 +2038,8 @@ class _StmtEmittersMixin:
                     # match when (sel_val ^ item_val) & ~(sel_mask | item_mask) == 0
                     conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
                 else:
-                    conds.append(f"({sel}) == ({val})")
+                    val_mask = self._emit_mask_expr(val_expr, sel_w)
+                    conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
             cond = " or ".join(conds) if conds else "0"
 
             keyword = "if" if first else "elif"

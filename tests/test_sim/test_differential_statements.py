@@ -27,14 +27,37 @@ update) that phase 1 never touches, and had never been differentially
 fuzzed before phase 2 landed. Both variants are checked against the
 reference oracle every batch.
 
+**Phase 3**: random `case`/`casex`/`casez` statements can now appear
+anywhere an if-chain could (`_gen_stmt` picks between leaf/if-chain/case-
+statement at each eligible recursion point), with 1-2 non-default items
+(1-2 comma-separated values each) plus a mandatory `default` (same
+latch-avoidance reasoning as phase 1's mandatory `else`). This is the
+first time the harness has generated Verilog LITERALS at all -- phases
+1/2's leaves are exclusively signal references/selects
+(`test_differential.py`'s `_gen_leaf`) -- so this adds a new sized-literal
+generator (`_gen_case_literal`), including x/z bits for casex/casez items
+specifically (the whole point of exercising wildcard matching). Case item
+literal widths are deliberately NOT always matched to the selector's own
+self-determined width (`_gen_case_literal`'s width is
+`sel_width + randint(-2, 2)`, clamped to >= 1): reading the pre-fuzzing
+implementation showed `sim/executor.py`'s `_case_match` and
+`sim/vm/compiler.py`'s `_compile_case` apply NO shared width between
+selector and item at all (self-determined only, the same "missing
+self-determined width" gap phase 1 fixed for `if`/`for`/`while`
+conditions but never extended to `case`), while
+`sim/compiled/_stmt_emitters.py`'s `_emit_case` forces every item value to
+the SELECTOR's own width -- three different behaviors, and a width
+mismatch is specifically meant to surface the resulting divergence.
+
 Conditions and RHS values both reuse `test_differential.py`'s own
 expression generator (`_gen_expr`) and fixed 8-signal input set unchanged,
 so this only adds a NEW statement-shape layer around already-fuzzer-
 verified expression generation, not a second copy of it.
 
-Deliberately NOT yet covered (see the scoping note in the session that
-added phase 1): `case`/`casex`/`casez` and `for`/`while` loops -- each is
-its own follow-up phase.
+Deliberately NOT yet covered: `unique`/`priority` case modifiers, casex/
+casez wildcard ranges via `?`, case-inside-case nesting beyond what the
+shared `_gen_stmt` recursion naturally produces, and `for`/`while` loops
+-- each is its own follow-up phase.
 
 Determinism: `VERIFORGE_DIFF_STMT_SEED` (default 20260701) seeds the
 generator; `VERIFORGE_DIFF_STMT_CASES` (default 40) sets how many random
@@ -75,16 +98,85 @@ _STMT_MAX_ARMS = 2
 level (plus the always-present final "else") -- kept small since nesting
 depth and arm count multiply."""
 
+_STMT_CASE_PROB = 0.35
+"""At an eligible (non-leaf) recursion point, the probability of
+generating a case/casex/casez statement instead of an if-chain."""
+_STMT_CASE_MAX_ITEMS = 2
+"""Max non-default case items (plus the always-present final default)."""
+_STMT_CASE_MAX_VALUES = 2
+"""Max comma-separated values per non-default case item."""
+
 # =====================================================================
-# Random if/else-if/else statement generation
+# Random if/else-if/else and case/casex/casez statement generation
 # =====================================================================
+
+
+def _gen_case_selector(rng: random.Random) -> tuple[int, str]:
+    """A case expression: a fixed signal, optionally bit/part-selected.
+
+    Mirrors `test_differential.py`'s `_gen_leaf` exactly (same restriction
+    to a fresh leaf reference, same shape distribution), but additionally
+    returns the resulting self-determined width -- `_gen_leaf` only
+    returns the string, and case item literals need to know this width to
+    size themselves relative to it (see `_gen_case_literal`).
+    """
+    name, width, _signed = rng.choice(td.FIXED_SIGNALS)
+    if width == 1:
+        return 1, name
+    choice = rng.random()
+    if choice < 0.4:
+        return width, name
+    if choice < 0.7:
+        idx = rng.randrange(width)
+        return 1, f"{name}[{idx}]"
+    hi = rng.randrange(width)
+    lo = rng.randrange(hi + 1)
+    if hi == lo:
+        return 1, f"{name}[{hi}]"
+    return hi - lo + 1, f"{name}[{hi}:{lo}]"
+
+
+def _gen_case_literal(rng: random.Random, sel_width: int, allow_xz: bool) -> str:
+    """A sized Verilog literal for a case item value.
+
+    Deliberately does NOT always match `sel_width` -- see this file's
+    docstring (phase 3 section) for why a width mismatch here is exactly
+    what's meant to be exercised. `allow_xz` is only set for casex/casez
+    items (a plain `case` item practically never contains x/z bits, and
+    exercising that combination is a separate, narrower question this
+    phase doesn't target).
+    """
+    width = max(1, sel_width + rng.randint(-2, 2))
+    chars = "01xz" if allow_xz else "01"
+    bits = "".join(rng.choice(chars) for _ in range(width))
+    return f"{width}'b{bits}"
+
+
+def _gen_case_stmt(rng: random.Random, depth: int, target: str, op: str) -> str:
+    """A case/casex/casez statement whose every item (including the
+    mandatory final default) recurses into `_gen_stmt` -- same "every path
+    assigns `target` exactly once" invariant as the if-chain generator.
+    """
+    case_type = rng.choice(("case", "casex", "casez"))
+    allow_xz = case_type != "case"
+    sel_width, sel_expr = _gen_case_selector(rng)
+    n_items = rng.randint(1, _STMT_CASE_MAX_ITEMS)
+    parts = [f"{case_type} ({sel_expr})"]
+    for _ in range(n_items):
+        n_vals = rng.randint(1, _STMT_CASE_MAX_VALUES)
+        vals = ", ".join(_gen_case_literal(rng, sel_width, allow_xz) for _ in range(n_vals))
+        parts.append(f"{vals}: begin\n{_gen_stmt(rng, depth - 1, target, op)}\nend")
+    parts.append(f"default: begin\n{_gen_stmt(rng, depth - 1, target, op)}\nend")
+    parts.append("endcase")
+    return "\n".join(parts)
 
 
 def _gen_stmt(rng: random.Random, depth: int, target: str, op: str) -> str:
-    """One statement: either a leaf assignment, or an if/else-if/.../else
-    chain whose every arm (including the mandatory final else) recurses
-    into another statement -- so every path assigns `target` exactly once,
-    with no latch-inference ambiguity for the oracle to disagree about.
+    """One statement: either a leaf assignment, an if/else-if/.../else
+    chain, or a case/casex/casez statement -- every arm/item (including
+    the mandatory final else/default) recurses into another statement, so
+    every path assigns `target` exactly once, with no latch-inference
+    ambiguity for the oracle to disagree about.
 
     *op* is `"="` (blocking, phase 1) or `"<="` (nonblocking, phase 2) --
     it only changes the leaf assignment operator, never the tree shape, so
@@ -94,6 +186,8 @@ def _gen_stmt(rng: random.Random, depth: int, target: str, op: str) -> str:
     """
     if depth <= 0 or rng.random() < _STMT_LEAF_PROB:
         return f"{target} {op} {td._gen_expr(rng, td._MAX_DEPTH)};"
+    if rng.random() < _STMT_CASE_PROB:
+        return _gen_case_stmt(rng, depth, target, op)
     n_arms = rng.randint(1, _STMT_MAX_ARMS)
     parts = []
     for i in range(n_arms):

@@ -3848,11 +3848,30 @@ class _WideEmitterMixin:
                 # OPERANDS before combining -- computing at a narrower
                 # enclosing context would silently drop upper operand bits
                 # (mirrors `_expr_emitter.py`'s `_NATURAL_WIDTH_OPS`
-                # handling). Arithmetic ops (+, -, *, /, %) are fully
-                # context-determined: operands extend straight to the
-                # enclosing dst_width, same as UnaryOp ~/- above.
+                # handling). `+`/`-`/`*` are context-determined and safe to
+                # compute directly at `dst_width` even when an operand's
+                # own natural width exceeds it: modular arithmetic is
+                # invariant to truncating each operand first, since
+                # `(a+b) mod N == ((a mod N) + (b mod N)) mod N` holds
+                # unconditionally. `/`/`%` are NOT residue-safe the same
+                # way -- `(a/b) mod N != ((a mod N)/(b mod N)) mod N` in
+                # general, so truncating the DIVIDEND to `dst_width` before
+                # dividing changes the quotient whenever the dividend's own
+                # natural width exceeds `dst_width` (mirrors the shift
+                # left-operand's identical `l_dst_width = max(lw,
+                # dst_width)` widening a few lines below, for the same
+                # underlying reason: a context-determined operator must
+                # WIDEN to fit an operand that's naturally larger than the
+                # context, never silently truncate it first). Confirmed
+                # against Icarus (cross-engine) for `(a wide, >dst_width
+                # concatenation) / (a6[44:0] | 1)`: the concatenation's own
+                # true width (202 bits) exceeded the assignment's 96-bit
+                # context, and computing it AT 96 bits before dividing
+                # discarded the high bits the correct quotient depended on.
                 if op in _NATURAL_WIDTH_OPS:
                     op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                elif op in ("/", "%"):
+                    op_width = max(dst_width, self._expr_width(expr.left), self._expr_width(expr.right))
                 else:
                     op_width = dst_width
                 # Division/modulus is NOT "residue-safe" like +/-/* (whose
@@ -3898,7 +3917,22 @@ class _WideEmitterMixin:
                     self._free_scratch(lslot, rslot)
                     return None
                 lines = llines + rlines
-                prim_width = min(op_width, dst_width)
+                # `wide_div`/`wide_mod`'s `dst_width` parameter isn't just
+                # output tail-masking (as it is for the bitwise/arithmetic
+                # primitives, where `min(op_width, dst_width)` is safe to
+                # truncate either way) -- it also bounds how many bits of
+                # the DIVIDEND the restoring-division algorithm itself
+                # iterates over (`for bit in range(dst_width - 1, -1,
+                # -1)`), so capping it back down to `dst_width` here would
+                # silently discard the same high dividend bits `op_width`
+                # was just widened above specifically to keep. Use the
+                # (possibly wider) `op_width` directly for `/`/`%` instead
+                # of re-truncating to `dst_width` -- the eventual signal
+                # store still only reads the destination's own true width
+                # out of the scratch array, so any extra high words beyond
+                # that are simply never read, no separate narrowing step
+                # needed here.
+                prim_width = op_width if op in ("/", "%") else min(op_width, dst_width)
                 lines.append(
                     f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m,"
                     f" _sc{lslot}_v, _sc{lslot}_m,"
@@ -3953,7 +3987,36 @@ class _WideEmitterMixin:
                 # the already-correct `$signed(...) << ...` case. Confirmed
                 # against Icarus for `a2 >> (...)` with `a2` declared
                 # `signed [15:0]` and a shift amount >= 16.
-                l_signed_override = False if op == ">>" else signed_override
+                # `>>` forcing unsigned is a property of how the shift reads
+                # its ALREADY-COMPUTED left operand's bit pattern (no
+                # sign-bit replication into vacated positions) -- it does
+                # NOT mean every leaf reached within that operand must be
+                # individually re-typed as unsigned. When `expr.left` is
+                # itself a natural-width combining op (`&`/`|`/`^`/`~^`/
+                # `^~`), that operand's OWN internal computation is a
+                # self-contained Verilog sub-expression whose value is
+                # fixed by each of ITS OWN operands' declared types,
+                # entirely independent of whatever operator later consumes
+                # the result -- forcing `False` here would incorrectly leak
+                # into that nested op's OWN per-operand extension (its
+                # `div_mod_override = signed_override` forwarding below),
+                # corrupting its computed VALUE, not just how it's read
+                # afterward. Only apply the force when `expr.left` actually
+                # needs WIDENING for this shift's own context (`lw <
+                # dst_width`) -- that's the one case an outer
+                # unsigned-widening decision genuinely must reach this deep
+                # (matches the already-confirmed `a2 >> ...` fix this
+                # override exists for, where `a2` is a plain signed
+                # Identifier). Confirmed against Icarus (cross-engine) for
+                # `(a6 & a0) >> a7` with `a0` a signed 1-bit register: `a0`
+                # must sign-extend to -1 (matching Verilog's `a6 & a0`,
+                # independent of the `>>`), but the unconditional force
+                # made `a0` zero-extend to +1 instead, giving `a6 & 1`
+                # rather than `a6 & (-1) == a6`.
+                if op == ">>" and lw >= dst_width:
+                    l_signed_override = None
+                else:
+                    l_signed_override = False if op == ">>" else signed_override
                 llines = self._emit_wide_expr_to_scratch(
                     expr.left, lslot, n_src, l_dst_width, indent, signed_override=l_signed_override
                 )
@@ -4106,15 +4169,49 @@ class _WideEmitterMixin:
                 # x-valued register and `a6` a large defined 80-bit
                 # signed value.
                 combined_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                # Unwrapping `$signed(x)` down to `x` and recursing `x`
+                # directly at the comparison's own (wider) `cmp_w`, forcing
+                # `signed_override=combined_signed`, is only equivalent to
+                # `$signed`'s real IEEE 1364-2005 Table 5-22 semantics
+                # (self-determined: compute the ARGUMENT at its OWN natural
+                # width, THEN sign/zero-extend that already-computed
+                # result to the outer width) when `x` is a plain leaf read
+                # (Identifier/Literal/BitSelect/RangeSelect/PartSelect) --
+                # for those, there is no operator whose OWN result depends
+                # on which width it computes at, so "read directly at the
+                # wider width" and "read at own width then extend" produce
+                # identical values. For a COMPOUND `x` involving a
+                # context-determined operator (confirmed case: unary `-`),
+                # the two orders genuinely differ: e.g. negating a
+                # small UNSIGNED value AFTER zero-extending it to a much
+                # wider width wraps around to a huge magnitude-near-2^cmp_w
+                # result, whereas IEEE's actual self-determined-then-
+                # extend order negates at the operand's own narrow width
+                # first (a small wrapped result) and only THEN extends
+                # it -- entirely different values. Restricting the unwrap
+                # to leaf `x` here (falling through to the un-unwrapped
+                # `$signed(...)` FunctionCall for anything else, which
+                # already correctly implements the self-determined-then-
+                # extend order in its own dedicated handler below) fixes
+                # this without touching the leaf fast path the unwrap
+                # exists for. Confirmed against Icarus (cross-engine) for
+                # `($unsigned({a0, a6}) < $signed((-a4[9:5])))`: unwrapping
+                # `$signed((-a4[9:5]))` and negating `a4[9:5]` directly at
+                # the comparison's 81-bit combined width gave a huge
+                # (~2^81) wraparound value instead of the correct small
+                # negated-at-5-bits-then-extended one.
+                _cmp_leaf_types = (Identifier, Literal, BitSelect, RangeSelect, PartSelect)
                 left_is_signed_call = (
                     isinstance(expr.left, FunctionCall)
                     and expr.left.name.lower() == "$signed"
                     and len(expr.left.arguments) == 1
+                    and isinstance(expr.left.arguments[0], _cmp_leaf_types)
                 )
                 right_is_signed_call = (
                     isinstance(expr.right, FunctionCall)
                     and expr.right.name.lower() == "$signed"
                     and len(expr.right.arguments) == 1
+                    and isinstance(expr.right.arguments[0], _cmp_leaf_types)
                 )
                 left_expr = expr.left.arguments[0] if left_is_signed_call else expr.left
                 right_expr = expr.right.arguments[0] if right_is_signed_call else expr.right
@@ -4353,8 +4450,40 @@ class _WideEmitterMixin:
             tslot = self._alloc_scratch()
             fslot = self._alloc_scratch()
             own_signed = self._expr_signed(expr)
+            # `own_signed` (the ternary's OWN combined branch signedness)
+            # is meant to govern WIDENING a branch's independently-computed
+            # value up to `dst_width` -- not to override how a
+            # CONTEXT-DETERMINED arithmetic branch (`+`/`-`/`*`) types ITS
+            # OWN operands. Those ops already extend directly to whatever
+            # width they're asked for (`op_width == dst_width` here,
+            # always -- unlike `&`/`|`/`^`, which have their own smaller
+            # natural width and a genuinely separate later widening step),
+            # so there is no legitimate "widen afterward" use for
+            # `signed_override` to serve here at all -- forwarding it only
+            # reaches down into `combined_override`/each operand's own
+            # extension decision (mirrors `_emit_binary`'s identical
+            # per-operand logic), silently overriding an operand's own
+            # declared type. Division/modulus keep the ternary's override
+            # (their dedicated `div_mod_override` computation is a
+            # deliberate, separate, already-confirmed exception -- IEEE
+            # 1364-2005 SS5.5.1 genuinely requires a division's ENTIRE
+            # divisor sub-expression read uniformly per its own combined
+            # decision). Confirmed against Icarus (cross-engine) for
+            # `cond ? a5 : ({3{{a5, a7, a0}}} - a2)` with `a5` unsigned and
+            # `a2` a signed identifier: the ternary's own combined type is
+            # unsigned (replication is always unsigned, so not both
+            # branches are signed), and forwarding that into the
+            # subtraction forced `a2` to zero- instead of sign-extend,
+            # even though IEEE governs `a2`'s OWN extension by its own
+            # declared type here, independent of the ternary.
+            t_signed_override = (
+                None if isinstance(expr.true_expr, BinaryOp) and expr.true_expr.op in ("+", "-", "*") else own_signed
+            )
+            f_signed_override = (
+                None if isinstance(expr.false_expr, BinaryOp) and expr.false_expr.op in ("+", "-", "*") else own_signed
+            )
             tlines = self._emit_wide_expr_to_scratch(
-                expr.true_expr, tslot, n_words, dst_width, indent, signed_override=own_signed
+                expr.true_expr, tslot, n_words, dst_width, indent, signed_override=t_signed_override
             )
             if tlines is None:
                 self._free_scratch(tslot, fslot)
@@ -4362,7 +4491,7 @@ class _WideEmitterMixin:
                     self._free_scratch(truth_slot, cond_slot)
                 return None
             flines = self._emit_wide_expr_to_scratch(
-                expr.false_expr, fslot, n_words, dst_width, indent, signed_override=own_signed
+                expr.false_expr, fslot, n_words, dst_width, indent, signed_override=f_signed_override
             )
             if flines is None:
                 self._free_scratch(tslot, fslot)

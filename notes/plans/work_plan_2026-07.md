@@ -1386,6 +1386,56 @@ passing individually and as part of the full suite. Phases 3+ (case
 statements, for/while loops, unpacked arrays, more operators) remain
 unscheduled future work.
 
+**Phase 3 follow-up — case/casex/casez statement fuzzing (July 2026)**:
+extended `test_differential_statements.py` to generate `case`/`casex`/
+`casez` statements at eligible if/else-chain recursion points, with
+deliberately width-mismatched selector/item literals to exercise each
+engine's truncation/extension behavior at the comparison boundary.
+Default-scale runs stayed green throughout; stress-testing at 150 cases
+across five seeds surfaced twelve distinct, real bugs, all Icarus-
+confirmed and/or cross-engine-confirmed — full writeup in
+`notes/known_issues.md` under "Randomized differential harness (work
+plan item 3.4): bugs found and fixed" → "Fourteenth wave". Only two of
+the twelve are actually about case/casex/casez matching itself (`vm-
+fast`'s `OP_CMP_CASEX`/`OP_CMP_CASEZ` ignoring wide operands; compiled
+plain `case` ignoring x/z entirely, unlike casex/casez); the rest are
+pre-existing bugs in comparison, shift, ternary, and division codegen
+that the generator's new branches merely shifted the RNG sequence enough
+to reach for the first time — the same "phase N's grammar addition
+surfaces phase-(N-1)-and-earlier gaps" pattern seen in phases 1 and 2.
+Highlights: a missing `RangeSelect` case in the compiled engine's mask
+helper (`_emit_expr_mask`), silently reading an entire x-valued
+part-select selector as fully known; compiled comparisons and XOR/XNOR
+breaking the `if`/`for`/`while` condition-truthiness convention (raw
+value must already read 0 wherever the true result is ambiguous, since
+those callers never combine it with the mask); a genuine 2^depth
+exponential code-size blowup introduced by the fix for that same bug,
+caught only by the full fast-suite regression against the real
+`ibex_cs_registers` design (not the fuzzer, whose synthetic trees never
+nest deep enough) — two tests going from completing in seconds to
+exhausting 17+ GB of RAM before a proper fix (hoisting into the
+existing `_et_pending` temp-caching mechanism, mirroring `TernaryOp`'s
+own identically-documented fix for the same failure mode); and three
+separate instances of the same underlying architectural mistake — an
+outer operator's own "how should MY combined result widen" decision
+(`>>`'s forced-unsigned, a ternary's own combined branch signedness, a
+wide comparison's `$signed()`-unwrap optimization) incorrectly threaded
+into a NESTED context-determined/natural-width operator's OWN per-
+operand typing decision, corrupting that operand's independently-
+computed value rather than just how it's read afterward. Also found:
+division/modulus wrongly grouped with the "residue-safe" `+ - *`
+context-determined treatment (division is NOT residue-safe — truncating
+the dividend before dividing changes the quotient); and a bytecode-
+compiler shift-operand truncation bug in `sim/vm/compiler.py` (the same
+"truncate before widen" mistake, in a third, previously-untouched
+engine). Verified via five statement-fuzzer seeds (150 cases each, 30/30
+batches, `_STMT_COMPILED=1`), the original 300-case expression-tree
+fuzzer (30/30 batches), `test_power_operator.py` (60 passed, 1 xfail,
+unaffected), and a final full fast-suite regression (7107 passed, 1
+xfailed, 0 failed, `-n 8`, ~30 min) — including the two
+`ibex_cs_registers` tests the exponential-blowup bug had broken, now
+completing in ~20s each.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

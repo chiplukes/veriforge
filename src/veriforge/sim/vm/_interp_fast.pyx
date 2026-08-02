@@ -592,8 +592,8 @@ cdef int _execute_core(
     cdef int has_x, red_parity, all_ones, any_one
     cdef int t_wide, cond_known1, cond_defined_zero, a_nonzero
     cdef int b_has_x, b_shift_n, b_huge
-    cdef int any_x
-    cdef unsigned long long known_diff
+    cdef int any_x, mismatch
+    cdef unsigned long long known_diff, dc
     cdef unsigned long long av_w, am_w, bv_w, bm_w, agree_word
     if wctx != NULL:
         wide_nba_max = wctx.nba_cap
@@ -3095,21 +3095,74 @@ cdef int _execute_core(
             continue
 
         if op == OP_CMP_CASEX:
-            sp -= 1; b = stack[sp]
-            sp -= 1; a = stack[sp]
-            # casex: x/z bits in either operand are don't-care
-            new_mask = a.mask | b.mask
-            stack[sp].val = 1 if ((a.val ^ b.val) & ~new_mask) == 0 else 0
-            stack[sp].mask = 0; stack[sp].width = 1
+            sp -= 2
+            a = stack[sp]; b = stack[sp + 1]
+            if wflag[sp] or wflag[sp + 1]:
+                # Wide casex: promote narrow first (mirrors OP_CMP_EQ),
+                # then compare word-by-word -- the narrow-only version
+                # below silently compared just the LOW word of a >64-bit
+                # selector/item pair, ignoring everything past bit 63.
+                # Confirmed wrong (cross-engine, against the reference
+                # oracle) for a casex whose selector and item literal were
+                # both >64 bits.
+                if not wflag[sp]:
+                    wv[sp * WIDE_WORDS]      = <unsigned long long>(a.val & ~a.mask)
+                    wm[sp * WIDE_WORDS]      = <unsigned long long>(a.mask)
+                    for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0; wm[sp * WIDE_WORDS + wi] = 0
+                if not wflag[sp + 1]:
+                    wv[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.val & ~b.mask)
+                    wm[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.mask)
+                    for wi in range(1, WIDE_WORDS): wv[(sp + 1) * WIDE_WORDS + wi] = 0; wm[(sp + 1) * WIDE_WORDS + wi] = 0
+                # x/z bits in either operand are don't-care -- unlike
+                # OP_CMP_EQ/NE, a casex/casez match is ALWAYS a definite
+                # 0/1, never x (the x/z bits are the wildcard spec, not
+                # genuine ambiguity).
+                mismatch = 0
+                for wi in range(WIDE_WORDS):
+                    dc = wm[sp * WIDE_WORDS + wi] | wm[(sp + 1) * WIDE_WORDS + wi]
+                    if (wv[sp * WIDE_WORDS + wi] ^ wv[(sp + 1) * WIDE_WORDS + wi]) & ~dc:
+                        mismatch = 1; break
+                stack[sp].val = 0 if mismatch else 1
+                stack[sp].mask = 0
+                wflag[sp] = 0
+            else:
+                new_mask = a.mask | b.mask
+                stack[sp].val = 1 if ((a.val ^ b.val) & ~new_mask) == 0 else 0
+                stack[sp].mask = 0
+            stack[sp].width = 1
             sp += 1; continue
 
         if op == OP_CMP_CASEZ:
-            sp -= 1; b = stack[sp]
-            sp -= 1; a = stack[sp]
-            # casez: same as casex in our 4-state model
-            new_mask = a.mask | b.mask
-            stack[sp].val = 1 if ((a.val ^ b.val) & ~new_mask) == 0 else 0
-            stack[sp].mask = 0; stack[sp].width = 1
+            sp -= 2
+            a = stack[sp]; b = stack[sp + 1]
+            if wflag[sp] or wflag[sp + 1]:
+                # Wide casez: same as wide casex -- see OP_CMP_CASEX above
+                # (casez is treated identically to casex in this 4-state
+                # model, which conflates x and z into one "unknown" mask
+                # bit; see notes/known_issues.md for the documented residual
+                # gap this conflation implies for casez's stricter x-must-
+                # match-exactly rule).
+                if not wflag[sp]:
+                    wv[sp * WIDE_WORDS]      = <unsigned long long>(a.val & ~a.mask)
+                    wm[sp * WIDE_WORDS]      = <unsigned long long>(a.mask)
+                    for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0; wm[sp * WIDE_WORDS + wi] = 0
+                if not wflag[sp + 1]:
+                    wv[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.val & ~b.mask)
+                    wm[(sp + 1) * WIDE_WORDS]  = <unsigned long long>(b.mask)
+                    for wi in range(1, WIDE_WORDS): wv[(sp + 1) * WIDE_WORDS + wi] = 0; wm[(sp + 1) * WIDE_WORDS + wi] = 0
+                mismatch = 0
+                for wi in range(WIDE_WORDS):
+                    dc = wm[sp * WIDE_WORDS + wi] | wm[(sp + 1) * WIDE_WORDS + wi]
+                    if (wv[sp * WIDE_WORDS + wi] ^ wv[(sp + 1) * WIDE_WORDS + wi]) & ~dc:
+                        mismatch = 1; break
+                stack[sp].val = 0 if mismatch else 1
+                stack[sp].mask = 0
+                wflag[sp] = 0
+            else:
+                new_mask = a.mask | b.mask
+                stack[sp].val = 1 if ((a.val ^ b.val) & ~new_mask) == 0 else 0
+                stack[sp].mask = 0
+            stack[sp].width = 1
             sp += 1; continue
 
         # ── Signed comparisons ────────────────────────────────────

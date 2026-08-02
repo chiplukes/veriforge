@@ -1584,6 +1584,246 @@ xfail, unaffected), and a final full fast-suite regression (7107 passed,
 truncation bug had broken, all now passing individually and as part of
 the full suite.
 
+**Fourteenth wave (July 2026, work plan item 3.4 phase 3) -- case/casex/
+casez statement fuzzing surfaces twelve more distinct bugs, half of them
+pre-existing and only newly REACHABLE, not newly introduced, by the
+generator's changed random-draw sequence**: extended
+`test_differential_statements.py` to generate `case`/`casex`/`casez`
+statements at eligible if/else-chain recursion points (`_STMT_CASE_PROB
+= 0.35`), with 1-2 items per case, 1-2 values per item, always a
+`default` arm, and deliberately width-mismatched selector/item literals
+(selector via the same shape distribution as `test_differential.py`'s
+leaf generator; item literal width = `sel_width + randint(-2, 2)`,
+clamped to >=1) to exercise each engine's own pre-existing (and
+different) truncation/extension behavior at the comparison boundary.
+Default-scale runs (40 cases) stayed green throughout; stress-testing at
+150 cases across five seeds (`99999`, `424242`, `13579`, `777777`,
+`246810`) surfaced twelve distinct, real bugs, all confirmed against
+Icarus and/or cross-engine agreement -- only two of them (the first two
+below) are actually about case/casex/casez matching itself; the rest are
+pre-existing bugs in comparison, shift, ternary, and division codegen
+that the generator's case-statement branches merely shifted the RNG
+sequence enough to reach for the first time:
+
+- **`vm-fast`'s `OP_CMP_CASEX`/`OP_CMP_CASEZ` ignored wide (>64-bit)
+  operands** (`sim/vm/_interp_fast.pyx`) -- both opcodes popped operands
+  via `stack[sp].val`/`.mask` only, never checking `wflag` (the flag
+  marking a stack slot's real data as living in the wide `wv`/`wm` word
+  arrays instead of the narrow fields), the same "wide value ignored" bug
+  class already fixed for `OP_TERNARY`'s condition truthiness in an
+  earlier wave. Confirmed wrong against Icarus for a `casez` matching a
+  65-bit selector against 66-bit/65-bit wildcard literals. Fixed by
+  rewriting both opcodes to mirror `OP_CMP_EQ`/`OP_CMP_NE`'s already-
+  correct wide-promotion pattern: if either operand's `wflag` is set,
+  promote the other to wide (filling from its narrow `.val & ~.mask`),
+  then compare word-by-word with `wm[i] = am[i] | bm[i]` (don't-care)
+  masking; casez is treated identically to casex in this codebase's
+  3-state model (x and z share one representation), a separately-
+  documented residual gap versus real IEEE casez's stricter rule.
+- **Compiled plain `case` statement matching ignored x/z entirely**
+  (`sim/compiled/_stmt_emitters.py`'s `_emit_case`) -- unlike `casex`/
+  `casez` (which at least attempted don't-care masking), the plain-`case`
+  branch compared item values with a bare value-only `sel == val`, never
+  checking either side's mask -- an x/z-bearing selector's "stored as 0"
+  convention could accidentally equal a same-valued known item, wrongly
+  matching instead of correctly falling through to `default` (real
+  `case` uses exact 4-state `===` matching, the opposite of casex/casez's
+  wildcarding). Confirmed against Icarus for `case (a2[14]) 1'b0: ...
+  default: ...` with `a2` fully x. Fixed by computing each side's mask
+  too (`_emit_mask_expr`, width-aware and consistent with the item
+  literal's already-width-aware value emission, unlike the casex/casez
+  path's own-natural-width-only `_emit_expr_mask` helper) and requiring
+  BOTH value and mask to match exactly.
+- **Compiled `_emit_expr_mask` had no `RangeSelect` case at all**
+  (`sim/compiled/_expr_emitter.py`) -- this helper (used by casex/casez
+  selector and item masks) handled `Identifier`/`Literal`/`BitSelect` but
+  silently fell through to a hardcoded `"0"` (always-known) for any
+  multi-bit part-select, e.g. a `casex (a5[39:2])` selector -- an entire
+  x-valued signal read as fully known, making a wildcard item wrongly
+  fail to match. Confirmed against Icarus for `casex (a5[39:2]) 37'b1z11
+  xx00...: ...` and `casez (a4[44:1]) 45'bxx000xx00...: ...`, both with
+  the base signal fully x. Fixed by adding a `RangeSelect` case mirroring
+  `_emit_expr`'s own value-side handling (same Identifier-vs-struct,
+  literal-vs-variable-msb/lsb branching), with `mask=True` threaded into
+  `_emit_signal_slice_expr` instead of the value-side sign-extension.
+- **Compiled narrow-path comparisons and XOR/XNOR broke the `if`/`for`/
+  `while` "value already reads 0 wherever ambiguous" convention**
+  (`sim/compiled/_expr_emitter.py`) -- `_emit_condition_lines_and_expr`
+  (used by every statement-level condition) deliberately reads only the
+  raw VALUE, never combining it with the mask, relying on every value-
+  emitting operator upholding that convention on its own (already true
+  for `+`/`-`/`==`-with-known-diff/`&&`/`||`, and trivially true for `&`/
+  `|` since ANDing/ORing an x-as-0 bit can never spuriously read
+  nonzero) -- but comparisons (`==`/`!=`/`<`/`<=`/`>`/`>=`) and XOR/XNOR
+  (`^`/`~^`/`^~`) never enforced it: XOR has no absorbing bit value, so
+  an x bit (stored as 0) XORed against the OTHER operand's known-1 bit
+  gives a spurious raw value=1 at a position that's actually ambiguous;
+  comparisons likewise computed a raw C `==`/`<`/etc. on the value fields
+  alone with no ambiguity check at all. Confirmed against Icarus for `if
+  (($unsigned(a2[5]) <= a1[6:1]) ^ (...))` and `if ((a2 == a2))`, both
+  with `a2` fully x -- wrongly took the true branch. Fixed by reusing
+  `_emit_mask_expr`'s own (already-correct, including its `==`/`!=`
+  known-differing-bit short-circuit) mask formula and wrapping every
+  comparison's value with `0 if (that mask) else (raw core)`; XOR/XNOR
+  got the analogous `core & ~(left_mask | right_mask)` bitwise fix.
+- **Comparison value-side masking (the fix immediately above) caused
+  exponential code-size blowup on deeply-nested real-world comparison
+  chains** (`sim/compiled/_expr_emitter.py`) -- the new mask lookup is a
+  FRESH, unhoisted `_emit_mask_expr` call at every comparison node, and
+  that helper's own `==`/`!=` known-diff formula independently re-emits
+  `_emit_expr` on the SAME operands the value side already computed --
+  for a comparison nested inside another comparison's operand (common in
+  real CSR/control logic, never exercised by the fuzzer's shallow
+  synthetic trees), each level doubles the generated string size, giving
+  2^depth blowup. Confirmed via the real `ibex_cs_registers` design:
+  compiling `test_ibex_cs_registers_assignment_patterns_cross_engine
+  [compiled]` and `..._mml_exec_suppression_cross_engine[compiled]`
+  (caught by the full fast-suite regression, not the fuzzer) went from
+  completing in seconds to exhausting 17+ GB of RAM and still climbing.
+  Fixed by hoisting both the derived value and mask into named `_et{n}_v`/
+  `_et{n}_m` temps and registering them in `_et_node_vals`/
+  `_et_node_masks` when `_et_pending is not None`, exactly mirroring the
+  existing `TernaryOp` hoist block a few lines above (whose own comment
+  already names this precise failure mode: "preventing 2^k recursion in
+  right-recursive chains") -- a later query for the same node, from
+  anywhere, now hits the existing cache checks in `_emit_expr`'s BinaryOp
+  dispatch and `_emit_mask_expr`'s comparison branch instead of
+  re-expanding.
+- **Compiled `>>`'s forced-unsigned override leaked into a NESTED `&`'s
+  own per-operand extension** (`sim/compiled/_expr_emitter.py`,
+  `_wide_emitter.py`) -- `>>` forces `signed_override=False` onto its
+  left operand's recursive evaluation (correct: `>>` is always a logical
+  shift regardless of the operand's own declared type), but when that
+  left operand is itself a natural-width bitwise op like `(a6 & a0)`,
+  the forced `False` was ALSO forwarded into `&`'s own internal operand
+  typing decision (via the same `combined_override`/`div_mod_override`
+  forwarding mechanism division legitimately needs deep-threaded) --
+  `a0`'s OWN sign-extension (needed to correctly compute `a6 & a0`'s
+  VALUE, a self-contained Verilog sub-expression whose result is fixed
+  by each of its own operands' types, independent of whatever operator
+  later consumes it) got zero-extended instead. Confirmed against Icarus
+  for `(a6 & a0) >> a7` with `a0` a signed 1-bit register: `a0` must
+  sign-extend to -1 (giving `a6 & a0 == a6`), but the leaked override
+  zero-extended it to +1 (giving `a6 & 1`). Fixed by only forcing the
+  override when the left operand's own natural width is actually
+  narrower than the shift's requested width (the one case an outer
+  unsigned-widening decision genuinely needs to reach this deep); when
+  no widening is needed, pass `None` so the nested op's own operand
+  typing is undisturbed.
+- **Compiled narrow-path shift mask returned the operand's raw UNSHIFTED
+  mask** (`sim/compiled/_expr_emitter.py`'s `_emit_mask_expr`) -- for a
+  known shift count, `<<`/`>>`'s mask fallback returned `lm` (the left
+  operand's own mask) completely unshifted, when `<</>>` shift in KNOWN-
+  zero bits (never x/z) at the vacated end -- a shift-in-zero position
+  still read as ambiguous whenever the ORIGINAL (pre-shift) bit at that
+  position happened to be x. Confirmed against Icarus for `~&((a2[6] ?
+  a0 : a3) << a4[29:26])` with `a3` fully x: the shift legitimately
+  produces known-0 low bits (forcing the NAND-reduction definitely 1),
+  but the unshifted mask hid that, making the reduction read as fully
+  ambiguous (0, per the convention above) instead. Fixed by actually
+  shifting `lm` by the same amount (`<<`/`<<<`) or logically
+  right-shifting it (`>>`), matching the value side's own shift
+  computation; `>>>`'s sign-filled vacated bits are left as a separately
+  documented residual gap (not addressed by this fix).
+- **Compiled ternary's own combined-branch signedness leaked into a
+  NESTED `+`/`-`/`*` branch's own operand extension** (`sim/compiled/
+  _expr_emitter.py`, `_wide_emitter.py`) -- the ternary's `own_signed`
+  (correct for WIDENING a selected branch's independently-computed value
+  up to the ternary's combined width) was ALSO threaded as
+  `signed_override` into the branch's entire recursive evaluation --
+  harmless for a `&`/`|`/`^` branch (which has a genuinely separate later
+  widening step this override legitimately governs) but wrong for a
+  CONTEXT-DETERMINED `+`/`-`/`*` branch, which has NO separate widening
+  step at all (it's requested directly at the ternary's width, so the
+  override only ever reaches operand-level typing) -- a signed operand's
+  own extension got silently overridden by the ternary's unrelated
+  combined-unsigned decision. Confirmed against Icarus for `cond ? a5 :
+  ({3{{a5, a7, a0}}} - a2)` with `a5` unsigned and `a2` a signed
+  identifier: the ternary's combined type is unsigned (replication is
+  always unsigned, so not both branches are signed), and forwarding that
+  into the subtraction forced `a2` to zero- instead of sign-extend, even
+  though IEEE governs `a2`'s own extension by its own declared type here,
+  independent of the ternary. Fixed by passing `None` instead of
+  `own_signed` specifically when a branch is directly a `+`/`-`/`*`
+  BinaryOp.
+- **Compiled wide comparison's `$signed(...)`-unwrap optimization broke
+  the cast's self-determined-width barrier for compound arguments**
+  (`sim/compiled/_wide_emitter.py`'s `_WIDE_CMP_PRIMS` path) -- to avoid
+  a redundant sign-extension step, the comparison dispatch unwraps
+  `$signed(x)` down to `x` and recurses `x` directly at the comparison's
+  own (wider) shared width with `signed_override=combined_signed`
+  forced -- correct for a plain leaf `x` (Identifier/Literal/BitSelect/
+  RangeSelect/PartSelect, where "read directly at the wider width" and
+  "read at own width then extend" are equivalent, no operator in between
+  to make the order matter) but wrong for a compound `x` involving a
+  context-determined operator: negating a small UNSIGNED value AFTER
+  zero-extending it to a much wider width wraps around to a huge
+  magnitude-near-2^width result, whereas the cast's real IEEE 1364-2005
+  Table 5-22 self-determined semantics (already correctly implemented in
+  this same file's general `FunctionCall` handler, just bypassed by this
+  unwrap) negate at the operand's own narrow width first and only then
+  extend -- an entirely different value. Confirmed against Icarus for
+  `($unsigned({a0, a6}) < $signed((-a4[9:5])))`: unwrapping and negating
+  `a4[9:5]` directly at the comparison's 81-bit combined width gave a
+  huge (~2^81) wraparound value instead of the correct small negated-at-
+  5-bits-then-extended one. Fixed by restricting the unwrap to leaf `x`
+  only; a compound `x` now falls through to the un-unwrapped `$signed(
+  ...)` FunctionCall, routing through the already-correct general
+  handler instead.
+- **Compiled division/modulus wrongly grouped with the "residue-safe"
+  `+`/`-`/`*` context-determined treatment** (`sim/compiled/
+  _wide_emitter.py`) -- `/`/`%`'s `op_width` was computed as `dst_width`
+  directly (same as `+`/`-`/`*`), on the theory that context-determined
+  arithmetic is safe to truncate to the enclosing width and widen the
+  result afterward. That IS true for `+`/`-`/`*` (`(a+b) mod N == ((a mod
+  N) + (b mod N)) mod N` holds unconditionally, a basic modular-
+  arithmetic identity) but NOT for division (`(a/b) mod N != ((a mod N)/
+  (b mod N)) mod N` in general) -- truncating the DIVIDEND to `dst_width`
+  before dividing silently changes the quotient whenever the dividend's
+  own natural width (e.g. a wide concatenation) exceeds the enclosing
+  assignment's width. Confirmed against Icarus for a 202-bit-wide
+  concatenation divided by `(a6[44:0] | 1)` inside a 96-bit assignment --
+  computing the concatenation at 96 bits before dividing discarded the
+  high bits the correct quotient depended on. Also had to widen
+  `prim_width` (the `wide_div`/`wide_mod` primitive's OWN `dst_width`
+  argument, which bounds how many bits the restoring-division algorithm
+  itself iterates over, not just output tail-masking like the bitwise/
+  arithmetic primitives) the same way -- capping it back down to
+  `dst_width` would have silently discarded the same high dividend bits
+  `op_width` was just widened to keep. Fixed by computing `op_width =
+  max(dst_width, expr_width(left), expr_width(right))` for `/`/`%`
+  specifically, mirroring the shift left-operand's identical
+  `l_dst_width = max(lw, dst_width)` widening for the same underlying
+  reason.
+- **`vm`/`vm-fast`'s bytecode compiler truncated a shift's left operand
+  to the enclosing context width before widening it** (`sim/vm/
+  compiler.py`) -- for `>>`/`<<`/etc., the left operand was compiled
+  directly at the (possibly narrower) outer `width`, and only
+  AFTERWARDS resized up to `target = max(width, self_width(left))` --
+  but `_compile_expr` for some node types (confirmed: `Replication`)
+  directly SIZES its result to whatever width it's asked to compile at,
+  so the narrower `width` already discarded bits above it DURING
+  compilation, before the later resize could recover them (widening
+  afterward only zero-pads on top of an already-truncated value).
+  Confirmed against Icarus (cross-engine, vm/vm-fast vs reference/
+  compiled) for `{2{$unsigned(a5)}} >> (a shift amount between the
+  enclosing 96-bit context width and the replication's own true 130-bit
+  width)`: bits 96-129 of the replication (needed once shifted down into
+  the visible low bits) were silently dropped. Fixed by computing
+  `target` BEFORE compiling the left operand and requesting it directly
+  at `target`, not `width`.
+
+All twelve bugs were verified via direct Icarus comparison scripts and/or
+cross-engine agreement, then confirmed clean across five statement-fuzzer
+seeds (`VERIFORGE_DIFF_STMT_SEED` = `99999`, `424242`, `13579`, `777777`,
+`246810`; `VERIFORGE_DIFF_STMT_CASES=150`, `_STMT_COMPILED=1`, 30/30
+batches each), the original 300-case expression-tree fuzzer (30/30
+batches, `VERIFORGE_DIFF_COMPILED=1`), `test_power_operator.py` (60
+passed, 1 xfail, unaffected), and a final full fast-suite regression
+(7107 passed, 1 xfailed, 0 failed, `-n 8`, ~30 min) -- including the two
+`ibex_cs_registers` tests the exponential-blowup bug had broken, now
+completing in ~20s each instead of exhausting memory.
+
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
 **Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in

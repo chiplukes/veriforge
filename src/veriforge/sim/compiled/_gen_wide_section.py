@@ -828,14 +828,20 @@ class _GenWideSectionsMixin:
 
         # ── wide_cmp_lt_signed: signed a < b ──────────────────────────────────
         # Sign bit at position src_width-1. Same-sign case reduces to unsigned cmp.
+        # Words are masked to src_width before comparing: callers (e.g. a
+        # sign-extending loader filling scratch words out to the full buffer
+        # size rather than just src_width) may leave bits above src_width set
+        # in a way that isn't consistent between operands, which would corrupt
+        # a raw word-magnitude comparison even though those bits are outside
+        # the value both operands actually represent.
         L += [
             "cdef inline void wide_cmp_lt_signed(",
             "    unsigned long long *dv, unsigned long long *dm,",
             "    unsigned long long *av, unsigned long long *am,",
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int src_width) noexcept nogil:",
-            "    cdef int i, has_x = 0, sign_word, sign_bit_idx, j",
-            "    cdef unsigned long long a_sign, b_sign",
+            "    cdef int i, has_x = 0, sign_word, sign_bit_idx, j, remaining_w",
+            "    cdef unsigned long long a_sign, b_sign, tail_mask, aw, bw",
             "    for i in range(n):",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
@@ -852,24 +858,29 @@ class _GenWideSectionsMixin:
             "        return",
             "    j = n - 1",
             "    while j >= 0:",
-            "        if av[j] < bv[j]:",
+            "        remaining_w = src_width - j * 64",
+            "        tail_mask = _word_mask64(remaining_w)",
+            "        aw = av[j] & tail_mask",
+            "        bw = bv[j] & tail_mask",
+            "        if aw < bw:",
             "            dv[0] = 1",
             "            return",
-            "        if av[j] > bv[j]:",
+            "        if aw > bw:",
             "            return",
             "        j -= 1",
             "",
         ]
 
         # ── wide_cmp_le_signed: signed a <= b ─────────────────────────────────
+        # See wide_cmp_lt_signed above for why words are masked to src_width.
         L += [
             "cdef inline void wide_cmp_le_signed(",
             "    unsigned long long *dv, unsigned long long *dm,",
             "    unsigned long long *av, unsigned long long *am,",
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int src_width) noexcept nogil:",
-            "    cdef int i, has_x = 0, sign_word, sign_bit_idx, j",
-            "    cdef unsigned long long a_sign, b_sign",
+            "    cdef int i, has_x = 0, sign_word, sign_bit_idx, j, remaining_w",
+            "    cdef unsigned long long a_sign, b_sign, tail_mask, aw, bw",
             "    for i in range(n):",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
@@ -886,9 +897,13 @@ class _GenWideSectionsMixin:
             "        return",
             "    j = n - 1",
             "    while j >= 0:",
-            "        if av[j] < bv[j]:",
+            "        remaining_w = src_width - j * 64",
+            "        tail_mask = _word_mask64(remaining_w)",
+            "        aw = av[j] & tail_mask",
+            "        bw = bv[j] & tail_mask",
+            "        if aw < bw:",
             "            return",
-            "        if av[j] > bv[j]:",
+            "        if aw > bw:",
             "            dv[0] = 0",
             "            return",
             "        j -= 1",
