@@ -2377,3 +2377,178 @@ exactly 64 silently became a shift by 0. Fixed in
 `>>`/`<<`/`>>>` with an explicit `shift_amount >= 64` check before emitting
 the native shift. Reference, VM, and vm-fast were unaffected (Python's
 `<<`/`>>` have no such wraparound).
+
+**Sixteenth wave (August 2026, work plan item 3.4 Phase 5) -- sequential
+multi-statement block fuzzing (data-dependent local temps) surfaces four
+more distinct signedness/width bugs, all pre-existing and only newly
+REACHABLE by generated expressions nesting arbitrary sub-trees as operands
+of `+`/`-`/`*`/`%`/bitwise ops for the first time (the same "phase N's
+grammar addition surfaces phase-(N-1)-and-earlier gaps" pattern as every
+prior wave), not newly introduced by Phase 5 itself**: extended
+`test_differential_statements.py` with `_SeqState`/`_gen_seq_stmt` to
+generate `begin...end` blocks of 2-3 statements where a later statement's
+expression can read a local temp an earlier statement in the same block
+just assigned (including, deliberately, the nonblocking `<=` case, so a
+later read sees the OLD pre-block value per NBA staging semantics), and
+threaded a new `extra_signals` parameter through `test_differential.py`'s
+`_gen_leaf`/`_gen_expr` so those temps are eligible operands anywhere in
+the generated expression tree, not just as the immediate assignment RHS.
+Default-scale runs stayed green throughout; stress-testing at 150 cases
+across the 14-seed rotation (5 carried over from phases 3/4 plus 9 fresh),
+plus the closing full fast-suite regression (which caught a real design
+exercising exactly the shape a first attempt at fixing one of these had
+gotten subtly wrong), surfaced five distinct bugs, all confirmed against
+Icarus and/or cross-engine agreement:
+
+- **`+`/`-`/`*` used each operand's own individual signedness instead of
+  the operator's combined signedness** (`sim/evaluator.py`,
+  `sim/vm/compiler.py`, `sim/compiled/_expr_emitter.py`,
+  `sim/compiled/_wide_emitter.py`) -- every engine special-cased `/`/`%`
+  alone to widen both operands using the operator's own COMBINED
+  signedness (signed only if both operands are individually signed, per
+  IEEE 1364-2005 §5.5.1) before combining, but let `+`/`-`/`*` widen each
+  operand using its OWN individual signedness instead, on the theory that
+  modular arithmetic is "residue-safe" -- invariant to how each operand
+  happens to be extended, as long as its value is "correct" at the target
+  width. That reasoning is wrong: sign- vs. zero-extending a signed
+  operand produces a genuinely DIFFERENT integer value in the first place
+  (a 1-bit signed `1` means -1 sign-extended but +1 zero-extended), and
+  `(a - b) mod N` differs depending on which of those two values `a` is
+  taken to be -- "residue-safe" only holds once each operand's value is
+  already fixed, it says nothing about which extension choice fixes it
+  correctly. Confirmed against Icarus for `(sa - ub)` with `sa` a signed
+  1-bit register holding `1` (i.e. -1) and `ub` an unsigned 2-bit `0`:
+  Icarus gives `1` (zero-extending `sa` per the pair's combined-unsigned
+  type), not `-1`/`3` (sign-extending `sa` on its own). Fixed by unifying
+  `+`/`-`/`*`'s handling with `/`/`%`'s in all four engines, forcing the
+  operator's own combined signedness into both operands' extension,
+  propagating into whatever nested operator either operand is (mirroring
+  how a ternary's combined signedness overrides its branches).
+- **Compiled `wide_mul`/`wide_add`/`wide_sub`'s x-propagation missed
+  operand bits truncated below the operator's own natural width**
+  (`sim/compiled/_wide_emitter.py`) -- `op_width` (the width at which
+  operand scratch arrays get filled before the primitive runs) was
+  capped at `dst_width` for `+`/`-`/`*` (only `/`/`%` used the wider
+  `max(dst_width, operand widths)`). The VALUE itself is genuinely
+  truncation-safe (modular arithmetic commutes with truncation), but the
+  primitive's `has_x` check is NOT: it scans exactly `op_width` bits of
+  each filled operand, so an x bit living entirely above the truncation
+  point was invisible to the check even though Verilog's conservative
+  "any x anywhere in either operand -> x result" rule doesn't care
+  whether that bit would have affected the truncated value -- under-
+  counting x-propagation, producing a determinate result where the
+  reference oracle (and Icarus) correctly produced x. Fixed by extending
+  `op_width` to `max(dst_width, self_width(left), self_width(right))` for
+  `+`/`-`/`*` too, matching `/`/`%`; the downstream `prim_width` (already
+  `min(op_width, dst_width) = dst_width` once `op_width >= dst_width`)
+  needed no change -- the wider `op_width` only affects how the operand
+  scratch arrays get *filled*, not how much of them the value computation
+  reads.
+- **Bitwise ops (`&`/`|`/`^`/`~^`/`^~`) leaked an unrelated outer
+  `signed_override` into a nested operand's own signedness decision**
+  (`sim/evaluator.py`, `sim/vm/compiler.py`,
+  `sim/compiled/_expr_emitter.py`, `sim/compiled/_wide_emitter.py`) --
+  the general shape behind several bugs already fixed in earlier waves
+  (`>>`'s forced-unsigned leaking into a nested `&`; a ternary's combined
+  signedness leaking into a nested arithmetic branch; a wide comparison's
+  `$signed()`-unwrap leaking into a compound argument), newly found for
+  `%`'s divisor-widening override specifically: a bitwise op's combined
+  signedness is entirely self-contained (governed solely by its own two
+  operands' types), unlike `>>`'s left operand or a ternary branch, which
+  genuinely need an outer decision to reach in -- an incoming
+  `signed_override` is meant only to control how the bitwise op's
+  *already-computed result* gets read by whatever outer context requested
+  it, never how its own operands get computed. Confirmed against Icarus
+  for `(|a3[45]) % (($signed(a4[23]) - a0) | 1)`: the dividend's unsigned
+  reduction forces `%`'s own combined decision unsigned, and every engine
+  was forwarding that `False` decision straight through the divisor's `|`
+  into the divisor's own nested `-`, even though both of the `-`'s
+  operands are genuinely, individually signed -- wrongly zero-extending
+  `a0` instead of sign-extending it, corrupting the divisor's own
+  computed value from `1` to a huge wraparound magnitude. Fixed in all
+  four engines' bitwise-op branch by no longer forwarding the incoming
+  override into either operand's own recursive evaluation/compilation/
+  emission (each operand now widens using its own individually-computed
+  signedness instead); only the bitwise op's own RESULT-level extension
+  still consults it.
+- **Compiled engine (narrow path): re-sign-extending a nested context-
+  determined operand by its *self-determined* width corrupted an already
+  wider-computed value** (`sim/compiled/_expr_emitter.py`) -- found while
+  fixing the bitwise-op leak above; fixing that bug exposed this second,
+  previously-latent bug in the same repro (previously masked because the
+  leaked `signed_override` happened to evaluate `False` in that specific
+  case, disabling this buggy code path entirely). `_emit_binary`'s post-
+  operand-emission step (`if op_width > lw: left = _sign_ext(left, lw)`,
+  `lw = self._expr_width(expr.left)`) re-sign-extends an operand's
+  already-generated Cython value string using `_expr_width()` -- a
+  STATIC, AST-shape-based self-width estimate -- whenever the caller's
+  `op_width` exceeds it. That's correct for a LEAF operand (Identifier/
+  Literal), whose own internal emission naturally stops at its
+  self-width, but for a NESTED context-determined operator (another
+  `+`/`-`/`*`/bitwise BinaryOp) the earlier recursive `_emit_expr`
+  call already computed and masked that operand's value DIRECTLY at the
+  wider `op_width` (this codebase's arithmetic/bitwise operand handling
+  deliberately computes at the target width throughout, since e.g. unary
+  `-` doesn't commute with extension) -- re-sign-extending that already-
+  `op_width` value using the narrower self-width `lw` reinterprets an
+  arbitrary INTERIOR bit of the correctly-computed value as its sign bit.
+  Confirmed against Icarus for the same `(|a3[45]) % (($signed(a4[23]) -
+  a0) | 1)` repro: the nested `-` was already correctly computed at the
+  `|`'s 32-bit `op_width`, but this step's `lw=1` (the `-` node's own
+  static self-width) then `_sign_ext`'d that already-32-bit value as if
+  bit 0 were its sign bit. Fixed by restricting this re-sign-extension
+  step to `+`/`-`/`*`/`/`/`%` only (which genuinely need it -- C's raw
+  arithmetic on a native register needs the operand's sign truly
+  replicated up the whole register for correct carry/borrow/division
+  behavior, not just masked to width); bitwise ops don't need it at all,
+  since their `core` gets masked to `op_width` again immediately after
+  combining regardless. `_wide_emitter.py` was never affected: its
+  scratch-array design fills each operand directly at the requested width
+  via the recursive call alone, with no analogous separate re-extension
+  step to get wrong.
+- **Compiled engine: `>>`'s logical-shift core didn't mask the left
+  operand's raw C register before shifting, then a first attempt at
+  fixing that masked it to the wrong width** (`sim/compiled/
+  _expr_emitter.py`) -- two bugs found back-to-back, the second only via
+  the full fast-suite regression (`tests/test_pulp_axi_examples.py`)
+  AFTER the rest of this wave was believed complete. Original bug: `>>`'s
+  core computation shifted the left operand's raw C `long long` value
+  directly, but a narrower signed operand's `_sign_ext` representation
+  fills the WHOLE native register unbounded by the operand's own true
+  width (most other consumers either further widen from there or mask
+  the final result afterward) -- a logical (zero-fill) right shift must
+  not let those extra high "padding" bits participate. Confirmed against
+  Icarus for `($signed(a0) >> a0)` with `a0` a signed 1-bit register
+  holding `1` (i.e. -1) used as an `if` condition: `-1 >> 1` (logical)
+  must give `0`, but shifting the unmasked full-64-bit sign-extension of
+  -1 gave a large nonzero value, flipping the condition. First fix
+  attempt: mask the left operand to `op_width` (the outer caller's
+  requested width) before shifting -- fixed the original repro (where
+  the operand's own natural width happened to equal `op_width`) but
+  introduced a NEW regression, caught by the full-suite run: `op_width`
+  for `>>` is just the outer context's requested width, which can be
+  NARROWER than the operand's own true width whenever the `>>` result is
+  immediately truncated by an outer cast (`sel_t'(addr >> SelOffset)`
+  requesting a 1-bit result from a 32-bit address) -- masking the address
+  down to that same 1 bit BEFORE shifting discarded real address bits
+  the shift still needed to correctly extract the upper ones. Confirmed
+  against Icarus (cross-engine, and via `git stash` bisection proving
+  this was a same-session regression, not pre-existing) for the PULP
+  AXI-Lite data-width upsizer's write-select logic
+  (`examples/pulp/axi/axi_lite_dw_converter`): masking a 32-bit AXI
+  address down to `sel_t`'s own 1-bit result width before the `>>`
+  zeroed the address's bit 1 before it could ever reach the output,
+  wrongly computing `wr_sel_q = 0` instead of `1` for address `0x2` and
+  silently disabling a downstream strobe left-shift that depended on it.
+  Final fix: mask to `max(op_width, self._expr_width(expr.left))` instead
+  -- widening (never narrowing) the naive `op_width`-only mask to also
+  cover the operand's own natural self-determined width, so the mask
+  only ever strips genuine sign-extension padding, never bits that are
+  part of the operand's real value.
+
+Verified via all 14 statement-fuzzer seeds (150 cases each, 8/8 batches,
+`VERIFORGE_DIFF_STMT_COMPILED=1`), all 8 expression-tree fuzzer seeds
+(150 cases each, 15/15 batches, `VERIFORGE_DIFF_COMPILED=1`),
+`test_power_operator.py` (60 passed, 1 xfail, unaffected), and a final
+full fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n 8`,
+~30 min, no regressions).

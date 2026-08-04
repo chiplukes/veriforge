@@ -454,14 +454,39 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # width). op_width itself must still come from each
                 # operand's OWN self-determined width (not the outer
                 # `width`), per the docstring above.
+                #
+                # Each operand's OWN extension (both the recursive `eval()`
+                # call and the subsequent "widen to op_width" step) must
+                # NEVER consult the INCOMING `signed_override` -- a bitwise
+                # op's own combined signedness is entirely SELF-CONTAINED
+                # (determined solely by its own two operands' individual
+                # types), unlike `>>`'s left operand or a ternary branch,
+                # which genuinely need an outer decision to reach in. An
+                # incoming override here is meant for a DIFFERENT purpose
+                # -- e.g. `%`'s divisor-widening forcing `signed_override=
+                # False` because the DIVIDEND happens to be unsigned -- and
+                # must only govern how THIS bitwise op's already-computed
+                # RESULT gets read/extended by that outer context (the
+                # `if width and result.width != width` step below), not
+                # leak into a NESTED, unrelated sub-expression's (e.g. a
+                # `-` operand's) own independent signed/unsigned
+                # computation. Confirmed against Icarus for `(|a3[45]) %
+                # (($signed(a4[23]) - a0) | 1)`: the dividend's unsigned
+                # reduction forces `%`'s combined decision unsigned,
+                # correctly governing how the FINAL divisor value gets
+                # read, but forcing that same `False` into the `-` node
+                # (both of whose own operands are genuinely, individually
+                # signed) wrongly zero-extended `a0` instead of sign-
+                # extending it, corrupting the divisor's own computed
+                # value from 1 to a huge wraparound magnitude.
                 op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
-                left = self.eval(expr.left, ctx, op_width, signed_override)
-                right = self.eval(expr.right, ctx, op_width, signed_override)
+                left = self.eval(expr.left, ctx, op_width)
+                right = self.eval(expr.right, ctx, op_width)
                 if left.width != op_width:
-                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                    eff_signed = _expr_signed(expr.left, ctx)
                     left = left.sign_extend(op_width) if eff_signed else left.resize(op_width)
                 if right.width != op_width:
-                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.right, ctx)
+                    eff_signed = _expr_signed(expr.right, ctx)
                     right = right.sign_extend(op_width) if eff_signed else right.resize(op_width)
                 result = _eval_binary_op(op, left, right)
                 if width and result.width != width:
@@ -535,67 +560,67 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # signedness for that (IEEE 1364-2005 §5.5.2), exactly like
                 # `$signed`/`$unsigned` already override only themselves.
                 target = max(width, _expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
-                if op in ("/", "%"):
-                    # Division/modulus is NOT "residue-safe" like +/-/*
-                    # (whose modular arithmetic gives the same answer
-                    # regardless of whether each operand was individually
-                    # sign- or zero-extended, as long as each operand's OWN
-                    # bit pattern is correct at the target width): the
-                    # actual division ALGORITHM depends on whether the
-                    # operand is read as a two's-complement negative value,
-                    # and that decision must be made UNIFORMLY across both
-                    # operands (IEEE 1364-2005 §5.5.1: signed division only
-                    # when BOTH operands are signed). Extending each
-                    # operand by its own individual signedness -- correct
-                    # for +/-/* -- is wrong here: a signed operand paired
-                    # with an unsigned one must have BOTH read as unsigned
-                    # (the division dispatch below can only be unsigned in
-                    # that case), not the signed one sign-extended and then
-                    # misread as a huge unsigned magnitude by an unsigned
-                    # division. `signed_override=both_signed` is forced
-                    # into both recursive `eval()` calls so this combined
-                    # decision -- not each operand's own type -- governs
-                    # every extension nested within either operand too
-                    # (mirrors how a ternary's combined signedness
-                    # overrides its branches); a `$signed`/`$unsigned` cast
-                    # reached within either operand still wins over this
-                    # override, exactly like every other signed_override
-                    # use in this function. Confirmed wrong against Icarus
-                    # for `a4 / ((~^a1[0]) | 1)` (a4 signed and negative,
-                    # divisor an unsigned reduction-derived expression):
-                    # sign-extending `a4` alone before an unsigned division
-                    # corrupted the dividend into a huge positive
-                    # magnitude.
-                    both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
-                    left = self.eval(expr.left, ctx, target, both_signed)
-                    right = self.eval(expr.right, ctx, target, both_signed)
-                    # Only ever WIDEN here, never narrow -- `target` is a
-                    # floor computed partly from `_expr_self_width`, a
-                    # STATIC AST-shape-based estimate that can UNDER-
-                    # estimate an operand's true width (e.g. a RangeSelect
-                    # whose msb/lsb aren't literal constants falls back to
-                    # a bare `1`); the operand's own `eval()` call above
-                    # already computed its real, correct width dynamically
-                    # and may legitimately be wider than this floor.
-                    # `.resize()`/`.sign_extend()` to a narrower width
-                    # would actively mask away real bits, not just
-                    # relabel it. Mirrors the identical fix in the
-                    # comparison branch above; see its docstring for the
-                    # concrete Icarus-confirmed repro (ibex PMP TOR
-                    # address comparator).
-                    if left.width < target:
-                        left = left.sign_extend(target) if both_signed else left.resize(target)
-                    if right.width < target:
-                        right = right.sign_extend(target) if both_signed else right.resize(target)
-                else:
-                    left = self.eval(expr.left, ctx, target, None)
-                    right = self.eval(expr.right, ctx, target, None)
-                    if left.width < target:
-                        eff_signed = _expr_signed(expr.left, ctx)
-                        left = left.sign_extend(target) if eff_signed else left.resize(target)
-                    if right.width < target:
-                        eff_signed = _expr_signed(expr.right, ctx)
-                        right = right.sign_extend(target) if eff_signed else right.resize(target)
+                # `+ - * / %` ALL need the OPERATOR's combined signedness
+                # (signed only if BOTH operands are signed, IEEE 1364-2005
+                # §5.5.1) to govern EVERY operand's own extension here --
+                # not each operand's own individual declared type. This
+                # file used to special-case `/`/`%` alone for this,
+                # reasoning that `+`/`-`/`*` are "residue-safe" (their
+                # modular arithmetic gives the same answer regardless of
+                # HOW each operand was individually extended, as long as
+                # each operand's bit pattern is "correct" at the target
+                # width) -- but that reasoning is simply wrong: sign- vs
+                # zero-extending a signed operand produces a DIFFERENT
+                # integer value (e.g. a 1-bit signed `1` means -1 sign-
+                # extended but +1 zero-extended), and `(a - b) mod N`
+                # genuinely differs depending on WHICH of those two
+                # different values `a` is taken to be -- "residue-safe"
+                # only holds once each operand's value is ALREADY fixed,
+                # it says nothing about which extension choice fixes it
+                # correctly in the first place. Per §5.5.1, when a signed
+                # operand is paired with an unsigned one in `+`/`-`/`*`,
+                # the WHOLE operation reads as unsigned, and the signed
+                # operand's bit pattern must be read as its RAW unsigned
+                # magnitude (zero-extended), not resurrected as negative
+                # via its own declared type. Confirmed against Icarus for
+                # `(sa - ub)` with `sa` a signed 1-bit register holding `1`
+                # (i.e. -1) and `ub` an unsigned 2-bit `0`: Icarus gives
+                # `1` (zero-extending `sa` to +1 first, per the pair's
+                # combined-unsigned type), not `-1`/`3` (sign-extending
+                # `sa` on its own, what individual-signedness extension
+                # computed here before this fix) -- the same bug shape
+                # already fixed for `/`/`%` above, comparisons, and
+                # bitwise ops, just missed for the other three arithmetic
+                # operators specifically because of this flawed argument.
+                # `signed_override=both_signed` is forced into both
+                # recursive `eval()` calls so this combined decision --
+                # not each operand's own type -- governs every extension
+                # nested within either operand too (mirrors how a
+                # ternary's combined signedness overrides its branches); a
+                # `$signed`/`$unsigned` cast reached within either operand
+                # still wins over this override, exactly like every other
+                # signed_override use in this function.
+                both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
+                left = self.eval(expr.left, ctx, target, both_signed)
+                right = self.eval(expr.right, ctx, target, both_signed)
+                # Only ever WIDEN here, never narrow -- `target` is a
+                # floor computed partly from `_expr_self_width`, a
+                # STATIC AST-shape-based estimate that can UNDER-
+                # estimate an operand's true width (e.g. a RangeSelect
+                # whose msb/lsb aren't literal constants falls back to
+                # a bare `1`); the operand's own `eval()` call above
+                # already computed its real, correct width dynamically
+                # and may legitimately be wider than this floor.
+                # `.resize()`/`.sign_extend()` to a narrower width
+                # would actively mask away real bits, not just
+                # relabel it. Mirrors the identical fix in the
+                # comparison branch above; see its docstring for the
+                # concrete Icarus-confirmed repro (ibex PMP TOR
+                # address comparator).
+                if left.width < target:
+                    left = left.sign_extend(target) if both_signed else left.resize(target)
+                if right.width < target:
+                    right = right.sign_extend(target) if both_signed else right.resize(target)
             # Detect signed comparison: both operands must be signed
             if op in ("<", "<=", ">", ">=") and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
                 result = _eval_signed_cmp(op, left, right)

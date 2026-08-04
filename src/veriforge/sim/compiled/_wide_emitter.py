@@ -3936,29 +3936,55 @@ class _WideEmitterMixin:
                 # OPERANDS before combining -- computing at a narrower
                 # enclosing context would silently drop upper operand bits
                 # (mirrors `_expr_emitter.py`'s `_NATURAL_WIDTH_OPS`
-                # handling). `+`/`-`/`*` are context-determined and safe to
-                # compute directly at `dst_width` even when an operand's
-                # own natural width exceeds it: modular arithmetic is
-                # invariant to truncating each operand first, since
-                # `(a+b) mod N == ((a mod N) + (b mod N)) mod N` holds
-                # unconditionally. `/`/`%` are NOT residue-safe the same
-                # way -- `(a/b) mod N != ((a mod N)/(b mod N)) mod N` in
-                # general, so truncating the DIVIDEND to `dst_width` before
-                # dividing changes the quotient whenever the dividend's own
-                # natural width exceeds `dst_width` (mirrors the shift
-                # left-operand's identical `l_dst_width = max(lw,
-                # dst_width)` widening a few lines below, for the same
-                # underlying reason: a context-determined operator must
-                # WIDEN to fit an operand that's naturally larger than the
-                # context, never silently truncate it first). Confirmed
-                # against Icarus (cross-engine) for `(a wide, >dst_width
-                # concatenation) / (a6[44:0] | 1)`: the concatenation's own
-                # true width (202 bits) exceeded the assignment's 96-bit
-                # context, and computing it AT 96 bits before dividing
-                # discarded the high bits the correct quotient depended on.
+                # handling). `+`/`-`/`*`/`/`/`%` ALL need the same widening
+                # treatment, for two SEPARATE reasons depending on the
+                # operator:
+                #
+                # `/`/`%` are not "residue-safe" for VALUE at all --
+                # `(a/b) mod N != ((a mod N)/(b mod N)) mod N` in general,
+                # so truncating the DIVIDEND to `dst_width` before dividing
+                # changes the quotient whenever the dividend's own natural
+                # width exceeds `dst_width`.
+                #
+                # `+`/`-`/`*` ARE residue-safe for VALUE (`(a+b) mod N ==
+                # ((a mod N) + (b mod N)) mod N` holds unconditionally, and
+                # likewise for `*`) -- but they are NOT safe for X-
+                # PROPAGATION, a separate property this file's comments
+                # previously conflated with value-safety. Each primitive's
+                # `has_x` check (`wide_add`/`wide_sub`/`wide_mul`'s own
+                # "any x bit ANYWHERE in either operand makes the ENTIRE
+                # result x" rule) must see the FULL width of each operand
+                # to correctly discover x bits that live ABOVE `dst_width`
+                # -- an x bit that only exists in an operand's own upper,
+                # value-truncated-away bits is INVISIBLE to a `has_x` check
+                # that only ever received the low `dst_width` bits, even
+                # though real Verilog's conservative x-propagation rule
+                # doesn't care whether that x bit would have affected the
+                # truncated VALUE or not. Confirmed against Icarus (cross-
+                # engine) for `(0 * {3{{(ambiguous-condition ternary), (176
+                # known bits)}}})` widened into a 96-bit destination: the
+                # replication's own natural width (723 bits) puts its
+                # ambiguous-ternary-derived x bits entirely above bit 176
+                # of each 241-bit unit, which a 96-bit-truncated operand
+                # computation never touches at all -- `has_x` saw a clean
+                # (never-computed, so implicitly all-zero) upper region and
+                # missed the x that a full-width computation would have
+                # found, wrongly computing a definite `0` (via the OTHER
+                # operand being definitely all-zero) instead of Icarus's
+                # all-x. `(a wide, >dst_width concatenation) / (a6[44:0] |
+                # 1)` is the original repro for the `/`/`%` value-safety
+                # issue: the concatenation's own true width (202 bits)
+                # exceeded the assignment's 96-bit context, and computing
+                # it AT 96 bits before dividing discarded the high bits the
+                # correct quotient depended on. Mirrors the shift left-
+                # operand's identical `l_dst_width = max(lw, dst_width)`
+                # widening a few lines below, for the same underlying
+                # reason: a context-determined operator must WIDEN to fit
+                # an operand that's naturally larger than the context,
+                # never silently truncate it first.
                 if op in _NATURAL_WIDTH_OPS:
                     op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
-                elif op in ("/", "%"):
+                elif op in ("+", "-", "*", "/", "%"):
                     op_width = max(dst_width, self._expr_width(expr.left), self._expr_width(expr.right))
                 else:
                     op_width = dst_width
@@ -3972,8 +3998,23 @@ class _WideEmitterMixin:
                 # the operator's OWN combined signedness (both operands
                 # signed) is false -- extending each operand by its own
                 # individual signedness would let a signed operand's
-                # sign-extension leak in as a huge unsigned magnitude.
-                # `div_mod_override` is threaded into BOTH operands'
+                # sign-extension leak in as a huge unsigned magnitude. This
+                # combined-signedness requirement is NOT unique to `/`/`%`
+                # -- `+`/`-`/`*` need it too, for a DIFFERENT reason than
+                # the op_width-truncation-safety comment above: that
+                # comment is about safely TRUNCATING an already-correctly-
+                # signed/zero-extended operand to a narrower `op_width`
+                # (a genuinely truncation-invariant property of modular
+                # arithmetic), not about which choice (sign- vs zero-
+                # extend) correctly WIDENS a narrower operand into
+                # `op_width` in the first place -- those are two different
+                # questions, and conflating them (the "each operand's own
+                # individual signedness is fine for +/-/*" reasoning this
+                # codebase used to rely on here) is wrong: sign- vs zero-
+                # extending a signed operand produces a DIFFERENT integer
+                # value, and `(a - b) mod N` genuinely differs depending on
+                # WHICH of those two different values `a` is taken to be.
+                # `combined_override` is threaded into BOTH operands'
                 # scratch computation, propagating into whatever nested
                 # operator either one is (exactly like a ternary's combined
                 # signedness overrides its branches), so this combined
@@ -3982,24 +4023,50 @@ class _WideEmitterMixin:
                 # identical fix in `sim/evaluator.py`/`_expr_emitter.py`;
                 # confirmed wrong (cross-engine, against the reference
                 # oracle) for `a3 % (a0 | 1))` (a0 a signed 1-bit register
-                # nested inside the divisor's own `|`).
-                div_mod_override = (
-                    (
-                        signed_override
-                        if signed_override is not None
-                        else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
-                    )
-                    if op in ("/", "%")
-                    else signed_override
-                )
+                # nested inside the divisor's own `|`), and (cross-engine,
+                # against Icarus) `(sa - ub)` with `sa` a signed 1-bit
+                # register holding `1` (i.e. -1) and `ub` an unsigned 2-bit
+                # `0`: Icarus gives `1` (zero-extending `sa` per the
+                # pair's combined-unsigned type), not `-1`/`3`.
+                # Bitwise ops (&,|,^,~^,^~) are excluded from the
+                # `signed_override`-forwarding used below for +/-/*//: a
+                # bitwise op's own combined signedness is entirely SELF-
+                # CONTAINED (governed solely by its own two operands' types),
+                # unlike +/-/*//, which genuinely need an outer decision
+                # (e.g. a ternary branch, or a `%`'s divisor-widening
+                # override) to reach in. Forwarding the incoming
+                # `signed_override` here would leak an unrelated outer
+                # decision into a NESTED, structurally-unrelated operand's
+                # own independent signed/unsigned computation -- exactly the
+                # bug shape already fixed in `sim/evaluator.py`'s mirror-
+                # image branch (see its docstring for the concrete Icarus-
+                # confirmed repro, `(|a3[45]) % (($signed(a4[23]) - a0) |
+                # 1)`: the dividend's unsigned reduction forces `%`'s
+                # combined decision unsigned, but forwarding that `False`
+                # into the nested `-`'s own operands wrongly zero-extended
+                # `a0` instead of sign-extending it). Passing `None` here
+                # lets `expr.left`/`expr.right` each widen to `op_width`
+                # using their OWN self-determined signedness (computed
+                # internally by the recursive call itself, same as any
+                # other unforced call) instead of the outer override; the
+                # RESULT-level extension below (`if op_width < dst_width`)
+                # still correctly consults `signed_override` for how the
+                # bitwise op's OWN already-computed result should be read
+                # by whatever outer context requested it.
+                if op in ("&", "|", "^", "~^", "^~"):
+                    combined_override = None
+                elif signed_override is not None:
+                    combined_override = signed_override
+                else:
+                    combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
                 llines = self._emit_wide_expr_to_scratch(
-                    expr.left, lslot, n_words, op_width, indent, signed_override=div_mod_override
+                    expr.left, lslot, n_words, op_width, indent, signed_override=combined_override
                 )
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
                 rlines = self._emit_wide_expr_to_scratch(
-                    expr.right, rslot, n_words, op_width, indent, signed_override=div_mod_override
+                    expr.right, rslot, n_words, op_width, indent, signed_override=combined_override
                 )
                 if rlines is None:
                     self._free_scratch(lslot, rslot)

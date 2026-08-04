@@ -1493,9 +1493,171 @@ seeds (150 cases each, 30/30 batches, `_STMT_COMPILED=1`), the original
 300-case expression-tree fuzzer (15/15 batches), `test_power_operator.py`
 (60 passed, 1 xfail, unaffected), and a final full fast-suite regression
 (7107 passed, 1 xfailed, 0 failed, `-n 8`, ~29.5 min, no regressions).
-Phases 5+ (`forever`/`repeat` loops, `break`/`continue`/`disable`,
-`unique`/`priority` case modifiers, multiple loop variables) remain
-unscheduled future work.
+Phase 5 (below) is now implemented; `forever`/`repeat` loops,
+`break`/`continue`/`disable`, `unique`/`priority` case modifiers, and
+multiple loop variables remain deferred future work (see Phase 5's own
+"Deferred / future work" note for why they were reprioritized below
+sequential-statement fuzzing).
+
+**Phase 5 — sequential multi-statement blocks with data dependencies**:
+every phase before this one (1-4) generates
+exactly ONE assignment target per rendered tree, and every leaf
+expression reads only from the 8 fixed input ports — never from a value
+a PRIOR statement in the same procedural block just wrote. That's a real
+gap, and arguably a bigger one than `forever`/`repeat` (considered and
+deprioritized — see below): a `begin...end` block with several
+sequential statements, later ones depending on earlier ones' results
+(`tmp = a + b; y = tmp * c;`), is the single most common shape in real
+combinational/sequential RTL, and the four engines implement procedural-
+block execution and NBA staging via structurally different mechanisms
+(reference: a Python AST walk; vm/vm-fast: a bytecode stack machine;
+compiled: generated imperative Cython) — exactly the kind of thing
+likely to disagree on ordering/visibility, and never exercised.
+
+**Goal**: generate procedural blocks with 2-3 sequential statements
+where a later statement's expression can read a LOCAL variable an
+earlier statement in the same block just assigned — including,
+deliberately, the nonblocking (`<=`) case, where a later statement
+reading that variable must see the OLD (pre-block) value since the NBA
+write hasn't taken effect yet. This is the most-tested-adjacent, least-
+tested-directly semantic in the whole harness so far.
+
+**Design**:
+1. New per-render "local temp" pool: each temp gets a fresh name
+   (`_tmp{case_idx}_{c,f}{n}`, mirroring `_LoopState`'s existing
+   `_li{case_idx}_{c,f}{n}` per-case/per-comb-or-ff separation, since a
+   variable can't be procedurally driven by two different `always`
+   blocks), a random width from `test_differential.py`'s existing
+   `_WIDTHS` list, and random signedness (same 50/50 convention) —
+   declared once at module scope as `reg [signed] [W-1:0] name;`,
+   collected the same way `_LoopState.decls` already is.
+2. New `_SeqState` dataclass (parallel to `_LoopState`): tracks the
+   temp-name-and-width list generated SO FAR within one render, so a
+   later statement's expression generation can reference an EARLIER
+   temp (never itself or a later one — matches real sequential
+   ordering).
+3. Extend `test_differential.py`'s `_gen_leaf`/`_gen_expr` with an
+   optional `extra_signals: Sequence[tuple[str, int, bool]] = ()`
+   parameter, appended to the `FIXED_SIGNALS` choice pool inside
+   `_gen_leaf`. Defaulting to `()` is a no-op for every existing call
+   site (including phases 1-4's own `td._gen_expr(rng, td._MAX_DEPTH)`
+   calls) — verify this by confirming `test_differential.py`'s own
+   generated cases are byte-identical before/after.
+4. New `_gen_seq_stmt`: a `begin...end` block of 2-3 statements. Each of
+   the first N-1 assigns a fresh temp via `_SeqState`, using
+   `td._gen_expr(rng, td._MAX_DEPTH, extra_signals=seq.available)` (so
+   it can read earlier temps in the SAME sequence) and the SAME
+   assignment operator (`op`) as the enclosing render — deliberate, so
+   the ff-phase (`<=`) render exercises the stale-read semantic above.
+   The LAST statement recurses into the EXISTING `_gen_stmt` (still
+   possibly a leaf/if/case/loop), also given `extra_signals=seq.available`
+   so the sequence's final write to `target` can depend on everything
+   computed earlier in the block.
+5. Wire `_gen_seq_stmt` into `_gen_stmt`'s dispatch as a new eligible
+   branch (`_STMT_SEQ_PROB`, same shape as `_STMT_CASE_PROB`/
+   `_STMT_LOOP_PROB`), threading a `_SeqState` (starting empty) alongside
+   the existing `_LoopState` through the whole recursion for one render
+   — a NESTED `_gen_seq_stmt` (a sequence inside an if-arm inside
+   another sequence) accumulates more temps into the SAME state.
+6. `_build_batch_module`: fold `_SeqState.decls` into the same
+   `decl_lines` list that already gathers `_LoopState.decls` — no other
+   module-assembly change needed.
+7. No new termination/determinism risk: fixed statement count per
+   sequence, same finite-tree-size argument already used for loops/case
+   nesting; the only new resource-growth axis (temp count) is bounded by
+   `_STMT_MAX_DEPTH` × max sequence length.
+
+**Open questions** (resolve before/while implementing, not blocking the
+scope itself): sequence length (proposed: 2-3, matching the existing
+arm-count/case-item-count conservatism, growable later); whether to
+generate the NBA stale-read case from the start (recommended — it's the
+most valuable, least-tested case, but the EXPECTED value must be
+reasoned through carefully by construction rather than trusted blindly
+from the reference engine, the same discipline phase 2's NBA work
+already required); temp widths drawn from the same `_WIDTHS` list as the
+fixed signals (recommended, for consistency with everything already
+stress-tested) vs. a separate distribution.
+
+**Steps**: (1) land the `extra_signals` param, verify no behavior change
+for existing callers; (2) add `_SeqState`/`_gen_seq_stmt`, wire into
+`_gen_stmt`, update `_build_batch_module`; (3) default-scale run green;
+(4) stress-test at 150 cases across the phase-3/4 seed rotation plus 2-3
+fresh seeds, fix/verify per the established Icarus + cross-engine +
+full-batch-regression methodology; (5) full fast-suite regression; (6)
+document results in `notes/known_issues.md` ("Sixteenth wave") and here,
+matching the existing per-phase format.
+**Accept**: default-scale run green; 150-case stress run green across
+5+ seeds; no regressions in the full fast suite; both docs updated with
+results.
+
+**Result** (August 2026): Built as specified. Added `_SeqState`
+(`tests/test_sim/test_differential_statements.py`) tracking the
+local-temp pool generated so far within one render, `_gen_seq_stmt`
+(a `begin...end` block of 2-3 statements, the first N-1 assigning fresh
+temps whose RHS can reference earlier temps in the same sequence via a
+new `extra_signals` parameter threaded through
+`test_differential.py`'s `_gen_leaf`/`_gen_expr`, the last recursing
+into the existing `_gen_stmt`), wired into `_gen_stmt`'s dispatch
+(`_STMT_SEQ_PROB = 0.3`) alongside the existing loop/case state. Temp
+assignments deliberately use the SAME operator (`=`/`<=`) as the
+enclosing render, exercising the NBA stale-read semantic for local
+(non-port) variables in the `<=` case. `extra_signals` defaults to `()`,
+confirmed a no-op for every pre-existing call site.
+
+Stress-testing at 150 cases across the 14-seed rotation (the 5 carried
+over from phases 3/4 plus 9 fresh: `999111`, `555000`, `888222`,
+`111333`, `314159`, `500500`, `42424242`, `13131313`, `90909090`)
+— together with the closing full fast-suite regression — surfaced five
+distinct bugs, all pre-existing (present before this phase's own
+changes, confirmed via `git stash` bisection where applicable) and only
+newly REACHABLE once generated expressions could nest arbitrary
+sub-trees as operands of `+`/`-`/`*`/`%`/bitwise ops, the same "phase N's
+grammar addition surfaces phase-(N-1)-and-earlier gaps" pattern as every
+prior phase: `+`/`-`/`*` using each operand's own individual signedness
+instead of the operator's IEEE 1364-2005 §5.5.1 combined signedness
+(fixed in all four engines); compiled `wide_mul`/`wide_add`/`wide_sub`'s
+x-propagation missing operand bits truncated below the operator's own
+natural width (fixed in `_wide_emitter.py`); bitwise ops leaking an
+unrelated outer `signed_override` (e.g. `%`'s divisor-widening decision)
+into a nested operand's own independent signedness computation (fixed in
+all four engines); found while fixing that leak (which had been masking
+it), the compiled narrow path re-sign-extending a nested context-
+determined operand using its STATIC self-determined width instead of the
+width it was actually computed at, corrupting an already-correct wider
+value (fixed in `_expr_emitter.py`); and compiled `>>`'s missing operand
+mask before shifting, whose FIRST fix attempt (mask to the outer
+requested width) itself regressed the PULP AXI-Lite data-width upsizer
+example (only caught by the closing full-suite run) by discarding real
+address bits whenever the `>>` result was immediately narrowed by an
+outer cast — corrected to mask by `max(outer width, the operand's own
+natural width)` instead. Full detail (root cause, Icarus repro, fix
+location) for each in `notes/known_issues.md`'s "Sixteenth wave" entry.
+
+Verified via all 14 statement-fuzzer seeds (150 cases each, 8/8 batches,
+`VERIFORGE_DIFF_STMT_COMPILED=1`), all 8 expression-tree fuzzer seeds
+(150 cases each, 15/15 batches, `VERIFORGE_DIFF_COMPILED=1`),
+`test_power_operator.py` (60 passed, 1 xfail, unaffected), and a final
+full fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n 8`,
+~30 min, no regressions).
+
+**Deferred / future work** (considered, deliberately not scheduled next):
+- `forever`/`repeat` loop differential fuzzing — both constructs are
+  already supported (all four engines implement `ForeverLoop`/
+  `RepeatLoop`) and already have deterministic cross-engine coverage
+  (`test_behavioral.py`, `test_vm.py`, `test_iverilog_validation.py`,
+  `test_vm_vs_reference.py`, compiled cross-validation) — lower marginal
+  value than a genuinely untested construct, and `forever` specifically
+  is almost exclusively a testbench-only pattern in real usage
+  (`initial forever #5 clk = ~clk;`), not synthesizable RTL.
+- User-defined `function`/`task` call fuzzing — the expression generator
+  currently only ever produces `$signed`/`$unsigned` as "calls"; real
+  Verilog `function`s (common for reusable combinational expressions in
+  RTL) have never been generated.
+- `unique`/`priority` case modifiers, casex/casez wildcard ranges via
+  `?`, case-inside-case nesting beyond what the shared `_gen_stmt`
+  recursion naturally produces, `break`/`continue`/`disable`, and
+  multiple loop variables per `for` — carried forward unchanged from
+  phase 4's docstring "Deliberately NOT yet covered" list.
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 

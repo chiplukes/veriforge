@@ -940,15 +940,34 @@ class Compiler:  # cm:8c1e4a
             # signedness. Mirrors the identical fix in `sim/evaluator.py`
             # (see notes/known_issues.md).
             elif expr.op in ("&", "|", "^", "~^", "^~"):
+                # `signed_override` must NEVER be forwarded into either
+                # operand's own recursive `_compile_expr` call, nor govern
+                # their own widen-to-`op_width` step below -- a bitwise
+                # op's combined signedness is entirely SELF-CONTAINED
+                # (determined solely by its own two operands' individual
+                # types), unlike `%`'s divisor-widening override (say), which
+                # genuinely needs to force a decision into a DIFFERENT
+                # operator. Forwarding it here would leak an unrelated outer
+                # decision into a NESTED, structurally-unrelated operand's
+                # own independent signed/unsigned computation, corrupting
+                # its computed VALUE. Only the RESULT-level extension below
+                # (`if width and width != op_width`) may still consult it,
+                # since that governs how THIS bitwise op's already-computed
+                # result gets read by the outer context. Mirrors the
+                # identical fix in `sim/evaluator.py`'s bitwise branch (see
+                # its docstring for the concrete Icarus-confirmed repro,
+                # `(|a3[45]) % (($signed(a4[23]) - a0) | 1)`) and
+                # `_wide_emitter.py`'s/`_expr_emitter.py`'s equivalent
+                # `combined_override` fixes.
                 op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
-                self._compile_expr(expr.left, program, op_width, signed_override)
-                left_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                self._compile_expr(expr.left, program, op_width)
+                left_eff_signed = self._expr_signed(expr.left)
                 if left_eff_signed:
                     program.append(instr(Op.SIGN_EXT, op_width, 0))
                 else:
                     program.append(instr(Op.RESIZE, op_width))
-                self._compile_expr(expr.right, program, op_width, signed_override)
-                right_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.right)
+                self._compile_expr(expr.right, program, op_width)
+                right_eff_signed = self._expr_signed(expr.right)
                 if right_eff_signed:
                     program.append(instr(Op.SIGN_EXT, op_width, 0))
                 else:
@@ -1025,48 +1044,49 @@ class Compiler:  # cm:8c1e4a
                 # with zero-extension. Mirrors the identical fix in
                 # `sim/evaluator.py`.
                 #
-                # `signed_override` is intentionally NOT forwarded to the
-                # per-operand `_compile_expr` calls -- it governs how the
-                # whole binary expression's own *result* is interpreted by
-                # an even-further-out cast (handled by the shared tail
-                # below via `static_result_w`), not how each operand's own
-                # extension is decided; each operand always uses its own
-                # natural signedness for that (IEEE 1364-2005 §5.5.2).
+                # `+ - * / %` ALL need the OPERATOR's combined signedness
+                # (signed only if BOTH operands are signed, IEEE 1364-2005
+                # §5.5.1) to govern EVERY operand's own extension here --
+                # not each operand's own individual declared type. This
+                # used to special-case `/`/`%` alone for this, reasoning
+                # that `+`/`-`/`*` are "residue-safe" (their modular
+                # arithmetic gives the same answer regardless of HOW each
+                # operand was individually extended, as long as each
+                # operand's bit pattern is "correct" at the target width)
+                # -- but that reasoning is simply wrong: sign- vs zero-
+                # extending a signed operand produces a DIFFERENT integer
+                # value (e.g. a 1-bit signed `1` means -1 sign-extended
+                # but +1 zero-extended), and `(a - b) mod N` genuinely
+                # differs depending on WHICH of those two different values
+                # `a` is taken to be -- "residue-safe" only holds once each
+                # operand's value is ALREADY fixed, it says nothing about
+                # which extension choice fixes it correctly in the first
+                # place. Per §5.5.1, when a signed operand is paired with
+                # an unsigned one in `+`/`-`/`*`, the WHOLE operation reads
+                # as unsigned, and the signed operand's bit pattern must be
+                # read as its RAW unsigned magnitude (zero-extended), not
+                # resurrected as negative via its own declared type.
+                # Confirmed against Icarus for `(sa - ub)` with `sa` a
+                # signed 1-bit register holding `1` (i.e. -1) and `ub` an
+                # unsigned 2-bit `0`: Icarus gives `1` (zero-extending
+                # `sa` to +1 first, per the pair's combined-unsigned type),
+                # not `-1`/`3` (sign-extending `sa` on its own, what
+                # individual-signedness compilation computed here before
+                # this fix) -- the same bug shape already fixed for `/`/
+                # `%` below, comparisons, and bitwise ops, just missed for
+                # the other three arithmetic operators specifically
+                # because of this flawed argument. `both_signed` is forced
+                # into both recursive `_compile_expr` calls so this
+                # combined decision -- not each operand's own type --
+                # governs every extension nested within either operand too
+                # (a `$signed`/`$unsigned` cast reached within either
+                # operand still wins over this override, exactly like
+                # every other signed_override use in this function).
+                # Mirrors the identical fix in `sim/evaluator.py`.
                 target = max(width, self._expr_width(expr.left), self._expr_width(expr.right))
-                if expr.op in ("/", "%"):
-                    # Division/modulus is NOT "residue-safe" like +/-/*
-                    # (whose modular arithmetic gives the same answer
-                    # regardless of whether each operand was individually
-                    # sign- or zero-extended, as long as each operand's OWN
-                    # bit pattern is correct at the target width): the
-                    # actual division ALGORITHM depends on whether the
-                    # operand is read as a two's-complement negative value,
-                    # and that decision must be made UNIFORMLY across both
-                    # operands (IEEE 1364-2005 §5.5.1: signed division only
-                    # when BOTH operands are signed). Compiling each operand
-                    # with its own individual signedness -- correct for
-                    # +/-/* -- is wrong here: a signed operand paired with
-                    # an unsigned one must have BOTH read as unsigned (the
-                    # division dispatch below can only be unsigned in that
-                    # case), not the signed one sign-extended and then
-                    # misread as a huge unsigned magnitude by an unsigned
-                    # division. `both_signed` is forced into both recursive
-                    # `_compile_expr` calls so this combined decision --
-                    # not each operand's own type -- governs every
-                    # extension nested within either operand too (a
-                    # `$signed`/`$unsigned` cast reached within either
-                    # operand still wins over this override, exactly like
-                    # every other signed_override use in this function).
-                    # Mirrors the identical fix in `sim/evaluator.py`;
-                    # confirmed wrong against Icarus for `a4 / ((~^a1[0]) |
-                    # 1)` (a4 signed and negative, divisor an unsigned
-                    # reduction-derived expression).
-                    both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
-                    self._compile_expr(expr.left, program, target, both_signed)
-                    self._compile_expr(expr.right, program, target, both_signed)
-                else:
-                    self._compile_expr(expr.left, program, target, None)
-                    self._compile_expr(expr.right, program, target, None)
+                both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                self._compile_expr(expr.left, program, target, both_signed)
+                self._compile_expr(expr.right, program, target, both_signed)
                 static_result_w = target + target if expr.op == "*" else target
             # Detect signed comparison: both operands must be signed
             if expr.op in _SIGNED_CMP_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):

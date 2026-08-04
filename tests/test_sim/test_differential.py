@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
@@ -75,14 +76,23 @@ _NODE_KINDS = ["binary", "unary", "reduction", "ternary", "concat", "replicate",
 # =====================================================================
 
 
-def _gen_leaf(rng: random.Random) -> str:
+def _gen_leaf(rng: random.Random, extra_signals: Sequence[tuple[str, int, bool]] = ()) -> str:
     """A reference to one of the fixed signals, optionally bit/part-selected.
 
     Selects are restricted to a fresh leaf reference (not an arbitrary
     subexpression) so the index/range is always known to be in-range without
     needing to compute the self-determined width of a compound expression.
+
+    *extra_signals* -- additional `(name, width, signed)` entries eligible
+    for selection alongside the fixed 8-signal set, same shape as
+    `FIXED_SIGNALS`. Defaults to `()`, a no-op for every pre-existing call
+    site: `test_differential_statements.py` uses this to let a
+    sequential-block statement's expression reference a LOCAL variable an
+    earlier statement in the same block already assigned (see that file's
+    phase 5 docstring section) -- `test_differential.py`'s own usage never
+    passes it, so its generated cases are unaffected.
     """
-    name, width, _signed = rng.choice(FIXED_SIGNALS)
+    name, width, _signed = rng.choice((*FIXED_SIGNALS, *extra_signals))
     if width == 1:
         return name
     choice = rng.random()
@@ -98,14 +108,17 @@ def _gen_leaf(rng: random.Random) -> str:
     return f"{name}[{hi}:{lo}]"
 
 
-def _gen_expr(rng: random.Random, depth: int) -> str:
+def _gen_expr(rng: random.Random, depth: int, extra_signals: Sequence[tuple[str, int, bool]] = ()) -> str:
+    """*extra_signals*: see `_gen_leaf`'s docstring -- threaded unchanged
+    through every recursive call so a leaf reachable anywhere in the tree
+    can pick from it, not just an immediate child."""
     if depth <= 0 or rng.random() < 0.35:
-        return _gen_leaf(rng)
+        return _gen_leaf(rng, extra_signals)
     kind = rng.choice(_NODE_KINDS)
     if kind == "binary":
         op = rng.choice(_BINARY_OPS)
-        lhs = _gen_expr(rng, depth - 1)
-        rhs = _gen_expr(rng, depth - 1)
+        lhs = _gen_expr(rng, depth - 1, extra_signals)
+        rhs = _gen_expr(rng, depth - 1, extra_signals)
         if op in ("/", "%"):
             # Avoid div-by-zero noise; x-results are still covered via the
             # x-contaminated stimulus vectors, not via generated zero RHS.
@@ -113,25 +126,25 @@ def _gen_expr(rng: random.Random, depth: int) -> str:
         return f"({lhs} {op} {rhs})"
     if kind == "unary":
         op = rng.choice(_UNARY_OPS)
-        return f"({op}{_gen_expr(rng, depth - 1)})"
+        return f"({op}{_gen_expr(rng, depth - 1, extra_signals)})"
     if kind == "reduction":
         op = rng.choice(_REDUCTION_OPS)
-        return f"({op}{_gen_expr(rng, depth - 1)})"
+        return f"({op}{_gen_expr(rng, depth - 1, extra_signals)})"
     if kind == "ternary":
-        cond = _gen_expr(rng, depth - 1)
-        a = _gen_expr(rng, depth - 1)
-        b = _gen_expr(rng, depth - 1)
+        cond = _gen_expr(rng, depth - 1, extra_signals)
+        a = _gen_expr(rng, depth - 1, extra_signals)
+        b = _gen_expr(rng, depth - 1, extra_signals)
         return f"({cond} ? {a} : {b})"
     if kind == "concat":
         n = rng.choice((2, 3))
-        parts = [_gen_expr(rng, depth - 1) for _ in range(n)]
+        parts = [_gen_expr(rng, depth - 1, extra_signals) for _ in range(n)]
         return "{" + ", ".join(parts) + "}"
     if kind == "replicate":
         n = rng.choice((2, 3))
-        return "{" + str(n) + "{" + _gen_expr(rng, depth - 1) + "}}"
+        return "{" + str(n) + "{" + _gen_expr(rng, depth - 1, extra_signals) + "}}"
     if kind == "cast":
         cast = rng.choice(("signed", "unsigned"))
-        return f"${cast}({_gen_expr(rng, depth - 1)})"
+        return f"${cast}({_gen_expr(rng, depth - 1, extra_signals)})"
     raise AssertionError(kind)
 
 

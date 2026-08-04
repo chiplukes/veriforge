@@ -82,11 +82,43 @@ blocking/nonblocking writes to the same target within one loop, a shape
 no prior phase could produce (if/case each assign exactly once per
 path).
 
+**Phase 5**: random sequential multi-statement blocks (`begin...end` with
+2-3 statements) can now appear anywhere an if-chain, case statement, or
+loop could. Every EARLIER phase generates exactly one assignment target
+per rendered tree, with every leaf expression reading only from the 8
+fixed input ports -- never from a value a PRIOR statement in the same
+procedural block just wrote, despite that being arguably the single most
+common shape in real combinational/sequential RTL (`tmp = a + b; y = tmp
+* c;`). `_gen_seq_stmt` generates a block whose first N-1 statements each
+assign a FRESH local temp (`_tmp{case_idx}_{c,f}{n}`, a fresh name/random
+width from `td._WIDTHS`/random signedness, module-level `reg` declared
+like a while-loop counter), using an expression that can reference any
+temp declared EARLIER in the same sequence (`td._gen_expr`'s new
+`extra_signals` parameter) -- never itself or a later one, matching real
+read-after-write ordering. The final statement recurses into `_gen_stmt`
+as usual. Crucially, temp assignments use the SAME operator (`op`) as the
+enclosing render: for the comb-phase (`=`) render this is ordinary
+blocking-assignment same-time-step visibility (a later statement sees the
+value just written), but for the ff-phase (`<=`) render, a later
+statement reading a temp must see whatever it held BEFORE this block
+started executing, since a nonblocking write doesn't take effect until
+the whole block finishes -- exercising NBA's deferred-update semantics
+for LOCAL (non-port) variables specifically, a genuinely different code
+path from `y_ff_stmt_N`'s own NBA staging that no earlier phase reached.
+Available temps are threaded through the WHOLE `_gen_stmt` recursion (a
+new `_SeqState`, alongside `_LoopState`) so a sequence nested inside an
+if-arm inside another sequence keeps accumulating into one growing pool,
+and every leaf/condition-generating call site (not just the sequence's
+own statements) can read from it, exactly like the fixed 8-signal set.
+
 Deliberately NOT yet covered: `unique`/`priority` case modifiers, casex/
 casez wildcard ranges via `?`, case-inside-case nesting beyond what the
 shared `_gen_stmt` recursion naturally produces, `forever`/`repeat`
-loops, `break`/`continue`/`disable`, and multiple loop variables per
-`for` -- each is its own follow-up phase (if warranted).
+loops, `break`/`continue`/`disable`, multiple loop variables per `for`,
+and user-defined `function`/`task` calls -- each is its own follow-up
+phase (if warranted); see `notes/plans/work_plan_2026-07.md` item 3.4's
+"Deferred / future work" note for why `forever`/`repeat` and
+function/task calls specifically were reprioritized below phase 5.
 
 Determinism: `VERIFORGE_DIFF_STMT_SEED` (default 20260701) seeds the
 generator; `VERIFORGE_DIFF_STMT_CASES` (default 40) sets how many random
@@ -141,6 +173,15 @@ of generating a for/while loop instead of an if-chain."""
 _STMT_LOOP_MAX_N = 4
 """Max loop-bound constant -- combined with `_STMT_MAX_DEPTH` capping
 nesting, keeps worst-case total loop-body executions small."""
+
+_STMT_SEQ_PROB = 0.3
+"""At an eligible (non-leaf, non-case, non-loop) recursion point, the
+probability of generating a sequential multi-statement block (phase 5)
+instead of an if-chain."""
+_STMT_SEQ_LEN_CHOICES = (2, 3)
+"""Number of statements in a generated sequence block, including the
+final one that recurses into `_gen_stmt` -- kept small, matching the
+existing arm-count/case-item-count conservatism."""
 
 # =====================================================================
 # Random if/else-if/else and case/casex/casez statement generation
@@ -211,7 +252,36 @@ class _LoopState:
         return f"{self.prefix}{n}"
 
 
-def _gen_case_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState) -> str:
+@dataclass
+class _SeqState:
+    """Threaded through the whole `_gen_stmt` recursion for one render,
+    alongside `_LoopState` (phase 5) -- tracks local "temp" variables
+    declared by sequential-block statements generated SO FAR, so a LATER
+    statement's expression generation can reference one as an extra leaf
+    (`td._gen_expr`'s `extra_signals` parameter), reproducing real
+    read-after-write data dependencies within a procedural block. Never
+    exposes a temp to anything generated BEFORE it -- `available` only
+    grows as `_gen_seq_stmt` appends to it, in generation order, matching
+    real sequential execution order exactly (a temp assigned via `op`
+    becomes an eligible read for every statement generated afterward,
+    whether in the same sequence or a sibling/nested one sharing this
+    same state). Same per-case/per-comb-or-ff `prefix` separation
+    reasoning as `_LoopState` (a variable can't be procedurally driven by
+    two different `always` blocks).
+    """
+
+    prefix: str
+    ctr: list[int]
+    decls: list[str]
+    available: list[tuple[str, int, bool]]
+
+    def next_var(self) -> str:
+        n = self.ctr[0]
+        self.ctr[0] += 1
+        return f"{self.prefix}{n}"
+
+
+def _gen_case_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState, seq: _SeqState) -> str:
     """A case/casex/casez statement whose every item (including the
     mandatory final default) recurses into `_gen_stmt` -- same "every path
     assigns `target` exactly once" invariant as the if-chain generator.
@@ -224,13 +294,13 @@ def _gen_case_stmt(rng: random.Random, depth: int, target: str, op: str, loops: 
     for _ in range(n_items):
         n_vals = rng.randint(1, _STMT_CASE_MAX_VALUES)
         vals = ", ".join(_gen_case_literal(rng, sel_width, allow_xz) for _ in range(n_vals))
-        parts.append(f"{vals}: begin\n{_gen_stmt(rng, depth - 1, target, op, loops)}\nend")
-    parts.append(f"default: begin\n{_gen_stmt(rng, depth - 1, target, op, loops)}\nend")
+        parts.append(f"{vals}: begin\n{_gen_stmt(rng, depth - 1, target, op, loops, seq)}\nend")
+    parts.append(f"default: begin\n{_gen_stmt(rng, depth - 1, target, op, loops, seq)}\nend")
     parts.append("endcase")
     return "\n".join(parts)
 
 
-def _gen_for_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState) -> str:
+def _gen_for_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState, seq: _SeqState) -> str:
     """A `for` loop using SystemVerilog's inline loop-variable
     declaration -- self-contained, no module-level declaration needed.
     `bound >= 1` guarantees the body (and therefore `target`) always
@@ -240,11 +310,11 @@ def _gen_for_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _
     """
     var = loops.next_var()
     bound = rng.randint(1, _STMT_LOOP_MAX_N)
-    body = _gen_stmt(rng, depth - 1, target, op, loops)
+    body = _gen_stmt(rng, depth - 1, target, op, loops, seq)
     return f"for (int {var} = 0; {var} < {bound}; {var} = {var} + 1) begin\n{body}\nend"
 
 
-def _gen_while_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState) -> str:
+def _gen_while_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState, seq: _SeqState) -> str:
     """A `while` loop whose counter needs a real module-level `integer`
     declaration (collected into `loops.decls`, no init clause to hang an
     inline declaration off like `for` has). The condition is `(counter <
@@ -260,9 +330,9 @@ def _gen_while_stmt(rng: random.Random, depth: int, target: str, op: str, loops:
     var = loops.next_var()
     loops.decls.append(f"integer {var};")
     bound = rng.randint(1, _STMT_LOOP_MAX_N)
-    fallback = td._gen_expr(rng, td._MAX_DEPTH)
-    cond = td._gen_expr(rng, td._MAX_DEPTH)
-    body = _gen_stmt(rng, depth - 1, target, op, loops)
+    fallback = td._gen_expr(rng, td._MAX_DEPTH, tuple(seq.available))
+    cond = td._gen_expr(rng, td._MAX_DEPTH, tuple(seq.available))
+    body = _gen_stmt(rng, depth - 1, target, op, loops, seq)
     return (
         f"{target} {op} {fallback};\n"
         f"{var} = 0;\n"
@@ -273,14 +343,53 @@ def _gen_while_stmt(rng: random.Random, depth: int, target: str, op: str, loops:
     )
 
 
-def _gen_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState) -> str:
+def _gen_seq_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState, seq: _SeqState) -> str:
+    """Phase 5: a `begin...end` block of 2-3 sequential statements. Each
+    of the first N-1 assigns a FRESH local temp (a fresh name, random
+    width from `td._WIDTHS`, random signedness) using an expression that
+    can reference any temp declared EARLIER in this same sequence (never
+    itself or a later one -- `seq.available` only grows as each temp is
+    declared, so generation order IS read-after-write order). The final
+    statement recurses into `_gen_stmt` as usual (still possibly a
+    leaf/if/case/loop/nested-sequence), so `target` still ends up
+    assigned on every path exactly like every other statement shape.
+
+    Uses the SAME assignment operator (`op`) for the temp assignments as
+    the enclosing render -- deliberate: for a comb-phase (`=`) render, a
+    later statement reading a temp sees the value JUST written (ordinary
+    blocking-assignment same-time-step visibility); for an ff-phase
+    (`<=`) render, a later statement reading a temp must see whatever the
+    temp held BEFORE this block started executing, since a nonblocking
+    write doesn't take effect until the whole block finishes -- the
+    single most common real-RTL data-dependency shape (`tmp = a + b; y =
+    tmp * c;`, or the read-old-value NBA equivalent) that no earlier
+    phase could generate, since every prior phase writes exactly one
+    target signal and reads only from the 8 fixed input ports.
+    """
+    n_stmts = rng.choice(_STMT_SEQ_LEN_CHOICES)
+    parts = []
+    for _ in range(n_stmts - 1):
+        name = seq.next_var()
+        width = rng.choice(td._WIDTHS)
+        signed = rng.random() < 0.5
+        sign_kw = "signed " if signed else ""
+        seq.decls.append(f"reg {sign_kw}[{width - 1}:0] {name};")
+        rhs = td._gen_expr(rng, td._MAX_DEPTH, tuple(seq.available))
+        parts.append(f"{name} {op} {rhs};")
+        seq.available.append((name, width, signed))
+    parts.append(_gen_stmt(rng, depth - 1, target, op, loops, seq))
+    return "begin\n" + "\n".join(parts) + "\nend"
+
+
+def _gen_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _LoopState, seq: _SeqState) -> str:
     """One statement: a leaf assignment, an if/else-if/.../else chain, a
-    case/casex/casez statement, or a for/while loop -- every arm/item
-    (including the mandatory final else/default) recurses into another
-    statement, and both loop shapes guarantee `target` ends up assigned
-    regardless of iteration count, so every path assigns `target` at
-    least once, with no latch-inference ambiguity for the oracle to
-    disagree about.
+    case/casex/casez statement, a for/while loop, or a sequential
+    multi-statement block (phase 5) -- every arm/item (including the
+    mandatory final else/default) recurses into another statement, and
+    both loop shapes plus the sequence's final statement guarantee
+    `target` ends up assigned regardless of iteration count, so every
+    path assigns `target` at least once, with no latch-inference
+    ambiguity for the oracle to disagree about.
 
     *op* is `"="` (blocking, phase 1) or `"<="` (nonblocking, phase 2) --
     it only changes the leaf assignment operator, never the tree shape, so
@@ -289,20 +398,22 @@ def _gen_stmt(rng: random.Random, depth: int, target: str, op: str, loops: _Loop
     trees for both (see `_generate_cases`).
     """
     if depth <= 0 or rng.random() < _STMT_LEAF_PROB:
-        return f"{target} {op} {td._gen_expr(rng, td._MAX_DEPTH)};"
+        return f"{target} {op} {td._gen_expr(rng, td._MAX_DEPTH, tuple(seq.available))};"
     if rng.random() < _STMT_CASE_PROB:
-        return _gen_case_stmt(rng, depth, target, op, loops)
+        return _gen_case_stmt(rng, depth, target, op, loops, seq)
     if rng.random() < _STMT_LOOP_PROB:
         if rng.random() < 0.5:
-            return _gen_for_stmt(rng, depth, target, op, loops)
-        return _gen_while_stmt(rng, depth, target, op, loops)
+            return _gen_for_stmt(rng, depth, target, op, loops, seq)
+        return _gen_while_stmt(rng, depth, target, op, loops, seq)
+    if rng.random() < _STMT_SEQ_PROB:
+        return _gen_seq_stmt(rng, depth, target, op, loops, seq)
     n_arms = rng.randint(1, _STMT_MAX_ARMS)
     parts = []
     for i in range(n_arms):
-        cond = td._gen_expr(rng, td._MAX_DEPTH)
+        cond = td._gen_expr(rng, td._MAX_DEPTH, tuple(seq.available))
         kw = "if" if i == 0 else "else if"
-        parts.append(f"{kw} ({cond}) begin\n{_gen_stmt(rng, depth - 1, target, op, loops)}\nend")
-    parts.append(f"else begin\n{_gen_stmt(rng, depth - 1, target, op, loops)}\nend")
+        parts.append(f"{kw} ({cond}) begin\n{_gen_stmt(rng, depth - 1, target, op, loops, seq)}\nend")
+    parts.append(f"else begin\n{_gen_stmt(rng, depth - 1, target, op, loops, seq)}\nend")
     return "\n".join(parts)
 
 
@@ -316,12 +427,14 @@ class _StmtCase:
     rendered with nonblocking (`<=`) assignment, driven inside
     `always @(posedge clk)`."""
     comb_decls: tuple[str, ...]
-    """Phase 4: module-level `integer` declarations for any while-loop
-    counters generated in `comb_body` (empty if none)."""
+    """Phase 4/5: module-level `integer` declarations for any while-loop
+    counters, plus (phase 5) local temp `reg` declarations for any
+    sequential-block statements, generated in `comb_body` (empty if
+    neither appears)."""
     ff_decls: tuple[str, ...]
-    """Phase 4: same, for `ff_body` -- a SEPARATE set of counter names
-    (see `_LoopState`'s docstring) since the same variable can't be
-    procedurally driven by two different `always` blocks."""
+    """Phase 4/5: same, for `ff_body` -- a SEPARATE set of names (see
+    `_LoopState`/`_SeqState`'s docstrings) since the same variable can't
+    be procedurally driven by two different `always` blocks."""
 
 
 def _generate_cases(seed: int, n: int) -> list[_StmtCase]:
@@ -331,7 +444,8 @@ def _generate_cases(seed: int, n: int) -> list[_StmtCase]:
         target = f"y_stmt_{i}"
         state = rng.getstate()
         comb_loops = _LoopState(f"_li{i}_c", [0], [])
-        comb_body = _gen_stmt(rng, _STMT_MAX_DEPTH, target, "=", comb_loops)
+        comb_seq = _SeqState(f"_tmp{i}_c", [0], [], [])
+        comb_body = _gen_stmt(rng, _STMT_MAX_DEPTH, target, "=", comb_loops, comb_seq)
         # `op` is only interpolated into the leaf string, never consumed by
         # `rng` -- replaying from the same starting state with a different
         # `op` draws the identical condition/RHS-expression sequence (byte-
@@ -340,8 +454,17 @@ def _generate_cases(seed: int, n: int) -> list[_StmtCase]:
         # this case" step is needed before generating case i+1.
         rng.setstate(state)
         ff_loops = _LoopState(f"_li{i}_f", [0], [])
-        ff_body = _gen_stmt(rng, _STMT_MAX_DEPTH, target, "<=", ff_loops)
-        cases.append(_StmtCase(i, comb_body, ff_body, tuple(comb_loops.decls), tuple(ff_loops.decls)))
+        ff_seq = _SeqState(f"_tmp{i}_f", [0], [], [])
+        ff_body = _gen_stmt(rng, _STMT_MAX_DEPTH, target, "<=", ff_loops, ff_seq)
+        cases.append(
+            _StmtCase(
+                i,
+                comb_body,
+                ff_body,
+                tuple(comb_loops.decls) + tuple(comb_seq.decls),
+                tuple(ff_loops.decls) + tuple(ff_seq.decls),
+            )
+        )
     return cases
 
 
