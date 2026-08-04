@@ -1824,6 +1824,225 @@ passed, 1 xfail, unaffected), and a final full fast-suite regression
 `ibex_cs_registers` tests the exponential-blowup bug had broken, now
 completing in ~20s each instead of exhausting memory.
 
+**Fifteenth wave (July 2026, work plan item 3.4 phase 4) -- `for`/`while`
+loop statement fuzzing surfaces eleven more distinct bugs, most of them
+pre-existing and only newly REACHABLE (the "phase N's grammar addition
+surfaces phase-(N-1)-and-earlier gaps" pattern seen in every prior
+phase), not newly introduced, by loops making a statement body execute
+MORE THAN ONCE per always-block evaluation for the first time**:
+extended `test_differential_statements.py` to generate `for`/`while`
+loops at eligible recursion points (`_STMT_LOOP_PROB = 0.3`), `for` via
+SystemVerilog's inline loop-variable declaration, `while` via a
+module-level `integer` counter bounded by the same small `N` ANDed with
+a genuinely data-dependent condition to exercise early exit without
+risking non-termination. Default-scale runs (40 cases) stayed green
+throughout; stress-testing at 150 cases across 14 seeds (the five
+carried over from phase 3, plus nine fresh ones -- `999111`, `555000`,
+`888222`, `111333`, `314159`, `500500`, `42424242`, `13131313`,
+`90909090`) surfaced ten distinct bug findings (several bundling more
+than one instance of the identical bug shape found together), all
+confirmed against Icarus and/or cross-engine agreement -- the first
+three found a genuine hard crash (a stack buffer overflow, not just a
+wrong-answer bug) before any wrong-answer bug was even reachable:
+
+- **Compiled `wide_mul`'s fixed 16-word `tmp` buffer was written before
+  its own `n > 16` overflow guard ran** (`sim/compiled/
+  _gen_wide_section.py`) -- the original code zeroed `tmp[i]` inside the
+  FIRST loop, which ran unconditionally for the caller-supplied `n`
+  (the shared per-module `_dynamic_max_wide_words` scratch-array word
+  count, not this multiplication's own operand width) before the guard
+  checked whether `n` actually fit in `tmp`'s 16 words -- a real stack
+  buffer overflow, confirmed via glibc's `_FORTIFY_SOURCE`/
+  `__fortify_fail` aborting the process, triggered by an UNRELATED
+  sibling statement's own extreme width (a triple-nested 3x replication
+  of an 80-bit ternary, `{3{{3{{3{(a0 ? a3 : a6)}}}}}}}`, true width 2160
+  bits, needing 34 words) inflating the shared scratch size past 16 for
+  a completely separate multiplication elsewhere in the same module.
+  Fixed by moving the zero-fill loop to after the guard.
+- **`wide_div`/`wide_mod` had the identical fixed-16-word-buffer-written-
+  before-its-own-guard bug** (`Rv[16]`, same file) -- found by direct
+  code reading immediately after the `wide_mul` fix above, same root
+  cause, same fix shape. The FIRST attempt at this fix was itself
+  incomplete for `wide_mod`: the buggy `Rv[i] = 0` line was correctly
+  REMOVED from the premature first loop, but no replacement loop was
+  added after the guard, leaving `Rv` completely UNINITIALIZED for the
+  rest of the function -- caught by re-running the seed-999111 batch
+  suite after the fix and finding `wide_mod`'s restoring-division
+  algorithm now reading stack garbage instead of crashing or corrupting
+  memory out of bounds.
+- **`wide_mul`/`wide_div`/`wide_mod` conflated the CALLER's shared
+  scratch-buffer word count with the number of words THIS operation
+  actually needs, even after the crash fix above** (same file) -- the
+  `n > 16` bail-to-all-x guard (a correctness-preserving fix for the
+  crash above) used the inflated shared `n` directly, so ANY
+  multiplication/division/modulus sharing a module with the 2160-bit
+  sibling from the crash bug -- including a completely trivial `(2 *
+  a0)` needing only 1-2 words of its own -- unconditionally bailed out
+  to all-x. Confirmed against Icarus for `(2 * a0)` sharing a module
+  with the 2160-bit sibling: `a0=0` should give `0`, but the inflated
+  `n=34` forced an all-x result regardless of the actual (tiny) operand
+  widths. Fixed by computing each primitive's own `eff_n =
+  ceil(dst_width / 64)` (product truncation for `*` is residue-safe, so
+  only the low `dst_width` bits of each operand can affect the result;
+  `/`/`%`'s `dst_width` is already the widened dividend-width from an
+  earlier wave's fix) and checking `eff_n > 16` instead of `n > 16`,
+  using `eff_n` for every internal loop bound while still zero-filling/
+  masking the full caller-sized `n` words on the way out.
+- **Compiled `wide_load_signal`'s scalar (`words == 0`) branch never
+  masked `c.val[sid]`/`c.mask[sid]` to the signal's own declared width**
+  (same file) -- a narrow SIGNED signal's internal storage can carry its
+  value already sign-extended across the full `long long` word (e.g. a
+  1-bit signed register holding `1`, which equals `-1` in one-bit two's
+  complement, stored with every bit of the word set), so this
+  supposedly ZERO-extending load let those stale high bits leak straight
+  through whenever a caller explicitly requested zero- (not sign-)
+  extension. Confirmed against Icarus for `(a5[8] % (a0 | 1))` used as
+  an `if` condition, with `a0` a signed 1-bit register: the `%`
+  operator's own `div_mod_override` mechanism (from an earlier wave)
+  correctly requested a zero-extending load for `a0`, but without this
+  mask its value still carried its 1-bit `1`/`-1` sign-extended across
+  the whole word, silently reintroducing the sign-extension the override
+  was meant to suppress and flipping the whole `if` condition's outcome.
+  Fixed by masking `dv[0]`/`dm[0]` to `wmask(c.width[sid])` in this
+  branch, mirroring `wide_load_signal_s`'s already-correct scalar-branch
+  handling.
+- **`vm-fast`'s `OP_BIT_NOT`/`OP_BIT_XNOR` masked only the TOP word of a
+  wide result after inverting, never zeroing the words ABOVE it**
+  (`sim/vm/_interp_fast.pyx`) -- both opcodes invert every word in the
+  fixed `WIDE_WORDS`-sized buffer unconditionally, including words
+  beyond the value's own width that a well-behaved producer leaves
+  zero-filled; inverting a clean zero word turns it all-ones, and the
+  existing "mask top word" step never reached the words above it,
+  leaving that all-ones garbage in place permanently. A later
+  truthiness consumer that scans the FULL fixed word buffer without its
+  own width bound (`OP_JUMP_IF_ZERO`/`OP_JUMP_IF_NONZERO`, `OP_TERNARY`'s
+  wide-condition check) then misreads a genuinely-zero value as nonzero.
+  Confirmed against Icarus for `if ((cond ? a2 : (~(-(a4 / (a5 |
+  1))))))` where the `~` operand's true value is `0` (`a5` is 65 bits,
+  so `WIDE_WORDS` words 2-5 are unused/zero-filled before the `~`, then
+  flipped to all-ones by it) -- a plain ASSIGNMENT of the identical
+  expression happened to "launder" this through a subsequent `OP_RESIZE`
+  (which DOES zero every word above its own top word) before storing,
+  masking the bug there but not when the same value was consumed
+  directly as a jump condition. Fixed by zeroing every word above the
+  top word in both opcodes, mirroring the pattern `OP_NEG` already used
+  correctly a few cases above. Also hardened `OP_JUMP_IF_ZERO`/
+  `OP_JUMP_IF_NONZERO`/`OP_TERNARY`'s wide-condition check to bound
+  their own scan by the value's declared width instead of the fixed
+  buffer size, as defense-in-depth against any other unfound producer of
+  this same shape.
+- **Compiled `case`/`casex`/`casez` truncated an over-width item literal
+  to the SELECTOR's own width instead of widening the selector**
+  (`sim/compiled/_stmt_emitters.py`'s `_emit_case`) -- `sel_w` was
+  computed purely from the case expression's own self-determined width,
+  silently discarding any item literal wider than that (Verilog widens
+  the NARROWER operand at comparison time; it never truncates the wider
+  one). Confirmed against Icarus for `casez (a4)` whose first item is a
+  66-bit literal but `a4` itself is only 64 bits wide, with `a4` fully
+  x: widening `a4` (sign-extended, so also x in the new top bits)
+  correctly keeps every engine falling through to `default`, but
+  truncating the 66-bit literal to 64 bits discarded its definite top
+  two bits (`'1'`,`'0'`) and let it spuriously match. Fixed by computing
+  `sel_w` as the max over the case expression's own width AND every
+  item literal's own width, routing to a new `_emit_case_wide` path
+  (below) whenever that max exceeds 64 bits.
+- **The new `_emit_case_wide` path's own match-check computation was
+  unsound against nested wide assignments inside an item's body** (same
+  file) -- the first implementation computed each item's wide
+  scratch-array comparison and left it as a raw inline expression
+  (`_sc{slot}_v[wi] == ...`) referenced later inside a subsequent
+  `elif`, on the assumption the scratch data would still be valid by
+  the time that `elif` is reached -- but `_emit_wide_lhs_write_new`
+  (any wide blocking/NBA assignment) unconditionally calls
+  `_reset_scratch()` at its own start, so an EARLIER item's own body
+  (if it contains a wide assignment, which for/while loops make far
+  more likely by executing a body multiple times with different
+  targets) can silently reuse and overwrite the SAME scratch-slot
+  indices a LATER item's match check still needed to read. Confirmed
+  against Icarus for a `casex` whose first item's own body contained an
+  if/else with two wide (96-bit) blocking assigns: the SECOND item's
+  match check got corrupted by the first item's own body execution even
+  though the first item never actually matched. Fixed by restructuring
+  into two passes: first compute every item's match check and reduce it
+  to a single `cdef int _casematch{n}` local (a plain stack variable
+  outside the `_sc{n}` scratch pool, immune to any number of later
+  scratch resets) before any item body is emitted, then build the
+  if/elif chain referencing only those flags in a second pass. (`cdef
+  int`, not `cdef bint`: `_gen_sections.py`'s existing
+  `_hoist_inline_cdefs` -- already required because Cython forbids
+  `cdef` inside conditional blocks, exactly the position this match
+  flag needs to live in for a case nested inside another's `default`
+  arm -- only recognizes `int`/`long long`/`unsigned long long` via its
+  regex, not `bint`; an unrecognized type passes through unhoisted and
+  fails to compile.)
+- **Both the new wide-case path AND the pre-existing narrow-case path
+  sign-extended instead of zero-extending when widening the case
+  expression or an item literal** (same file) -- once the truncation fix
+  above started genuinely widening `sel_w` beyond either operand's own
+  natural width (a scenario the narrow path had never actually been
+  exercised at before, since it previously just silently truncated
+  instead), `_emit_expr`'s/`_emit_wide_expr_to_scratch`'s DEFAULT
+  extension behavior (natural signedness) sign-extends whenever a
+  signed operand's sign bit is DEFINITELY known-1 -- only an AMBIGUOUS
+  sign bit degenerates to a zero-extend, via the unrelated "value reads
+  0 wherever ambiguous" convention, masking this exact bug for a fully-x
+  selector but not a known one. Confirmed against Icarus for `casex
+  (a0)` with a signed 1-bit `a0 == 1` (i.e. `-1`) against a 3-bit item
+  `3'b0zz`: sign-extending `a0` gives `111`, mismatching the pattern's
+  definite leading `0`, but Icarus zero-extends it to `001`, correctly
+  matching regardless of `a0`'s own declared signedness. Fixed by
+  passing `signed_override=False` explicitly for both the selector and
+  every item value in both the narrow and wide case paths.
+- **Compiled narrow-path shift-amount overflow guards compared the
+  computed amount as SIGNED instead of UNSIGNED** (`sim/compiled/
+  _expr_emitter.py`, both the value-side shift core and the mask-side
+  `lm_shifted` helper) -- the `0 if (amount) >= 64 else (... shift ...)`
+  guard (added in an earlier wave specifically because a native C shift
+  instruction only consults the low 6 bits of the count) compared
+  `amount` as a `long long`, but Verilog shift amounts are always an
+  UNSIGNED magnitude: a shift-amount expression computed via negation of
+  a large positive value (e.g. `x << (-a4)` with `a4` a large positive
+  64-bit signed value) produces a bit pattern that reads as a huge
+  magnitude when interpreted as unsigned but as a large NEGATIVE `long
+  long` when compared as signed -- `(-huge) >= 64` is then false,
+  letting a genuinely out-of-range shift amount slip past the guard into
+  an ACTUAL negative-count shift (undefined behavior in C, not just a
+  wrong-answer bug). Confirmed against Icarus for `$signed((a1 * a1) <<
+  (-a4))` used as a ternary's own condition, embedded in a wider
+  assignment. Fixed by casting the compared amount to `unsigned long
+  long` in both guards.
+- **Compiled wide `wide_load_signal_s` never masked its sign-extension
+  down to the caller's requested `dst_width` when that width wasn't a
+  whole-word multiple** (`sim/compiled/_wide_emitter.py`'s Identifier
+  branch of `_emit_wide_expr_to_scratch`) -- the primitive itself only
+  understands whole WORDS, always sign-filling every bit through the end
+  of its last word regardless of how many of those bits actually belong
+  to `dst_width` (mirroring the identical, already-fixed
+  `wide_sign_extend`/`_wide_sign_extend_to_dst_lines` gap from an
+  earlier wave, but never applied to this sibling primitive) -- for a
+  1-bit signed operand widened to a 2-bit comparison context (`n_words =
+  1`), the sign-extend fills the ENTIRE 64-bit word, not just the low 2
+  bits, leaving extra high-order 1 bits set beyond `dst_width` that the
+  caller assumed were 0. Confirmed against Icarus for `($signed(a3[8:7])
+  != $signed(a7))` widened to a 256-bit destination: `a7` (1-bit)
+  sign-extended via `wide_load_signal_s` to the full 64-bit word instead
+  of just the comparison's own 2-bit width, so its raw word no longer
+  bit-for-bit matched the OTHER (correctly 2-bit-masked, via a separate
+  code path) operand's word even though both represented the same 2-bit
+  value, spuriously making `!=` true. Fixed by adding the same explicit
+  tail-masking step `_wide_sign_extend_to_dst_lines` already uses,
+  directly after the `wide_load_signal_s` call.
+
+All ten were verified via direct Icarus comparison scripts and/or
+cross-engine agreement, then confirmed clean across fourteen statement-
+fuzzer seeds (the five from phase 3 plus `999111`, `555000`, `888222`,
+`111333`, `314159`, `500500`, `42424242`, `13131313`, `90909090`;
+`VERIFORGE_DIFF_STMT_CASES=150`, `_STMT_COMPILED=1`, 30/30 batches each),
+the original 300-case expression-tree fuzzer (15/15 batches,
+`VERIFORGE_DIFF_COMPILED=1`), `test_power_operator.py` (60 passed, 1
+xfail, unaffected), and a final full fast-suite regression (7107 passed,
+1 xfailed, 0 failed, `-n 8`, ~29.5 min, no regressions).
+
 ### Wide/narrow arithmetic right shift (`>>>`) X-propagation
 
 **Status**: Resolved (July 2026, work plan item 2.4). Formerly tracked in

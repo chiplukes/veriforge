@@ -3534,7 +3534,41 @@ class _WideEmitterMixin:
                     else (sid < len(self._signal_signed) and self._signal_signed[sid])
                 )
                 if src_signed and dst_width > self._signal_widths[sid]:
-                    return [f"{pad}wide_load_signal_s(c, {sid}, _sc{slot}_v, _sc{slot}_m, {n_words})"]
+                    # `wide_load_signal_s` only understands whole WORDS --
+                    # it always sign-fills every bit through the end of
+                    # word `n_words - 1`, regardless of how many of those
+                    # bits actually belong to `dst_width`. That over-fills
+                    # whenever `dst_width` isn't a multiple of 64 (e.g. a
+                    # 1-bit signed operand widened to a 2-bit comparison
+                    # context, `n_words=1`: the sign-extend fills the
+                    # ENTIRE 64-bit word, not just the low 2 bits), leaving
+                    # extra high-order 1 bits set beyond `dst_width` that
+                    # the caller assumes are 0 -- silently corrupting a
+                    # SIBLING operand's own bit-pattern comparison against
+                    # this one, since both were meant to be masked to the
+                    # same shared `dst_width` first. Mirrors the identical
+                    # `_wide_sign_extend_to_dst_lines` fix for
+                    # `wide_sign_extend` -- explicit tail masking after the
+                    # call restricts the result to precisely `dst_width`
+                    # bits. Confirmed against Icarus (cross-engine) for
+                    # `($signed(a3[8:7]) != $signed(a7))` widened to a
+                    # 256-bit destination: `a7` (1-bit) sign-extended via
+                    # `wide_load_signal_s` to the full 64-bit word instead
+                    # of just the comparison's own 2-bit width, so its
+                    # raw word no longer bit-for-bit matched the OTHER
+                    # (correctly 2-bit-masked) operand's word even though
+                    # both represented the same 2-bit value, spuriously
+                    # making `!=` true.
+                    lines = [f"{pad}wide_load_signal_s(c, {sid}, _sc{slot}_v, _sc{slot}_m, {n_words})"]
+                    dst_n = (dst_width + 63) // 64
+                    tail_bits = dst_width - (dst_n - 1) * 64
+                    if tail_bits < _WORD_BITS:
+                        lines.append(f"{pad}_sc{slot}_v[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                        lines.append(f"{pad}_sc{slot}_m[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                    for wi in range(dst_n, n_words):
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    return lines
                 return [f"{pad}wide_load_signal(c, {sid}, _sc{slot}_v, _sc{slot}_m, {n_words})"]
 
             # Try struct field or memory element field access.
@@ -3739,6 +3773,60 @@ class _WideEmitterMixin:
                         for wi in range(1, n_words):
                             lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
                             lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    self._free_scratch(op_slot)
+                    return lines
+                if op == "-":
+                    # `-` (unlike `~`, handled by the plain `n_words`-sized
+                    # path below) needs its operand computed at its OWN
+                    # full width, not just `n_words`/`dst_width` -- a
+                    # single x/z bit ANYWHERE in the operand makes unary
+                    # minus's ENTIRE result x (no per-bit borrow-chain
+                    # precision, matches Icarus/`wide_neg`'s own "any x/z
+                    # in source -> result is all-x" rule), so if the
+                    # operand's true width exceeds `dst_width` (e.g. a
+                    # Concatenation whose x-bearing member sits above the
+                    # visible truncation point), computing it directly at
+                    # `n_words`/`dst_width` would silently discard those
+                    # x-bearing high bits BEFORE `wide_neg` ever sees them,
+                    # turning a genuinely-all-x result into a spurious
+                    # fully-defined one. Mirrors the identical "truncate
+                    # before widen" fix for the wide shift left operand a
+                    # few hundred lines up, and the identical fix in
+                    # `sim/vm/compiler.py`'s own UnaryOp `-` handling.
+                    # Compute the operand at its own full `op_width`/`op_n`
+                    # in a separately-sized scratch slot, explicitly check
+                    # for x ANYWHERE across that full range, and only then
+                    # either force the all-x result directly or delegate
+                    # to `wide_neg` at the normal `n_words` size (safe in
+                    # that branch precisely because no x exists anywhere
+                    # to miss). Confirmed against Icarus (cross-engine) for
+                    # `(-{a3, (^a5[16]), {3{(a7 ? a6[66:21] : a3)}}})`
+                    # widened into a 96-bit destination, with `a3` (63
+                    # bits, fully x) positioned as the concatenation's
+                    # MSB-most member -- the concatenation's own true
+                    # width is 202 bits, so `a3`'s x-bearing bits sit at
+                    # positions 139-201, entirely above the 96-bit
+                    # truncation point.
+                    op_width = max(dst_width, self._expr_width(expr.operand))
+                    op_n = max(n_words, (op_width + 63) // 64)
+                    self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, op_n)
+                    op_slot = self._alloc_scratch()
+                    lines = self._emit_wide_expr_to_scratch(
+                        expr.operand, op_slot, op_n, op_width, indent, signed_override=signed_override
+                    )
+                    if lines is None:
+                        self._free_scratch(op_slot)
+                        return None
+                    has_x_expr = " or ".join(f"_sc{op_slot}_m[{i}] != 0" for i in range(op_n))
+                    lines.append(f"{pad}if {has_x_expr}:")
+                    for i in range(n_words):
+                        lines.append(f"{pad}    _sc{slot}_v[{i}] = 0")
+                        lines.append(f"{pad}    _sc{slot}_m[{i}] = _word_mask64({dst_width} - {i} * 64)")
+                    lines.append(f"{pad}else:")
+                    lines.append(
+                        f"{pad}    {prim}(_sc{slot}_v, _sc{slot}_m,"
+                        f" _sc{op_slot}_v, _sc{op_slot}_m, {n_words}, {dst_width})"
+                    )
                     self._free_scratch(op_slot)
                     return lines
                 op_slot = self._alloc_scratch()
@@ -4067,7 +4155,32 @@ class _WideEmitterMixin:
                         self._free_scratch(lslot, aslot)
                         return None
                     lines = llines + alines
-                    amount_expr = f"<int>(_sc{aslot}_v[0])"
+                    # Reading only `_sc{aslot}_v[0]` (the LOW word) silently
+                    # dropped the shift amount's own high word(s) whenever
+                    # its true (multi-word) value genuinely needed them --
+                    # e.g. a >64-bit Concatenation/Replication-built amount
+                    # whose value is astronomically larger than the
+                    # shifted operand's own width, but whose LOW 64 bits
+                    # alone happen to look like a small, in-range count.
+                    # The shift primitives below only need to know
+                    # "definitely saturating" vs. "this exact small count"
+                    # (they already saturate for any `amount >= 64`-ish
+                    # value), so clamp to a large sentinel (guaranteed to
+                    # trigger that saturation) whenever ANY high word is
+                    # nonzero OR the low word alone exceeds `<int>`'s own
+                    # range (a plain `<int>` cast of a `long long`/
+                    # `unsigned long long` that overflows 32 bits is
+                    # implementation-defined, not a safe truncation).
+                    # Confirmed against Icarus (cross-engine) for
+                    # `(a5 << {a1[2], (a1[5] ? a7 : a6), (~a6[1])})` with
+                    # `a6` 80 bits (making the shift amount's own combined
+                    # width 82 bits, needing 2 words): the true amount is
+                    # vastly larger than `a5`'s own 65-bit width (should
+                    # shift to all-zero), but reading only the low word
+                    # gave a small, wrong, non-saturating count.
+                    overflow_checks = [f"(_sc{aslot}_v[0] > <unsigned long long>0x7FFFFFFF)"]
+                    overflow_checks += [f"(_sc{aslot}_v[{wi}] != 0)" for wi in range(1, amount_n)]
+                    amount_expr = f"(0x7FFFFFFF if ({' or '.join(overflow_checks)}) else <int>(_sc{aslot}_v[0]))"
                     amount_mask_expr = " | ".join(f"_sc{aslot}_m[{wi}]" for wi in range(amount_n))
                 else:
                     lines = llines
@@ -4093,7 +4206,19 @@ class _WideEmitterMixin:
                     # pattern (0b111 = 7 unsigned) was being read back as
                     # `-1`, and the wide shift primitive then shifted the
                     # dividend left instead of right.
-                    amount_expr = f"<int>(({self._emit_expr(expr.right, amount_w, False)}) & wmask({amount_w}))"
+                    # `<int>` is only a 32-bit register -- a masked
+                    # `amount_w`-bit value (up to 64 bits wide here, since
+                    # this is the narrow/non-wide-routed branch) can still
+                    # exceed `INT_MAX` on its own, even from a single
+                    # 64-bit word with no multi-word truncation involved;
+                    # clamp the same way the wide-routed sibling branch
+                    # above does, for the identical "definitely saturating"
+                    # reason.
+                    masked_amount = f"(({self._emit_expr(expr.right, amount_w, False)}) & wmask({amount_w}))"
+                    amount_expr = (
+                        f"(0x7FFFFFFF if (<unsigned long long>({masked_amount}) >"
+                        f" <unsigned long long>0x7FFFFFFF) else <int>({masked_amount}))"
+                    )
                     amount_mask_expr = self._emit_mask_expr(expr.right, amount_w)
                 # An x/z shift COUNT makes the whole shift result x/z
                 # (there's no way to know how many positions to shift) --
@@ -4200,18 +4325,49 @@ class _WideEmitterMixin:
                 # the comparison's 81-bit combined width gave a huge
                 # (~2^81) wraparound value instead of the correct small
                 # negated-at-5-bits-then-extended one.
+                #
+                # A SEPARATE bug in the same unwrap, found immediately
+                # after fixing the one above: even for a genuine leaf `x`,
+                # forcing `signed_override=combined_signed` is only a
+                # no-op (hence safe) when `combined_signed` already equals
+                # `True` -- `$signed(x)`'s OWN forced-signed nature is an
+                # explicit, unconditional override (that's the entire
+                # point of the cast: to force sign-extension regardless of
+                # what the comparison's own combined type would otherwise
+                # decide for an un-cast operand), not something the
+                # comparison's combined type gets to override. Requiring
+                # `combined_signed` restores that: when the comparison's
+                # own combined type is unsigned (not both operands
+                # independently signed -- true whenever the OTHER operand
+                # isn't signed, exactly the case a `$signed(...)` cast is
+                # most often used to override), unwrapping would force the
+                # cast's argument to zero-extend instead, silently
+                # discarding the cast entirely. Falling through to the
+                # un-unwrapped `$signed(...)` FunctionCall here still
+                # correctly widens (its own dedicated handler always
+                # sign-extends, unconditionally, per `$signed`'s real
+                # semantics). Confirmed against Icarus (cross-engine) for
+                # `((a5[4] ? a4 : a1[1]) != $signed(a5[27]))` widened to a
+                # 96-bit destination: the ternary's combined type is
+                # unsigned (its false branch, a1[1], is unsigned), and
+                # `!=`'s own combined type is therefore also unsigned, so
+                # unwrapping forced `a5[27]` to zero- instead of
+                # sign-extend, even though `$signed(...)` explicitly
+                # requires sign-extension regardless.
                 _cmp_leaf_types = (Identifier, Literal, BitSelect, RangeSelect, PartSelect)
                 left_is_signed_call = (
                     isinstance(expr.left, FunctionCall)
                     and expr.left.name.lower() == "$signed"
                     and len(expr.left.arguments) == 1
                     and isinstance(expr.left.arguments[0], _cmp_leaf_types)
+                    and combined_signed
                 )
                 right_is_signed_call = (
                     isinstance(expr.right, FunctionCall)
                     and expr.right.name.lower() == "$signed"
                     and len(expr.right.arguments) == 1
                     and isinstance(expr.right.arguments[0], _cmp_leaf_types)
+                    and combined_signed
                 )
                 left_expr = expr.left.arguments[0] if left_is_signed_call else expr.left
                 right_expr = expr.right.arguments[0] if right_is_signed_call else expr.right
@@ -4426,7 +4582,36 @@ class _WideEmitterMixin:
             cond_lines: list[str]
             cond_slot: int | None = None
             truth_slot: int | None = None
-            if self._expr_uses_wide_signal(expr.condition):
+            # `_expr_uses_wide_signal` alone misses a condition that's a
+            # Concatenation/Replication of several individually-narrow
+            # (<=64-bit) signals whose COMBINED width still exceeds 64 --
+            # e.g. `{{2{a2[8:7]}}, (~a3[11]), {a3, a4[18]}}` with `a2`
+            # 16 bits, `a3` 63 bits, `a4` 64 bits (none individually wide)
+            # but a 69-bit combined width. `cond_w > _WORD_BITS` catches
+            # that case directly; `_expr_max_internal_width` catches the
+            # dual gap of an internal sub-computation exceeding 64 bits
+            # even when the condition's own RESULT width doesn't (mirrors
+            # the identical three-way check already used for statement
+            # conditions in `_stmt_emitters.py`'s
+            # `_emit_condition_lines_and_expr`). Without this, the
+            # scalar/narrow path below silently truncates the condition
+            # to its low 64 bits before ever checking truthiness -- e.g.
+            # dropping a known-1 bit that lived in the truncated-away high
+            # bits, which should have forced the condition definitely true
+            # per the "known-1 bit anywhere" precision rule, but instead
+            # got merged as if the condition were ambiguous. Confirmed
+            # against Icarus (cross-engine) for `(a1[3] ^ ({{2{a2[8:7]}},
+            # (~a3[11]), {a3, a4[18]}} ? a4[51:40] : $signed((a0 ? a2 :
+            # a6[10]))))` with `a3` fully x: `a2[8:7]`'s own known-1 bit
+            # (in the truncated-away high 5 bits) never got seen, so the
+            # ternary's selected branch degraded from a clean, fully
+            # defined value into a spuriously-ambiguous per-bit merge of
+            # both branches.
+            if (
+                cond_w > _WORD_BITS
+                or self._expr_uses_wide_signal(expr.condition)
+                or self._expr_max_internal_width(expr.condition) > _WORD_BITS
+            ):
                 cond_n = max(1, (cond_w + 63) // 64)
                 cond_slot = self._alloc_scratch()
                 maybe_cond_lines = self._emit_wide_expr_to_scratch(expr.condition, cond_slot, cond_n, cond_w, indent)
@@ -4535,7 +4720,28 @@ class _WideEmitterMixin:
             src_w = self._expr_width(expr.target)
             n_src = (src_w + 63) // 64
             tslot = self._alloc_scratch()
-            lines = self._emit_wide_expr_to_scratch(expr.target, tslot, n_words, src_w, indent)
+            # Load the target at its own `n_src` (word count sized for ITS
+            # OWN true width), not the caller-supplied `n_words` (sized
+            # for THIS RangeSelect's own, possibly narrower, result) --
+            # `wide_slice_extract` below is called with `n_src` and reads
+            # that many words back out of `_sc{tslot}`, so populating
+            # fewer words than that leaves the extra high word(s)
+            # uninitialized stack garbage whenever the slice's own bit
+            # range crosses a 64-bit word boundary (e.g. `a6[66:41]` on an
+            # 80-bit `a6`, spanning bit 64, inside an enclosing expression
+            # whose own `n_words` is only 1). Mirrors the identical
+            # "recurse at the operand's own required word count, not the
+            # caller's" fix already applied to the wide shift left operand
+            # and unary minus elsewhere in this file. Confirmed against
+            # Icarus (cross-engine) for `(a1[7:2] ^ a6[66:41]) == {...}`
+            # with `a6` fully x: the garbage-filled high word of the
+            # loaded `a6` scratch buffer read as spuriously non-ambiguous,
+            # corrupting the slice's mask and, downstream, the comparison
+            # result -- but only when OTHER, unrelated code elsewhere in
+            # the same function happened to leave different stale data in
+            # that stack slot, making the bug appear to depend on sibling
+            # statements that were never actually executed.
+            lines = self._emit_wide_expr_to_scratch(expr.target, tslot, n_src, src_w, indent)
             if lines is None:
                 self._free_scratch(tslot)
                 return None

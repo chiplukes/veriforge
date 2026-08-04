@@ -669,24 +669,59 @@ class _GenWideSectionsMixin:
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
             "    cdef unsigned long long tmp[16]",
-            "    cdef int i, j, k, k2, remaining_w, has_x = 0",
+            "    cdef int i, j, k, k2, remaining_w, has_x = 0, eff_n",
             "    cdef unsigned long long lo, hi, old, tail_mask",
             "    for i in range(n):",
             "        dv[i] = 0",
             "        dm[i] = 0",
-            "        tmp[i] = 0",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
-            "    if has_x or n > 16:",
+            "    if has_x:",
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
             "            dm[i] = tail_mask",
             "        return",
-            "    for i in range(n):",
-            "        for j in range(n):",
+            # `n` is the CALLER's shared scratch-buffer word count --
+            # `_dynamic_max_wide_words`, a per-MODULE running peak across
+            # every wide-scratch use anywhere in the module -- not the
+            # number of words this particular multiplication actually
+            # needs. An unrelated sibling statement's own extreme width
+            # (confirmed case: a triple-nested 3x replication of an
+            # 80-bit ternary, `{3{{3{{3{(a0 ? a3 : a6)}}}}}}}`, whose own
+            # true width is 2160 bits, needing 34 words) inflates `n` for
+            # every OTHER wide primitive call in the same module too,
+            # including a completely unrelated multiplication elsewhere
+            # whose own `dst_width` only needs 1-2 words. Bailing out to
+            # all-x whenever the INFLATED `n` exceeds `tmp`'s fixed
+            # 16-word capacity (the previous fix's `n > 16` guard) is
+            # correct for safety but silently wrong for correctness in
+            # this common case -- the multiplication's OWN required word
+            # count, derived from `dst_width` (product truncation is
+            # residue-safe, so only the low `dst_width` bits of each
+            # operand can affect the low `dst_width` bits of the result;
+            # `op_width`/`prim_width` upstream already ensure operands
+            # are correctly sized/extended before this point), is what
+            # must be checked against 16, not the shared buffer size.
+            # Confirmed against Icarus (cross-engine) for `(2 * a0)`
+            # sharing a module with the 2160-bit sibling above: `n=34`
+            # from the sibling's own scratch requirement previously
+            # forced this trivial 96-bit multiply to bail out as all-x.
+            "    eff_n = (dst_width + 63) // 64",
+            "    if eff_n > n:",
+            "        eff_n = n",
+            "    if eff_n > 16:",
+            "        for i in range(n):",
+            "            remaining_w = dst_width - i * 64",
+            "            tail_mask = _word_mask64(remaining_w)",
+            "            dm[i] = tail_mask",
+            "        return",
+            "    for i in range(eff_n):",
+            "        tmp[i] = 0",
+            "    for i in range(eff_n):",
+            "        for j in range(eff_n):",
             "            k = i + j",
-            "            if k >= n:",
+            "            if k >= eff_n:",
             "                break",
             "            lo = av[i] * bv[j]",
             "            hi = _mulhi64(av[i], bv[j])",
@@ -694,17 +729,17 @@ class _GenWideSectionsMixin:
             "            tmp[k] = old + lo",
             "            if tmp[k] < old:",
             "                k2 = k + 1",
-            "                while k2 < n:",
+            "                while k2 < eff_n:",
             "                    tmp[k2] += 1",
             "                    if tmp[k2] != 0:",
             "                        break",
             "                    k2 += 1",
-            "            if k + 1 < n and hi != 0:",
+            "            if k + 1 < eff_n and hi != 0:",
             "                old = tmp[k + 1]",
             "                tmp[k + 1] = old + hi",
             "                if tmp[k + 1] < old:",
             "                    k2 = k + 2",
-            "                    while k2 < n:",
+            "                    while k2 < eff_n:",
             "                        tmp[k2] += 1",
             "                        if tmp[k2] != 0:",
             "                            break",
@@ -712,7 +747,7 @@ class _GenWideSectionsMixin:
             "    for i in range(n):",
             "        remaining_w = dst_width - i * 64",
             "        tail_mask = _word_mask64(remaining_w)",
-            "        dv[i] = tmp[i] & tail_mask",
+            "        dv[i] = (tmp[i] & tail_mask) if i < eff_n else 0",
             "",
         ]
 
@@ -726,30 +761,54 @@ class _GenWideSectionsMixin:
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
             "    cdef unsigned long long Rv[16]",
-            "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1",
+            "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1, eff_n",
             "    cdef unsigned long long borrow, old, tail_mask",
             "    for i in range(n):",
             "        dv[i] = 0",
             "        dm[i] = 0",
-            "        Rv[i] = 0",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
             "        if bv[i] != 0:",
             "            b_zero = 0",
-            "    if has_x or b_zero or n > 16:",
+            "    if has_x or b_zero:",
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
             "            dm[i] = tail_mask",
             "        return",
+            # `n` is the CALLER's shared per-module scratch-buffer word
+            # count, not the number of words THIS division actually
+            # needs -- see the identical `wide_mul`/`eff_n` fix and its
+            # full rationale above (an unrelated sibling statement's own
+            # extreme width inflates `n` for every wide primitive call in
+            # the module, including a division whose own `dst_width` --
+            # already widened to the full dividend width by the caller
+            # for `/`/`%`'s non-residue-safe semantics -- only needs 1-2
+            # words). `Rv` is a fixed 16-word buffer: both the "does this
+            # fit" check AND every loop that shifts/compares/subtracts
+            # across the remainder register must use `eff_n`, not `n` --
+            # using `n` for those loops (as the previous `n > 16`-guarded
+            # version did) still indexes `Rv[16..n-1]` out of bounds
+            # whenever `eff_n <= 16 < n`.
+            "    eff_n = (dst_width + 63) // 64",
+            "    if eff_n > n:",
+            "        eff_n = n",
+            "    if eff_n > 16:",
+            "        for i in range(n):",
+            "            remaining_w = dst_width - i * 64",
+            "            tail_mask = _word_mask64(remaining_w)",
+            "            dm[i] = tail_mask",
+            "        return",
+            "    for i in range(eff_n):",
+            "        Rv[i] = 0",
             "    for bit in range(dst_width - 1, -1, -1):",
             "        wi = bit >> 6",
             "        bs = bit & 63",
-            "        for i in range(n - 1, 0, -1):",
+            "        for i in range(eff_n - 1, 0, -1):",
             "            Rv[i] = (Rv[i] << 1) | (Rv[i - 1] >> 63)",
             "        Rv[0] = (Rv[0] << 1) | ((av[wi] >> bs) & 1)",
             "        ge = 1",
-            "        for i in range(n - 1, -1, -1):",
+            "        for i in range(eff_n - 1, -1, -1):",
             "            if Rv[i] > bv[i]:",
             "                break",
             "            if Rv[i] < bv[i]:",
@@ -758,7 +817,7 @@ class _GenWideSectionsMixin:
             "        if ge:",
             "            dv[wi] = dv[wi] | (<unsigned long long>1 << bs)",
             "            borrow = 0",
-            "            for i in range(n):",
+            "            for i in range(eff_n):",
             "                old = Rv[i]",
             "                Rv[i] = old - bv[i] - borrow",
             "                if borrow:",
@@ -781,30 +840,41 @@ class _GenWideSectionsMixin:
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
             "    cdef unsigned long long Rv[16]",
-            "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1",
+            "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1, eff_n",
             "    cdef unsigned long long borrow, old, tail_mask",
             "    for i in range(n):",
             "        dv[i] = 0",
             "        dm[i] = 0",
-            "        Rv[i] = 0",
             "        if am[i] != 0 or bm[i] != 0:",
             "            has_x = 1",
             "        if bv[i] != 0:",
             "            b_zero = 0",
-            "    if has_x or b_zero or n > 16:",
+            "    if has_x or b_zero:",
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
             "            dm[i] = tail_mask",
             "        return",
+            # See the identical `wide_div`/`eff_n` fix above.
+            "    eff_n = (dst_width + 63) // 64",
+            "    if eff_n > n:",
+            "        eff_n = n",
+            "    if eff_n > 16:",
+            "        for i in range(n):",
+            "            remaining_w = dst_width - i * 64",
+            "            tail_mask = _word_mask64(remaining_w)",
+            "            dm[i] = tail_mask",
+            "        return",
+            "    for i in range(eff_n):",
+            "        Rv[i] = 0",
             "    for bit in range(dst_width - 1, -1, -1):",
             "        wi = bit >> 6",
             "        bs = bit & 63",
-            "        for i in range(n - 1, 0, -1):",
+            "        for i in range(eff_n - 1, 0, -1):",
             "            Rv[i] = (Rv[i] << 1) | (Rv[i - 1] >> 63)",
             "        Rv[0] = (Rv[0] << 1) | ((av[wi] >> bs) & 1)",
             "        ge = 1",
-            "        for i in range(n - 1, -1, -1):",
+            "        for i in range(eff_n - 1, -1, -1):",
             "            if Rv[i] > bv[i]:",
             "                break",
             "            if Rv[i] < bv[i]:",
@@ -812,7 +882,7 @@ class _GenWideSectionsMixin:
             "                break",
             "        if ge:",
             "            borrow = 0",
-            "            for i in range(n):",
+            "            for i in range(eff_n):",
             "                old = Rv[i]",
             "                Rv[i] = old - bv[i] - borrow",
             "                if borrow:",
@@ -822,7 +892,7 @@ class _GenWideSectionsMixin:
             "    for i in range(n):",
             "        remaining_w = dst_width - i * 64",
             "        tail_mask = _word_mask64(remaining_w)",
-            "        dv[i] = Rv[i] & tail_mask",
+            "        dv[i] = (Rv[i] & tail_mask) if i < eff_n else 0",
             "",
         ]
 
@@ -944,8 +1014,23 @@ class _GenWideSectionsMixin:
             "                dv[i] = 0",
             "                dm[i] = 0",
             "    else:",
-            "        dv[0] = <unsigned long long>c.val[sid]",
-            "        dm[0] = <unsigned long long>c.mask[sid]",
+            # A narrow scalar signal's `c.val[sid]`/`c.mask[sid]` may hold
+            # bits set beyond the signal's own declared width in internal
+            # storage (e.g. a signed narrow value kept sign-extended
+            # across the full `long long` word) -- this "zero-extend"
+            # load must mask down to the signal's true width before
+            # zero-filling the rest, or those stale high bits leak
+            # through as if they'd been sign-extended despite the caller
+            # explicitly asking for zero-extension. Confirmed against
+            # Icarus (cross-engine) for `(a5[8] % (a0 | 1))` used as an
+            # `if` condition: `div_mod_override` correctly requested a
+            # zero-extending load of the signed 1-bit `a0`, but without
+            # this mask its `c.val[sid]` still carried its 1-bit value
+            # (1 == -1 in two's complement) sign-extended across the
+            # whole word, silently reintroducing the very sign-extension
+            # the override was meant to suppress.
+            "        dv[0] = <unsigned long long>c.val[sid] & wmask(c.width[sid])",
+            "        dm[0] = <unsigned long long>c.mask[sid] & wmask(c.width[sid])",
             "        for i in range(1, n):",
             "            dv[i] = 0",
             "            dm[i] = 0",

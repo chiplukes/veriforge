@@ -1665,7 +1665,13 @@ cdef int _execute_core(
                 for wi in range(WIDE_WORDS):
                     wm[sp * WIDE_WORDS + wi] = wm[sp * WIDE_WORDS + wi] | wm[(sp + 1) * WIDE_WORDS + wi]
                     wv[sp * WIDE_WORDS + wi] = ~(wv[sp * WIDE_WORDS + wi] ^ wv[(sp + 1) * WIDE_WORDS + wi]) & ~wm[sp * WIDE_WORDS + wi]
-                # Mask top word to avoid garbage in unused bits
+                # Mask top word, and zero every word above it -- see the
+                # identical OP_BIT_NOT fix for the full rationale: `~(...)`
+                # over a previously all-zero unused high word turns it
+                # all-ones, and masking only the top word (not zeroing
+                # everything above it too) leaves that garbage in place for
+                # any consumer that scans the full WIDE_WORDS buffer
+                # without its own width bound.
                 wsp = (w - 1) >> 6
                 if wsp < WIDE_WORDS:
                     n = w & 63
@@ -1673,6 +1679,9 @@ cdef int _execute_core(
                         wtmp = (1ULL << n) - 1
                         wv[sp * WIDE_WORDS + wsp] &= wtmp
                         wm[sp * WIDE_WORDS + wsp] &= wtmp
+                    for wi in range(wsp + 1, WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = 0
+                        wm[sp * WIDE_WORDS + wi] = 0
                 wflag[sp] = 1
                 stack[sp].val = 0; stack[sp].mask = 0
             else:
@@ -1700,7 +1709,26 @@ cdef int _execute_core(
                     wflag[sp - 1] = 1
                 for wi in range(WIDE_WORDS):
                     wv[(sp - 1) * WIDE_WORDS + wi] = ~wv[(sp - 1) * WIDE_WORDS + wi] & ~wm[(sp - 1) * WIDE_WORDS + wi]
-                # Mask top word
+                # Mask top word, and -- unlike the top word alone -- also
+                # zero every word ABOVE it. Inverting a previously all-zero
+                # high word (the common case: producers zero-fill unused
+                # words past their own result width) turns it into
+                # all-ones, and a truthiness consumer that scans the full
+                # fixed WIDE_WORDS buffer without its own width bound
+                # (OP_JUMP_IF_ZERO/NONZERO, OP_TERNARY's wide-condition
+                # check) would then see that stale all-ones word and treat
+                # a genuinely-zero value as nonzero. Mirrors OP_NEG's
+                # identical "mask top word, zero everything above" pattern
+                # a few cases above. Confirmed against Icarus (cross-engine,
+                # vm-fast only) for `if ((cond ? a2 : (~(-(a4 / (a5 |
+                # 1))))))` where the `~` operand's true value is 0 (a5 is
+                # 65 bits, so WIDE_WORDS words 2-5 are unused/zero-filled
+                # before the `~`, then flipped to all-ones by it) -- a
+                # plain assignment of the same expression happened to
+                # "launder" this through a subsequent RESIZE (which DOES
+                # zero every word above its own top word) before storing,
+                # masking the bug there but not when the value is consumed
+                # directly as a jump condition.
                 wsp = (w - 1) >> 6
                 if wsp < WIDE_WORDS:
                     n = w & 63
@@ -1708,6 +1736,9 @@ cdef int _execute_core(
                         wtmp = (1ULL << n) - 1
                         wv[(sp - 1) * WIDE_WORDS + wsp] &= wtmp
                         wm[(sp - 1) * WIDE_WORDS + wsp] &= wtmp
+                    for wi in range(wsp + 1, WIDE_WORDS):
+                        wv[(sp - 1) * WIDE_WORDS + wi] = 0
+                        wm[(sp - 1) * WIDE_WORDS + wi] = 0
                 stack[sp - 1].val = 0; stack[sp - 1].mask = 0
             else:
                 a = stack[sp - 1]
@@ -2970,9 +3001,30 @@ cdef int _execute_core(
             # same as OP_TERNARY above.
             sp -= 1
             if wflag[sp]:
+                # Bound the scan by the value's OWN width, not the fixed
+                # WIDE_WORDS buffer size -- a producer that only zeroes
+                # words up to its own result width (the norm; several
+                # producers, e.g. OP_BIT_NOT/OP_BIT_XNOR before their own
+                # fix, left stale garbage in UNUSED higher words) would
+                # otherwise be misread as "some bit set" by a consumer
+                # that keeps scanning past the value's real extent. Mirrors
+                # OP_RESIZE's identical top-word masking. Confirmed against
+                # Icarus (cross-engine, vm-fast only) for `if ((cond ? a2 :
+                # (~(-(a4 / (a5 | 1))))))`.
                 a_nonzero = 0
-                for wi in range(WIDE_WORDS):
-                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: a_nonzero = 1; break
+                w = stack[sp].width
+                if w > 0:
+                    wsp = (w - 1) >> 6
+                    for wi in range(WIDE_WORDS):
+                        if wi > wsp:
+                            break
+                        if wi == wsp and (w & 63) != 0:
+                            wtmp = mask_for_width(w & 63)
+                        else:
+                            wtmp = <unsigned long long>(-1)
+                        if (wv[sp * WIDE_WORDS + wi] & wtmp) & ~(wm[sp * WIDE_WORDS + wi] & wtmp):
+                            a_nonzero = 1
+                            break
                 if not a_nonzero:
                     pc = arg1
             else:
@@ -2984,9 +3036,21 @@ cdef int _execute_core(
         if op == OP_JUMP_IF_NONZERO:
             sp -= 1
             if wflag[sp]:
+                # See OP_JUMP_IF_ZERO above for the width-bounding rationale.
                 a_nonzero = 0
-                for wi in range(WIDE_WORDS):
-                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: a_nonzero = 1; break
+                w = stack[sp].width
+                if w > 0:
+                    wsp = (w - 1) >> 6
+                    for wi in range(WIDE_WORDS):
+                        if wi > wsp:
+                            break
+                        if wi == wsp and (w & 63) != 0:
+                            wtmp = mask_for_width(w & 63)
+                        else:
+                            wtmp = <unsigned long long>(-1)
+                        if (wv[sp * WIDE_WORDS + wi] & wtmp) & ~(wm[sp * WIDE_WORDS + wi] & wtmp):
+                            a_nonzero = 1
+                            break
                 if a_nonzero:
                     pc = arg1
             else:
@@ -3240,12 +3304,25 @@ cdef int _execute_core(
                 # Condition itself may be >64 bits (e.g. a wide concat) --
                 # the narrow t.val/t.mask slot does not hold the real data
                 # in that case (it lives in wv[]/wm[]), so it must not be
-                # consulted directly.
+                # consulted directly. Bound the scan by the condition's OWN
+                # width -- see the identical OP_JUMP_IF_ZERO fix for the
+                # full rationale (a producer's stale garbage in unused
+                # higher words would otherwise be misread as x or a known-1
+                # bit here).
                 cond_known1 = 0
                 has_x = 0
-                for wi in range(WIDE_WORDS):
-                    if wm[sp * WIDE_WORDS + wi]: has_x = 1
-                    if wv[sp * WIDE_WORDS + wi] & ~wm[sp * WIDE_WORDS + wi]: cond_known1 = 1
+                w = t.width
+                if w > 0:
+                    wsp = (w - 1) >> 6
+                    for wi in range(WIDE_WORDS):
+                        if wi > wsp:
+                            break
+                        if wi == wsp and (w & 63) != 0:
+                            wtmp = mask_for_width(w & 63)
+                        else:
+                            wtmp = <unsigned long long>(-1)
+                        if wm[sp * WIDE_WORDS + wi] & wtmp: has_x = 1
+                        if (wv[sp * WIDE_WORDS + wi] & wtmp) & ~(wm[sp * WIDE_WORDS + wi] & wtmp): cond_known1 = 1
                 cond_defined_zero = (cond_known1 == 0) and (has_x == 0)
             else:
                 cond_known1 = 1 if (t.val & ~t.mask) else 0

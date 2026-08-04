@@ -1636,13 +1636,28 @@ class _ExprEmitterMixin:
         # A shift amount >= 64 must yield 0 (Verilog semantics), but the
         # native C shift instruction only consults the low 6 bits of the
         # count, so `x >> 64` / `x << 64` silently behave like `x >> 0` /
-        # `x << 0` on a 64-bit word — guard it explicitly.
+        # `x << 0` on a 64-bit word — guard it explicitly. The guard's own
+        # comparison must be UNSIGNED: Verilog shift amounts are always an
+        # unsigned magnitude, but `right` here is a `long long`, so a
+        # shift-amount expression computed via negation of a large value
+        # (e.g. `x << (-a4)` with `a4` a large positive 64-bit signed
+        # value) produces a bit pattern that's a huge magnitude when read
+        # as unsigned but a large NEGATIVE `long long` when compared as
+        # signed -- `(-huge) >= 64` is then false, letting a genuinely
+        # out-of-range shift amount slip past the guard into an actual
+        # negative-count shift (undefined behavior in C, not just a
+        # wrong-answer bug). Confirmed against Icarus (cross-engine) for
+        # `$signed((a1 * a1) << (-a4))` used as a ternary's own condition
+        # embedded in a wider assignment.
         if expr.op == ">>":
-            core = f"(0 if ({right}) >= 64 else (<long long>(<unsigned long long>({left}) >> <unsigned long long>({right}))))"
+            core = (
+                f"(0 if (<unsigned long long>({right})) >= 64 else"
+                f" (<long long>(<unsigned long long>({left}) >> <unsigned long long>({right}))))"
+            )
         # For left-shift, promote left operand to long long to avoid
         # C int overflow when small literal << large shift (e.g. 4095 << 20).
         elif expr.op in ("<<", "<<<"):
-            core = f"(0 if ({right}) >= 64 else ((<long long>({left})) {c_op} ({right})))"
+            core = f"(0 if (<unsigned long long>({right})) >= 64 else ((<long long>({left})) {c_op} ({right})))"
         elif expr.op in ("/", "%") and not combined_override:
             # Unsigned division/modulus: cast both sides to avoid signed C behavior
             # on 64-bit values with MSB=1 stored as negative long long.
@@ -1742,7 +1757,24 @@ class _ExprEmitterMixin:
                 if expr.op == "-":
                     core = f"((-({operand})) & wmask({ow}))"
                 elif expr.op == "~":
-                    core = f"((~({operand})) & wmask({ow}))"
+                    # `~` must independently force 0 wherever the operand is
+                    # ambiguous, not just complement whatever raw value bits
+                    # it received -- an ambiguous bit's value is
+                    # conventionally stored as 0 (see `_emit_reduction`'s
+                    # docstring for the general "value is 0 wherever the
+                    # true result is x" convention this whole codebase
+                    # relies on), so a plain `~` flips it to a SPURIOUS
+                    # known-1, violating the very invariant callers like
+                    # `&&`'s mask formula depend on ("a nonzero raw value
+                    # implies a genuine known-1 bit"). Confirmed against
+                    # Icarus (cross-engine) for `((0 < 4) && (~{2{(!(!a7))}}))`
+                    # with `a7` fully x: `!(!a7)` correctly reads VALUE=0
+                    # (ambiguous), but `~` on the replicated result flipped
+                    # those ambiguous-stored-as-0 bits to 1, making `&&`'s
+                    # own "both operands look truthy" check wrongly
+                    # conclude the whole condition was definitely true.
+                    operand_mask = self._emit_mask_expr(expr.operand, ow)
+                    core = f"((~({operand})) & (~({operand_mask})) & wmask({ow}))"
                 else:
                     core = f"({operand})"
                 eval_width = max(ow, width) if width else ow
@@ -1761,7 +1793,14 @@ class _ExprEmitterMixin:
             if expr.op == "-":
                 return f"((-({operand})) & wmask({eval_width}))"
             if expr.op == "~":
-                return f"((~({operand})) & wmask({eval_width}))"
+                # Same "force 0 wherever ambiguous" fix as the fixed-width
+                # branch above, extended (via the same sign/zero rule
+                # already applied to `operand` itself just above) to match
+                # `operand`'s own width here.
+                operand_mask = self._emit_mask_expr(expr.operand, ow)
+                if eff_signed and eval_width > ow:
+                    operand_mask = f"_sign_ext({operand_mask}, {ow})"
+                return f"((~({operand})) & (~({operand_mask})) & wmask({eval_width}))"
             return f"({operand})"
 
         # Logical NOT (!) — self-determined 1-bit
@@ -2516,11 +2555,20 @@ class _ExprEmitterMixin:
                 # making it read as fully ambiguous instead.
                 if expr.op in ("<<", "<<<", ">>"):
                     rv = self._emit_expr(expr.right, self._shift_amount_width(expr.right))
+                    # `>= 64` must compare `rv` as UNSIGNED -- see the
+                    # identical fix (and its Icarus-confirmed rationale)
+                    # on the VALUE-side shift core a few hundred lines
+                    # above: a shift-amount expression computed via
+                    # negation of a large value produces a bit pattern
+                    # that's a huge magnitude read as unsigned but a
+                    # large negative `long long` read as signed, letting
+                    # an out-of-range amount slip past a signed `>= 64`
+                    # guard into an actual negative-count shift.
                     if expr.op in ("<<", "<<<"):
-                        lm_shifted = f"(0 if ({rv}) >= 64 else ((<long long>({lm})) << ({rv})))"
+                        lm_shifted = f"(0 if (<unsigned long long>({rv})) >= 64 else ((<long long>({lm})) << ({rv})))"
                     else:
                         lm_shifted = (
-                            f"(0 if ({rv}) >= 64 else"
+                            f"(0 if (<unsigned long long>({rv})) >= 64 else"
                             f" (<long long>(<unsigned long long>({lm}) >> <unsigned long long>({rv}))))"
                         )
                     return f"(wmask({width}) if ({rm}) else (({lm_shifted}) & wmask({width})))"

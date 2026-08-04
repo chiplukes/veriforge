@@ -1993,11 +1993,65 @@ class _StmtEmittersMixin:
 
     def _emit_case(self, stmt: CaseStatement, indent: int, *, context: str = "process") -> list[str]:
         """Emit case/casex/casez as if/elif chain."""
-        pad = "    " * indent
         sel_w = self._expr_width(stmt.expression)
         is_casex = hasattr(stmt, "case_type") and stmt.case_type in ("casex", "casez")
 
-        sel = self._emit_expr(stmt.expression, sel_w)
+        # A case-item literal may declare a width WIDER than the case
+        # expression's own self-determined width (this fuzzer deliberately
+        # generates that mismatch) -- Verilog widens the NARROWER operand
+        # to match at comparison time, it never truncates the WIDER one.
+        # Using only the expression's own width here silently discarded
+        # an over-width item's own high bits before comparing, which can
+        # turn a definite-bit requirement in those discarded positions
+        # into "no requirement at all", causing a spurious match. Confirmed
+        # against Icarus (cross-engine) for `casez (a4)` whose first item
+        # is a 66-bit literal but `a4` itself is only 64 bits wide, with
+        # `a4` fully x: widening `a4` (sign-extended, so also x in the new
+        # top bits) correctly keeps every engine falling through to
+        # `default`, but truncating the 66-bit literal to 64 bits (the
+        # previous behavior) discarded its definite top two bits ('1','0')
+        # and let it spuriously match.
+        for item in stmt.items:
+            if item.is_default:
+                continue
+            for val_expr in item.values:
+                iw = self._expr_width(val_expr)
+                if iw > sel_w:
+                    sel_w = iw
+
+        if sel_w > _WORD_BITS:
+            wide_result = self._emit_case_wide(stmt, indent, sel_w, is_casex, context=context)
+            if wide_result is not None:
+                return wide_result
+            # Wide emission couldn't handle this particular expression
+            # shape -- fall back to the previous (narrow, over-width-item
+            # truncating) behavior rather than failing to compile outright,
+            # matching the established fallback pattern used elsewhere in
+            # this file for expressions the wide emitter doesn't support.
+            sel_w = self._expr_width(stmt.expression)
+
+        return self._emit_case_narrow(stmt, indent, sel_w, is_casex, context=context)
+
+    def _emit_case_narrow(
+        self, stmt: CaseStatement, indent: int, sel_w: int, is_casex: bool, *, context: str = "process"
+    ) -> list[str]:
+        """Emit case/casex/casez as if/elif chain using the narrow (<=64-bit) expr emitter."""
+        pad = "    " * indent
+        # `signed_override=False`: widening the case expression (or an
+        # item literal) up to the shared `sel_w` must ZERO-extend, never
+        # sign-extend -- regardless of the case expression's own declared
+        # signedness. Without this, `_emit_expr`'s default (natural
+        # signedness) sign-extends whenever the value's sign bit is
+        # DEFINITELY known-1 (only an AMBIGUOUS sign bit degenerates to a
+        # zero-extend, via the unrelated "value reads 0 wherever ambiguous"
+        # convention -- masking this bug for fully-x selectors but not
+        # known ones). Confirmed against Icarus (cross-engine) for
+        # `casex (a0)` with a signed 1-bit `a0 == 1` (i.e. -1) against a
+        # 3-bit item `3'b0zz`: sign-extending a0 gives `111`, mismatching
+        # the pattern's definite leading `0`, but Icarus zero-extends it
+        # to `001`, correctly matching. Mirrors the identical fix in
+        # `_emit_case_wide`.
+        sel = self._emit_expr(stmt.expression, sel_w, signed_override=False)
         lines: list[str] = []
         default_lines: list[str] = []
         first = True
@@ -2021,7 +2075,7 @@ class _StmtEmittersMixin:
         if is_casex:
             sel_mask = self._emit_expr_mask(stmt.expression)
         else:
-            sel_mask = self._emit_mask_expr(stmt.expression, sel_w)
+            sel_mask = self._emit_mask_expr(stmt.expression, sel_w, signed_override=False)
 
         for item in stmt.items:
             if item.is_default:
@@ -2031,14 +2085,14 @@ class _StmtEmittersMixin:
             # Build comparison conditions
             conds = []
             for val_expr in item.values:
-                val = self._emit_expr(val_expr, sel_w)
+                val = self._emit_expr(val_expr, sel_w, signed_override=False)
                 if is_casex:
                     val_mask = self._emit_expr_mask(val_expr)
                     # casex: don't-care bits = x/z in either operand
                     # match when (sel_val ^ item_val) & ~(sel_mask | item_mask) == 0
                     conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
                 else:
-                    val_mask = self._emit_mask_expr(val_expr, sel_w)
+                    val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
                     conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
             cond = " or ".join(conds) if conds else "0"
 
@@ -2068,6 +2122,157 @@ class _StmtEmittersMixin:
             lines.append(f"{pad}pass  # empty case")
 
         return lines
+
+    def _emit_case_wide(
+        self, stmt: CaseStatement, indent: int, sel_w: int, is_casex: bool, *, context: str = "process"
+    ) -> list[str] | None:
+        """Emit case/casex/casez when the comparison width exceeds 64 bits.
+
+        Returns None if any operand's wide emission isn't supported for
+        this expression shape, letting the caller fall back to the narrow
+        (over-width-item-truncating) path rather than failing to compile.
+
+        All item match checks are computed in a FIRST PASS, each reduced
+        to a single `cdef bint _casematch{n} = ...` local declared right
+        where it's computed, BEFORE any item body is emitted in the
+        second pass. This is not just an optimization -- computing a
+        match check as a raw scratch-array comparison (`_sc{slot}_v[wi]
+        == ...`) and only consuming it later, inside a subsequent
+        `elif`, is unsound: an item's own body can itself contain a wide
+        assignment, and `_emit_wide_lhs_write_new` unconditionally calls
+        `_reset_scratch()` at its start -- reusing scratch-slot INDICES
+        (and therefore overwriting the `_sc{slot}_v`/`_m` arrays) for its
+        own unrelated computation before a LATER `elif` in this same
+        chain gets to read what it thought was still the selector's or
+        an earlier item's data. `cdef bint` locals are plain stack
+        variables, entirely outside the `_sc{n}` scratch pool, so they
+        survive untouched across any number of nested scratch resets.
+        Confirmed against Icarus (cross-engine) for a `casex` whose
+        first matching item's own body contained an if/else with two
+        wide (96-bit) blocking assigns: the SECOND item's match check
+        (word_conds. built from raw scratch slots) got corrupted by the
+        first item's own body execution, even though the first item
+        never actually matched.
+        """
+        pad = "    " * indent
+        n_words = (sel_w + _WORD_BITS - 1) // _WORD_BITS
+        n_words = max(n_words, self._module_max_wide_words())
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+
+        setup: list[str] = []
+        alloc_slots: list[int] = []
+        sel_slot = self._alloc_scratch()
+        alloc_slots.append(sel_slot)
+        # Widening the case expression (or an item literal) up to the
+        # comparison's shared `sel_w` must ZERO-extend, never sign-extend
+        # -- regardless of the case expression's own declared signedness.
+        # Confirmed against Icarus (cross-engine) for a signed selector
+        # narrower than a casez item pattern, both fully x: sign-extending
+        # the selector would x-fill (and therefore wildcard, matching the
+        # narrow path's OR-of-masks formula) the extension bits, but
+        # Icarus requires those extension bits to be definite 0, correctly
+        # mismatching a pattern with a definite 1 there. The narrow path
+        # (`_emit_case_narrow`) already behaves this way for its VALUE
+        # half incidentally -- `_sign_ext` operates on `c.val[sid]`, whose
+        # x/z-masked bits are already forced to 0 by the "value reads 0
+        # wherever ambiguous" convention, so sign-extending an ambiguous
+        # sign bit degenerates to a zero-extend -- but its MASK half
+        # (`_emit_expr_mask`, called with no width argument) never
+        # extends the mask into those bits at all, leaving them
+        # definite-0 unconditionally. `signed_override=False` here
+        # reproduces that same net effect directly and unambiguously
+        # for both value and mask, rather than relying on the
+        # narrow path's incidental interaction between two separately
+        # under-specified pieces.
+        sel_lines = self._emit_wide_expr_to_scratch(
+            stmt.expression, sel_slot, n_words, sel_w, indent, signed_override=False
+        )
+        if sel_lines is None:
+            self._free_scratch(*alloc_slots)
+            return None
+        setup.extend(sel_lines)
+
+        match_flags: list[str | None] = []
+        for item in stmt.items:
+            if item.is_default:
+                match_flags.append(None)
+                continue
+
+            conds = []
+            for val_expr in item.values:
+                val_slot = self._alloc_scratch()
+                alloc_slots.append(val_slot)
+                val_lines = self._emit_wide_expr_to_scratch(
+                    val_expr, val_slot, n_words, sel_w, indent, signed_override=False
+                )
+                if val_lines is None:
+                    self._free_scratch(*alloc_slots)
+                    return None
+                setup.extend(val_lines)
+                word_conds = []
+                for wi in range(n_words):
+                    if is_casex:
+                        # don't-care bits = x/z in either operand.
+                        word_conds.append(
+                            f"((_sc{sel_slot}_v[{wi}] ^ _sc{val_slot}_v[{wi}])"
+                            f" & ~(_sc{sel_slot}_m[{wi}] | _sc{val_slot}_m[{wi}])) == 0"
+                        )
+                    else:
+                        word_conds.append(
+                            f"(_sc{sel_slot}_v[{wi}] == _sc{val_slot}_v[{wi}])"
+                            f" and (_sc{sel_slot}_m[{wi}] == _sc{val_slot}_m[{wi}])"
+                        )
+                conds.append(" and ".join(word_conds))
+            cond = " or ".join(conds) if conds else "0"
+
+            n = self._et_count
+            self._et_count += 1
+            flag = f"_casematch{n}"
+            # `cdef int`, not `cdef bint` -- `_gen_sections.py`'s
+            # `_hoist_inline_cdefs` (which every process-function
+            # generator already runs specifically because Cython forbids
+            # `cdef` inside conditional blocks, exactly the position this
+            # match check needs to live in for a case statement nested
+            # inside another's `default` arm) only recognizes
+            # `int`/`long long`/`unsigned long long` via its regex, not
+            # `bint` -- an unrecognized type passes through unhoisted and
+            # fails to compile with "cdef statement not allowed here".
+            # 0/1 semantics are identical for this purpose.
+            setup.append(f"{pad}cdef int {flag} = {cond}")
+            match_flags.append(flag)
+
+        self._free_scratch(*alloc_slots)
+
+        lines: list[str] = []
+        default_lines: list[str] = []
+        first = True
+
+        for item, flag in zip(stmt.items, match_flags, strict=True):
+            if item.is_default:
+                default_lines = self._emit_stmt(item.body, indent + 1, context=context) if item.body else []
+                continue
+
+            keyword = "if" if first else "elif"
+            lines.append(f"{pad}{keyword} {flag}:")
+            first = False
+
+            if item.body:
+                body = self._emit_stmt(item.body, indent + 1, context=context)
+                lines.extend(body if body else [f"{'    ' * (indent + 1)}pass"])
+            else:
+                lines.append(f"{'    ' * (indent + 1)}pass")
+
+        if default_lines:
+            if first:
+                lines.extend(default_lines)
+            else:
+                lines.append(f"{pad}else:")
+                lines.extend(default_lines if default_lines else [f"{'    ' * (indent + 1)}pass"])
+
+        if not lines:
+            lines.append(f"{pad}pass  # empty case")
+
+        return setup + lines
 
     def _emit_for(self, stmt: ForLoop, indent: int, *, context: str = "process") -> list[str]:
         """Emit for loop as Cython while loop.
@@ -2442,6 +2647,42 @@ class _StmtEmittersMixin:
             self._collect_stmt_signals(stmt.init, sigs)
             self._walk_signals(stmt.condition, sigs)
             self._collect_stmt_signals(stmt.update, sigs)
+            self._collect_stmt_signals(stmt.body, sigs)
+            return
+
+        # `WhileLoop`/`RepeatLoop`/`ForeverLoop` were previously entirely
+        # unhandled here (silently falling through the end of this
+        # function with nothing collected), so a signal read ONLY inside a
+        # loop's own condition/count/body -- never elsewhere in the same
+        # combinational block -- never made it into the process's
+        # sensitivity set. `_gen_sections.py`'s caller only gates a
+        # process behind an "if trigger[...]" check when `sensitivity` is
+        # non-empty; with an empty set the process instead runs
+        # UNCONDITIONALLY every delta iteration (masking this exact gap
+        # whenever nothing else in the block reads a real signal). But
+        # once ANY other statement in the same block reads a signal (e.g.
+        # a plain assignment before the loop), the process becomes GATED
+        # on just that signal's own dirty flag -- completely missing
+        # re-triggers from a signal the loop's OWN condition depends on.
+        # Confirmed against Icarus (cross-engine, vm/vm-fast/reference vs
+        # compiled) for `y = {3{a7}}; while ((i < N) && (a0)) begin ... i =
+        # i + 1; end` inside `always @(*)`: after settling once with
+        # a0 == 0 (loop correctly skipped) and then driving a0 == 1, the
+        # process's own sensitivity set only contained `a7` (from the
+        # preceding plain assignment), so it never re-ran and `y` stayed
+        # stuck at its stale a0==0 value instead of correctly running the
+        # loop body.
+        if stype is WhileLoop:
+            self._walk_signals(stmt.condition, sigs)
+            self._collect_stmt_signals(stmt.body, sigs)
+            return
+
+        if stype is RepeatLoop:
+            self._walk_signals(stmt.count, sigs)
+            self._collect_stmt_signals(stmt.body, sigs)
+            return
+
+        if stype is ForeverLoop:
             self._collect_stmt_signals(stmt.body, sigs)
             return
 

@@ -1175,9 +1175,36 @@ class Compiler:  # cm:8c1e4a
                             else:
                                 program.append(instr(Op.RESIZE, width))
                     return
-                self._compile_expr(expr.operand, program, width, signed_override)
+                # Compile the operand directly at `target` (max of the
+                # enclosing context width and its own static
+                # self-determined width), NOT `width` alone -- mirrors the
+                # identical shift left-operand fix a few hundred lines up
+                # (see its comment for the full "truncate-before-widen"
+                # rationale): `_compile_expr` for some node types
+                # (confirmed: `Concatenation`) directly SIZES its result to
+                # whatever width it's asked to compile at, so requesting
+                # the narrower `width` here would already discard bits
+                # above it DURING compilation, before the negation (and
+                # this RESIZE/SIGN_EXT) ever run. That matters specifically
+                # for `-`: unlike `~`/bitwise ops, a SINGLE x/z bit
+                # ANYWHERE in the operand makes the ENTIRE negation result
+                # x (no per-bit borrow-chain precision -- matches Icarus),
+                # so discarding an x-bearing HIGH portion of a wider
+                # operand before negating silently turns a genuinely-all-x
+                # result into a spurious fully-defined one. Confirmed
+                # against Icarus (cross-engine, vm/vm-fast/compiled vs
+                # reference) for `(-{a3, (^a5[16]), {3{(a7 ? a6[66:21] :
+                # a3)}}})` widened into a 96-bit destination with `a3`
+                # (63 bits, fully x) positioned as the concatenation's
+                # MSB-most member: the concatenation's own true width is
+                # 202 bits, so `a3`'s x-bearing bits sit at positions
+                # 139-201, entirely above the 96-bit truncation point --
+                # compiling the concatenation at 96 bits directly dropped
+                # them before negation ever saw them, giving a fully
+                # defined (wrong) result instead of Icarus's all-x one.
+                target = max(width, self._expr_width(expr.operand)) if width else width
+                self._compile_expr(expr.operand, program, target, signed_override)
                 if width:
-                    target = max(width, self._expr_width(expr.operand))
                     eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
                     if eff_signed:
                         program.append(instr(Op.SIGN_EXT, target, 0))

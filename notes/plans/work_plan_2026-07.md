@@ -1436,6 +1436,67 @@ xfailed, 0 failed, `-n 8`, ~30 min) — including the two
 `ibex_cs_registers` tests the exponential-blowup bug had broken, now
 completing in ~20s each.
 
+**Phase 4 follow-up — `for`/`while` loop statement fuzzing (July
+2026)**: extended `test_differential_statements.py` to generate
+`for`/`while` loops at eligible if/case-statement recursion points —
+`for` via SystemVerilog's self-contained inline loop-variable
+declaration, `while` via a module-level `integer` counter bounded by a
+small constant ANDed with a genuinely data-dependent condition to
+guarantee termination while still exercising early exit. This is the
+first phase where a generated statement's body can execute MORE THAN
+ONCE per always-block evaluation. Default-scale runs stayed green
+throughout; stress-testing at 150 cases across 14 seeds (the five from
+phase 3 plus nine fresh ones) surfaced ten distinct bug findings, all
+Icarus-confirmed and/or cross-engine-confirmed — full writeup in
+`notes/known_issues.md` under "Randomized differential harness (work
+plan item 3.4): bugs found and fixed" → "Fifteenth wave". The first
+three are a genuine hard crash (a real stack buffer overflow, not a
+wrong-answer bug): `wide_mul`'s fixed 16-word scratch buffer was written
+before its own `n > 16` overflow guard ran, triggered by an unrelated
+sibling statement's extreme width inflating the shared per-module
+scratch word count past 16 for a totally separate multiplication;
+`wide_div`/`wide_mod` had the identical bug (found by direct code
+reading right after fixing `wide_mul`), and the first attempt at fixing
+`wide_mod` was itself incomplete, leaving its remainder-register buffer
+completely uninitialized rather than just unguarded. Fixing the crash
+outright then exposed a second-order correctness bug in the same three
+primitives: the overflow guard used the CALLER's shared scratch-buffer
+word count instead of the number of words the operation itself actually
+needs, so any multiplication/division/modulus sharing a module with an
+extreme-width sibling — including a trivial `2 * a0` — unconditionally
+bailed out to all-x regardless of its own tiny operand widths; fixed by
+computing each primitive's own required word count from its `dst_width`
+rather than trusting the shared buffer size. Other highlights: a
+narrow-signal load primitive not masking a sign-extended value down to
+the signal's own declared width, letting stale storage bits leak
+through a supposedly zero-extending load; two `vm-fast` bitwise opcodes
+masking only the top word of a wide result after inverting it, leaving
+permanent all-ones garbage in unused higher words that a later
+truthiness check could misread (plus defensive width-bounding added to
+every wide truthiness consumer as a hardening measure); `case`/`casex`/
+`casez` truncating an item literal wider than the selector instead of
+widening the selector (needing an entirely new wide-comparison code
+path, sized 64+ bits, for the compiled engine); that new path's own
+match-check computation initially being unsound against nested wide
+assignments inside an item's body (a scratch-lifetime hazard, fixed by
+precomputing match results into plain non-scratch local variables before
+any body runs); both the new and pre-existing case-comparison paths
+sign-extending instead of always zero-extending when widening a signed
+case expression or item; a shift-amount overflow guard comparing the
+amount as signed instead of unsigned, letting a shift amount computed
+via negation of a large value (`x << (-a4)`) slip past the guard into an
+actual undefined-behavior negative-count shift; and a wide sign-extending
+load primitive not masking its result down to a non-whole-word
+destination width, corrupting an equality comparison between two
+differently-sized signed operands. Verified via all 14 statement-fuzzer
+seeds (150 cases each, 30/30 batches, `_STMT_COMPILED=1`), the original
+300-case expression-tree fuzzer (15/15 batches), `test_power_operator.py`
+(60 passed, 1 xfail, unaffected), and a final full fast-suite regression
+(7107 passed, 1 xfailed, 0 failed, `-n 8`, ~29.5 min, no regressions).
+Phases 5+ (`forever`/`repeat` loops, `break`/`continue`/`disable`,
+`unique`/`priority` case modifiers, multiple loop variables) remain
+unscheduled future work.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible
