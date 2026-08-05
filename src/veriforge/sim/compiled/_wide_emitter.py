@@ -3874,6 +3874,33 @@ class _WideEmitterMixin:
                 # `!` case right below. Confirmed against Icarus for
                 # `((^a3) - ({2{a5[21:12]}} & (~^a6))) ? a1 : ...` where
                 # `a6` is 80 bits and the enclosing subtraction is only 20.
+                #
+                # `_dynamic_max_wide_words` (the per-module running peak
+                # scratch-array word count, sized once at the END of
+                # codegen -- see `_module_max_wide_words`) must ALSO be
+                # bumped here: every OTHER "allocate a scratch slot at a
+                # width not already implied by an enclosing wide
+                # destination or a wide SIGNAL" call site in this file
+                # already does this (mirrors the identical update a few
+                # dozen lines up, in unary `-`'s own wide handling), but
+                # this reduction dispatch never did -- previously masked
+                # because every PRIOR caller reaching this code already
+                # sat inside an already-wide context (or the operand was
+                # itself a wide SIGNAL, separately tracked by
+                # `_module_max_wide_words`'s own signal-width scan), so
+                # `_dynamic_max_wide_words` always happened to already
+                # cover `op_n` by the time array declarations were sized.
+                # Confirmed against Icarus for a reduction over a
+                # >64-bit COMPUTED (non-signal) operand -- e.g. a
+                # concatenation -- reached from a narrow (<=64-bit)
+                # calling context with no OTHER wide computation anywhere
+                # else in the module: the scratch arrays got declared at
+                # only 1 word, one word short of what `wide_or`/
+                # `wide_reduce_or` (both called with `n=2` immediately
+                # below) actually need, which the Cython compiler itself
+                # caught as a type error rather than silently
+                # miscompiling.
+                self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words, op_n)
                 lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, max(n_words, op_n), op_width, indent)
                 if lines is None:
                     self._free_scratch(op_slot)
@@ -3907,6 +3934,10 @@ class _WideEmitterMixin:
                 op_slot = self._alloc_scratch()
                 op_width = self._expr_width(expr.operand)
                 op_n = (op_width + 63) // 64
+                # Same `_dynamic_max_wide_words` gap and fix as the
+                # `_REDUCE_PRIMS` branch just above -- see its own
+                # comment for the full rationale.
+                self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words, op_n)
                 lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, op_n, op_width, indent)
                 if lines is None:
                     self._free_scratch(op_slot)
@@ -4991,6 +5022,51 @@ class _WideEmitterMixin:
                     return None
                 if dst_width > inner_w and fname == "$signed":
                     lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(inner_w), indent))
+                return lines
+            # User-defined function: `_user_func_XXX` always returns a
+            # `long long` (at most 64 bits, by construction of its own
+            # calling convention -- see `_gen_sections.py`'s
+            # `_gen_user_functions`), so its result always fits in scratch
+            # word 0 regardless of how wide `dst_width` (the OUTER
+            # context) is. Previously this branch fell through to `return
+            # None` -- the generic "not yet handled" signal callers use to
+            # fall back to OTHER wide-RHS pattern matchers, all of which
+            # ALSO don't understand FunctionCall, eventually reaching the
+            # narrow-scalar last-resort fallback that's wrong for a
+            # >64-bit destination (silently computing a value that never
+            # accounted for this operand's own contribution at all).
+            # Confirmed against Icarus (cross-engine, `vm`/`vm-fast`/
+            # `reference` all already agreed) for `(~^$signed({a3,
+            # fn_sub16s(a7, a1[6:4])}))`: the 79-bit-wide concat containing
+            # a function call is an operand of a reduction, forcing this
+            # wide path even though the FINAL destination (`y`) is only
+            # 64 bits -- the missing case here silently dropped the
+            # function call's contribution to the concat entirely.
+            func = self._function_map.get(expr.name)
+            if func is not None:
+                call_expr = self._emit_user_func_call_expr(func, expr)
+                ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
+                if ret_sid is None:
+                    return None
+                ret_w = self._signal_widths[ret_sid]
+                src_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                lines = [
+                    f"{pad}_sc{slot}_v[0] = ({call_expr}) & wmask({ret_w})",
+                    f"{pad}_sc{slot}_m[0] = (c.mask[{ret_sid}]) & wmask({ret_w})",
+                ]
+                for wi in range(1, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                if dst_width > ret_w and src_signed:
+                    lines = lines[:2] + self._wide_sign_extend_to_dst_lines(
+                        slot, dst_width, n_words, str(ret_w), indent
+                    )
+                elif dst_width < ret_w:
+                    dst_n = (dst_width + 63) // 64
+                    tail_bits = dst_width - (dst_n - 1) * 64
+                    if tail_bits < _WORD_BITS:
+                        lines.append(f"{pad}_sc{slot}_v[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                        lines.append(f"{pad}_sc{slot}_m[{dst_n - 1}] &= _word_mask64({tail_bits})")
                 return lines
             return None
 

@@ -47,6 +47,7 @@ class EvalContext:  # cm:1f4c6a
 
     __slots__ = (
         "_dirty",
+        "_functions",
         "_memories",
         "_memory_bases",
         "_memory_names",
@@ -87,6 +88,14 @@ class EvalContext:  # cm:1f4c6a
         # For signals declared with non-zero LSB (e.g. logic [31:1] foo),
         # stores the LSB so bit/range selects can adjust indices.
         self._signal_bases: dict[str, int] = {}
+        # User-defined function registry: function_name -> FunctionDecl.
+        # Populated during elaboration (mirrors the executor's own
+        # `_function_map`, populated alongside it in `scheduler.py`) so
+        # `_expr_self_width` can look up a user-defined function CALL's
+        # own real return width instead of a hardcoded fallback -- see
+        # that function's FunctionCall case for the concrete Icarus-
+        # confirmed repro this fixes.
+        self._functions: dict[str, object] = {}
 
     def read_signal(self, name: str) -> Value:
         """Read a signal by name.  Returns x(1) if unknown.
@@ -1171,7 +1180,6 @@ class ExpressionEvaluator:  # cm:7e8b5d
         from veriforge.model.functions import FunctionDecl
 
         func: FunctionDecl
-        args = [self.eval(a, ctx) for a in call.arguments]
 
         # Determine return width
         ret_width = 32
@@ -1186,8 +1194,58 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # Create local context: copy parent signals, add port bindings + return var
         local_signals = dict(ctx._signals)
         for i, port in enumerate(func.ports):
-            if i < len(args):
-                local_signals[port.name] = args[i]
+            if i < len(call.arguments):
+                # A call's argument-to-port binding is really an implicit
+                # assignment (`port = arg_expr;`), and just like every
+                # other assignment in this file, the RHS must be
+                # evaluated DIRECTLY at the target's own width
+                # (`self.eval(expr, ctx, width=port_width)`, mirroring
+                # `executor.py`'s BlockingAssign/NonblockingAssign
+                # handling, `self.evaluator.eval(stmt.rhs, ctx,
+                # width=lhs_w)`) -- NOT at the argument's own self-
+                # determined width with a resize applied afterward (the
+                # first version of this fix). Those are NOT equivalent
+                # whenever the argument is itself a NESTED context-
+                # determined operator (unary `-`, a further `+`/`-`/`*`,
+                # a `$signed`/`$unsigned` cast): two's-complement
+                # negation, in particular, does not commute with
+                # extension, the same "unary `-` must negate at its
+                # final width, not self-width-then-extend" principle
+                # already established for ordinary context-determined
+                # arithmetic elsewhere in this file. Confirmed against
+                # Icarus for `fn_neg(-(!a7))` with `fn_neg(input signed
+                # [15:0] a)` and `a7` = 0: negating `!a7`=1 at its own
+                # 1-bit self-determined width first (mod-2 arithmetic)
+                # gives 1, zero-extended to 16 bits = `1` -- wrong;
+                # Icarus negates directly at the port's 16-bit context,
+                # correctly giving `-1` (0xFFFF).
+                #
+                # `self.eval(..., ctx, port_width)` still never NARROWS a
+                # result on its own for expression types whose own
+                # dispatch ignores the width hint for narrowing (a
+                # `RangeSelect`/`BitSelect`'s own dispatch only ever
+                # WIDENS when asked, matching the "never narrow, only
+                # widen" convention this file uses everywhere else) -- an
+                # explicit post-hoc resize/sign_extend is therefore still
+                # needed for THAT case, same as before. Confirmed against
+                # Icarus for `fn_sel1(a4[27:8], a1)` with `fn_sel1(input
+                # a, input [62:0] b)`: passing the 20-bit range-select
+                # `a4[27:8]` into the 1-bit port `a` unchanged left it
+                # nonzero (hence "truthy") regardless of its own low bit,
+                # always taking the ternary body's TRUE branch -- Icarus
+                # (and every other engine, none of which had this bug)
+                # truncates to just `a4`'s bit 8 first, as required.
+                port_width = 1
+                if port.width is not None:
+                    msb_v = self.eval(port.width.msb, ctx)
+                    lsb_v = self.eval(port.width.lsb, ctx)
+                    if msb_v.is_defined and lsb_v.is_defined:
+                        port_width = abs(int(msb_v) - int(lsb_v)) + 1
+                arg_val = self.eval(call.arguments[i], ctx, port_width)
+                if arg_val.width != port_width:
+                    eff_signed = _expr_signed(call.arguments[i], ctx)
+                    arg_val = arg_val.sign_extend(port_width) if eff_signed else arg_val.resize(port_width)
+                local_signals[port.name] = arg_val
             else:
                 local_signals[port.name] = Value.x(1)
         # Initialize the return variable (same name as the function)
@@ -1202,6 +1260,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
         local_ctx._memory_bases.update(ctx._memory_bases)
         local_ctx._memory_names.update(ctx._memory_names)
         local_ctx._memories.update(ctx._memories)
+        local_ctx._functions.update(ctx._functions)
         for port in func.ports:
             layout = _struct_layout_for_type(getattr(port, "data_type", None), ctx)
             if layout is not None:
@@ -1356,6 +1415,24 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         name = expr.name.lower()
         if name in ("$signed", "$unsigned") and expr.arguments:
             return _expr_self_width(expr.arguments[0], ctx)
+        # A user-defined function call's self-determined width is its
+        # OWN declared return width, not a hardcoded fallback -- the
+        # fallback below is only for genuinely unresolvable calls (e.g.
+        # an unknown/unregistered function name). Mirrors
+        # `_eval_user_function`'s own return-width computation (msb/lsb
+        # evaluated as literals; a non-literal or missing return range
+        # falls back to 32, the same approximation used everywhere else
+        # in this STATIC, AST-shape-based helper). Confirmed against
+        # Icarus for `($unsigned(fn_sel1(a4[27:8], a1)) ^ (~^(-a4)))`
+        # with `fn_sel1` declared `function [62:0] fn_sel1(...)`: the
+        # old hardcoded `32` here silently truncated the XOR's own
+        # `target` width computation, corrupting the zero-extension of
+        # the call's real 63-bit return value into the 64-bit result.
+        func = ctx._functions.get(expr.name)
+        if func is not None and func.return_range is not None:
+            msb, lsb = func.return_range.msb, func.return_range.lsb
+            if isinstance(msb, Literal) and isinstance(lsb, Literal):
+                return abs(int(msb.value) - int(lsb.value)) + 1
         return 32
     if etype is StringLiteral:
         return len(expr.value) * 8

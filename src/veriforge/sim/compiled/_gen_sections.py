@@ -67,7 +67,9 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
     return lines
 
 
-def _seq_body_to_sv_reads(body_lines: list[str], async_sids: set[int] | None = None) -> list[str]:
+def _seq_body_to_sv_reads(
+    body_lines: list[str], async_sids: set[int] | None = None, func_internal_sids: set[int] | None = None
+) -> list[str]:
     """Rewrite a seq proc body so that signal reads use sv[]/sm[] (pre-posedge snapshot).
 
     All sequential process bodies should sample inputs from the pre-clock-edge state,
@@ -91,6 +93,23 @@ def _seq_body_to_sv_reads(body_lines: list[str], async_sids: set[int] | None = N
     Reading sv[rst_n] inside ``if (!rst_n)`` would evaluate to 1 (not reset), causing
     the else branch to execute instead of the reset path.
 
+    **Exception** — signals listed in *func_internal_sids* (a user-defined function's own
+    port/local/return-variable signals -- see ``_gen_user_functions``) must also use
+    c.val[]/c.mask[] not sv[]/sm[], for a different reason than blocking-written locals:
+    their true value is written DIRECTLY by a ``_user_func_XXX(...)`` call embedded
+    inline in an expression (not a standalone ``c.val[N] = ...`` statement this
+    function's own blocking-write detection recognizes), so the first-pass "blocking-
+    written" scan never sees them and would otherwise treat them as an ordinary,
+    rewritable signal reference. `sv[]`/`sm[]` were never populated for these IDs at
+    all (they are not real driven signals participating in this process's own posedge-
+    snapshot convention), so rewriting a mask/value READ of one to `sv`/`sm` silently
+    reads stale/zero-initialized shadow-array garbage instead of the value the function
+    call that same line just computed. Confirmed against Icarus (cross-engine,
+    `vm`/`vm-fast`/`reference` all already agreed) for `y <= {2{fn_sel1(a2[4], a5)}}`:
+    the mask-side re-invocation's `c.mask[ret_sid]` read got rewritten to `sm[ret_sid]`,
+    which was never written by anything, spuriously reading fully-x garbage regardless
+    of the function's own correctly-computed (fully defined) result.
+
     Substitutions performed (safe because NBA writes use c.nba_val/c.nba_mask/c.nba_dirty):
       c.val[N]                      → sv[N]    (only if N not blocking-written or async here)
       c.mask[N]                     → sm[N]    (only if N not blocking-written or async here)
@@ -98,8 +117,12 @@ def _seq_body_to_sv_reads(body_lines: list[str], async_sids: set[int] | None = N
       _sig_extract_word_mask(c, …)  → _sig_extract_word_mask_sv(sm, c, …)
     """
     # First pass: collect signal IDs that are blocking-written in this process.
-    # Also seed tainted with async sensitivity signals (negedge signals).
+    # Also seed tainted with async sensitivity signals (negedge signals) and
+    # any user-defined function's own internal signals (see the docstring's
+    # func_internal_sids exception above).
     tainted: set[int] = set(async_sids) if async_sids else set()
+    if func_internal_sids:
+        tainted.update(func_internal_sids)
     for line in body_lines:
         m = _BLOCKING_WRITE_RE.match(line)
         if m:
@@ -389,8 +412,22 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ret_sid = self._signal_map[ret_name]
             ret_w = self._signal_widths[ret_sid]
 
-            # Build parameter list
-            params = ", ".join(f"long long arg_{i}" for i in range(len(func.ports)))
+            # Build parameter list. Each argument passes its VALUE and its
+            # x/z MASK as a separate pair (`arg_{i}_v`, `arg_{i}_m}`) --
+            # a single `long long` return/argument has no room for both,
+            # and this call boundary previously carried ONLY the value,
+            # silently discarding any x/z-ness in every argument before
+            # it ever reached the function body (every port's mask was
+            # hardcoded to 0 below, regardless of what the caller's
+            # actual argument expression's mask was). Confirmed against
+            # Icarus (cross-engine, `vm`/`vm-fast`/`reference` all
+            # already agreed) for `fn_sub16s(a5, a5[35])` with `a5` fully
+            # x: the correct result has fn_sub16s's own 16-bit return
+            # width worth of x, but with the argument mask always
+            # silently zeroed here, the subtraction inside the function
+            # body saw two fully-DEFINED (looking) operands and computed
+            # a spurious definite value instead.
+            params = ", ".join(f"long long arg_{i}_v, long long arg_{i}_m" for i in range(len(func.ports)))
             sig = (
                 f"cdef inline long long _user_func_{safe_name}(SimCtx *c, {params}) noexcept nogil:"
                 if params
@@ -407,8 +444,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 local_name = f"{prefix}.{port.name}"
                 sid = self._signal_map[local_name]
                 w = self._signal_widths[sid]
-                parts.append(f"    c.val[{sid}] = arg_{i} & wmask({w})")
-                parts.append(f"    c.mask[{sid}] = 0")
+                parts.append(f"    c.val[{sid}] = arg_{i}_v & wmask({w})")
+                parts.append(f"    c.mask[{sid}] = arg_{i}_m & wmask({w})")
 
             # Emit function body with remapped identifiers
             if func.body:
@@ -489,6 +526,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         seq_negedge_sids = [
             {sid for sid, et in edges.items() if et == "negedge"} for edges, _, _ in self._seq_processes
         ]
+        # Every user-defined function's own internal signals (ports, return
+        # variable, locals) must also never be rewritten to sv[]/sm[] -- see
+        # `_seq_body_to_sv_reads`'s own docstring (func_internal_sids
+        # exception) for the concrete Icarus-confirmed repro this avoids.
+        func_internal_sids: set[int] = set()
+        for func in self._function_map.values():
+            prefix = f"__func_{func.name}"
+            names = [func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)]
+            for name in names:
+                sid = self._signal_map.get(f"{prefix}.{name}")
+                if sid is not None:
+                    func_internal_sids.add(sid)
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
@@ -510,7 +559,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     decls: list[str] = []
                     if use_sv:
                         async_sids = seq_negedge_sids[i] if prefix == "seq" else None
-                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids)
+                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids, func_internal_sids)
                     # Hoist inline cdef-with-initializer declarations to function
                     # level so they are never emitted inside if/elif blocks (Cython
                     # forbids cdef inside conditional blocks).
@@ -576,6 +625,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         seq_negedge_sids = [
             {sid for sid, et in edges.items() if et == "negedge"} for edges, _, _ in self._seq_processes
         ]
+        # Mirrors `_gen_process_functions`'s identical precomputation -- see
+        # `_seq_body_to_sv_reads`'s docstring (func_internal_sids exception)
+        # for the rationale; this method must stay byte-for-byte identical
+        # to that one.
+        func_internal_sids: set[int] = set()
+        for func in self._function_map.values():
+            prefix = f"__func_{func.name}"
+            names = [func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)]
+            for name in names:
+                sid = self._signal_map.get(f"{prefix}.{name}")
+                if sid is not None:
+                    func_internal_sids.add(sid)
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
@@ -597,7 +658,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     decls: list[str] = []
                     if use_sv:
                         async_sids = seq_negedge_sids[i] if prefix == "seq" else None
-                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids)
+                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids, func_internal_sids)
                     hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                     decls.extend(hoisted_cdefs)
                     joined = "\n".join(body_lines)

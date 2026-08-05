@@ -424,6 +424,7 @@ class Scheduler:  # cm:9a7f2c
         # Populate function/task lookup maps on the executor
         for func in module.functions:
             self.executor._function_map[func.name] = func
+            self.ctx._functions[func.name] = func
         for task in module.tasks:
             self.executor._task_map[task.name] = task
 

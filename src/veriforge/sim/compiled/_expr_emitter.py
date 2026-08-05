@@ -27,6 +27,7 @@ from veriforge.model.expressions import (
     TernaryOp,
     UnaryOp,
 )
+from veriforge.semantics import range_width as _range_width
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _cy_lit,
@@ -753,8 +754,40 @@ class _ExprEmitterMixin:
             true_expr = self._emit_expr(expr.true_expr, width, t_signed_override)
             false_expr = self._emit_expr(expr.false_expr, width, f_signed_override)
             cond_mask = self._emit_mask_expr(expr.condition, cond_w)
-            true_mask = self._emit_mask_expr(expr.true_expr, tw)
-            false_mask = self._emit_mask_expr(expr.false_expr, fw)
+            # A `+`/`-`/`*`/`/`/`%` branch's VALUE was just computed
+            # directly AT the outer `width` above (`op_width == width`
+            # always for these ops in `_emit_binary`, per this function's
+            # own comment a few dozen lines up: "those ops already extend
+            # directly to whatever width they're asked for... unlike
+            # `&`/`|`/`^`, which have their own smaller natural width and
+            # a genuinely separate later widening step") -- its MASK query
+            # must match that SAME width, not the branch's own self-
+            # determined `tw`/`fw`, or the mask ends up bounded to a
+            # NARROWER width than the value it's describing, silently
+            # leaving the outer bits beyond that (definitely-x-or-not)
+            # unaccounted for. This is independent of `own_signed`/
+            # `t_signed_override` above (which only decides WHICH
+            # signedness decision governs the branch's own internal
+            # extension, not what OUTER width it was computed at in the
+            # first place) -- `/`/`%` need it too despite keeping their
+            # own `own_signed`-forced override, since they share the same
+            # "compute directly at `width`" `op_width` rule as `+`/`-`/`*`.
+            # Confirmed against Icarus (cross-engine, `vm`/`vm-fast`/
+            # `reference` all already agreed) for `cond ? ((a >> b) *
+            # $signed(a2)) : {2{a4[52]}}` with `a2` fully x: the `*`
+            # branch's mask, queried at its own 63-bit self-width instead
+            # of the ternary's 64-bit outer width, left bit 63 spuriously
+            # looking definite (0) instead of x.
+            true_mask_w = (
+                width if isinstance(expr.true_expr, BinaryOp) and expr.true_expr.op in ("+", "-", "*", "/", "%") else tw
+            )
+            false_mask_w = (
+                width
+                if isinstance(expr.false_expr, BinaryOp) and expr.false_expr.op in ("+", "-", "*", "/", "%")
+                else fw
+            )
+            true_mask = self._emit_mask_expr(expr.true_expr, true_mask_w)
+            false_mask = self._emit_mask_expr(expr.false_expr, false_mask_w)
             # `_emit_mask_expr` has no `signed_override` parameter (unlike
             # `_emit_expr`), so `true_mask`/`false_mask` above are computed
             # at each branch's own self-width `tw`/`fw` ONLY -- they never
@@ -1830,7 +1863,50 @@ class _ExprEmitterMixin:
         ow = self._expr_width(expr.operand)
 
         # Reduction operators → 1-bit result (self-determined)
-        if expr.op in _REDUCTION_OPS:
+        if expr.op in _REDUCTION_OPS or expr.op == "!":
+            # A reduction's OWN result always fits in 1 bit regardless of
+            # its operand's width, but `_emit_reduction`/the `!` formula
+            # below both compute via native `long long` operand/mask
+            # strings -- correct only up to 64 bits. Beyond that (a
+            # concat/replication whose own self-determined width exceeds
+            # the native register), those strings silently lose the
+            # operand's upper bits entirely (`wmask(ow)`/`_cy_hex((1 <<
+            # ow) - 1)` both overflow a 64-bit C literal for `ow > 64`,
+            # collapsing to an effectively-64-bit mask no matter how wide
+            # `ow` really is). Route through the wide emitter instead,
+            # which already has correct multi-word reduction primitives
+            # (`wide_reduce_and`/`_or`/`_xor`) -- see
+            # `_emit_wide_reduction_to_value`'s own docstring. This is a
+            # genuine, PRE-EXISTING gap unrelated to any particular
+            # operator nested inside the reduction -- confirmed against
+            # Icarus (cross-engine) for `((!{a0, a7, a4}) & 64'hFF...FF)`
+            # with `a0` 1 bit x, `a7` 1 bit, `a4` 64 bits (66 bits total):
+            # embedding the reduction as an AND operand (reached through
+            # `_emit_mask_expr`'s generic dispatch, unlike a bare top-
+            # level assignment RHS, which apparently has its own
+            # unaffected fast path) spuriously read the ambiguous top bit
+            # as definite.
+            if ow > _WORD_BITS:
+                wide = self._emit_wide_reduction_to_value(expr)
+                if wide is not None:
+                    return wide[0]
+            if expr.op == "!":
+                operand = self._emit_expr(expr.operand, ow)
+                # Must independently return 0 (not just "whatever the raw,
+                # x-positions-already-zeroed value happens to compute")
+                # whenever the true result is ambiguous -- see the
+                # docstring on `_emit_reduction` below for why this
+                # matters even though a PAIRED mask expression already
+                # gets this right elsewhere. A known-1 bit anywhere in the
+                # operand forces `!` definitely false regardless of x
+                # elsewhere; only when there is NO known-1 bit AND some
+                # bit is x is the result genuinely ambiguous (value must
+                # read 0 there, matching the mask).
+                operand_mask = self._emit_mask_expr(expr.operand, ow)
+                wm = f"wmask({ow})"
+                known_one = f"(({operand}) & (~({operand_mask})) & {wm})"
+                any_x = f"(({operand_mask}) & {wm})"
+                return f"(0 if {known_one} else (0 if {any_x} else (1 if (({operand}) & {wm}) == 0 else 0)))"
             operand = self._emit_expr(expr.operand, ow)
             operand_mask = self._emit_mask_expr(expr.operand, ow)
             return self._emit_reduction(expr.op, operand, operand_mask, ow)
@@ -1922,24 +1998,75 @@ class _ExprEmitterMixin:
                 return f"((~({operand})) & (~({operand_mask})) & wmask({eval_width}))"
             return f"({operand})"
 
-        # Logical NOT (!) — self-determined 1-bit
+        # Any other unary op reaching here (none currently do -- `!` and
+        # every reduction op are handled above, `~`/`+`/`-` above that):
+        # fall back to a plain passthrough.
         operand = self._emit_expr(expr.operand, ow)
-        if expr.op == "!":
-            # Must independently return 0 (not just "whatever the raw,
-            # x-positions-already-zeroed value happens to compute")
-            # whenever the true result is ambiguous -- see the docstring
-            # on `_emit_reduction` below for why this matters even though
-            # a PAIRED mask expression already gets this right elsewhere.
-            # A known-1 bit anywhere in the operand forces `!` definitely
-            # false regardless of x elsewhere; only when there is NO
-            # known-1 bit AND some bit is x is the result genuinely
-            # ambiguous (value must read 0 there, matching the mask).
-            operand_mask = self._emit_mask_expr(expr.operand, ow)
-            wm = f"wmask({ow})"
-            known_one = f"(({operand}) & (~({operand_mask})) & {wm})"
-            any_x = f"(({operand_mask}) & {wm})"
-            return f"(0 if {known_one} else (0 if {any_x} else (1 if (({operand}) & {wm}) == 0 else 0)))"
         return f"({operand})"
+
+    def _emit_wide_reduction_to_value(self, expr: UnaryOp) -> tuple[str, str] | None:
+        """Compute a reduction/`!` `UnaryOp` whose operand exceeds 64 bits
+        via the wide emitter, returning `(value_expr, mask_expr)` strings
+        usable as plain `long long` sub-expressions.
+
+        `_wide_emitter.py`'s `_emit_wide_expr_to_scratch` already has
+        correct multi-word reduction support (`wide_reduce_and`/`_or`/
+        `_xor`, dispatched for every reduction op and `!` -- see its own
+        `_REDUCE_PRIMS` table and the `!`-specific branch right below it)
+        -- it's just never been reachable from THIS (narrow) emitter's
+        own `_emit_unary`, which always computed reductions via native
+        `long long` operand/mask strings, silently losing any operand
+        bits beyond the register's own 64. Calling straight into it here
+        and hoisting its (necessarily multi-statement, scratch-array-
+        based) computation into `_et` temps reuses that already-correct
+        logic instead of reimplementing it. The reduction's OWN result is
+        always exactly 1 bit, so it always fits back into a native
+        register afterward even though computing it correctly requires
+        scanning the operand's full width.
+
+        Returns None if hoisting isn't available in this context (no
+        `_et_pending` list to append to) or the wide emitter doesn't
+        recognize this node shape -- caller falls back to the narrow
+        formula, which remains correct up to 64 bits either way.
+        """
+        if self._et_pending is None:
+            return None
+        cached_v = self._et_node_vals.get(id(expr))
+        cached_m = self._et_node_masks.get(id(expr))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        slot = self._alloc_scratch()
+        lines = self._emit_wide_expr_to_scratch(expr, slot, 1, 1, 0)
+        if lines is None:
+            self._free_scratch(slot)
+            return None
+        # `_emit_wide_lhs_write_new` (a WIDE-destination assignment's own
+        # entry point into this same recursive scratch emitter) always
+        # sets this flag once it decides to use wide scratch space at
+        # all -- it's what controls whether the module's wide-primitive
+        # helper functions (`wide_reduce_or`, `wide_or`, `wide_shl`, ...)
+        # get emitted into the generated .pyx AT ALL (see
+        # `_module_has_wide_state`). This call site is a NARROW-
+        # destination caller reaching the same scratch machinery for the
+        # first time, and needs the identical flag -- without it, a
+        # module whose ONLY wide computation is a reduction like this one
+        # (no signal/memory in the module is itself >64 bits, and no
+        # OTHER assignment goes through the wide-destination path) never
+        # emits the wide-primitive definitions its own generated call
+        # here still references, which Cython's own type checker catches
+        # as "Converting to Python object not allowed without gil"
+        # (an undefined-identifier error, not a logic bug) rather than a
+        # silent runtime failure.
+        self._needs_wide_helpers = True
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.extend(lines)
+        self._et_pending.append(f"cdef long long _et{n}_v = <long long>_sc{slot}_v[0]")
+        self._et_pending.append(f"cdef long long _et{n}_m = <long long>_sc{slot}_m[0]")
+        self._free_scratch(slot)
+        self._et_node_vals[id(expr)] = f"_et{n}_v"
+        self._et_node_masks[id(expr)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
 
     def _emit_reduction(self, op: str, operand: str, operand_mask: str, width: int) -> str:  # noqa: PLR0911
         """Emit a reduction operator (result is 1 bit).
@@ -2278,14 +2405,57 @@ class _ExprEmitterMixin:
         # User-defined function
         func = self._function_map.get(call.name)
         if func is not None:
-            args = [self._emit_expr(a, 32) for a in call.arguments] if call.arguments else []
-            return (
-                f"_user_func_{_safe_ident(call.name)}(c, {', '.join(args)})"
-                if args
-                else f"_user_func_{_safe_ident(call.name)}(c)"
-            )
+            # Each argument must be emitted AT its own PORT's declared
+            # width, not a hardcoded `32` -- the generated
+            # `_user_func_XXX` helper does mask the incoming raw value
+            # down to the port's width on its own (`c.val[sid] = arg_i &
+            # wmask(w)`, see `_gen_sections.py`'s `_gen_user_functions`),
+            # which happens to correctly recover the right VALUE for most
+            # expression shapes regardless of what width they were
+            # emitted at (a plain Identifier/BitSelect's own C
+            # representation already holds its full correct value,
+            # unaffected by a narrower REQUESTED width). But some node
+            # shapes -- notably a `TernaryOp` with an ambiguous (x/z)
+            # condition, whose "bitwise-merge both branches" fallback
+            # masks its OWN result to the REQUESTED width as part of
+            # computing the merge itself, not just as an afterthought --
+            # genuinely lose real high-order bits when asked for a width
+            # narrower than the argument's own true content. Confirmed
+            # against Icarus (cross-engine, `vm`/`reference`/`vm-fast`
+            # all already agreed) for `fn_xor64s(((cond) ? a6 : (-a3)),
+            # a6[35])` with `fn_xor64s(input signed [63:0] a, ...)`: the
+            # old hardcoded `32` truncated the ternary's own ambiguous-
+            # condition merge computation for the 63/64-bit-wide argument
+            # down to 32 bits, corrupting high-order bits of the value
+            # actually stored into port `a`.
+            return self._emit_user_func_call_expr(func, call)
         # Unsupported function ΓåÆ 0
         return "0"
+
+    def _emit_user_func_call_expr(self, func, call: FunctionCall) -> str:
+        """Build a `_user_func_XXX(c, v0, m0, v1, m1, ...)` call expression.
+
+        Shared by `_emit_func_call` (VALUE side) and `_emit_mask_expr`'s
+        FunctionCall case (MASK side, which re-emits this SAME call
+        expression to force the function to run before reading
+        `c.mask[ret_sid]` -- see that call site's own docstring). Each
+        argument is emitted AT its own PORT's declared width (not a
+        hardcoded, possibly-too-narrow width -- see `_emit_func_call`'s
+        docstring above for the concrete Icarus-confirmed repro this
+        avoids), as a (value, mask) PAIR: `_user_func_XXX`'s own
+        generated signature (`_gen_sections.py`'s `_gen_user_functions`)
+        takes both per argument, since a single `long long` has no room
+        for a value AND its x/z mask -- passing only the value would
+        silently discard any x/z-ness in every argument before it ever
+        reached the function body.
+        """
+        port_widths = [_range_width(port.width, self._param_env) for port in func.ports]
+        args: list[str] = []
+        for a, w in zip(call.arguments, port_widths, strict=False):
+            args.append(self._emit_expr(a, w))
+            args.append(self._emit_mask_expr(a, w))
+        safe_name = _safe_ident(call.name)
+        return f"_user_func_{safe_name}(c, {', '.join(args)})" if args else f"_user_func_{safe_name}(c)"
 
     # ΓöÇΓöÇ Expression width computation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -2629,7 +2799,28 @@ class _ExprEmitterMixin:
                     f" (0 if ({r_def_zero}) else"
                     f" (0 if ({both_truthy}) else (({lm}) | ({rm})))))"
                 )
-            if expr.op in {"+", "-"}:
+            if expr.op in {"+", "-", "*", "/", "%"}:
+                # Arithmetic ops need the conservative "ANY x/z bit
+                # ANYWHERE in either operand -> the ENTIRE result is x"
+                # rule (already correctly applied to `+`/`-` here, but
+                # `*`/`/`/`%` were missing it entirely, silently falling
+                # through to the generic per-bit-position `lm | rm`
+                # fallback at the end of this function -- appropriate for
+                # a bitwise combining op, wrong for arithmetic, whose
+                # carry/borrow/product/quotient chain can't be computed
+                # with partial unknowns). Confirmed against Icarus
+                # (cross-engine, against the reference oracle) for `((0 -
+                # a3) * (a0 && a0))` with `a0` fully x: `a0 && a0`'s own
+                # 1-bit x result, zero-extended into the wider
+                # multiplication, has a mask with only its own low bit
+                # set (the zero-extension padding bits are definitely 0)
+                # -- the old `lm | rm` fallback let that single x bit's
+                # position alone determine which RESULT bits read as x,
+                # instead of correctly tainting the entire product.
+                # Confirmed the identical shape for `/`/`%` too via a
+                # divisor whose own x bit survives an `| 1` (used
+                # elsewhere to dodge zero-divisor UB) at a different bit
+                # position.
                 return f"(wmask({width}) if (({lm}) | ({rm})) else 0)"
             if (
                 expr.op == ">>>"
@@ -2745,6 +2936,19 @@ class _ExprEmitterMixin:
         if etype is UnaryOp:
             ow = self._expr_width(expr.operand)
             if expr.op in _REDUCTION_OPS or expr.op == "!":
+                # Same "native long long can't represent a >64-bit operand"
+                # gap as `_emit_unary`'s mirror-image VALUE-side branch --
+                # see `_emit_wide_reduction_to_value`'s own docstring for
+                # the full rationale and the concrete Icarus-confirmed
+                # repro. `_emit_wide_reduction_to_value` caches by
+                # `id(expr)`, so if the VALUE side already hoisted this
+                # SAME node (the common case -- most callers want both),
+                # this returns the identical already-computed `_et{n}_m`
+                # instead of re-emitting the whole wide computation.
+                if ow > _WORD_BITS:
+                    wide = self._emit_wide_reduction_to_value(expr)
+                    if wide is not None:
+                        return wide[1]
                 # A reduction's mask isn't just "pass through the operand's
                 # mask" -- a known-0 bit forces &/~& definitely non-x, and a
                 # known-1 bit forces |/~|/! definitely non-x, even when
@@ -3106,7 +3310,50 @@ class _ExprEmitterMixin:
                 if fname == "$signed":
                     return f"_sign_ext({arg_mask}, {arg_w})"
                 return arg_mask
-            # For functions, OR all argument masks
+            # User-defined function: `_user_func_XXX` returns only a
+            # `long long` VALUE -- there is no mask channel in its call
+            # signature at all, so its own internally-computed x/z bits
+            # (`c.mask[ret_sid]`, set correctly by the generated function
+            # body) never reach the caller through the return value. The
+            # OLD fallback here approximated this by ORing together the
+            # ARGUMENT masks (a crude "did any input look ambiguous"
+            # guess), which is wrong in both directions: it can UNDER-
+            # report (a function whose body happens to mask an ambiguous
+            # argument away, e.g. `f = a & 0;`, would still show x here)
+            # and, the bug actually hit, OVER-report -- the caller then
+            # extends this approximate mask to the OUTER destination's
+            # FULL width rather than the function's own narrower return
+            # width, corrupting an otherwise-correctly-bounded x result
+            # into an all-x one. Confirmed against Icarus (cross-engine,
+            # `vm`/`vm-fast`/`reference` all already agreed) for
+            # `fn_sub16s(a5, a5[35])` with `a5` fully x and `fn_sub16s`
+            # declared `function signed [15:0] fn_sub16s(...)`: the
+            # correct result is x only in fn_sub16s's own low 16 bits
+            # (zero-extended into the wider destination), not all 64.
+            #
+            # `ret_sid` is a FIXED, per-FUNCTION (not per-call-site)
+            # signal id (`_gen_user_functions` in `_gen_sections.py`
+            # names it `__func_{name}.{name}`, no call-site suffix), so
+            # `c.mask[ret_sid]` genuinely reflects whichever call most
+            # recently ran -- calling the function a SECOND time here
+            # (with the identical arguments already re-emitted for the
+            # value side) is safe (Verilog functions are pure, input-only
+            # ports by spec, so a repeat call has no side effects to
+            # duplicate) and populates `c.mask[ret_sid]` correctly before
+            # reading it. The `(... if (CALL or 1) else 0)` shape forces
+            # the call to always run as part of evaluating the condition
+            # (its own return value is discarded) while still producing a
+            # single composable expression, matching this codebase's
+            # existing ternary-as-expression-sequencing convention used
+            # throughout this file.
+            func = self._function_map.get(expr.name)
+            if func is not None:
+                ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
+                if ret_sid is not None:
+                    call_expr = self._emit_user_func_call_expr(func, expr)
+                    return f"(c.mask[{ret_sid}] if ({call_expr} or 1) else 0)"
+            # Fallback (function not found -- shouldn't happen in practice):
+            # OR all argument masks, same crude approximation as before.
             if expr.arguments:
                 parts = [self._emit_mask_expr(a, 32) for a in expr.arguments]
                 return "(" + " | ".join(parts) + ")"

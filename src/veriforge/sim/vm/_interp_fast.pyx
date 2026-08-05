@@ -854,9 +854,35 @@ cdef int _execute_core(
                     for wi in range(sx_tail_word + 1, WIDE_WORDS):
                         wv[(sp - 1) * WIDE_WORDS + wi] = 0
                         wm[(sp - 1) * WIDE_WORDS + wi] = 0
-                wflag[sp - 1] = 1
-                stack[sp - 1].val   = 0
-                stack[sp - 1].mask  = 0
+                if arg1 <= 64:
+                    # The SOURCE was wide (that's why this branch ran at
+                    # all), but the REQUESTED result width fits in the
+                    # scalar stack slot -- demote back to narrow
+                    # (wflag=0) instead of leaving the result stranded in
+                    # the wide array with a stale `stack[sp-1].val=0`
+                    # placeholder. Mirrors `OP_RESIZE`'s own "Wide to
+                    # narrow" branch a few dozen lines up, which already
+                    # gets this right -- `OP_SIGN_EXT` never had the
+                    # equivalent step. Without this, a later narrow-
+                    # destination consumer reading `stack[sp-1].val`
+                    # directly (e.g. `OP_STORE_SIG`'s narrow-signal branch,
+                    # which never checks `wflag`) silently reads 0 instead
+                    # of the correctly-computed value. Confirmed against
+                    # Icarus (cross-engine, `vm`/`reference`/`compiled` all
+                    # agreed already) for `fn_xor64s(a5, a6)` with
+                    # `fn_xor64s(input signed [63:0] a, input [7:0] b)`:
+                    # narrowing the 80-bit signed `a6` down to the 8-bit
+                    # port `b` (arg1=8, a wide source) left `b`'s value as
+                    # a near-zero placeholder on `vm-fast` only, corrupting
+                    # the XOR body's result.
+                    wmask = mask_for_width(arg1)
+                    stack[sp - 1].val  = <long long>(wv[(sp - 1) * WIDE_WORDS] & wmask)
+                    stack[sp - 1].mask = <long long>(wm[(sp - 1) * WIDE_WORDS] & wmask)
+                    wflag[sp - 1] = 0
+                else:
+                    wflag[sp - 1] = 1
+                    stack[sp - 1].val   = 0
+                    stack[sp - 1].mask  = 0
                 stack[sp - 1].width = arg1
             continue
 

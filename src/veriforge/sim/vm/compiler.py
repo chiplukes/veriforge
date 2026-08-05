@@ -1672,6 +1672,24 @@ class Compiler:  # cm:8c1e4a
         func: FunctionDecl
         depth = self._func_call_depth
         prefix = f"__func_{func.name}_{depth}"
+        # Bump `_func_call_depth` immediately, BEFORE compiling this
+        # call's own ARGUMENTS (not just its body, as the code used to)
+        # -- a NESTED user-function call reached while compiling one of
+        # THIS call's arguments (e.g. `fn_xor64s(fn_xor64s(a, b), c)`)
+        # must get a DIFFERENT depth than this (outer) call's own, or it
+        # computes the identical `depth` value here (since the increment
+        # previously happened only right before the BODY, well after the
+        # argument loop) and therefore the IDENTICAL `__func_{name}_
+        # {depth}` prefix -- meaning the inner and outer calls to the
+        # SAME function silently share the SAME local port/return
+        # signals, and the inner call's own argument-binding writes (its
+        # own STORE_SIG into `.a`/`.b`) corrupt the outer call's
+        # not-yet-consumed ones. Confirmed against Icarus (cross-engine,
+        # `reference`/`compiled` already agreed) for `fn_xor64s(a2[12:0],
+        # {fn_xor64s(a0, a2[0]), $signed(a2)})`: the outer call's own
+        # `a2[12:0]` argument value got corrupted by the inner
+        # `fn_xor64s(a0, a2[0])` call sharing its port signals.
+        self._func_call_depth += 1
 
         # Determine return width
         ret_width = 32
@@ -1708,12 +1726,54 @@ class Compiler:  # cm:8c1e4a
 
         # Compile and store each argument into the corresponding port signal
         for i, port in enumerate(func.ports):
+            port_w = _range_width(port.width, self._param_env)
             if i < len(call.arguments):
-                self._compile_expr(call.arguments[i], program)
+                # A call's argument-to-port binding is really an implicit
+                # assignment (`port = arg_expr;`), so the argument is
+                # compiled DIRECTLY at the PORT's own declared width
+                # (mirroring every other "compile RHS at target width"
+                # call site in this file) -- NOT at the argument's own
+                # self-determined width with a RESIZE/SIGN_EXT applied
+                # afterward alone (the first version of this fix). Those
+                # are NOT equivalent whenever the argument is itself a
+                # NESTED context-determined operator (unary `-`, a
+                # further `+`/`-`/`*`, a `$signed`/`$unsigned` cast):
+                # two's-complement negation, in particular, does not
+                # commute with extension, the same "unary `-` must negate
+                # at its final width, not self-width-then-extend"
+                # principle already established for ordinary context-
+                # determined arithmetic elsewhere in this file. Confirmed
+                # against Icarus for `fn_neg(-(!a7))` with `fn_neg(input
+                # signed [15:0] a)` and `a7` = 0: negating `!a7`=1 at its
+                # own 1-bit self-determined width first (mod-2 arithmetic)
+                # gives 1, zero-extended to 16 bits = `1` -- wrong; Icarus
+                # negates directly at the port's 16-bit context, correctly
+                # giving `-1` (0xFFFF).
+                #
+                # The RESIZE/SIGN_EXT safety net below is STILL needed on
+                # top of that -- it exists for a separate reason (see the
+                # ORIGINAL Icarus-confirmed repro this same net already
+                # fixed, `fn_xor64s(((cond) ? a6 : (-a3)), a6[35])`):
+                # whenever the argument expression's own self-determined
+                # width exceeds 64 bits, `_compile_expr` emits WIDE
+                # bytecode for it regardless of the `width` just passed
+                # in (matching this file's "only ever widen, never
+                # narrow, at the node's own dispatch" convention),
+                # leaving a wide-flagged value on the interpreter stack
+                # that `OP_STORE_SIG`'s narrow-destination branch (used
+                # whenever the PORT itself is <=64 bits) can't read
+                # directly -- an explicit RESIZE/SIGN_EXT forces the
+                # value back onto the narrow stack slot BEFORE
+                # `STORE_SIG` runs.
+                eff_signed = self._expr_signed(call.arguments[i])
+                self._compile_expr(call.arguments[i], program, port_w)
+                arg_w = self._expr_width(call.arguments[i])
+                if arg_w != port_w:
+                    program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, port_w, 0))
             else:
                 x_cid = self._add_const(Value.x(1))
                 program.append(instr(Op.LOAD_CONST, x_cid))
-            program.append(instr(Op.STORE_SIG, port_sids[i], _range_width(port.width, self._param_env)))
+            program.append(instr(Op.STORE_SIG, port_sids[i], port_w))
 
         # Remap identifiers: build a mapping from original names to local names
         import copy
@@ -1724,8 +1784,9 @@ class Compiler:  # cm:8c1e4a
         local_names.add(func.name)
         self._remap_identifiers(body_copy, local_names, prefix)
 
-        # Compile the function body with remapped identifiers
-        self._func_call_depth += 1
+        # Compile the function body with remapped identifiers -- already
+        # running at `depth + 1` (bumped once, up front, before the
+        # argument loop too -- see that comment for why).
         self._compile_stmt(body_copy, program)
         self._func_call_depth -= 1
 
@@ -2342,6 +2403,22 @@ class Compiler:  # cm:8c1e4a
             name = expr.name.lower()
             if name in ("$signed", "$unsigned") and expr.arguments:
                 return self._expr_width(expr.arguments[0])
+            # A user-defined function call's self-determined width is its
+            # OWN declared return width, not the generic fallback below --
+            # mirrors `_compile_user_function`'s own return-width
+            # computation and the identical fix in `sim/evaluator.py`'s
+            # `_expr_self_width` (see its docstring for the concrete
+            # Icarus-confirmed repro, `($unsigned(fn_sel1(a4[27:8], a1)) ^
+            # (~^(-a4)))` with `fn_sel1` declared `function [62:0]
+            # fn_sel1(...)`): the old hardcoded `32` here silently
+            # truncated the XOR's own `target` width computation,
+            # corrupting the zero-extension of the call's real 63-bit
+            # return value into the 64-bit result.
+            func = self._function_map.get(expr.name)
+            if func is not None and func.return_range is not None:
+                msb, lsb = func.return_range.msb, func.return_range.lsb
+                if isinstance(msb, Literal) and isinstance(lsb, Literal):
+                    return abs(int(msb.value) - int(lsb.value)) + 1
 
         return 32  # fallback
 

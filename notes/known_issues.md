@@ -2552,3 +2552,265 @@ Verified via all 14 statement-fuzzer seeds (150 cases each, 8/8 batches,
 `test_power_operator.py` (60 passed, 1 xfail, unaffected), and a final
 full fast-suite regression (7107 passed, 1 xfailed, 0 failed, `-n 8`,
 ~30 min, no regressions).
+
+**Seventeenth wave (August 2026, work plan item 3.4 Phase 6) --
+user-defined `function` call fuzzing surfaces fifteen more distinct
+bugs across all four engines, the majority pre-existing and only newly
+reachable now that a call's argument/return values get exercised by
+randomly generated expressions for the first time**: added
+`test_differential_functions.py`, a new dedicated fuzzer (own file,
+not folded into `test_differential.py`/`test_differential_statements.py`
+-- see that file's own docstring for why: the compiled engine cannot
+handle a `FunctionCall` node feeding a >64-bit destination, the same
+constraint that already excluded `**` into its own file) generating
+calls to a small fixed pool of user-defined functions
+(`FIXED_FUNCTIONS`, added to `test_differential.py` and reused via a
+new `callables` parameter on `_gen_expr`, itself a no-op for every
+pre-existing call site) from arbitrary expression positions with
+randomly generated argument expressions. Default-scale runs (reference/
+vm/vm-fast only) were clean from the start and stayed clean throughout;
+stress-testing at 150 cases across the 8-seed rotation with
+`VERIFORGE_DIFF_FUNC_COMPILED=1` surfaced the following, all confirmed
+against Icarus and/or cross-engine agreement:
+
+- **Reference engine's function-call argument binding never narrowed an
+  over-width argument to its port's own declared width**
+  (`sim/evaluator.py`'s `_eval_user_function`) -- a call's argument-to-
+  port binding is really an implicit assignment, but the raw `Value`
+  from evaluating the argument expression was stored directly into the
+  local port signal with no resize/sign-extend step, unlike every real
+  assignment (which gets this for free from `_write_target` writing
+  into the destination's own storage). Confirmed against Icarus for
+  `fn_sel1(a4[27:8], a1)` with `fn_sel1(input a, input [62:0] b)`:
+  passing the 20-bit range-select `a4[27:8]` into the 1-bit port `a`
+  unchanged left it nonzero (hence "truthy") regardless of its own low
+  bit. Fixed by explicitly resizing/sign-extending each argument to its
+  port's own width after evaluation.
+- **...then refined: evaluating an argument at its own self-determined
+  width and resizing afterward is not equivalent to evaluating it
+  DIRECTLY at the port's width**, whenever the argument is itself a
+  nested context-determined operator (unary `-` in particular, which
+  does not commute with extension -- the same principle already
+  established for ordinary context-determined arithmetic). Confirmed
+  against Icarus for `fn_neg(-(!a7))` with `fn_neg(input signed [15:0]
+  a)` and `a7 = 0`: negating `!a7`=1 at its own 1-bit self-determined
+  width first (mod-2 arithmetic) gives `1`, zero-extended to 16 bits =
+  `1` -- wrong; Icarus negates directly at the port's 16-bit context,
+  correctly giving `-1` (0xFFFF). Fixed by evaluating each argument
+  directly at its port's width (mirroring every "evaluate RHS at target
+  width" call site elsewhere in this file), keeping the post-hoc
+  resize/sign_extend as a safety net for expression types (like
+  `RangeSelect`) whose own dispatch never narrows on its own.
+- **Reference engine's (and `sim/vm/compiler.py`'s identical copy of)
+  self-determined-width estimator hardcoded a user-defined function
+  call's own width to a generic `32` fallback**, never consulting the
+  function's real declared return width (`_expr_self_width`/
+  `_expr_width`'s `FunctionCall` case only special-cased `$signed`/
+  `$unsigned`). Confirmed against Icarus for `($unsigned(fn_sel1(...))
+  ^ (~^(-a4)))` with `fn_sel1` declared `function [62:0] fn_sel1(...)`:
+  the hardcoded `32` silently truncated the XOR's own combined-width
+  computation, corrupting the zero-extension of the call's real 63-bit
+  return value. Fixed in both files by looking up the function's own
+  `return_range` (via a new `EvalContext._functions` registry,
+  populated in `scheduler.py` alongside the executor's own
+  `_function_map`, for `sim/evaluator.py`; via the existing
+  `_function_map` for `sim/vm/compiler.py`).
+- **`sim/vm/compiler.py`'s argument compilation had the identical
+  "compiled at self-width, resized afterward" gap as the reference-
+  engine fixes above**, plus a SEPARATE issue specific to the bytecode
+  VM: when an argument's own self-determined width exceeds 64 bits
+  (e.g. a wide ternary operand), `_compile_expr` emits WIDE bytecode
+  for it regardless of the port's own narrow width, leaving a wide-
+  flagged value on the interpreter stack that `OP_STORE_SIG`'s narrow-
+  destination branch can't read directly. Confirmed against Icarus for
+  `fn_xor64s(((cond) ? a6 : (-a3)), a6[35])` with `fn_xor64s(input
+  signed [63:0] a, ...)`: the 80-bit-wide ternary argument passed to
+  the 64-bit port `a` gave a near-zero garbage value on `vm-fast`
+  (`vm` itself was unaffected -- pure Python, no wide/narrow stack
+  distinction). Fixed by compiling each argument directly at its
+  port's width (fixing the first issue) with an explicit RESIZE/
+  SIGN_EXT safety net immediately after (fixing the second).
+- **`vm-fast`'s `OP_SIGN_EXT` never demoted a wide-flagged source back
+  to the narrow scalar stack representation when the requested result
+  width is <=64 bits** (`sim/vm/_interp_fast.pyx`) -- unlike `OP_RESIZE`
+  (which already correctly extracts the low bits and clears
+  `wflag` when narrowing from wide), `OP_SIGN_EXT`'s wide-source path
+  always left the result wide-flagged with a stale zeroed narrow slot,
+  regardless of the requested width. This is exactly what the RESIZE
+  safety net above emits, so it was reachable the moment that fix
+  landed. Confirmed against Icarus for `fn_xor64s(a5, a6)` narrowing
+  an 80-bit signed argument down to an 8-bit port: the result was a
+  near-zero garbage value. Fixed by adding the missing demotion,
+  mirroring `OP_RESIZE`'s own pattern.
+- **`sim/vm/compiler.py`'s nested-call depth counter incremented too
+  late, letting two calls to the SAME function (one nested inside the
+  other's own argument) collide on the identical local port/return
+  signals** -- `_func_call_depth` was only bumped immediately before
+  compiling the function BODY, not before compiling its ARGUMENTS, so
+  a nested call encountered while compiling an outer call's own
+  argument read the same (not-yet-incremented) depth and therefore the
+  identical `__func_{name}_{depth}` signal-name prefix as the outer
+  call itself. Confirmed against Icarus for `fn_xor64s(a2[12:0],
+  {fn_xor64s(a0, a2[0]), $signed(a2)})`: the inner call's own argument-
+  binding writes corrupted the outer call's not-yet-consumed port
+  signals. Fixed by bumping the depth counter immediately, before the
+  argument loop, so any nested call reached while compiling arguments
+  gets a distinct depth from its own outer call.
+- **Compiled engine's `_emit_func_call` hardcoded every argument's
+  VALUE-side width to `32` regardless of the port's own declared
+  width** (`sim/compiled/_expr_emitter.py`) -- correct by coincidence
+  for most expression shapes (the generated `_user_func_XXX` helper
+  re-masks the incoming raw value to the port's real width on its own
+  storage side), but genuinely wrong for a `TernaryOp` argument whose
+  own "ambiguous-condition bitwise-merge" fallback masks its result to
+  the REQUESTED width as part of computing the merge itself. Confirmed
+  against Icarus for `fn_xor64s(((cond) ? a6 : (-a3)), a6[35])`: the
+  hardcoded `32` truncated the ternary's own merge computation for the
+  63/64-bit-wide argument down to 32 bits, corrupting high-order value
+  bits before they reached the function. Fixed by computing each
+  argument at its own port's real declared width (via a new shared
+  `_emit_user_func_call_expr` helper, reused by both the value- and
+  mask-side call sites below).
+- **Compiled engine's function-call ABI had no mask (x/z) channel at
+  all, in either direction** (`sim/compiled/_gen_sections.py`'s
+  `_gen_user_functions`, `_expr_emitter.py`'s `_emit_func_call`/
+  `_emit_mask_expr`) -- `_user_func_XXX` took only VALUE arguments
+  (`long long arg_i`, hardcoding `c.mask[port_sid] = 0` on the way in)
+  and returned only a VALUE (discarding `c.mask[ret_sid]`, correctly
+  computed internally, on the way out). Confirmed against Icarus for
+  `fn_sub16s(a5, a5[35])` with `a5` fully x: the correct result is x
+  only in `fn_sub16s`'s own 16-bit return width, but the missing INPUT
+  channel meant the function body's subtraction always saw fully-
+  defined-looking operands, computing a spurious definite value instead
+  of x -- and separately, before that was fixed, the missing OUTPUT
+  channel meant the caller had to approximate the call's own mask by
+  ORing together its argument masks (a crude guess, also wrong -- see
+  the ternary/`&`/`*` findings below). Fixed by changing the generated
+  function signature to take `(value, mask)` pairs per argument and
+  storing both into the local port signals; the mask-side caller now
+  re-invokes the same call expression (forcing it to run again, safe
+  since Verilog functions are pure/input-only) purely to read
+  `c.mask[ret_sid]` afterward, via `(c.mask[ret_sid] if (CALL or 1)
+  else 0)` -- a value-discarding "run this call as a side effect of
+  evaluating this condition" idiom matching this codebase's existing
+  ternary-as-expression-sequencing convention.
+- **`+`/`-`/`*`/`/`/`%`'s mask-combining formula in the compiled
+  engine's narrow path was missing the "ANY x/z bit ANYWHERE in either
+  operand -> the ENTIRE result is x" rule for `*`/`/`/`%` specifically**
+  (`sim/compiled/_expr_emitter.py`'s `_emit_mask_expr`) -- `+`/`-`
+  already had it, but `*`/`/`/`%` silently fell through to the generic
+  per-bit-position `lm | rm` fallback (correct for bitwise ops, wrong
+  for arithmetic, whose carry/borrow/product/quotient chain can't be
+  computed with partial unknowns). This is a genuine, PRE-EXISTING gap
+  UNRELATED to function calls -- confirmed with a plain, function-free
+  repro, `((0 - a3) * (a0 && a0))` with `a0` fully x: `a0 && a0`'s own
+  1-bit x result, zero-extended into the wider multiplication, has a
+  mask with only its own low bit set (the zero-extension padding bits
+  are definitely 0) -- the old fallback let that single x bit's
+  position alone determine which RESULT bits read as x, instead of
+  correctly tainting the entire product. Fixed by extending the
+  existing `+`/`-` rule to `*`/`/`/`%` too.
+- **A ternary branch's mask gets queried at its own self-determined
+  width even when its VALUE was computed directly at the ternary's own
+  (wider) combined width** (`sim/compiled/_expr_emitter.py`'s
+  `_emit_ternary_value_mask_exprs`) -- `+`/`-`/`*`/`/`/`%` branches are
+  a documented special case (this file's own comment: "those ops
+  already extend directly to whatever width they're asked for... not
+  self-width-then-extend"), but the corresponding MASK query still used
+  the branch's own self-width (`tw`/`fw`) unconditionally, mismatching
+  what the value side actually computed. Confirmed against Icarus for
+  `cond ? ((a >> b) * $signed(a2)) : {2{a4[52]}}` with `a2` fully x:
+  the `*` branch's mask, queried at its own 63-bit self-width instead
+  of the ternary's 64-bit outer width, left bit 63 spuriously reading
+  as definite (0) instead of x. Fixed by using the ternary's own outer
+  width for an arithmetic branch's mask query too, matching what its
+  value query already does.
+- **The compiled engine's wide emitter had no support for user-defined
+  function calls at all** (`sim/compiled/_wide_emitter.py`'s
+  `_emit_wide_expr_to_scratch`) -- its `FunctionCall` case only handled
+  `$signed`/`$unsigned`, returning `None` (the generic "not yet
+  handled" signal) for anything else, silently falling through to a
+  narrow-scalar last-resort path that never accounted for the call's
+  own contribution at all. Confirmed against Icarus for `(~^$signed({a3,
+  fn_sub16s(a7, a1[6:4])}))`: a function call as one member of a
+  concatenation whose own self-determined width exceeds 64 bits (here
+  reached through a reduction, not the assignment's own destination,
+  which stayed narrow) silently dropped the call's contribution.
+  `_user_func_XXX` always returns at most 64 bits by construction of
+  its own calling convention, so its result always fits in scratch
+  word 0 regardless of how wide the enclosing destination is -- fixed
+  by adding a case that emits the call (reusing the same
+  `_emit_user_func_call_expr` helper) and loads the result into word 0,
+  sign/zero-extending to the destination width as needed.
+- **The compiled engine's reduction operators (`&`/`|`/`^`/`~&`/`~|`/
+  `~^`/`^~`/`!`) computed entirely via native `long long` operand/mask
+  strings, silently losing any operand bits beyond the register's own
+  64** (`sim/compiled/_expr_emitter.py`'s `_emit_unary`/
+  `_emit_reduction`/`_emit_mask_expr`) -- a GENUINE, PRE-EXISTING gap
+  UNRELATED to function calls, confirmed with a plain, function-free
+  repro: `((!{a0, a7, a4}) & 64'hFFFFFFFFFFFFFFFF)` with `a0` (1 bit,
+  x) as the MSB of a 66-bit concat reduced by `!` -- both `wmask(ow)`
+  and `_cy_hex((1 << ow) - 1)` silently overflow/wrap a 64-bit C
+  literal for `ow > 64`, collapsing to an effectively-64-bit mask
+  regardless of the operand's true width, so the ambiguous top bit
+  read as spuriously definite once the reduction was embedded as an
+  operand of `&` (reached through `_emit_mask_expr`'s generic dispatch
+  -- a bare top-level assignment RHS apparently has its own unaffected
+  fast path, which is why this had never surfaced before). The wide
+  emitter already has fully correct multi-word reduction primitives
+  (`wide_reduce_and`/`_or`/`_xor`, already dispatched for every
+  reduction op and `!`) -- just never reachable from the narrow
+  emitter. Fixed by adding `_emit_wide_reduction_to_value` (routes a
+  reduction whose operand exceeds 64 bits through the wide emitter,
+  hoisting the multi-word computation into `_et` temps and returning
+  plain `long long` value/mask expressions, since the reduction's own
+  result always fits in 1 bit regardless of its operand's width).
+  Fixing this exposed two further, independent PRE-EXISTING gaps in
+  the wide emitter's own reduction dispatch, both only ever masked
+  before because every prior caller reaching that code already sat
+  inside an already-wide context: (a) it never updated
+  `_dynamic_max_wide_words` (the per-module running peak scratch-array
+  word count) for its own operand's word count, so a module whose ONLY
+  wide computation is a reduction like this one got its scratch arrays
+  declared one word too small -- caught by Cython's own compiler as a
+  type error rather than silently miscompiling; (b) reaching the wide
+  emitter from a narrow calling context never set `_needs_wide_helpers`
+  (the flag controlling whether the module's wide-primitive helper
+  functions get emitted into the generated `.pyx` at all), so a module
+  with no wide SIGNAL anywhere skipped emitting `wide_reduce_or`/etc.
+  entirely even though the generated code now called them. Both fixed
+  alongside the main routing fix.
+
+**Known, pre-existing, separately-scoped gap found along the way**:
+fixing the reduction-operator case above confirmed the SAME general
+family of bug -- a computed value exceeding 64 bits reached from a
+narrow calling context that the compiled engine's narrow emitter was
+never designed to handle -- recurs in OTHER node types beyond
+reductions. Confirmed against Icarus for `(({a3[28:10], (~^a4), a6} ?
+a4[54:20] : {3{(a6 != a6)}}) <= a0)` (no function call involved at
+all): a ternary CONDITION whose own concatenation exceeds 100 bits,
+reached from a narrow (<=64-bit) comparison context, hits the identical
+"native long long can't represent this" class of gap the reduction fix
+above addressed, just for a different node type (`TernaryOp`
+conditions, and plausibly others not yet enumerated) that the same fix
+does not cover. Making the compiled engine's narrow emitter correctly
+route EVERY node type through the wide emitter whenever a nested
+sub-expression's own self-determined width exceeds 64 bits -- not just
+reductions -- is a larger, more systematic undertaking than this wave's
+scope; deliberately deferred as its own follow-up (mirrors the existing
+"compiled engine's 64-bit width limit is only partially resolved" work
+plan item 2.7 sub-item 4). `test_differential_functions.py`'s default
+(non-compiled) run is unaffected and fully green across all 8 seeds;
+`VERIFORGE_DIFF_FUNC_COMPILED=1` runs may occasionally hit this
+specific residual gap until that follow-up lands.
+
+Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
+batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8
+batches) with `VERIFORGE_DIFF_COMPILED=1`/`VERIFORGE_DIFF_STMT_COMPILED=1`
+respectively (both fuzzers unaffected by all the shared-file changes
+above); all 8 seeds of the new function-call fuzzer with no compiled
+(fully green) and with `VERIFORGE_DIFF_FUNC_COMPILED=1` (green except
+for the known, separately-scoped gap just above); `test_function_task.py`
+(29 passed, unaffected) and `test_power_operator.py` (60 passed, 1
+xfail, unaffected); and a final full fast-suite regression (7122
+passed, 1 xfailed, 0 failed, `-n 8`, ~31 min, no regressions).
