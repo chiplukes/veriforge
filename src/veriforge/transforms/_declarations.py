@@ -236,15 +236,29 @@ def _extract_port_identifiers_with_dimensions(
 
 
 def _extract_port_names(tree: Tree, source_file: str | None) -> list[Port]:
-    """Extract port names from a list_of_ports (old-style, non-ANSI)."""
+    """Extract port names from a list_of_ports (old-style, non-ANSI).
+
+    Each `port` node wraps its identifier several levels deep (`port ->
+    port_expression -> port_reference -> PORT_IDENTIFIER`), not as a
+    direct child -- a direct-children-only scan never found any name at
+    all, silently producing zero header stubs for every non-ANSI module.
+    That in turn meant `_merge_ports_by_name` (in `_design_builder.py`,
+    which reconciles these header stubs with the module body's own
+    `input`/`output` re-declarations) had nothing to merge INTO, so
+    ports ended up ordered by BODY re-declaration order instead of the
+    header's own `list_of_ports` order -- broken for any old-style
+    module whose body declarations aren't in the same order as its own
+    header (legal, common Verilog-1995 style). Descend into each `port`
+    subtree fully (`scan_values`) rather than only its direct children.
+    """
     ports: list[Port] = []
     for child in tree.iter_subtrees():
         if child.data == "port":
-            for item in child.children:
-                if isinstance(item, Token):
-                    name = str(item)
-                    loc = _loc_from_tree(child, source_file)
-                    ports.append(Port(name=name, direction=PortDirection.INPUT, loc=loc))
+            for tok in child.scan_values(lambda v: isinstance(v, Token) and v.type == "PORT_IDENTIFIER"):
+                name = str(tok)
+                loc = _loc_from_tree(child, source_file)
+                ports.append(Port(name=name, direction=PortDirection.INPUT, loc=loc))
+                break
     return ports
 
 

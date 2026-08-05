@@ -105,6 +105,43 @@ class TestPorts:
         assert len(m.ports) == 1
         assert m.ports[0].direction == PortDirection.INOUT
 
+    def test_non_ansi_port_width_and_direction(self, parser):
+        """Old-style (Verilog-1995) ports: header lists bare names, body
+        re-declares direction/width/signedness separately -- the body
+        declaration must win over the header's directionless, widthless
+        stub, not be silently discarded.
+        """
+        m = _parse_module(
+            parser,
+            "module m(a, b);\n    input signed [7:0] a;\n    output [15:0] b;\nendmodule\n",
+        )
+        assert len(m.ports) == 2
+        a, b = m.ports
+        assert a.name == "a"
+        assert a.direction == PortDirection.INPUT
+        assert a.signed is True
+        assert int(a.width.msb.value) == 7
+        assert int(a.width.lsb.value) == 0
+        assert b.name == "b"
+        assert b.direction == PortDirection.OUTPUT
+        assert b.signed is False
+        assert int(b.width.msb.value) == 15
+        assert int(b.width.lsb.value) == 0
+
+    def test_non_ansi_port_order_preserved(self, parser):
+        """Body-level re-declarations may appear in any order -- port list
+        order (from the header) must still be preserved in the model.
+        """
+        m = _parse_module(
+            parser,
+            "module m(a, b, c);\n    output b;\n    input a;\n    input c;\nendmodule\n",
+        )
+        assert [p.name for p in m.ports] == ["a", "b", "c"]
+        by_name = {p.name: p for p in m.ports}
+        assert by_name["a"].direction == PortDirection.INPUT
+        assert by_name["b"].direction == PortDirection.OUTPUT
+        assert by_name["c"].direction == PortDirection.INPUT
+
 
 class TestExpressions:
     """Expression extraction tests."""

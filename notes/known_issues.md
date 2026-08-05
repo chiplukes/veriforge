@@ -2830,28 +2830,84 @@ newly fixes):
   something in the wide emitter's own recursive handling of a nested
   unary `-` at that width still produces a wrong answer (root cause not
   yet isolated). Not fixed.
-- The pure-Python `vm` engine (`sim/vm/interpreter.py`) gives a
-  DIFFERENT (wrong) answer than `vm-fast` (`sim/vm/_interp_fast.pyx`)
-  for the exact same `TernaryOp`-condition repro above, even though both
-  interpreters execute IDENTICAL bytecode from the same `compiler.py` --
-  `vm-fast` gets it right (`x`, matching reference), `vm` gets it wrong
-  (definite `1`). Since `vm/interpreter.py` has no narrow/wide stack
-  split at all (it operates on arbitrary-precision `Value` objects
-  throughout, unlike `vm-fast`'s scratch-array split), this is NOT the
-  same "native long long truncation" bug class -- it's a genuinely
-  different divergence between the two bytecode interpreters, root
-  cause not yet isolated. Not fixed.
+The `vm`-vs-`vm-fast` divergence noted above (`sim/vm/interpreter.py`
+giving a different answer than `sim/vm/_interp_fast.pyx` for the exact
+same `TernaryOp`-condition repro, despite executing identical bytecode)
+turned out to be a **false alarm, not a real interpreter bug** -- see
+below.
 
-Both deliberately deferred, mirroring the existing "compiled engine's
-64-bit width limit is only partially resolved" work plan item 2.7
-sub-item 4 -- making the compiled engine's narrow emitter (and,
-separately, the `vm`/`vm-fast` interpreter divergence) correctly handle
-every node shape is a larger, more systematic undertaking than a single
-follow-up's scope. `test_differential_functions.py`'s default
+**Root-caused and fixed: non-ANSI (Verilog-1995 style) module port
+declarations silently lost all width/direction/signedness metadata
+during parsing.** The original ad-hoc repro used old-style port syntax
+(`module t(a0, ...); input [62:0] a3; ...`) purely for hand-written-
+script convenience -- a style the differential fuzzers never generate
+(they always emit ANSI-style headers). Re-tested with ANSI-style syntax
+(matching the fuzzers), `vm` and `vm-fast` agree correctly; the
+divergence only reproduces with old-style declarations. Digging into
+*why* revealed a real, unrelated, and more consequential bug:
+`Module.ports` (and `.nets`/`.variables`) end up completely EMPTY after
+parsing any old-style module -- `sim/vm/compiler.py`'s `_get_signal_id`
+then silently auto-registers every referenced signal at a default width
+of 1 the first time it's compiled. Two independent, stacked defects in
+`src/veriforge/transforms/`, both now fixed:
+- **`_design_builder.py`'s `_MODULE_SKIP_NODES` unconditionally skips
+  `port_declaration` nodes** -- correct for ANSI-style modules (where
+  `port_declaration` is already consumed inline via
+  `list_of_port_declarations` in the header), but for old-style
+  modules the body's OWN `input`/`output`/`inout` re-declaration (e.g.
+  `input signed [62:0] a3;`) is parsed as an *additional*, separate
+  `module_item -> port_declaration` node, and is the ONLY place a
+  non-ANSI port's real width/direction/signedness ever appears -- the
+  header's `list_of_ports` supplies just the bare name. Skipping it
+  there discarded that information entirely. Fixed by special-casing
+  `module_item` nodes that directly wrap a `port_declaration` (new
+  `_wraps_port_declaration` helper) and merging the extracted `Port`
+  (reusing the existing ANSI-style `extract_ports_from_declarations`
+  callback, which happens to work unmodified on this node shape too)
+  into `ctx.ports` BY NAME (new `_merge_ports_by_name` helper),
+  replacing the header's placeholder stub rather than appending a
+  duplicate.
+- **`_declarations.py`'s `_extract_port_names` (the header
+  `list_of_ports` bare-name extractor) never actually found any names**
+  -- it scanned only each `port` node's DIRECT children for a `Token`,
+  but the identifier is nested three levels deeper (`port ->
+  port_expression -> port_reference -> PORT_IDENTIFIER`), so it
+  silently produced zero header stubs for every old-style module. This
+  compounded the first bug: with no header stubs to merge into, `Port`s
+  from the body-declaration fix above landed in `ctx.ports` in BODY
+  DECLARATION order (via plain append) instead of the header's own
+  `list_of_ports` order -- broken for any old-style module whose body
+  declarations aren't already in header order (legal, common
+  Verilog-1995 style), which matters for POSITIONAL port connections at
+  instantiation. Fixed by descending fully into each `port` subtree
+  (`scan_values`) rather than only its direct children.
+
+Verified: `top.ports` now correctly shows full width/direction/signed
+for every non-ANSI port, in header order, regardless of body
+declaration order; the original `vm`-vs-`vm-fast` repro now agrees
+across reference/vm/vm-fast (both were being fed a mangled 1-bit signal
+model before -- `vm-fast`'s agreement with reference was itself
+coincidental, not evidence it was already correct). Two new regression
+tests added in `tests/test_model/test_module.py`
+(`test_non_ansi_port_width_and_direction`,
+`test_non_ansi_port_order_preserved`). `tests/test_model/` and
+`tests/test_verilog_parser/` (951 passed) and a full fast-suite
+regression (7894 passed, 16 pre-existing failures unrelated and
+unchanged -- confirmed via `git stash` bisection: 12
+`test_memories.py::TestWideSignalMemory` parametrizations failing with
+a Cython "Converting to Python object not allowed without gil" compile
+error, and `test_codegen_basic.py::TestOrChainTemporaries::
+test_or_chain_max_line_length` -- both present identically without
+this fix, `-n 8`, ~34 min, zero new failures) all pass.
+
+The OTHER residual gap noted above (a reduction over a wide unary `-`
+operand nested inside a function-call argument, still wrong on
+compiled) remains deliberately deferred, mirroring the existing
+"compiled engine's 64-bit width limit is only partially resolved" work
+plan item 2.7 sub-item 4. `test_differential_functions.py`'s default
 (non-compiled) run and the originally-documented 8-seed
-`VERIFORGE_DIFF_FUNC_COMPILED=1` rotation remain fully green (aside
-from the one case the fix above now additionally passes); other seeds
-may hit these two residual gaps until further follow-up work lands.
+`VERIFORGE_DIFF_FUNC_COMPILED=1` rotation remain fully green; other
+seeds may hit this residual gap until further follow-up work lands.
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8

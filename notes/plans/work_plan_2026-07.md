@@ -1848,16 +1848,43 @@ bisection to exist identically with or without this fix): (1) a
 reduction over a wide unary-`-` operand nested inside a function-call
 argument still gives a wrong answer on compiled — the general "wide
 value in narrow context" bug family is evidently broader than either
-the reduction or `TernaryOp`-condition fixes cover; and (2) the pure-
-Python `vm` engine disagrees with `vm-fast` on the identical
-`TernaryOp`-condition repro despite both executing identical bytecode
-— a distinct interpreter-divergence bug, unrelated to the narrow/wide
-split (the `vm` interpreter has no such split at all). Both are
-documented in `notes/known_issues.md`'s Seventeenth wave entry and
-deliberately NOT fixed here — each would be its own open-ended
-investigation, and this follow-up's scope was specifically the one
-`TernaryOp`-condition instance already confirmed. Left for the user to
-prioritize as a future follow-up.
+the reduction or `TernaryOp`-condition fixes cover (still open, see
+below); and (2) the pure-Python `vm` engine appeared to disagree with
+`vm-fast` on the identical `TernaryOp`-condition repro despite both
+executing identical bytecode.
+
+**Follow-up to the follow-up: (2) turned out to be a false alarm, and
+root-causing it found a real, unrelated, more consequential bug
+instead.** The apparent `vm`-vs-`vm-fast` divergence only reproduced
+because the ad-hoc repro used old-style (Verilog-1995) port syntax for
+scripting convenience — a style the differential fuzzers never
+generate. Re-tested with ANSI-style syntax, `vm`/`vm-fast`/reference
+all agree; there is no interpreter bug. Digging into *why* old-style
+syntax behaved differently found that `Module.ports` (and
+`.nets`/`.variables`) end up **completely empty** after parsing any
+old-style module — two stacked defects in `src/veriforge/transforms/`:
+`_design_builder.py`'s `_MODULE_SKIP_NODES` unconditionally skips
+`port_declaration` nodes (correct for ANSI headers, but for old-style
+modules the body's own `input`/`output` re-declaration is the ONLY
+place a port's real width/direction/signedness appears, and was being
+discarded wholesale), and `_declarations.py`'s `_extract_port_names`
+(the header bare-name extractor) never actually found any names at all
+(scanned only direct children; the identifier is nested three levels
+deeper), which additionally broke port ORDER once the first bug was
+fixed (ports fell back to body-declaration order instead of the
+header's `list_of_ports` order, breaking positional instantiation for
+any old-style module whose body isn't already in header order). Both
+fixed; two new regression tests added in `tests/test_model/
+test_module.py`. Full detail in `notes/known_issues.md`'s Seventeenth
+wave entry. Verified: `tests/test_model/`/`tests/test_verilog_parser/`
+(951 passed) and a full fast-suite regression (7894 passed, the same
+16 pre-existing failures as the baseline — confirmed via `git stash`
+bisection — and zero new failures, `-n 8`, ~34 min).
+
+Item (1) above (the wide-unary-`-`-in-function-argument reduction gap
+on compiled) remains open and deliberately deferred, mirroring item
+2.7 sub-item 4's framing — left for the user to prioritize as a future
+follow-up.
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 

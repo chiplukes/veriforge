@@ -332,6 +332,41 @@ def _build_module(
     return module
 
 
+def _wraps_port_declaration(module_item: Tree) -> bool:
+    """True if a `module_item` node's only child is a `port_declaration`.
+
+    Distinguishes a non-ANSI port's body-level `input`/`output`/`inout`
+    re-declaration (a direct `module_item` -> `port_declaration` child,
+    parsed as its own module item, separate from `non_port_module_item`)
+    from every other kind of module item.
+    """
+    return (
+        len(module_item.children) == 1
+        and isinstance(module_item.children[0], Tree)
+        and module_item.children[0].data == "port_declaration"
+    )
+
+
+def _merge_ports_by_name(ports: list[Port], new_ports: list[Port]) -> None:
+    """Merge non-ANSI body-declared ports into an existing port list by name.
+
+    The header's `list_of_ports` already contributed a directionless,
+    widthless stub `Port` for each name (see `extract_port_names`) --
+    `new_ports` (from this same name's body-level `port_declaration`)
+    carries the REAL direction/width/signedness for the identical port,
+    not a separate one, so it replaces the stub in place rather than
+    appending a duplicate.
+    """
+    by_name = {p.name: i for i, p in enumerate(ports)}
+    for new_port in new_ports:
+        idx = by_name.get(new_port.name)
+        if idx is not None:
+            ports[idx] = new_port
+        else:
+            by_name[new_port.name] = len(ports)
+            ports.append(new_port)
+
+
 def _update_module_context(
     ctx: _ModuleContext,
     child: Tree,
@@ -347,6 +382,33 @@ def _update_module_context(
         ctx.ports.extend(callbacks.extract_ports_from_declarations(child, source_file))
     elif child.data == "list_of_ports":
         ctx.ports.extend(callbacks.extract_port_names(child, source_file))
+    elif child.data == "module_item" and _wraps_port_declaration(child):
+        # Non-ANSI (Verilog-1995 style) port: `module t(a); input [7:0] a; ...`
+        # declares the bare name in the header's `list_of_ports` (handled by
+        # `extract_port_names` above, which can only produce a directionless,
+        # widthless INPUT stub -- the name is all that's available there) and
+        # separately re-declares its direction/width/signedness in the module
+        # body as its own `port_declaration` statement, structurally identical
+        # to the `port_declaration` nodes ANSI-style ports carry inline in
+        # their header (`extract_ports_from_declarations` above already knows
+        # how to pull a `Port` out of one). This body-level declaration is the
+        # ONLY place a non-ANSI port's real width/direction/signedness ever
+        # appears -- `_MODULE_SKIP_NODES` (in `_extract_module_items`'s own
+        # dispatch) intentionally skips `port_declaration` nodes to avoid
+        # double-processing the ANSI case (already consumed via
+        # `list_of_port_declarations` above), but that same skip silently
+        # discarded non-ANSI declarations entirely, leaving every port name
+        # from `list_of_ports` as a directionless 1-bit stub with no width --
+        # `sim/vm/compiler.py` and friends then auto-register the signal at a
+        # default width of 1 on first reference, silently truncating every
+        # non-ANSI-declared signal. Confirmed cross-engine for `module t(a3,
+        # ...); input [62:0] a3; ...`: `a3[28:10]` read a byte-vector that had
+        # collapsed to 1 bit. Reuses the very same extraction the ANSI header
+        # path already trusts, then merges each result into `ctx.ports` BY
+        # NAME (replacing the header's placeholder stub) rather than
+        # appending, since the header's `list_of_ports` entry and this
+        # body declaration describe the SAME port, not two different ones.
+        _merge_ports_by_name(ctx.ports, callbacks.extract_ports_from_declarations(child, source_file))
     elif child.data in ("non_port_module_item", "module_item"):
         items = _ModuleItems(
             ctx.parameters,
