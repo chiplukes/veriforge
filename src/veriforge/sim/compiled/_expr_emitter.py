@@ -754,6 +754,23 @@ class _ExprEmitterMixin:
             true_expr = self._emit_expr(expr.true_expr, width, t_signed_override)
             false_expr = self._emit_expr(expr.false_expr, width, f_signed_override)
             cond_mask = self._emit_mask_expr(expr.condition, cond_w)
+            # `cond`/`cond_mask` (the latter just above) are only ever
+            # consumed downstream (`cond_known1`/`cond_mask_zero`, below)
+            # through a "reduce to one known-truth scalar" lens -- exactly
+            # what `wide_logical_truth` computes. When the condition's own
+            # self-determined width exceeds 64 bits, or it internally
+            # computes wider than that (a nested TernaryOp/Concatenation/
+            # Replication condition, or a reduction reading a wide signal),
+            # `_emit_expr`/`_emit_mask_expr` above silently only produced
+            # the LOW 64 bits -- this narrow (Cython hot-loop) path is the
+            # only one affected; the `py` branch above already uses
+            # arbitrary-precision Python-bignum evaluation and needs no
+            # such substitution. Confirmed against Icarus for `(({a3[28:10],
+            # (~^a4), a6} ? a4[54:20] : {3{(a6 != a6)}}) <= a0)`, whose
+            # ternary condition is over 100 bits wide.
+            wide_cond = self._emit_wide_truthy_to_value(expr.condition)
+            if wide_cond is not None:
+                cond, cond_mask = wide_cond
             # A `+`/`-`/`*`/`/`/`%` branch's VALUE was just computed
             # directly AT the outer `width` above (`op_width == width`
             # always for these ops in `_emit_binary`, per this function's
@@ -2066,6 +2083,76 @@ class _ExprEmitterMixin:
         self._free_scratch(slot)
         self._et_node_vals[id(expr)] = f"_et{n}_v"
         self._et_node_masks[id(expr)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
+
+    def _emit_wide_truthy_to_value(self, condition: Expression) -> tuple[str, str] | None:
+        """Compute a TernaryOp condition's truthiness via the wide emitter
+        when the condition's own self-determined width exceeds 64 bits or
+        it internally computes wider than that, returning `(value_expr,
+        mask_expr)` strings usable as plain `long long` sub-expressions.
+
+        Mirrors `_stmt_emitters.py`'s `_emit_condition_lines_and_expr`
+        (same wide-detection check, same `wide_logical_truth` primitive)
+        -- that helper already fixed this exact bug class for `if`/
+        `while`/`for` statement conditions, but discards the mask (its
+        own callers don't need it, relying on the "value reads 0
+        wherever ambiguous" convention). `_emit_ternary_value_mask_exprs`
+        needs the REAL mask too, since its "cond_known1"/"cond_mask_zero"
+        branch selection consumes `cond`/`cond_mask` as a pair -- so this
+        hoists both halves via the `_et_pending` temp mechanism instead
+        of returning raw lines (an expression emitter can't return
+        multiple statements the way a statement emitter can).
+
+        `wide_logical_truth`'s (value, mask) pair is semantically
+        equivalent to a reduce-OR: `dv[0]=1` if any known-1 bit exists
+        anywhere, `dm[0]=0` if the result is unambiguous (either a
+        known-1 exists, or every bit is fully known and none are 1).
+        This is exactly the lens `cond`/`cond_mask` are consumed through
+        downstream, so substituting this pair in for the condition's raw
+        (truncated, narrow) value/mask is transparent to the rest of the
+        ternary's merge formula.
+
+        Returns None if hoisting isn't available in this context, the
+        condition isn't actually wide, or the wide emitter doesn't
+        recognize this node shape -- caller falls back to the narrow
+        formula, which remains correct up to 64 bits either way.
+        """
+        if self._et_pending is None:
+            return None
+        w = self._expr_width(condition)
+        wide = (
+            w > _WORD_BITS
+            or self._expr_uses_wide_signal(condition)
+            or self._expr_max_internal_width(condition) > _WORD_BITS
+        )
+        if not wide:
+            return None
+        cached_v = self._et_node_vals.get(id(condition))
+        cached_m = self._et_node_masks.get(id(condition))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        cond_n = max(1, (w + 63) // 64)
+        cond_n = max(cond_n, (self._expr_max_internal_width(condition) + 63) // 64)
+        cond_n = max(cond_n, self._module_max_wide_words())
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, cond_n)
+        cond_slot = self._alloc_scratch()
+        cond_lines = self._emit_wide_expr_to_scratch(condition, cond_slot, cond_n, w, 0)
+        if cond_lines is None:
+            self._free_scratch(cond_slot)
+            return None
+        self._needs_wide_helpers = True
+        truth_slot = self._alloc_scratch()
+        cond_lines.append(
+            f"wide_logical_truth(_sc{truth_slot}_v, _sc{truth_slot}_m, _sc{cond_slot}_v, _sc{cond_slot}_m, {cond_n})"
+        )
+        self._free_scratch(cond_slot, truth_slot)
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.extend(cond_lines)
+        self._et_pending.append(f"cdef long long _et{n}_v = <long long>_sc{truth_slot}_v[0]")
+        self._et_pending.append(f"cdef long long _et{n}_m = <long long>_sc{truth_slot}_m[0]")
+        self._et_node_vals[id(condition)] = f"_et{n}_v"
+        self._et_node_masks[id(condition)] = f"_et{n}_m"
         return f"_et{n}_v", f"_et{n}_m"
 
     def _emit_reduction(self, op: str, operand: str, operand_mask: str, width: int) -> str:  # noqa: PLR0911

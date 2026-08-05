@@ -2781,28 +2781,77 @@ against Icarus and/or cross-engine agreement:
   entirely even though the generated code now called them. Both fixed
   alongside the main routing fix.
 
-**Known, pre-existing, separately-scoped gap found along the way**:
-fixing the reduction-operator case above confirmed the SAME general
-family of bug -- a computed value exceeding 64 bits reached from a
-narrow calling context that the compiled engine's narrow emitter was
-never designed to handle -- recurs in OTHER node types beyond
-reductions. Confirmed against Icarus for `(({a3[28:10], (~^a4), a6} ?
-a4[54:20] : {3{(a6 != a6)}}) <= a0)` (no function call involved at
-all): a ternary CONDITION whose own concatenation exceeds 100 bits,
-reached from a narrow (<=64-bit) comparison context, hits the identical
-"native long long can't represent this" class of gap the reduction fix
-above addressed, just for a different node type (`TernaryOp`
-conditions, and plausibly others not yet enumerated) that the same fix
-does not cover. Making the compiled engine's narrow emitter correctly
-route EVERY node type through the wide emitter whenever a nested
-sub-expression's own self-determined width exceeds 64 bits -- not just
-reductions -- is a larger, more systematic undertaking than this wave's
-scope; deliberately deferred as its own follow-up (mirrors the existing
-"compiled engine's 64-bit width limit is only partially resolved" work
-plan item 2.7 sub-item 4). `test_differential_functions.py`'s default
-(non-compiled) run is unaffected and fully green across all 8 seeds;
-`VERIFORGE_DIFF_FUNC_COMPILED=1` runs may occasionally hit this
-specific residual gap until that follow-up lands.
+**Fixed as a direct follow-up: `TernaryOp` conditions exceeding 64
+bits, reached from a narrow calling context** (`sim/compiled/
+_expr_emitter.py`) -- the reduction-operator fix above confirmed the
+same general family of bug (a computed value exceeding 64 bits reached
+from a narrow calling context that the compiled engine's narrow
+emitter was never designed to handle) recurs in other node types
+beyond reductions. Confirmed against Icarus for `(({a3[28:10], (~^a4),
+a6} ? a4[54:20] : {3{(a6 != a6)}}) <= a0)` (no function call involved
+at all): a ternary CONDITION whose own concatenation exceeds 100 bits,
+reached from a narrow (<=64-bit) comparison context, hit the identical
+"native long long can't represent this" class of gap for `TernaryOp`
+conditions specifically. `_emit_ternary_value_mask_exprs` always
+computed its condition's value/mask via the narrow `_emit_expr`/
+`_emit_mask_expr` (correct only up to 64 bits), even though the
+downstream "cond_known1"/"cond_mask_zero" branch-selection logic only
+ever consumes them through a "reduce to one known-truth scalar" lens --
+exactly what `wide_logical_truth` (the C primitive already used by
+`_stmt_emitters.py`'s `_emit_condition_lines_and_expr` for `if`/`while`/
+`for` statement conditions) computes. Fixed by adding a new
+`_emit_wide_truthy_to_value` helper mirroring that existing statement-
+condition precedent (same wide-detection check, same primitive), but
+returning BOTH the value and mask (not just the value, since the
+statement-condition helper's callers don't need the mask but the
+ternary's branch-selection logic does), hoisted via the same `_et_pending`
+temp mechanism used by the reduction fix; wired into
+`_emit_ternary_value_mask_exprs`'s non-`py` branch only (the `py=True`
+elaboration-time path already uses arbitrary-precision Python-bignum
+evaluation and was never affected). Verified with zero regressions and
+one additional previously-failing case now passing (seed 44 of the
+ad-hoc verification sweep below, 7 failures -> 6).
+
+**Known, pre-existing, separately-scoped gaps found while verifying the
+fix above** -- confirmed the general "wide value in narrow context" bug
+family is broader than either the reduction or `TernaryOp`-condition
+fixes cover, recurring in yet more node shapes. An ad-hoc sweep of 8
+arbitrary seeds (150 cases each, `VERIFORGE_DIFF_FUNC_COMPILED=1`,
+seeds `11/22/33/44/55/66/77/20260701` -- NOT the same 8 seeds
+documented as clean above) surfaced two more distinct instances, both
+confirmed pre-existing via `git stash` bisection against the fix above
+(identical failure counts with and without it, except the one case it
+newly fixes):
+- A reduction whose operand is itself a further wide context-determined
+  operator (unary `-`) nested inside a function-call argument still
+  fails: `fn_sel1({2{((~|a6[62]) && {a7, a6[5]})}}, (^(-a5)))` with
+  `a5` 65 bits -- `(^(-a5))`'s operand self-width (65) DOES route
+  through `_emit_wide_reduction_to_value` (`ow > _WORD_BITS`), but
+  something in the wide emitter's own recursive handling of a nested
+  unary `-` at that width still produces a wrong answer (root cause not
+  yet isolated). Not fixed.
+- The pure-Python `vm` engine (`sim/vm/interpreter.py`) gives a
+  DIFFERENT (wrong) answer than `vm-fast` (`sim/vm/_interp_fast.pyx`)
+  for the exact same `TernaryOp`-condition repro above, even though both
+  interpreters execute IDENTICAL bytecode from the same `compiler.py` --
+  `vm-fast` gets it right (`x`, matching reference), `vm` gets it wrong
+  (definite `1`). Since `vm/interpreter.py` has no narrow/wide stack
+  split at all (it operates on arbitrary-precision `Value` objects
+  throughout, unlike `vm-fast`'s scratch-array split), this is NOT the
+  same "native long long truncation" bug class -- it's a genuinely
+  different divergence between the two bytecode interpreters, root
+  cause not yet isolated. Not fixed.
+
+Both deliberately deferred, mirroring the existing "compiled engine's
+64-bit width limit is only partially resolved" work plan item 2.7
+sub-item 4 -- making the compiled engine's narrow emitter (and,
+separately, the `vm`/`vm-fast` interpreter divergence) correctly handle
+every node shape is a larger, more systematic undertaking than a single
+follow-up's scope. `test_differential_functions.py`'s default
+(non-compiled) run and the originally-documented 8-seed
+`VERIFORGE_DIFF_FUNC_COMPILED=1` rotation remain fully green (aside
+from the one case the fix above now additionally passes); other seeds
+may hit these two residual gaps until further follow-up work lands.
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8

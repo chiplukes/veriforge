@@ -1826,6 +1826,39 @@ residual gap), `test_function_task.py` (29 passed, unaffected),
 full fast-suite regression (7122 passed, 1 xfailed, 0 failed, `-n 8`,
 ~31 min, no regressions).
 
+**Follow-up (August 2026): the deferred `TernaryOp`-condition gap is
+now fixed.** `_emit_ternary_value_mask_exprs` (`sim/compiled/
+_expr_emitter.py`) now routes a wide (>64-bit self-determined, or
+internally-wide) condition through a new `_emit_wide_truthy_to_value`
+helper — mirrors `_stmt_emitters.py`'s existing `_emit_condition_lines_
+and_expr` (same wide-detection check, same `wide_logical_truth`
+primitive), but returns both value AND mask (the ternary's branch-
+selection logic needs both; the statement-condition helper only needed
+the value). Verified against the exact documented repro (now matches
+reference/`vm-fast`, previously wrong), the originally-documented
+8-seed rotation (still fully green, plus one previously-failing case
+in a broader ad-hoc sweep now passes), and zero regressions in
+`test_differential.py`/`test_differential_statements.py`/
+`test_function_task.py`/`test_power_operator.py`.
+
+While verifying, an ad-hoc sweep of 8 *different* seeds (not the
+documented 8) at the same 150-case scale surfaced two more,
+**separately-scoped**, pre-existing gaps (confirmed via `git stash`
+bisection to exist identically with or without this fix): (1) a
+reduction over a wide unary-`-` operand nested inside a function-call
+argument still gives a wrong answer on compiled — the general "wide
+value in narrow context" bug family is evidently broader than either
+the reduction or `TernaryOp`-condition fixes cover; and (2) the pure-
+Python `vm` engine disagrees with `vm-fast` on the identical
+`TernaryOp`-condition repro despite both executing identical bytecode
+— a distinct interpreter-divergence bug, unrelated to the narrow/wide
+split (the `vm` interpreter has no such split at all). Both are
+documented in `notes/known_issues.md`'s Seventeenth wave entry and
+deliberately NOT fixed here — each would be its own open-ended
+investigation, and this follow-up's scope was specifically the one
+`TernaryOp`-condition instance already confirmed. Left for the user to
+prioritize as a future follow-up.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible
