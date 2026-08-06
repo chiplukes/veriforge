@@ -722,19 +722,11 @@ def _prec(op: str) -> int:
     return _BINARY_PREC.get(op, 0)
 
 
+_REDUCTION_OPS = frozenset({"~&", "~|", "~^", "^~", "&", "|", "^"})
+
+
 def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
-    """Emit an Expression as Verilog text.
-
-    Args:
-        expr: The expression to emit.
-
-    Returns:
-        Verilog expression text, with parentheses inserted wherever operator
-        precedence in Verilog would differ from the expression tree structure.
-        Python and Verilog share most precedence rankings but diverge for
-        relational operators vs. bitwise operators (e.g. != has higher
-        precedence than & in Verilog but lower in Python).
-    """
+    """Emit an Expression as Verilog text."""
     if isinstance(expr, Literal):
         return _emit_literal(expr)
     if isinstance(expr, Identifier):
@@ -743,9 +735,17 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         return expr.name
     if isinstance(expr, UnaryOp):
         operand_str = emit_expression(expr.operand)
-        # Unary ops bind tighter than all binary ops, but a BinaryOp operand
-        # still needs parens: ~(a & b) not ~a & b.
+        # BinaryOp/TernaryOp operands need parens: ~(a & b) not ~a & b.
+        # Nested UnaryOp operands need parens because Verilog grammar
+        # requires unary_operator → primary; a UnaryOp expression tree
+        # like ~~x is not a primary, so we emit ~(~x).
+        # Concatenation/Replication/FunctionCall operands need parens
+        # when followed by a reduction op (which MUST be before a primary).
         if isinstance(expr.operand, (BinaryOp, TernaryOp)):
+            operand_str = f"({operand_str})"
+        elif isinstance(expr.operand, UnaryOp):
+            operand_str = f"({operand_str})"
+        elif isinstance(expr.operand, (Concatenation, Replication, FunctionCall)) and expr.op in _REDUCTION_OPS:
             operand_str = f"({operand_str})"
         return f"{expr.op}{operand_str}"
     if isinstance(expr, BinaryOp):

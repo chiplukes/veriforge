@@ -20,6 +20,7 @@ library_text: library_description*
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: library work "designs/*.v";
+// SUPPORT: NO
 library_description: library_declaration | include_statement | config_declaration
 // BNF: library_declaration ::=
 //     library library_identifier file_path_spec [ { , file_path_spec } ]
@@ -27,11 +28,13 @@ library_description: library_declaration | include_statement | config_declaratio
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: library mylib "src/*.v", "lib/*.v" -incdir "inc";
+// SUPPORT: NO
 library_declaration: KW_LIBRARY LIBRARY_IDENTIFIER FILE_PATH_SPEC ( ( "," FILE_PATH_SPEC)*)? (KW_INCDIR FILE_PATH_SPEC ("," FILE_PATH_SPEC)*)? ";"
 // BNF: include_statement ::= include file_path_spec ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: include "header.vh";
+// SUPPORT: NO
 include_statement: KW_INCLUDE FILE_PATH_SPEC ";"
 
 // SECTION: A.1.2 Verilog source text
@@ -72,7 +75,10 @@ module_declaration: attribute_instance* KW_MODULE MODULE_IDENTIFIER package_impo
 // SYNTHESIZABLE: YES
 // EXAMPLE: import ibex_pkg::*;
 // EXAMPLE: import my_pkg::my_type;
+// SUPPORT: YES
+// SUPPORT: YES
 package_import_declaration: KW_IMPORT package_import_item ("," package_import_item)* ";"
+// SUPPORT: YES
 package_import_item: IDENTIFIER "::" "*"
     | IDENTIFIER "::" IDENTIFIER
 
@@ -85,12 +91,14 @@ package_import_item: IDENTIFIER "::" "*"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: interface my_bus; logic [7:0] data; modport master(output data); endinterface
+// SUPPORT: YES
 interface_declaration: attribute_instance* KW_INTERFACE MODULE_IDENTIFIER module_parameter_port_list? list_of_port_declarations? ";" interface_item* KW_ENDINTERFACE
 
 // SV: interface_item ::= module_or_generate_item | modport_declaration
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [7:0] data;
+// SUPPORT: YES
 interface_item: module_or_generate_item
     | attribute_instance* modport_declaration
 
@@ -98,12 +106,14 @@ interface_item: module_or_generate_item
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: modport master(output data);
+// SUPPORT: YES
 modport_declaration: KW_MODPORT MODULE_IDENTIFIER "(" modport_port_declaration ("," modport_port_declaration)* ")" ";"
 
 // SV: modport_ports_declaration ::= port_direction modport_simple_port { , modport_simple_port }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: output data
+// SUPPORT: YES
 modport_port_declaration: (KW_INPUT | KW_OUTPUT | KW_INOUT) MODULE_IDENTIFIER
 
 
@@ -111,12 +121,14 @@ modport_port_declaration: (KW_INPUT | KW_OUTPUT | KW_INOUT) MODULE_IDENTIFIER
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: package my_pkg; localparam WIDTH = 8; endpackage
+// SUPPORT: YES
 package_declaration: KW_PACKAGE MODULE_IDENTIFIER ";" package_item* KW_ENDPACKAGE
 
 // SV: package_item ::= parameter_declaration | localparam | typedef | function | task | import
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: localparam WIDTH = 8;
+// SUPPORT: YES
 package_item: parameter_declaration ";"
     | local_parameter_declaration ";"
     | typedef_declaration
@@ -128,12 +140,14 @@ package_item: parameter_declaration ";"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: import my_pkg::WIDTH;
+// SUPPORT: YES
 import_declaration: KW_IMPORT import_item ("," import_item)* ";"
 
 // SV: package_import_item ::= package_identifier :: identifier | package_identifier :: *
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: my_pkg::WIDTH
+// SUPPORT: YES
 import_item: MODULE_IDENTIFIER "::" (MODULE_IDENTIFIER | IMPORT_WILDCARD)
 IMPORT_WILDCARD: "*"
 
@@ -143,11 +157,13 @@ IMPORT_WILDCARD: "*"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: #(parameter WIDTH=8, parameter DEPTH=16)
+// SUPPORT: YES
 module_parameter_port_list: "#" "(" parameter_declaration ("," parameter_declaration )* ")"
 // BNF: list_of_ports ::= ( port { , port } )
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: (clk, rst, data_in, data_out)
+// SUPPORT: YES
 list_of_ports: "(" port  ("," port)* ")"
 // BNF: list_of_port_declarations ::=
 //     ( port_declaration { , port_declaration } )
@@ -155,6 +171,7 @@ list_of_ports: "(" port  ("," port)* ")"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: (input clk, input rst, output [7:0] data)
+// SUPPORT: YES
 list_of_port_declarations: "(" port_declaration ( "," port_declaration )* ")"
     | "(" ")"
 // BNF: port ::=
@@ -163,6 +180,7 @@ list_of_port_declarations: "(" port_declaration ( "," port_declaration )* ")"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: .data_in(internal_data)
+// SUPPORT: YES
 port: port_expression?
      | "." PORT_IDENTIFIER "(" port_expression? ")"
 // BNF: port_expression ::=
@@ -171,6 +189,7 @@ port: port_expression?
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: {a, b, c}
+// SUPPORT: YES
 port_expression: port_reference
     | "{" port_reference ( "," port_reference )* "}"
 // BNF: port_reference ::=
@@ -178,6 +197,7 @@ port_expression: port_reference
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: data[7:0]
+// SUPPORT: YES
 port_reference: PORT_IDENTIFIER ("[" constant_range_expression "]")?
 
 // BNF: port_declaration ::=
@@ -187,6 +207,7 @@ port_reference: PORT_IDENTIFIER ("[" constant_range_expression "]")?
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: input wire [7:0] data
+// SUPPORT: YES
 port_declaration: attribute_instance* inout_declaration
     | attribute_instance* input_declaration
     | attribute_instance* output_declaration
@@ -199,6 +220,7 @@ port_declaration: attribute_instance* inout_declaration
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: input clk;
+// SUPPORT: YES
 module_item: port_declaration ";"
     | non_port_module_item
 // BNF: module_or_generate_item ::=
@@ -217,6 +239,7 @@ module_item: port_declaration ";"
 // SYNTHESIZABLE: YES
 // EXAMPLE: wire [7:0] data;
 // EXAMPLE: assign y = a & b;
+// SUPPORT: YES
 module_or_generate_item: attribute_instance* module_or_generate_item_declaration
     | attribute_instance* local_parameter_declaration ";"
     | attribute_instance* parameter_override
@@ -249,6 +272,7 @@ module_or_generate_item: attribute_instance* module_or_generate_item_declaration
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: wire [7:0] data;
+// SUPPORT: YES
 module_or_generate_item_declaration: net_declaration
     | reg_declaration
     | logic_declaration
@@ -277,6 +301,7 @@ module_or_generate_item_declaration: net_declaration
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: always @(posedge clk) q <= d;
+// SUPPORT: YES
 non_port_module_item: module_or_generate_item
     | generate_region
     | specify_block
@@ -289,6 +314,7 @@ non_port_module_item: module_or_generate_item
 // SYNTHESIZABLE: NO
 // EXAMPLE: export "DPI-C" function simutil_get_key;
 // EXAMPLE: import "DPI-C" function int get_rand_value();
+// SUPPORT: NO
 dpi_import_export: KW_EXPORT string KW_FUNCTION FUNCTION_IDENTIFIER ";"
     | KW_EXPORT string KW_TASK FUNCTION_IDENTIFIER ";"
     | KW_IMPORT string KW_FUNCTION function_range_or_type? FUNCTION_IDENTIFIER "(" function_port_list? ")" ";"
@@ -299,6 +325,7 @@ KW_EXPORT: /export(?![a-zA-Z0-9_$])/
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: defparam u1.WIDTH = 16;
+// SUPPORT: YES
 parameter_override: KW_DEFPARAM list_of_defparam_assignments ";"
 
 // SECTION: A.1.5 Configuration source text
@@ -316,7 +343,9 @@ config_declaration: KW_CONFIG CONFIG_IDENTIFIER ";" design_statement config_rule
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: design work.top;
+// SUPPORT: NO
 LIB_DOT: LIBRARY_IDENTIFIER "." // added this as terminal to reduce collision between CELL_IDENTIFIER
+// SUPPORT: NO
 design_statement: KW_DESIGN (LIB_DOT* CELL_IDENTIFIER)* ";"
 // BNF: config_rule_statement ::=
 //     default_clause liblist_clause ;
@@ -327,36 +356,43 @@ design_statement: KW_DESIGN (LIB_DOT* CELL_IDENTIFIER)* ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: default liblist work;
+// SUPPORT: NO
 config_rule_statement: default_clause liblist_clause ";" | inst_clause liblist_clause ";" | inst_clause use_clause ";" | cell_clause liblist_clause ";" | cell_clause use_clause ";"
 // BNF: default_clause ::= default
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: default
+// SUPPORT: NO
 default_clause: KW_DEFAULT
 // BNF: inst_clause ::= instance inst_name
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: instance top.u1
+// SUPPORT: NO
 inst_clause: KW_INSTANCE inst_name
 // BNF: inst_name ::= topmodule_identifier{.instance_identifier}
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: top.u1.u2
+// SUPPORT: NO
 inst_name: TOPMODULE_IDENTIFIER ("." INSTANCE_IDENTIFIER)*
 // BNF: cell_clause ::= cell [ library_identifier.]cell_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: cell work.counter
+// SUPPORT: NO
 cell_clause: KW_CELL LIB_DOT* CELL_IDENTIFIER
 // BNF: liblist_clause ::= liblist { library_identifier }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: liblist work rtl
+// SUPPORT: NO
 liblist_clause: KW_LIBLIST LIBRARY_IDENTIFIER*
 // BNF: use_clause ::= use [library_identifier.]cell_identifier[:config]
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: use work.new_cell
+// SUPPORT: NO
 use_clause: KW_USE (LIBRARY_IDENTIFIER ".")? CELL_IDENTIFIER ":config"?
 
 
@@ -371,6 +407,7 @@ use_clause: KW_USE (LIBRARY_IDENTIFIER ".")? CELL_IDENTIFIER ":config"?
 // EXAMPLE: localparam WIDTH = 8
 // EXAMPLE: localparam signed [7:0] MASK = 8'hFF
 // EXAMPLE: localparam integer SIZE = 16
+// SUPPORT: YES
 local_parameter_declaration: KW_LOCALPARAM KW_SIGNED? range? list_of_param_assignments
     | KW_LOCALPARAM parameter_type list_of_param_assignments
 // BNF: parameter_declaration ::=
@@ -381,6 +418,7 @@ local_parameter_declaration: KW_LOCALPARAM KW_SIGNED? range? list_of_param_assig
 // EXAMPLE: parameter WIDTH = 8
 // EXAMPLE: parameter signed [7:0] MASK = 8'hFF
 // EXAMPLE: parameter integer SIZE = 16
+// SUPPORT: YES
 parameter_declaration: KW_PARAMETER KW_SIGNED? range? list_of_param_assignments
     | KW_PARAMETER parameter_type list_of_param_assignments
 
@@ -388,12 +426,14 @@ parameter_declaration: KW_PARAMETER KW_SIGNED? range? list_of_param_assignments
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: specparam tRISE = 1.5;
+// SUPPORT: NO
 specparam_declaration: KW_SPECPARAM range? list_of_specparam_assignments ";"
 // BNF: parameter_type ::=
 //     integer | real | realtime | time
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: integer
+// SUPPORT: YES
 parameter_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
     | KW_LOGIC KW_SIGNED? range?
     | KW_BIT KW_SIGNED? range?
@@ -411,6 +451,7 @@ parameter_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: inout wire signed [7:0] data
+// SUPPORT: YES
 inout_declaration: KW_INOUT net_type? KW_SIGNED? range? list_of_port_identifiers
     | KW_INOUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INOUT IDENTIFIER dimension* list_of_port_identifiers
@@ -419,6 +460,7 @@ inout_declaration: KW_INOUT net_type? KW_SIGNED? range? list_of_port_identifiers
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: input wire signed [7:0] data
+// SUPPORT: YES
 input_declaration: KW_INPUT net_type? KW_SIGNED? range? list_of_port_identifiers
     | KW_INPUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INPUT IDENTIFIER dimension* list_of_port_identifiers
@@ -434,6 +476,7 @@ input_declaration: KW_INPUT net_type? KW_SIGNED? range? list_of_port_identifiers
 // EXAMPLE: output reg [7:0] result
 // EXAMPLE: output wire [3:0] data
 // EXAMPLE: output integer count
+// SUPPORT: YES
 output_declaration: KW_OUTPUT net_type? KW_SIGNED? range? list_of_port_identifiers
 | KW_OUTPUT KW_REG KW_SIGNED? range? list_of_variable_port_identifiers
 | KW_OUTPUT output_variable_type list_of_variable_port_identifiers
@@ -445,11 +488,13 @@ output_declaration: KW_OUTPUT net_type? KW_SIGNED? range? list_of_port_identifie
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: event done;
+// SUPPORT: NO
 event_declaration: KW_EVENT list_of_event_identifiers ";"
 // BNF: integer_declaration ::= integer list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: integer count;
+// SUPPORT: YES
 integer_declaration: KW_INTEGER list_of_variable_identifiers ";"
 // BNF: net_declaration ::=
 //     net_type [ signed ]
@@ -473,6 +518,7 @@ integer_declaration: KW_INTEGER list_of_variable_identifiers ";"
 // EXAMPLE: wire [7:0] data;
 // EXAMPLE: tri signed [3:0] bus;
 // EXAMPLE: trireg (small) [7:0] mem;
+// SUPPORT: YES
 net_declaration: net_type KW_SIGNED? delay3? list_of_net_identifiers ";"
     | net_type drive_strength? KW_SIGNED?  delay3? list_of_net_decl_assignments ";"
     | net_type ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_identifiers ";"
@@ -485,47 +531,56 @@ net_declaration: net_type KW_SIGNED? delay3? list_of_net_identifiers ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: real voltage;
+// SUPPORT: NO
 real_declaration: KW_REAL list_of_real_identifiers ";"
 // BNF: realtime_declaration ::= realtime list_of_real_identifiers ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: realtime sim_time;
+// SUPPORT: NO
 realtime_declaration: KW_REALTIME list_of_real_identifiers ";"
 // BNF: reg_declaration ::= reg [ signed ] [ range ]
 //     list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: reg [7:0] counter;
+// SUPPORT: YES
 reg_declaration: KW_REG KW_SIGNED? range? list_of_variable_identifiers ";"
 // SV: logic_declaration ::= logic [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [7:0] data;
+// SUPPORT: YES
 logic_declaration: KW_LOGIC KW_SIGNED? range? list_of_variable_identifiers ";"
 // SV: bit_declaration ::= bit [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: bit [3:0] nibble;
+// SUPPORT: YES
 bit_declaration: KW_BIT KW_SIGNED? range? list_of_variable_identifiers ";"
 // SV: byte_declaration ::= byte [ signed ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: byte status;
+// SUPPORT: YES
 byte_declaration: KW_BYTE KW_SIGNED? list_of_variable_identifiers ";"
 // SV: shortint_declaration ::= shortint [ signed ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: shortint offset;
+// SUPPORT: YES
 shortint_declaration: KW_SHORTINT KW_SIGNED? list_of_variable_identifiers ";"
 // SV: int_declaration ::= int [ unsigned ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: int count;
+// SUPPORT: YES
 int_declaration: KW_INT KW_UNSIGNED? list_of_variable_identifiers ";"
 // SV: longint_declaration ::= longint [ signed ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: longint timestamp;
+// SUPPORT: YES
 longint_declaration: KW_LONGINT KW_SIGNED? list_of_variable_identifiers ";"
 // SV: typedef_declaration ::= typedef enum_declaration IDENTIFIER ;
 //                           | typedef data_type IDENTIFIER ;
@@ -535,6 +590,7 @@ longint_declaration: KW_LONGINT KW_SIGNED? list_of_variable_identifiers ";"
 // SYNTHESIZABLE: YES
 // EXAMPLE: typedef enum logic [1:0] { IDLE, RUN, DONE } state_t;
 // EXAMPLE: typedef struct packed { logic [7:0] data; logic valid; } bus_t;
+// SUPPORT: YES
 typedef_declaration: KW_TYPEDEF enum_declaration VARIABLE_IDENTIFIER ";"
     | KW_TYPEDEF enum_base_type VARIABLE_IDENTIFIER ";"
     | KW_TYPEDEF struct_declaration VARIABLE_IDENTIFIER ";"
@@ -543,32 +599,38 @@ typedef_declaration: KW_TYPEDEF enum_declaration VARIABLE_IDENTIFIER ";"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: enum logic [1:0] { IDLE, RUN, DONE }
+// SUPPORT: YES
 enum_declaration: KW_ENUM enum_base_type? "{" enum_name_declaration ("," enum_name_declaration)* "}"
 // SV: enum_base_type ::= integer_atom_type [ signed ] | integer_vector_type [ signed ] [ range ]
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [1:0]
+// SUPPORT: YES
 enum_base_type: (KW_LOGIC | KW_BIT | KW_REG) KW_SIGNED? range*
     | (KW_INT | KW_INTEGER | KW_SHORTINT | KW_LONGINT | KW_BYTE) KW_SIGNED?
 // SV: enum_name_declaration ::= IDENTIFIER [ = constant_expression ]
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: IDLE = 2'b00
+// SUPPORT: YES
 enum_name_declaration: VARIABLE_IDENTIFIER ("=" constant_expression)?
 // SV: struct_declaration ::= struct [ packed [ signed ] ] { struct_member+ }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: struct packed { logic [7:0] data; logic valid; }
+// SUPPORT: YES
 struct_declaration: KW_STRUCT KW_PACKED? KW_SIGNED? "{" struct_member+ "}"
 // SV: union_declaration ::= union [ packed [ signed ] ] { struct_member+ }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: union packed { logic [31:0] word; logic [7:0] byte_val; }
+// SUPPORT: YES
 union_declaration: KW_UNION KW_PACKED? KW_SIGNED? "{" struct_member+ "}"
 // SV: struct_member ::= data_type identifier ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [7:0] data;
+// SUPPORT: YES
 struct_member: enum_base_type VARIABLE_IDENTIFIER ";"
     | IDENTIFIER VARIABLE_IDENTIFIER ";"
     | scoped_identifier VARIABLE_IDENTIFIER ";"
@@ -580,14 +642,18 @@ struct_member: enum_base_type VARIABLE_IDENTIFIER ";"
 // EXAMPLE: ctrl_fsm_e ctrl_fsm_cs, ctrl_fsm_ns;
 // EXAMPLE: pmp_cfg_t csr_pmp_cfg [PMPNumRegions];
 // EXAMPLE: ibex_pkg::opcode_e op;
+// SUPPORT: YES
+// SUPPORT: YES
 sv_type_declaration: IDENTIFIER dimension* sv_type_var_id ("," sv_type_var_id)* ";"
     | scoped_identifier dimension* sv_type_var_id ("," sv_type_var_id)* ";"
+// SUPPORT: YES
 sv_type_var_id: VARIABLE_IDENTIFIER dimension*
 
 // BNF: time_declaration ::= time list_of_variable_identifiers ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: time start_time;
+// SUPPORT: NO
 time_declaration: KW_TIME list_of_variable_identifiers ";"
 
 // SECTION: A.2.2 Declaration data types
@@ -599,11 +665,13 @@ time_declaration: KW_TIME list_of_variable_identifiers ";"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: wire
+// SUPPORT: YES
 net_type: KW_SUPPLY0 | KW_SUPPLY1 | KW_TRI | KW_TRIAND | KW_TRIOR | KW_TRI0 | KW_TRI1 | KW_UWIRE | KW_WIRE | KW_WAND | KW_WOR | KW_LOGIC
 // BNF: output_variable_type ::= integer | time
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: integer
+// SUPPORT: YES
 output_variable_type: KW_INTEGER | KW_TIME
 // BNF: real_type ::=
 //     real_identifier { dimension }
@@ -611,6 +679,7 @@ output_variable_type: KW_INTEGER | KW_TIME
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: voltage = 3.3
+// SUPPORT: NO
 real_type: REAL_IDENTIFIER dimension*
     | REAL_IDENTIFIER "=" constant_expression
 // BNF: variable_type ::=
@@ -619,6 +688,7 @@ real_type: REAL_IDENTIFIER dimension*
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: count = 0
+// SUPPORT: YES
 variable_type: VARIABLE_IDENTIFIER dimension*
     | VARIABLE_IDENTIFIER "=" constant_expression
 
@@ -634,6 +704,7 @@ variable_type: VARIABLE_IDENTIFIER dimension*
 // SYNTHESIZABLE: NO
 // EXAMPLE: (strong1, weak0)
 // EXAMPLE: (pull0, highz1)
+// SUPPORT: NO
 drive_strength: "(" strength0 "," strength1 ")"
     | "(" strength1 "," strength0 ")"
     | "(" strength0 "," KW_HIGHZ1 ")"
@@ -645,16 +716,19 @@ drive_strength: "(" strength0 "," strength1 ")"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: strong0
+// SUPPORT: NO
 strength0: KW_SUPPLY0 | KW_STRONG0 | KW_PULL0 | KW_WEAK0
 // BNF: strength1 ::= supply1 | strong1 | pull1 | weak1
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: strong1
+// SUPPORT: NO
 strength1: KW_SUPPLY1 | KW_STRONG1 | KW_PULL1 | KW_WEAK1
 // BNF: charge_strength ::= ( small ) | ( medium ) | ( large )
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (medium)
+// SUPPORT: NO
 charge_strength: "(" KW_SMALL ")" | "(" KW_MEDIUM ")" | "(" KW_LARGE ")"
 
 // SECTION: A.2.2.3 Delays
@@ -664,6 +738,7 @@ charge_strength: "(" KW_SMALL ")" | "(" KW_MEDIUM ")" | "(" KW_LARGE ")"
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: #(1, 2, 3)
+// SUPPORT: NO
 delay3: "#" delay_value
     | "#" "(" mintypmax_expression ( "," mintypmax_expression ( "," mintypmax_expression )? )? ")"
 
@@ -673,6 +748,7 @@ delay3: "#" delay_value
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: #(5, 10)
+// SUPPORT: NO
 delay2: "#" delay_value
     | "#" "(" mintypmax_expression ( "," mintypmax_expression )? ")"
 
@@ -683,6 +759,7 @@ delay2: "#" delay_value
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: 10
+// SUPPORT: NO
 delay_value: unsigned_number
     | real_number
     | IDENTIFIER
@@ -692,28 +769,33 @@ delay_value: unsigned_number
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: u1.WIDTH = 16, u2.WIDTH = 32
+// SUPPORT: YES
 list_of_defparam_assignments: defparam_assignment ( "," defparam_assignment )*
 // BNF: list_of_event_identifiers ::= event_identifier { dimension }
 //     { , event_identifier { dimension } }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: evt1, evt2[3:0]
+// SUPPORT: NO
 list_of_event_identifiers: EVENT_IDENTIFIER dimension* ( "," EVENT_IDENTIFIER dimension* )*
 // BNF: list_of_net_decl_assignments ::= net_decl_assignment { , net_decl_assignment }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: x = a & b, y = c | d
+// SUPPORT: YES
 list_of_net_decl_assignments: net_decl_assignment ( "," net_decl_assignment )*
 // BNF: list_of_net_identifiers ::= net_identifier { dimension }
 //     { , net_identifier { dimension } }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: clk, rst, data[7:0]
+// SUPPORT: YES
 list_of_net_identifiers: NET_IDENTIFIER dimension* ( "," NET_IDENTIFIER dimension* )*
 // BNF: list_of_param_assignments ::= param_assignment { , param_assignment }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: WIDTH = 8, DEPTH = 16
+// SUPPORT: YES
 list_of_param_assignments: param_assignment ("," param_assignment)*
 // BNF: list_of_port_identifiers ::= port_identifier { , port_identifier }
 // SV extension: port identifiers may have unpacked dimensions
@@ -721,28 +803,35 @@ list_of_param_assignments: param_assignment ("," param_assignment)*
 // SYNTHESIZABLE: YES
 // EXAMPLE: a, b, c
 // EXAMPLE: data[2], status
+// SUPPORT: YES
+// SUPPORT: YES
 list_of_port_identifiers: port_id_with_dimensions ( "," port_id_with_dimensions )*
+// SUPPORT: YES
 port_id_with_dimensions: PORT_IDENTIFIER dimension* ("=" expression)?
 // BNF: list_of_real_identifiers ::= real_type { , real_type }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: voltage, current = 0.1
+// SUPPORT: NO
 list_of_real_identifiers: real_type ( "," real_type )*
 // BNF: list_of_specparam_assignments ::= specparam_assignment { , specparam_assignment }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: tRISE = 1.0, tFALL = 1.5
+// SUPPORT: NO
 list_of_specparam_assignments: specparam_assignment ( "," specparam_assignment )*
 // BNF: list_of_variable_identifiers ::= variable_type { , variable_type }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: count, index = 0
+// SUPPORT: YES
 list_of_variable_identifiers: variable_type ( "," variable_type )*
 // BNF: list_of_variable_port_identifiers ::= port_identifier [ = constant_expression ]
 //     { , port_identifier [ = constant_expression ] }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: result = 0, carry = 1'b0
+// SUPPORT: YES
 list_of_variable_port_identifiers: PORT_IDENTIFIER ( "=" constant_expression )? ( "," PORT_IDENTIFIER ( "=" constant_expression )? )*
 
 // SECTION: A.2.4 Declaration assignments
@@ -750,11 +839,13 @@ list_of_variable_port_identifiers: PORT_IDENTIFIER ( "=" constant_expression )? 
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: u1.WIDTH = 16
+// SUPPORT: YES
 defparam_assignment: hierarchical_parameter_identifier "=" constant_mintypmax_expression
 // BNF: net_decl_assignment ::= net_identifier = expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: data = in_a & in_b
+// SUPPORT: YES
 net_decl_assignment: NET_IDENTIFIER "=" expression
 // BNF: param_assignment ::= parameter_identifier = constant_mintypmax_expression
 // SV extension: parameter may have unpacked dimensions
@@ -762,6 +853,7 @@ net_decl_assignment: NET_IDENTIFIER "=" expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: WIDTH = 8
 // EXAMPLE: MASK [4] = 0
+// SUPPORT: YES
 param_assignment: PARAMETER_IDENTIFIER dimension* "=" constant_mintypmax_expression
 // BNF: specparam_assignment ::=
 //     specparam_identifier = constant_mintypmax_expression
@@ -769,6 +861,7 @@ param_assignment: PARAMETER_IDENTIFIER dimension* "=" constant_mintypmax_express
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: tRISE = 1.5
+// SUPPORT: NO
 specparam_assignment: SPECPARAM_IDENTIFIER "=" constant_mintypmax_expression
     | pulse_control_specparam
 
@@ -779,6 +872,7 @@ specparam_assignment: SPECPARAM_IDENTIFIER "=" constant_mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: PATHPULSE$ = (1, 2)
+// SUPPORT: NO
 pulse_control_specparam: "PATHPULSE$" "=" "(" reject_limit_value ( "," error_limit_value )? ")"
     | "PATHPULSE$" specify_input_terminal_descriptor "$" specify_output_terminal_descriptor "=" "(" reject_limit_value ( "," error_limit_value )? ")"
 
@@ -786,16 +880,19 @@ pulse_control_specparam: "PATHPULSE$" "=" "(" reject_limit_value ( "," error_lim
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 2
+// SUPPORT: NO
 error_limit_value: limit_value
 // BNF: reject_limit_value ::= limit_value
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 reject_limit_value: limit_value
 // BNF: limit_value ::= constant_mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1:2:3
+// SUPPORT: NO
 limit_value: constant_mintypmax_expression
 
 // SECTION: A.2.5 Declaration ranges
@@ -805,12 +902,14 @@ limit_value: constant_mintypmax_expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: [0:15]
 // EXAMPLE: [32]
+// SUPPORT: YES
 dimension: "[" dimension_constant_expression ":" dimension_constant_expression "]"
     | "[" dimension_constant_expression "]"
 // BNF: range ::= [ msb_constant_expression : lsb_constant_expression ]
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: [7:0]
+// SUPPORT: YES
 range: "[" msb_constant_expression ":" lsb_constant_expression "]"
 
 // SECTION: A.2.6 Function declarations
@@ -826,6 +925,7 @@ range: "[" msb_constant_expression ":" lsb_constant_expression "]"
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: function automatic [7:0] add; input [7:0] a, b; begin add = a + b; end endfunction
+// SUPPORT: YES
 function_declaration: KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER ";" function_item_declaration function_item_declaration* function_statement KW_ENDFUNCTION
     | KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER "(" function_port_list? ")" ";" block_item_declaration* function_statement+ KW_ENDFUNCTION
 
@@ -835,6 +935,7 @@ function_declaration: KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: input [7:0] a;
+// SUPPORT: YES
 function_item_declaration: block_item_declaration
     | attribute_instance* tf_input_declaration ";"
 
@@ -843,8 +944,11 @@ function_item_declaration: block_item_declaration
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: input [7:0] a, input [7:0] b
+// SUPPORT: YES
+// SUPPORT: YES
 function_port_list: attribute_instance* sv_function_port ( "," attribute_instance* sv_function_port )*
 // SV function ports: may omit direction (defaults to input)
+// SUPPORT: YES
 sv_function_port: tf_input_declaration
     | tf_output_declaration
     | KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
@@ -866,6 +970,7 @@ sv_function_port: tf_input_declaration
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: [7:0]
+// SUPPORT: YES
 function_range_or_type: KW_SIGNED? range?
     | KW_INTEGER
     | KW_REAL
@@ -894,6 +999,7 @@ function_range_or_type: KW_SIGNED? range?
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: task automatic delay_10; #10; endtask
+// SUPPORT: YES
 task_declaration: KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER ";" task_item_declaration* statement_or_null KW_ENDTASK
     | KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER "(" task_port_list? ")" ";" block_item_declaration* statement_or_null KW_ENDTASK
 
@@ -905,6 +1011,7 @@ task_declaration: KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER ";" task_item_declaratio
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: input [7:0] data;
+// SUPPORT: YES
 task_item_declaration: block_item_declaration
     | attribute_instance* tf_input_declaration ";"
     | attribute_instance* tf_output_declaration ";"
@@ -914,6 +1021,7 @@ task_item_declaration: block_item_declaration
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: input a, output b
+// SUPPORT: YES
 task_port_list: task_port_item ( "," task_port_item )*
 // BNF: task_port_item ::=
 //     { attribute_instance } tf_input_declaration
@@ -922,6 +1030,7 @@ task_port_list: task_port_item ( "," task_port_item )*
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: input [7:0] data
+// SUPPORT: YES
 task_port_item: attribute_instance* tf_input_declaration
     | attribute_instance* tf_output_declaration
     | attribute_instance* tf_inout_declaration
@@ -933,6 +1042,7 @@ task_port_item: attribute_instance* tf_input_declaration
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: input [7:0] data
 // EXAMPLE: input integer count
+// SUPPORT: YES
 tf_input_declaration: KW_INPUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
     | KW_INPUT task_port_type list_of_port_identifiers
     | KW_INPUT KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
@@ -946,6 +1056,7 @@ tf_input_declaration: KW_INPUT KW_REG? KW_SIGNED? range? list_of_port_identifier
 // SYNTHESIZABLE: NO
 // EXAMPLE: output [7:0] result
 // EXAMPLE: output integer count
+// SUPPORT: YES
 tf_output_declaration: KW_OUTPUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
     | KW_OUTPUT task_port_type list_of_port_identifiers
     | KW_OUTPUT KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
@@ -959,6 +1070,7 @@ tf_output_declaration: KW_OUTPUT KW_REG? KW_SIGNED? range? list_of_port_identifi
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: inout [7:0] bus
+// SUPPORT: YES
 tf_inout_declaration: KW_INOUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
     | KW_INOUT task_port_type list_of_port_identifiers
 
@@ -967,6 +1079,7 @@ tf_inout_declaration: KW_INOUT KW_REG? KW_SIGNED? range? list_of_port_identifier
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: integer
+// SUPPORT: YES
 task_port_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
 
 
@@ -984,6 +1097,7 @@ task_port_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: reg signed [7:0] temp;
 // EXAMPLE: integer count;
+// SUPPORT: YES
 block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_INTEGER list_of_block_variable_identifiers ";"
     | attribute_instance* KW_TIME list_of_block_variable_identifiers ";"
@@ -1005,22 +1119,26 @@ block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_blo
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: a, b, c[7:0]
+// SUPPORT: YES
 list_of_block_variable_identifiers: block_variable_type ( "," block_variable_type )*
 // BNF: list_of_block_real_identifiers ::= block_real_type { , block_real_type }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: voltage, current
+// SUPPORT: NO
 list_of_block_real_identifiers: block_real_type ( "," block_real_type )*
 // BNF: block_variable_type ::= variable_identifier { dimension }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: temp[7:0]
+// SUPPORT: YES
 block_variable_type: VARIABLE_IDENTIFIER dimension*
     | VARIABLE_IDENTIFIER dimension* "=" expression
 // BNF: block_real_type ::= real_identifier { dimension }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: voltage
+// SUPPORT: NO
 block_real_type: REAL_IDENTIFIER dimension*
 
 // SECTION: A.3 Primitive instances
@@ -1065,48 +1183,57 @@ gate_instantiation: cmos_switchtype delay3? cmos_switch_instance ( "," cmos_swit
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1(out, in, nctrl, pctrl)
+// SUPPORT: NO
 cmos_switch_instance: name_of_gate_instance? "(" output_terminal "," input_terminal ","  ncontrol_terminal "," pcontrol_terminal ")"
 
 // BNF: enable_gate_instance ::= [ name_of_gate_instance ] ( output_terminal , input_terminal , enable_terminal )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1(out, in, en)
+// SUPPORT: NO
 enable_gate_instance: name_of_gate_instance? "(" output_terminal "," input_terminal "," enable_terminal ")"
 // BNF: mos_switch_instance ::= [ name_of_gate_instance ] ( output_terminal , input_terminal , enable_terminal )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: m1(out, in, gate)
+// SUPPORT: NO
 mos_switch_instance: name_of_gate_instance? "(" output_terminal "," input_terminal "," enable_terminal ")"
 // BNF: n_input_gate_instance ::= [ name_of_gate_instance ] ( output_terminal , input_terminal { , input_terminal } )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1(out, in1, in2, in3)
+// SUPPORT: NO
 n_input_gate_instance: name_of_gate_instance? "(" output_terminal "," input_terminal ( "," input_terminal )* ")"
 // BNF: n_output_gate_instance ::= [ name_of_gate_instance ] ( output_terminal { , output_terminal } ,
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1(out1, out2, in)
+// SUPPORT: NO
 n_output_gate_instance: name_of_gate_instance? "(" output_terminal ( "," output_terminal )* "," input_terminal ")"
 // BNF: pass_switch_instance ::= [ name_of_gate_instance ] ( inout_terminal , inout_terminal )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: p1(a, b)
+// SUPPORT: NO
 pass_switch_instance: name_of_gate_instance? "(" inout_terminal "," inout_terminal ")"
 // BNF: pass_enable_switch_instance ::= [ name_of_gate_instance ] ( inout_terminal , inout_terminal ,
 //     enable_terminal )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: p1(a, b, en)
+// SUPPORT: NO
 pass_enable_switch_instance: name_of_gate_instance? "(" inout_terminal "," inout_terminal "," enable_terminal ")"
 // BNF: pull_gate_instance ::= [ name_of_gate_instance ] ( output_terminal )
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1(out)
+// SUPPORT: NO
 pull_gate_instance: name_of_gate_instance? "(" output_terminal ")"
 // BNF: name_of_gate_instance ::= gate_instance_identifier [ range ]
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: g1[3:0]
+// SUPPORT: NO
 name_of_gate_instance: GATE_INSTANCE_IDENTIFIER range?
 
 // SECTION: A.3.2 Primitive strengths
@@ -1117,6 +1244,7 @@ name_of_gate_instance: GATE_INSTANCE_IDENTIFIER range?
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (strong0, weak1)
+// SUPPORT: NO
 pulldown_strength: "(" strength0 "," strength1 ")"
     | "(" strength1 "," strength0 ")"
     | "(" strength0 ")"
@@ -1128,6 +1256,7 @@ pulldown_strength: "(" strength0 "," strength1 ")"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (weak1)
+// SUPPORT: NO
 pullup_strength: "(" strength0 "," strength1 ")"
     | "(" strength1 "," strength0 ")"
     | "(" strength1 ")"
@@ -1138,31 +1267,37 @@ pullup_strength: "(" strength0 "," strength1 ")"
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: en
+// SUPPORT: NO
 enable_terminal: expression
 // BNF: inout_terminal ::= net_lvalue
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: data
+// SUPPORT: NO
 inout_terminal: net_lvalue
 // BNF: input_terminal ::= expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: a & b
+// SUPPORT: NO
 input_terminal: expression
 // BNF: ncontrol_terminal ::= expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: nctrl
+// SUPPORT: NO
 ncontrol_terminal: expression
 // BNF: output_terminal ::= net_lvalue
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: out
+// SUPPORT: NO
 output_terminal: net_lvalue
 // BNF: pcontrol_terminal ::= expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: pctrl
+// SUPPORT: NO
 pcontrol_terminal: expression
 
 // SECTION: A.3.4 Primitive gate and switch types
@@ -1170,36 +1305,43 @@ pcontrol_terminal: expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: cmos
+// SUPPORT: NO
 cmos_switchtype: KW_CMOS | KW_RCMOS
 // BNF: enable_gatetype ::= bufif0 | bufif1 | notif0 | notif1
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: bufif1
+// SUPPORT: NO
 enable_gatetype: KW_BUFIF0 | KW_BUFIF1 | KW_NOTIF0 | KW_NOTIF1
 // BNF: mos_switchtype ::= nmos | pmos | rnmos | rpmos
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: nmos
+// SUPPORT: NO
 mos_switchtype: KW_NMOS | KW_PMOS | KW_RNMOS | KW_RPMOS
 // BNF: n_input_gatetype ::= and | nand | or | nor | xor | xnor
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: and
+// SUPPORT: NO
 n_input_gatetype: KW_AND | KW_NAND | KW_OR | KW_NOR | KW_XOR | KW_XNOR
 // BNF: n_output_gatetype ::= buf | not
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: buf
+// SUPPORT: NO
 n_output_gatetype: KW_BUF | KW_NOT
 // BNF: pass_en_switchtype ::= tranif0 | tranif1 | rtranif1 | rtranif0
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: tranif1
+// SUPPORT: NO
 pass_en_switchtype: KW_TRANIF0 | KW_TRANIF1 | KW_RTRANIF1 | KW_RTRANIF0
 // BNF: pass_switchtype ::= tran | rtran
 // PRIORITY: LOW
 // SYNTHESIZABLE: YES
 // EXAMPLE: tran
+// SUPPORT: NO
 pass_switchtype: KW_TRAN | KW_RTRAN
 
 // SECTION: A.4 Module instantiation and generate construct
@@ -1210,11 +1352,13 @@ pass_switchtype: KW_TRAN | KW_RTRAN
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: counter #(.WIDTH(8)) u1 (.clk(clk), .rst(rst));
+// SUPPORT: YES
 module_instantiation: MODULE_IDENTIFIER parameter_value_assignment? module_instance ( "," module_instance )* ";"
 // BNF: parameter_value_assignment ::= # ( list_of_parameter_assignments )
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: #(.WIDTH(8), .DEPTH(16))
+// SUPPORT: YES
 parameter_value_assignment: "#" "(" list_of_parameter_assignments? ")"
 // BNF: list_of_parameter_assignments ::=
 //     ordered_parameter_assignment { , ordered_parameter_assignment } |
@@ -1222,27 +1366,32 @@ parameter_value_assignment: "#" "(" list_of_parameter_assignments? ")"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: .WIDTH(8), .DEPTH(16)
+// SUPPORT: YES
 list_of_parameter_assignments: ordered_parameter_assignment ( "," ordered_parameter_assignment )*
     | named_parameter_assignment ( "," named_parameter_assignment )*
 // BNF: ordered_parameter_assignment ::= expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8
+// SUPPORT: YES
 ordered_parameter_assignment: expression
 // BNF: named_parameter_assignment ::= . parameter_identifier ( [ mintypmax_expression ] )
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: .WIDTH(8)
+// SUPPORT: YES
 named_parameter_assignment: "." PARAMETER_IDENTIFIER "(" mintypmax_expression? ")"
 // BNF: module_instance ::= name_of_module_instance ( [ list_of_port_connections ] )
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: u1(.clk(clk), .data(data))
+// SUPPORT: YES
 module_instance: name_of_module_instance "(" list_of_port_connections? ")"
 // BNF: name_of_module_instance ::= module_instance_identifier [ range ]
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: u1[3:0]
+// SUPPORT: YES
 name_of_module_instance: MODULE_INSTANCE_IDENTIFIER range?
 // BNF: list_of_port_connections ::=
 //     ordered_port_connection { , ordered_port_connection }
@@ -1250,6 +1399,7 @@ name_of_module_instance: MODULE_INSTANCE_IDENTIFIER range?
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: .clk(clk), .rst(rst)
+// SUPPORT: YES
 list_of_port_connections: ordered_port_connection ( "," ordered_port_connection )*
     | named_port_connection ( "," named_port_connection )*
 
@@ -1257,11 +1407,13 @@ list_of_port_connections: ordered_port_connection ( "," ordered_port_connection 
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: clk
+// SUPPORT: YES
 ordered_port_connection: attribute_instance* expression?
 // BNF: named_port_connection ::= { attribute_instance } . port_identifier ( [ expression ] )
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: .clk(sys_clk)
+// SUPPORT: YES
 named_port_connection: attribute_instance* "." PORT_IDENTIFIER "(" expression? ")"
     | attribute_instance* "." PORT_IDENTIFIER
 
@@ -1271,18 +1423,21 @@ named_port_connection: attribute_instance* "." PORT_IDENTIFIER "(" expression? "
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: generate for (i=0; i<4; i=i+1) begin : gen_loop wire x; end endgenerate
+// SUPPORT: YES
 generate_region: KW_GENERATE module_or_generate_item* KW_ENDGENERATE
 // BNF: genvar_declaration ::=
 //     genvar list_of_genvar_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: genvar i, j;
+// SUPPORT: YES
 genvar_declaration: KW_GENVAR list_of_genvar_identifiers ";"
 // BNF: list_of_genvar_identifiers ::=
 //     genvar_identifier { , genvar_identifier }
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: i, j
+// SUPPORT: YES
 list_of_genvar_identifiers: GENVAR_IDENTIFIER ( "," GENVAR_IDENTIFIER )*
 // BNF: loop_generate_construct ::=
 //     for ( genvar_initialization ; genvar_expression ; genvar_iteration )
@@ -1290,6 +1445,7 @@ list_of_genvar_identifiers: GENVAR_IDENTIFIER ( "," GENVAR_IDENTIFIER )*
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: for (i=0; i<4; i=i+1) begin : gen_blk wire x; end
+// SUPPORT: YES
 loop_generate_construct: KW_FOR "(" genvar_initialization ";" genvar_expression ";" genvar_iteration ")" generate_block
 
 // BNF: genvar_initialization ::=
@@ -1300,6 +1456,7 @@ loop_generate_construct: KW_FOR "(" genvar_initialization ";" genvar_expression 
 // SYNTHESIZABLE: YES
 // EXAMPLE: i = 0
 // EXAMPLE: genvar i = 0
+// SUPPORT: YES
 genvar_initialization: KW_GENVAR? GENVAR_IDENTIFIER "=" constant_expression
 
 // BNF: genvar_expression ::=
@@ -1311,6 +1468,7 @@ genvar_initialization: KW_GENVAR? GENVAR_IDENTIFIER "=" constant_expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: i < 4
 // EXAMPLE: -i
+// SUPPORT: YES
 genvar_expression: genvar_primary
     | unary_operator attribute_instance* genvar_primary
     | genvar_expression binary_operator attribute_instance* genvar_expression
@@ -1326,6 +1484,7 @@ genvar_expression: genvar_primary
 // EXAMPLE: i = i + 1
 // EXAMPLE: i++
 // EXAMPLE: ++i
+// SUPPORT: YES
 genvar_iteration: GENVAR_IDENTIFIER "=" genvar_expression
     | GENVAR_IDENTIFIER OP_INC
     | GENVAR_IDENTIFIER OP_DEC
@@ -1342,6 +1501,7 @@ genvar_iteration: GENVAR_IDENTIFIER "=" genvar_expression
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: i
+// SUPPORT: YES
 genvar_primary: constant_primary
     | GENVAR_IDENTIFIER
 
@@ -1351,6 +1511,7 @@ genvar_primary: constant_primary
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: if (WIDTH > 8) begin : wide_path wire x; end else begin : narrow_path wire y; end
+// SUPPORT: YES
 conditional_generate_construct: if_generate_construct
     | case_generate_construct
 // BNF: if_generate_construct ::=
@@ -1359,6 +1520,7 @@ conditional_generate_construct: if_generate_construct
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: if (ENABLE) begin : gen_en wire x; end
+// SUPPORT: YES
 if_generate_construct: KW_IF "(" constant_expression ")" generate_block_or_null ( KW_ELSE generate_block_or_null )?
 // BNF: case_generate_construct ::=
 //     case ( constant_expression )
@@ -1370,6 +1532,7 @@ if_generate_construct: KW_IF "(" constant_expression ")" generate_block_or_null 
 // SYNTHESIZABLE: YES
 // EXAMPLE: case (MODE) 0: begin : m0 wire a; end 1: begin : m1 wire b; end endcase
 // EXAMPLE: unique case (MODE) 0: begin : m0 wire a; end default: begin : md wire b; end endcase
+// SUPPORT: YES
 case_generate_construct: case_qualifier? KW_CASE "(" constant_expression ")" case_generate_item case_generate_item* KW_ENDCASE
 // BNF: case_generate_item ::=
 //     constant_expression { , constant_expression } : generate_block_or_null
@@ -1377,6 +1540,7 @@ case_generate_construct: case_qualifier? KW_CASE "(" constant_expression ")" cas
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: 0: begin : case0 wire x; end
+// SUPPORT: YES
 case_generate_item: constant_expression ( "," constant_expression )* ":" generate_block_or_null
     | KW_DEFAULT ":"? generate_block_or_null
 // BNF: generate_block ::=
@@ -1385,6 +1549,7 @@ case_generate_item: constant_expression ( "," constant_expression )* ":" generat
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin : blk wire x; end
+// SUPPORT: YES
 generate_block: module_or_generate_item
     | KW_BEGIN ( ":" GENERATE_BLOCK_IDENTIFIER )? module_or_generate_item* KW_END
 
@@ -1394,6 +1559,7 @@ generate_block: module_or_generate_item
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin : blk wire x; end
+// SUPPORT: YES
 generate_block_or_null: generate_block
     | ";"
 
@@ -1419,12 +1585,14 @@ udp_declaration: attribute_instance* KW_PRIMITIVE UDP_IDENTIFIER "(" udp_port_li
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: out, sel, a, b
+// SUPPORT: NO
 udp_port_list: OUTPUT_PORT_IDENTIFIER "," INPUT_PORT_IDENTIFIER ( "," INPUT_PORT_IDENTIFIER)*
 // BNF: udp_declaration_port_list ::=
 //     udp_output_declaration , udp_input_declaration { , udp_input_declaration }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: output out, input a, input b
+// SUPPORT: NO
 udp_declaration_port_list: udp_output_declaration "," udp_input_declaration ( "," udp_input_declaration )*
 // BNF: udp_port_declaration ::=
 //     udp_output_declaration ;
@@ -1433,6 +1601,7 @@ udp_declaration_port_list: udp_output_declaration "," udp_input_declaration ( ",
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: output out;
+// SUPPORT: NO
 udp_port_declaration: udp_output_declaration ";"
     | udp_input_declaration ";"
     | udp_reg_declaration ";"
@@ -1442,17 +1611,20 @@ udp_port_declaration: udp_output_declaration ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: output reg q = 1'b0
+// SUPPORT: NO
 udp_output_declaration: attribute_instance* KW_OUTPUT PORT_IDENTIFIER
     | attribute_instance* KW_OUTPUT KW_REG PORT_IDENTIFIER ( "=" constant_expression )?
 // BNF: udp_input_declaration ::= { attribute_instance } input list_of_port_identifiers
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: input a, b, c
+// SUPPORT: NO
 udp_input_declaration: attribute_instance* KW_INPUT list_of_port_identifiers
 // BNF: udp_reg_declaration ::= { attribute_instance } reg variable_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: reg q
+// SUPPORT: NO
 udp_reg_declaration: attribute_instance* KW_REG VARIABLE_IDENTIFIER
 
 // SECTION: A.5.3 UDP body
@@ -1460,81 +1632,97 @@ udp_reg_declaration: attribute_instance* KW_REG VARIABLE_IDENTIFIER
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: table 00:0; 01:0; 10:0; 11:1; endtable
+// SUPPORT: NO
 udp_body: combinational_body | sequential_body
 // BNF: combinational_body ::= table combinational_entry { combinational_entry } endtable
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: table 00:0; 01:0; 10:0; 11:1; endtable
+// SUPPORT: NO
 combinational_body: KW_TABLE combinational_entry combinational_entry* KW_ENDTABLE
 // BNF: combinational_entry ::= level_input_list : output_symbol ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 00 : 0 ;
+// SUPPORT: NO
 combinational_entry: level_input_list ":" output_symbol ";"
 // BNF: sequential_body ::= [ udp_initial_statement ] table sequential_entry { sequential_entry } endtable
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: table ?r:0:1; endtable
+// SUPPORT: NO
 sequential_body: udp_initial_statement? KW_TABLE sequential_entry sequential_entry* KW_ENDTABLE
 // BNF: udp_initial_statement ::= initial output_port_identifier = init_val ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: initial q = 1'b0;
+// SUPPORT: NO
 udp_initial_statement: KW_INITIAL OUTPUT_PORT_IDENTIFIER "=" init_val ";"
 // BNF: init_val ::= 1'b0 | 1'b1 | 1'bx | 1'bX | 1'B0 | 1'B1 | 1'Bx | 1'BX | 1 | 0
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1'b0
+// SUPPORT: NO
 init_val: "1'b0" | "1'b1" | "1'bx" | "1'bX" | "1'B0" | "1'B1" | "1'Bx" | "1'BX" | "1" | "0"
 // BNF: sequential_entry ::= seq_input_list : current_state : next_state ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: ?r : 0 : 1 ;
+// SUPPORT: NO
 sequential_entry: seq_input_list ":" current_state ":" next_state ";"
 // BNF: seq_input_list ::= level_input_list | edge_input_list
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: ?r
+// SUPPORT: NO
 seq_input_list: level_input_list | edge_input_list
 // BNF: level_input_list ::= level_symbol { level_symbol }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 01
+// SUPPORT: NO
 level_input_list: level_symbol level_symbol*
 // BNF: edge_input_list ::= { level_symbol } edge_indicator { level_symbol }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: ?r?
+// SUPPORT: NO
 edge_input_list: level_symbol* edge_indicator level_symbol*
 // BNF: edge_indicator ::= ( level_symbol level_symbol ) | edge_symbol
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (01)
+// SUPPORT: NO
 edge_indicator: "(" level_symbol level_symbol ")" | edge_symbol
 // BNF: current_state ::= level_symbol
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 0
+// SUPPORT: NO
 current_state: level_symbol
 // BNF: next_state ::= output_symbol | -
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 next_state: output_symbol | "-"
 // BNF: output_symbol ::= 0 | 1 | x | X
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 output_symbol: "0" | "1" | "x" | "X"
 // BNF: level_symbol ::= 0 | 1 | x | X | ? | b | B
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: ?
+// SUPPORT: NO
 level_symbol: "0" | "1" | "x" | "X" | "?" | "b" | "B"
 // BNF: edge_symbol ::= r | R | f | F | p | P | n | N | *
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: r
+// SUPPORT: NO
 edge_symbol: "r" | "R" | "f" | "F" | "p" | "P" | "n" | "N" | "*"
 
 // SECTION: A.5.4 UDP instantiation
@@ -1543,17 +1731,20 @@ edge_symbol: "r" | "R" | "f" | "F" | "p" | "P" | "n" | "N" | "*"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: my_udp u1(out, in1, in2);
+// SUPPORT: NO
 udp_instantiation: UDP_IDENTIFIER drive_strength? delay2? udp_instance ( "," udp_instance)* ";"
 // BNF: udp_instance ::= [ name_of_udp_instance ] ( output_terminal , input_terminal
 //                         { , input_terminal } )
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: u1(out, in1, in2)
+// SUPPORT: NO
 udp_instance: name_of_udp_instance? "(" output_terminal "," input_terminal ( "," input_terminal )* ")"
 // BNF: name_of_udp_instance ::= udp_instance_identifier [ range ]
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: u1[3:0]
+// SUPPORT: NO
 name_of_udp_instance: UDP_INSTANCE_IDENTIFIER range?
 
 // SECTION: A.6 Behavioral statements
@@ -1562,16 +1753,19 @@ name_of_udp_instance: UDP_INSTANCE_IDENTIFIER range?
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: assign y = a & b;
+// SUPPORT: YES
 continuous_assign: KW_ASSIGN drive_strength? delay3? list_of_net_assignments ";"
 // BNF: list_of_net_assignments ::= net_assignment { , net_assignment }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: y = a & b, z = c | d
+// SUPPORT: YES
 list_of_net_assignments: net_assignment ( "," net_assignment )*
 // BNF: net_assignment ::= net_lvalue = expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: y = a & b
+// SUPPORT: YES
 net_assignment: net_lvalue "=" expression
 
 // SECTION: A.6.2 Procedural blocks and assignments
@@ -1579,26 +1773,31 @@ net_assignment: net_lvalue "=" expression
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: initial begin clk = 0; end
+// SUPPORT: YES
 initial_construct: KW_INITIAL statement
 // BNF: always_construct ::= always statement
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: always @(posedge clk) q <= d;
+// SUPPORT: YES
 always_construct: KW_ALWAYS statement
 // SV: always_comb_construct ::= always_comb statement
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: always_comb begin y = a & b; end
+// SUPPORT: YES
 always_comb_construct: KW_ALWAYS_COMB statement
 // SV: always_ff_construct ::= always_ff @ ( event_expression ) statement
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: always_ff @(posedge clk or negedge rst_n) begin q <= d; end
+// SUPPORT: YES
 always_ff_construct: KW_ALWAYS_FF "@" "(" event_expression ")" statement
 // SV: always_latch_construct ::= always_latch statement
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: always_latch begin if (en) q <= d; end
+// SUPPORT: YES
 always_latch_construct: KW_ALWAYS_LATCH statement
 // BNF: blocking_assignment ::= variable_lvalue = [ delay_or_event_control ] expression
 // SV extension: compound assignment operators (+=, -=, etc.)
@@ -1606,6 +1805,7 @@ always_latch_construct: KW_ALWAYS_LATCH statement
 // SYNTHESIZABLE: YES
 // EXAMPLE: x = a + b
 // EXAMPLE: count += 1
+// SUPPORT: YES
 blocking_assignment: variable_lvalue "=" delay_or_event_control? expression
     | variable_lvalue COMPOUND_ASSIGN expression
 COMPOUND_ASSIGN: "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "<<<="
@@ -1613,6 +1813,7 @@ COMPOUND_ASSIGN: "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" |
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: q <= d
+// SUPPORT: YES
 nonblocking_assignment: variable_lvalue "<=" delay_or_event_control? expression
 // BNF: procedural_continuous_assignments ::=
 //     assign variable_assignment
@@ -1626,6 +1827,7 @@ nonblocking_assignment: variable_lvalue "<=" delay_or_event_control? expression
 // EXAMPLE: force data = 8'hFF
 // EXAMPLE: deassign q
 // EXAMPLE: release data
+// SUPPORT: NO
 procedural_continuous_assignments: KW_ASSIGN variable_assignment
     | KW_DEASSIGN variable_lvalue
     | KW_FORCE variable_assignment
@@ -1637,6 +1839,7 @@ procedural_continuous_assignments: KW_ASSIGN variable_assignment
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: data = value
+// SUPPORT: YES
 variable_assignment: variable_lvalue "=" expression
     | variable_lvalue COMPOUND_ASSIGN expression
     | variable_lvalue OP_INC
@@ -1648,12 +1851,14 @@ variable_assignment: variable_lvalue "=" expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: fork : par_blk #10 a = 1; #20 b = 2; join
+// SUPPORT: YES
 par_block: KW_FORK ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_JOIN
 // BNF: seq_block ::= begin [ : block_identifier
 //     { block_item_declaration } ] { statement } end
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin : blk reg [7:0] temp; x = 1; y = 2; end
+// SUPPORT: YES
 seq_block: KW_BEGIN ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_END
 
 // SECTION: A.6.4 Statements
@@ -1676,6 +1881,7 @@ seq_block: KW_BEGIN ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement*
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: if (sel) y = a; else y = b;
 // EXAMPLE: q <= d;
+// SUPPORT: YES
 statement: attribute_instance* blocking_assignment ";"
     | attribute_instance* case_statement
     | attribute_instance* conditional_statement
@@ -1696,6 +1902,7 @@ statement: attribute_instance* blocking_assignment ";"
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: return 7'd16;
+// SUPPORT: YES
 return_statement: KW_RETURN expression? ";"
 
 // BNF: statement_or_null ::=
@@ -1704,12 +1911,14 @@ return_statement: KW_RETURN expression? ";"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: ;
+// SUPPORT: YES
 statement_or_null: statement
     | attribute_instance* ";"
 
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin add = a + b; end
+// SUPPORT: YES
 function_statement: statement
 
 // SECTION: A.6.5 Timing control statements
@@ -1719,6 +1928,7 @@ function_statement: statement
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: #10
+// SUPPORT: YES
 delay_control: "#" delay_value
     | "#" "(" mintypmax_expression ")"
 // BNF: delay_or_event_control ::=
@@ -1728,6 +1938,7 @@ delay_control: "#" delay_value
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: @(posedge clk)
+// SUPPORT: YES
 delay_or_event_control: delay_control
     | event_control
     | KW_REPEAT "(" expression ")" event_control
@@ -1737,6 +1948,7 @@ delay_or_event_control: delay_control
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: disable my_task;
+// SUPPORT: YES
 disable_statement: KW_DISABLE hierarchical_task_identifier ";"
     | KW_DISABLE hierarchical_block_identifier ";"
 // BNF: event_control ::=
@@ -1748,6 +1960,7 @@ disable_statement: KW_DISABLE hierarchical_task_identifier ";"
 // SYNTHESIZABLE: YES
 // EXAMPLE: @(posedge clk or negedge rst)
 // EXAMPLE: @*
+// SUPPORT: YES
 event_control: "@" hierarchical_event_identifier
     | "@" "(" event_expression ")"
     | "@" "*"
@@ -1758,6 +1971,7 @@ event_control: "@" hierarchical_event_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: -> done_event;
+// SUPPORT: YES
 event_trigger: "->" hierarchical_event_identifier ( "[" expression "]" )* ";"
 // BNF: event_expression ::=
 //     expression
@@ -1768,6 +1982,7 @@ event_trigger: "->" hierarchical_event_identifier ( "[" expression "]" )* ";"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: posedge clk or negedge rst
+// SUPPORT: YES
 event_expression: expression
     | KW_POSEDGE expression
     | KW_NEGEDGE expression
@@ -1780,6 +1995,7 @@ event_expression: expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: @(posedge clk)
+// SUPPORT: YES
 procedural_timing_control: delay_control
     | event_control
 // BNF: procedural_timing_control_statement ::=
@@ -1787,12 +2003,14 @@ procedural_timing_control: delay_control
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: @(posedge clk) q <= d;
+// SUPPORT: YES
 procedural_timing_control_statement: procedural_timing_control statement_or_null
 // BNF: wait_statement ::=
 //     wait ( expression ) statement_or_null
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: wait (ready) data = bus;
+// SUPPORT: YES
 wait_statement: KW_WAIT "(" expression ")" statement_or_null
 
 // SECTION: A.6.6 Conditional statements
@@ -1803,6 +2021,7 @@ wait_statement: KW_WAIT "(" expression ")" statement_or_null
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: if (sel) y = a; else y = b;
+// SUPPORT: YES
 conditional_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE statement_or_null )?
     | if_else_if_statement
 // BNF: if_else_if_statement ::=
@@ -1812,6 +2031,7 @@ conditional_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE stat
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: if (a) x=1; else if (b) x=2; else x=3;
+// SUPPORT: YES
 if_else_if_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE KW_IF "(" expression ")" statement_or_null )* ( KW_ELSE statement_or_null )?
 
 // SECTION: A.6.7 Case statements
@@ -1826,10 +2046,12 @@ if_else_if_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE KW_IF
 // SYNTHESIZABLE: YES
 // EXAMPLE: case (sel) 2'b00: y=a; 2'b01: y=b; default: y=0; endcase
 // EXAMPLE: casex (data) 4'b1???: high = 1; default: high = 0; endcase
+// SUPPORT: YES
 case_statement: case_qualifier? KW_CASE "(" expression ")" case_item case_item* KW_ENDCASE
     | case_qualifier? KW_CASEZ "(" expression ")" case_item case_item* KW_ENDCASE
     | case_qualifier? KW_CASEX "(" expression ")" case_item case_item* KW_ENDCASE
 // SV: case_qualifier ::= unique | unique0 | priority
+// SUPPORT: YES
 case_qualifier: KW_UNIQUE | KW_UNIQUE0 | KW_PRIORITY
 // BNF: case_item ::=
 //     expression { , expression } : statement_or_null
@@ -1837,6 +2059,7 @@ case_qualifier: KW_UNIQUE | KW_UNIQUE0 | KW_PRIORITY
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 2'b00: y = a;
+// SUPPORT: YES
 case_item: expression ( "," expression )* ":" statement_or_null
     | KW_DEFAULT ":"? statement_or_null
 
@@ -1852,6 +2075,7 @@ case_item: expression ( "," expression )* ":" statement_or_null
 // EXAMPLE: for (i=0; i<8; i=i+1) mem[i] = 0;
 // EXAMPLE: forever #10 clk = ~clk;
 // EXAMPLE: while (count > 0) count = count - 1;
+// SUPPORT: YES
 loop_statement: KW_FOREVER statement
     | KW_REPEAT "(" expression ")" statement
     | KW_WHILE "(" expression ")" statement
@@ -1859,6 +2083,7 @@ loop_statement: KW_FOREVER statement
     | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" statement
 // SV: for-loop with inline variable declaration
 // EXAMPLE: int unsigned i = 0
+// SUPPORT: YES
 for_variable_declaration: KW_INT KW_UNSIGNED? VARIABLE_IDENTIFIER "=" expression
     | KW_INTEGER VARIABLE_IDENTIFIER "=" expression
     | KW_LOGIC KW_SIGNED? range? VARIABLE_IDENTIFIER "=" expression
@@ -1869,11 +2094,13 @@ for_variable_declaration: KW_INT KW_UNSIGNED? VARIABLE_IDENTIFIER "=" expression
 // SYNTHESIZABLE: NO
 // EXAMPLE: $display("value=%d", val);
 // EXAMPLE: $finish;
+// SUPPORT: YES
 system_task_enable: SYSTEM_TASK_IDENTIFIER ( "(" expression? ( "," expression? )* ")" )? ";"
 // BNF: task_enable ::= hierarchical_task_identifier [ ( expression { , expression } ) ] ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: my_task(arg1, arg2);
+// SUPPORT: YES
 task_enable: hierarchical_task_identifier ( "(" expression ( "," expression )* ")" )? ";"
 
 // SECTION: A.7 Specify section
@@ -1882,6 +2109,7 @@ task_enable: hierarchical_task_identifier ( "(" expression ( "," expression )* "
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: specify (a => b) = 1; endspecify
+// SUPPORT: NO
 specify_block: KW_SPECIFY specify_item* KW_ENDSPECIFY
 // BNF: specify_item ::=
 //     specparam_declaration
@@ -1892,6 +2120,7 @@ specify_block: KW_SPECIFY specify_item* KW_ENDSPECIFY
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (a => b) = 1;
+// SUPPORT: NO
 specify_item: specparam_declaration
     | pulsestyle_declaration
     | showcancelled_declaration
@@ -1903,6 +2132,7 @@ specify_item: specparam_declaration
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: pulsestyle_onevent out;
+// SUPPORT: NO
 pulsestyle_declaration: KW_PULSESTYLE_ONEVENT list_of_path_outputs ";"
     | KW_PULSESTYLE_ONDETECT list_of_path_outputs ";"
 // BNF: showcancelled_declaration ::=
@@ -1911,6 +2141,7 @@ pulsestyle_declaration: KW_PULSESTYLE_ONEVENT list_of_path_outputs ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: showcancelled out;
+// SUPPORT: NO
 showcancelled_declaration: KW_SHOWCANCELLED list_of_path_outputs ";"
     | KW_NOSHOWCANCELLED list_of_path_outputs ";"
 
@@ -1922,6 +2153,7 @@ showcancelled_declaration: KW_SHOWCANCELLED list_of_path_outputs ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (a => b) = 1;
+// SUPPORT: NO
 path_declaration: simple_path_declaration ";"
     | edge_sensitive_path_declaration ";"
     | state_dependent_path_declaration ";"
@@ -1931,6 +2163,7 @@ path_declaration: simple_path_declaration ";"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (a => b) = 1
+// SUPPORT: NO
 simple_path_declaration: parallel_path_description "=" path_delay_value
     | full_path_description "=" path_delay_value
 // BNF: parallel_path_description ::=
@@ -1938,24 +2171,28 @@ simple_path_declaration: parallel_path_description "=" path_delay_value
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (a => b)
+// SUPPORT: NO
 parallel_path_description: "(" specify_input_terminal_descriptor  polarity_operator? "=>" specify_output_terminal_descriptor ")"
 // BNF: full_path_description ::=
 //     ( list_of_path_inputs [ polarity_operator ] *> list_of_path_outputs )
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (a, b *> c, d)
+// SUPPORT: NO
 full_path_description: "(" list_of_path_inputs polarity_operator? "*>" list_of_path_outputs ")"
 // BNF: list_of_path_inputs ::=
 //     specify_input_terminal_descriptor { , specify_input_terminal_descriptor }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: a, b
+// SUPPORT: NO
 list_of_path_inputs: specify_input_terminal_descriptor ( "," specify_input_terminal_descriptor )*
 // BNF: list_of_path_outputs ::=
 //     specify_output_terminal_descriptor { , specify_output_terminal_descriptor }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: c, d
+// SUPPORT: NO
 list_of_path_outputs: specify_output_terminal_descriptor ( "," specify_output_terminal_descriptor )*
 
 
@@ -1965,22 +2202,26 @@ list_of_path_outputs: specify_output_terminal_descriptor ( "," specify_output_te
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: a[7:0]
+// SUPPORT: NO
 specify_input_terminal_descriptor: input_identifier ( "[" constant_range_expression "]" )?
 // BNF: specify_output_terminal_descriptor ::=
 //     output_identifier [ [ constant_range_expression ] ]
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: q[7:0]
+// SUPPORT: NO
 specify_output_terminal_descriptor: output_identifier ( "[" constant_range_expression "]" )?
 // BNF: input_identifier ::= input_port_identifier | inout_port_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: clk
+// SUPPORT: NO
 input_identifier: INPUT_PORT_IDENTIFIER | INOUT_PORT_IDENTIFIER
 // BNF: output_identifier ::= output_port_identifier | inout_port_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: q
+// SUPPORT: NO
 output_identifier: OUTPUT_PORT_IDENTIFIER | INOUT_PORT_IDENTIFIER
 
 // SECTION: A.7.4 Specify path delays
@@ -1990,6 +2231,7 @@ output_identifier: OUTPUT_PORT_IDENTIFIER | INOUT_PORT_IDENTIFIER
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (1, 2, 3)
+// SUPPORT: NO
 path_delay_value: list_of_path_delay_expressions
     | "(" list_of_path_delay_expressions ")"
 // BNF: list_of_path_delay_expressions ::=
@@ -2005,6 +2247,7 @@ path_delay_value: list_of_path_delay_expressions
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1, 2
+// SUPPORT: NO
 list_of_path_delay_expressions: t_path_delay_expression
     | trise_path_delay_expression "," tfall_path_delay_expression
     | trise_path_delay_expression "," tfall_path_delay_expression "," tz_path_delay_expression
@@ -2015,86 +2258,103 @@ list_of_path_delay_expressions: t_path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 t_path_delay_expression: path_delay_expression
 // BNF: trise_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 2
+// SUPPORT: NO
 trise_path_delay_expression: path_delay_expression
 // BNF: tfall_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 3
+// SUPPORT: NO
 tfall_path_delay_expression: path_delay_expression
 // BNF: tz_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 4
+// SUPPORT: NO
 tz_path_delay_expression: path_delay_expression
 // BNF: t01_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 t01_path_delay_expression: path_delay_expression
 // BNF: t10_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 2
+// SUPPORT: NO
 t10_path_delay_expression: path_delay_expression
 // BNF: t0z_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 3
+// SUPPORT: NO
 t0z_path_delay_expression: path_delay_expression
 // BNF: tz1_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 4
+// SUPPORT: NO
 tz1_path_delay_expression: path_delay_expression
 // BNF: t1z_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 5
+// SUPPORT: NO
 t1z_path_delay_expression: path_delay_expression
 // BNF: tz0_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 6
+// SUPPORT: NO
 tz0_path_delay_expression: path_delay_expression
 // BNF: t0x_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 7
+// SUPPORT: NO
 t0x_path_delay_expression: path_delay_expression
 // BNF: tx1_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 8
+// SUPPORT: NO
 tx1_path_delay_expression: path_delay_expression
 // BNF: t1x_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 9
+// SUPPORT: NO
 t1x_path_delay_expression: path_delay_expression
 // BNF: tx0_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 10
+// SUPPORT: NO
 tx0_path_delay_expression: path_delay_expression
 // BNF: txz_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 11
+// SUPPORT: NO
 txz_path_delay_expression: path_delay_expression
 // BNF: tzx_path_delay_expression ::= path_delay_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 12
+// SUPPORT: NO
 tzx_path_delay_expression: path_delay_expression
 // BNF: path_delay_expression ::= constant_mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1:2:3
+// SUPPORT: NO
 path_delay_expression: constant_mintypmax_expression
 // BNF: edge_sensitive_path_declaration ::=
 //     parallel_edge_sensitive_path_description = path_delay_value
@@ -2102,6 +2362,7 @@ path_delay_expression: constant_mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (posedge clk => (q +: d)) = 1
+// SUPPORT: NO
 edge_sensitive_path_declaration: parallel_edge_sensitive_path_description "=" path_delay_value
     | full_edge_sensitive_path_description "=" path_delay_value
 // BNF: parallel_edge_sensitive_path_description ::=
@@ -2110,6 +2371,7 @@ edge_sensitive_path_declaration: parallel_edge_sensitive_path_description "=" pa
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (posedge clk => (q +: d))
+// SUPPORT: NO
 parallel_edge_sensitive_path_description: "(" edge_identifier? specify_input_terminal_descriptor "=>" "(" specify_output_terminal_descriptor polarity_operator? ":" data_source_expression ")" ")"
 
 // BNF: full_edge_sensitive_path_description ::=
@@ -2118,15 +2380,18 @@ parallel_edge_sensitive_path_description: "(" edge_identifier? specify_input_ter
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (posedge clk *> (q, r +: d))
+// SUPPORT: NO
 full_edge_sensitive_path_description: "(" edge_identifier? list_of_path_inputs "*>" "(" list_of_path_outputs polarity_operator? ":" data_source_expression ")" ")"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: d
+// SUPPORT: NO
 data_source_expression: expression
 // BNF: edge_identifier ::= posedge | negedge
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge
+// SUPPORT: NO
 edge_identifier: KW_POSEDGE | KW_NEGEDGE
 // BNF: state_dependent_path_declaration ::=
 //     if ( module_path_expression ) simple_path_declaration
@@ -2135,6 +2400,7 @@ edge_identifier: KW_POSEDGE | KW_NEGEDGE
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: if (enable) (a => b) = 1
+// SUPPORT: NO
 state_dependent_path_declaration: KW_IF "(" module_path_expression ")" simple_path_declaration
     | KW_IF "(" module_path_expression ")" edge_sensitive_path_declaration
     | KW_IFNONE simple_path_declaration
@@ -2142,6 +2408,7 @@ state_dependent_path_declaration: KW_IF "(" module_path_expression ")" simple_pa
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: +
+// SUPPORT: NO
 polarity_operator: "+" | "-"
 
 // SECTION: A.7.5 System timing checks
@@ -2162,6 +2429,7 @@ polarity_operator: "+" | "-"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $setup(data, posedge clk, 1);
+// SUPPORT: NO
 system_timing_check: setup_timing_check
     | hold_timing_check
     | setuphold_timing_check
@@ -2180,12 +2448,14 @@ system_timing_check: setup_timing_check
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $setup(d, posedge clk, 1);
+// SUPPORT: NO
 setup_timing_check: "$setup" "(" data_event "," reference_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF: $hold_timing_check ::=
 //     $hold ( reference_event , data_event , timing_check_limit [ , [ notifier ] ] ) ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $hold(posedge clk, d, 1);
+// SUPPORT: NO
 hold_timing_check: "$hold" "(" reference_event "," data_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF:  $setuphold_timing_check ::=
 //     $setuphold ( reference_event , data_event , timing_check_limit , timing_check_limit
@@ -2194,18 +2464,21 @@ hold_timing_check: "$hold" "(" reference_event "," data_event "," timing_check_l
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $setuphold(posedge clk, d, 1, 2);
+// SUPPORT: NO
 setuphold_timing_check: "$setuphold" "(" reference_event "," data_event "," timing_check_limit "," timing_check_limit ( notifier? ( "," stamptime_condition? ( "," checktime_condition? ( "," delayed_reference? ( "," delayed_data? )? )? )? )? )? ")" ";"
 // BNF: $recovery_timing_check ::=
 //     $recovery ( reference_event , data_event , timing_check_limit [ , [ notifier ] ] ) ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $recovery(posedge rst, d, 1);
+// SUPPORT: NO
 recovery_timing_check: "$recovery" "(" reference_event "," data_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF: $removal_timing_check ::=
 //     $removal ( reference_event , data_event , timing_check_limit [ , [ notifier ] ] ) ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $removal(posedge rst, d, 1);
+// SUPPORT: NO
 removal_timing_check: "$removal" "(" reference_event "," data_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF: $recrem_timing_check ::=
 //     $recrem ( reference_event , data_event , timing_check_limit , timing_check_limit
@@ -2214,12 +2487,14 @@ removal_timing_check: "$removal" "(" reference_event "," data_event "," timing_c
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $recrem(posedge rst, d, 1, 2);
+// SUPPORT: NO
 recrem_timing_check: "$recrem" "(" reference_event "," data_event "," timing_check_limit "," timing_check_limit ( "," notifier? ( "," stamptime_condition? ( "," checktime_condition? ( "," delayed_reference? ( "," delayed_data? )? )? )? )? )? ")" ";"
 // BNF: $skew_timing_check ::=
 //     $skew ( reference_event , data_event , timing_check_limit [ , [ notifier ] ] ) ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $skew(posedge clk1, posedge clk2, 1);
+// SUPPORT: NO
 skew_timing_check: "$skew" "(" reference_event "," data_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF: $timeskew_timing_check ::=
 //     $timeskew ( reference_event , data_event , timing_check_limit
@@ -2227,6 +2502,7 @@ skew_timing_check: "$skew" "(" reference_event "," data_event "," timing_check_l
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $timeskew(posedge clk1, posedge clk2, 1);
+// SUPPORT: NO
 timeskew_timing_check: "$timeskew" "(" reference_event "," data_event "," timing_check_limit ( "," notifier? ( "," event_based_flag? ( "," remain_active_flag? )? )? )? ")" ";"
 // BNF: $fullskew_timing_check ::=
 //     $fullskew ( reference_event , data_event , timing_check_limit , timing_check_limit
@@ -2234,12 +2510,14 @@ timeskew_timing_check: "$timeskew" "(" reference_event "," data_event "," timing
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $fullskew(posedge clk1, posedge clk2, 1, 2);
+// SUPPORT: NO
 fullskew_timing_check: "$fullskew" "(" reference_event "," data_event "," timing_check_limit "," timing_check_limit ( "," notifier? ( "," event_based_flag? ( "," remain_active_flag? )? )? )? ")" ";"
 // BNF: $period_timing_check ::=
 //     $period ( controlled_reference_event , timing_check_limit [ , [ notifier ] ] ) ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $period(posedge clk, 10);
+// SUPPORT: NO
 period_timing_check: "$period" "(" controlled_reference_event "," timing_check_limit ( "," notifier? )? ")" ";"
 // BNF: $width_timing_check ::=
 //     $width ( controlled_reference_event , timing_check_limit
@@ -2247,6 +2525,7 @@ period_timing_check: "$period" "(" controlled_reference_event "," timing_check_l
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $width(posedge clk, 5);
+// SUPPORT: NO
 width_timing_check: "$width" "(" controlled_reference_event "," timing_check_limit ( "," threshold ( "," notifier )? )? ")" ";"
 // BNF: $nochange_timing_check ::=
 //     $nochange ( reference_event , data_event , start_edge_offset ,
@@ -2254,6 +2533,7 @@ width_timing_check: "$width" "(" controlled_reference_event "," timing_check_lim
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: $nochange(posedge clk, d, 1, 2);
+// SUPPORT: NO
 nochange_timing_check: "$nochange" "(" reference_event "," data_event "," start_edge_offset "," end_edge_offset ( "," notifier? )? ")" ";"
 
 // SECTION: A.7.5.2 System timing check command arguments
@@ -2261,16 +2541,19 @@ nochange_timing_check: "$nochange" "(" reference_event "," data_event "," start_
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 checktime_condition: mintypmax_expression
 // BNF: controlled_reference_event ::= controlled_timing_check_event
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge clk
+// SUPPORT: NO
 controlled_reference_event: controlled_timing_check_event
 // BNF: data_event ::= timing_check_event
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: d
+// SUPPORT: NO
 data_event: timing_check_event
 // BNF: delayed_data ::=
 //     terminal_identifier
@@ -2278,6 +2561,7 @@ data_event: timing_check_event
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: d_delayed
+// SUPPORT: NO
 delayed_data: TERMINAL_IDENTIFIER
     | TERMINAL_IDENTIFIER constant_mintypmax_expression?
 // BNF: delayed_reference ::=
@@ -2286,52 +2570,62 @@ delayed_data: TERMINAL_IDENTIFIER
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: clk_delayed
+// SUPPORT: NO
 delayed_reference: TERMINAL_IDENTIFIER
     | TERMINAL_IDENTIFIER constant_mintypmax_expression?
 // BNF: end_edge_offset ::= mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 5
+// SUPPORT: NO
 end_edge_offset: mintypmax_expression
 // BNF: event_based_flag ::= constant_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 event_based_flag: constant_expression
 // BNF: notifier ::= variable_identifier
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: notif
+// SUPPORT: NO
 notifier: VARIABLE_IDENTIFIER
 // BNF: reference_event ::= timing_check_event
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge clk
+// SUPPORT: NO
 reference_event: timing_check_event
 // BNF: remain_active_flag ::= constant_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 remain_active_flag: constant_expression
 // BNF: stamptime_condition ::= mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1
+// SUPPORT: NO
 stamptime_condition: mintypmax_expression
 // BNF: start_edge_offset ::= mintypmax_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 2
+// SUPPORT: NO
 start_edge_offset: mintypmax_expression
 // BNF: threshold ::= constant_expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 0.5
+// SUPPORT: NO
 threshold: constant_expression
 // BNF: timing_check_limit ::= expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 10
+// SUPPORT: NO
 timing_check_limit: expression
 
 // SECTION: A.7.5.3 System timing check event definitions
@@ -2340,12 +2634,14 @@ timing_check_limit: expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge clk &&& enable
+// SUPPORT: NO
 timing_check_event: timing_check_event_control? specify_terminal_descriptor ( "&&&" timing_check_condition )?
 // BNF: controlled_timing_check_event ::=
 //     timing_check_event_control specify_terminal_descriptor [ &&& timing_check_condition ]
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge clk
+// SUPPORT: NO
 controlled_timing_check_event: timing_check_event_control specify_terminal_descriptor ( "&&&" timing_check_condition )?
 // BNF: timing_check_event_control ::=
 //     posedge
@@ -2354,6 +2650,7 @@ controlled_timing_check_event: timing_check_event_control specify_terminal_descr
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: posedge
+// SUPPORT: NO
 timing_check_event_control: KW_POSEDGE
     | KW_NEGEDGE
     | edge_control_specifier
@@ -2363,12 +2660,14 @@ timing_check_event_control: KW_POSEDGE
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: clk
+// SUPPORT: NO
 specify_terminal_descriptor: specify_input_terminal_descriptor
     | specify_output_terminal_descriptor
 // BNF: edge_control_specifier ::= edge [ edge_descriptor { , edge_descriptor } ]
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: edge[01, 10]
+// SUPPORT: NO
 edge_control_specifier: KW_EDGE "[" edge_descriptor ( "," edge_descriptor )* "]"
 // BNF: edge_descriptor2 ::=
 //     01
@@ -2379,6 +2678,7 @@ edge_control_specifier: KW_EDGE "[" edge_descriptor ( "," edge_descriptor )* "]"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 01
+// SUPPORT: NO
 edge_descriptor: "01"
     | "10"
     | z_or_x zero_or_one
@@ -2386,11 +2686,13 @@ edge_descriptor: "01"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 0
+// SUPPORT: NO
 zero_or_one: "0" | "1"
 // BNF: z_or_x ::= x | X | z | Z
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: x
+// SUPPORT: NO
 z_or_x: "x" | "X" | "z" | "Z"
 // BNF: timing_check_condition ::=
 //     scalar_timing_check_condition
@@ -2398,6 +2700,7 @@ z_or_x: "x" | "X" | "z" | "Z"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: (enable)
+// SUPPORT: NO
 timing_check_condition: scalar_timing_check_condition
     | "(" scalar_timing_check_condition ")"
 // BNF: scalar_timing_check_condition ::=
@@ -2410,6 +2713,7 @@ timing_check_condition: scalar_timing_check_condition
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: enable == 1'b1
+// SUPPORT: NO
 scalar_timing_check_condition: expression
     | "~" expression
     | expression "==" scalar_constant
@@ -2421,6 +2725,7 @@ scalar_timing_check_condition: expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1'b1
+// SUPPORT: NO
 scalar_constant: "1'b0" | "1'b1" | "1'B0" | "1'B1" | "'b0" | "'b1" | "'B0" | "'B1" | "1" | "0"
 
 // SECTION: A.8 Expressions
@@ -2429,31 +2734,37 @@ scalar_constant: "1'b0" | "1'b1" | "1'B0" | "1'B1" | "'b0" | "'b1" | "'B0" | "'B
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: {a, b, c}
+// SUPPORT: YES
 concatenation: "{" expression ( "," expression )* "}"
 // BNF: constant_concatenation ::= { constant_expression { , constant_expression } }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: {4'b0, 4'b1}
+// SUPPORT: YES
 constant_concatenation: "{" constant_expression ( "," constant_expression )* "}"
 // BNF: constant_multiple_concatenation ::= { constant_expression constant_concatenation }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: {4{4'b0}}
+// SUPPORT: YES
 constant_multiple_concatenation: "{" constant_expression constant_concatenation "}"
 // BNF: module_path_concatenation ::= { module_path_expression { , module_path_expression } }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: {clk, reset}
+// SUPPORT: NO
 module_path_concatenation: "{" module_path_expression ( "," module_path_expression )* "}"
 // BNF: module_path_multiple_concatenation ::= { constant_expression module_path_concatenation }
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: {2{clk, reset}}
+// SUPPORT: NO
 module_path_multiple_concatenation: "{" constant_expression module_path_concatenation "}"
 // BNF: multiple_concatenation ::= { constant_expression concatenation }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: {4{data}}
+// SUPPORT: YES
 multiple_concatenation: "{" constant_expression concatenation "}"
 // SV: assignment_pattern ::= '{ expression { , expression } }
 //                          | '{ structure_pattern_key : expression { , structure_pattern_key : expression } }
@@ -2463,6 +2774,7 @@ multiple_concatenation: "{" constant_expression concatenation "}"
 // EXAMPLE: '{default: '0}
 // EXAMPLE: '{32'hFF, 32'h00}
 // EXAMPLE: '{a: 1, b: 2}
+// SUPPORT: YES
 assignment_pattern: "'{" KW_DEFAULT ":" expression "}"
     | "'{" expression ( "," expression )* "}"
     | "'{" IDENTIFIER ":" expression ( "," IDENTIFIER ":" expression )* ("," KW_DEFAULT ":" expression)? "}"
@@ -2473,21 +2785,26 @@ assignment_pattern: "'{" KW_DEFAULT ":" expression "}"
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: clog2(WIDTH)
+// SUPPORT: YES
 constant_function_call: FUNCTION_IDENTIFIER attribute_instance* "(" constant_expression ( "," constant_expression )* ")"
 // BNF: constant_system_function_call ::= system_function_identifier
 //     ( constant_expression { , constant_expression } )
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: $clog2(8)
+// SUPPORT: NO
 constant_system_function_call: SYSTEM_FUNCTION_IDENTIFIER "(" constant_expression ( "," constant_expression )* ")"
 // BNF: function_call ::= hierarchical_function_identifier{ attribute_instance }
 //     ( expression { , expression } )
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: add(a, b)
+// SUPPORT: YES
+// SUPPORT: YES
 function_call: hierarchical_function_identifier attribute_instance* "(" expression ( "," expression )* ")"
     | hierarchical_function_identifier attribute_instance* "(" named_function_arg ( "," named_function_arg )* ")"
     | hierarchical_function_identifier attribute_instance* "(" ")"
+// SUPPORT: YES
 named_function_arg: "." IDENTIFIER "(" expression ")"
 // BNF: system_function_call ::= system_function_identifier
 //     [ ( expression { , expression } ) ]
@@ -2502,11 +2819,13 @@ named_function_arg: "." IDENTIFIER "(" expression ")"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: addr + 1
+// SUPPORT: YES
 base_expression: expression
 // BNF: conditional_expression ::= expression1 ? { attribute_instance } expression2 : expression3
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: sel ? a : b
+// SUPPORT: YES
 // NOTE: The condition uses binary_expression (not expression) to enforce
 //       that all binary operators bind tighter than the ternary operator.
 //       Parenthesised ternaries in the condition go through primary → expression.
@@ -2515,6 +2834,7 @@ conditional_expression: binary_expression "?" attribute_instance* expression ":"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: WIDTH
+// SUPPORT: YES
 constant_base_expression: constant_expression
 // BNF: constant_expression ::=
 //     constant_primary
@@ -2525,6 +2845,7 @@ constant_base_expression: constant_expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: WIDTH - 1
 // EXAMPLE: WIDTH > 0 ? WIDTH : 1
+// SUPPORT: YES
 constant_expression: constant_primary
     | unary_operator attribute_instance* constant_primary
     | constant_expression binary_operator attribute_instance* constant_expression
@@ -2535,6 +2856,7 @@ constant_expression: constant_primary
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: 5:10:15
+// SUPPORT: NO
 constant_mintypmax_expression: constant_expression
     | constant_expression ":" constant_expression ":" constant_expression
 // BNF: constant_range_expression ::=
@@ -2545,6 +2867,7 @@ constant_mintypmax_expression: constant_expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 7:0
+// SUPPORT: YES
 constant_range_expression: constant_expression
     | msb_constant_expression ":" lsb_constant_expression
     | constant_base_expression "+:" width_constant_expression
@@ -2553,6 +2876,7 @@ constant_range_expression: constant_expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8
+// SUPPORT: YES
 dimension_constant_expression: constant_expression
 // BNF: expression ::=
 //     primary
@@ -2563,11 +2887,14 @@ dimension_constant_expression: constant_expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: ~a & b
 // EXAMPLE: sel ? a : b
+// SUPPORT: YES
+// SUPPORT: YES
 // NOTE: binary_expression separates non-ternary sub-expressions so that
 //       binary operators always bind tighter than the ternary ?:.
 //       This eliminates the ambiguity in "a == b ? c : d".
 expression: binary_expression
     | conditional_expression
+// SUPPORT: YES
 binary_expression: primary
     | unary_operator attribute_instance* primary
     | binary_expression binary_operator attribute_instance* binary_expression
@@ -2575,7 +2902,10 @@ binary_expression: primary
 
 // SV: open_range_list ::= open_value_range { , open_value_range }
 // SV: open_value_range ::= value_range
+// SUPPORT: YES
+// SUPPORT: YES
 open_range_list: open_value_range ("," open_value_range)*
+// SUPPORT: YES
 open_value_range: expression
     | "[" expression ":" expression "]"
 
@@ -2586,6 +2916,7 @@ open_value_range: expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 0
+// SUPPORT: YES
 lsb_constant_expression: constant_expression
 // BNF: mintypmax_expression ::=
 //     expression
@@ -2593,6 +2924,7 @@ lsb_constant_expression: constant_expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: PARTIAL
 // EXAMPLE: 1:2:3
+// SUPPORT: NO
 mintypmax_expression: expression
     | expression ":" expression ":" expression
 // BNF: module_path_conditional_expression ::= module_path_expression ? { attribute_instance }
@@ -2600,6 +2932,7 @@ mintypmax_expression: expression
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: en ? a : b
+// SUPPORT: NO
 module_path_conditional_expression: module_path_expression "?" attribute_instance* module_path_expression ":" module_path_expression
 // BNF: module_path_expression ::=
 //     module_path_primary
@@ -2610,6 +2943,7 @@ module_path_conditional_expression: module_path_expression "?" attribute_instanc
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: clk && en
+// SUPPORT: NO
 module_path_expression: module_path_primary
     | unary_module_path_operator attribute_instance* module_path_primary
     | module_path_expression binary_module_path_operator attribute_instance* module_path_expression
@@ -2620,12 +2954,14 @@ module_path_expression: module_path_primary
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 1:2:3
+// SUPPORT: NO
 module_path_mintypmax_expression: module_path_expression
     | module_path_expression ":" module_path_expression ":" module_path_expression
 // BNF: msb_constant_expression ::= constant_expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 7
+// SUPPORT: YES
 msb_constant_expression: constant_expression
 // BNF: range_expression ::=
 //     expression
@@ -2635,6 +2971,7 @@ msb_constant_expression: constant_expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 7:0
+// SUPPORT: YES
 range_expression: expression
     | msb_constant_expression ":" lsb_constant_expression
     | base_expression "+:" width_constant_expression
@@ -2643,6 +2980,7 @@ range_expression: expression
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8
+// SUPPORT: YES
 width_constant_expression: constant_expression
 
 
@@ -2661,6 +2999,7 @@ width_constant_expression: constant_expression
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8'hFF
 // EXAMPLE: {4'b0, 4'b1}
+// SUPPORT: YES
 constant_primary: number
     | scoped_identifier
     | PARAMETER_IDENTIFIER ( "[" constant_range_expression "]" )?
@@ -2685,6 +3024,7 @@ constant_primary: number
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: clk
+// SUPPORT: NO
 module_path_primary: number
     | IDENTIFIER
     | module_path_concatenation
@@ -2708,6 +3048,7 @@ module_path_primary: number
 // EXAMPLE: data[7:0]
 // EXAMPLE: {a, b, c}
 // EXAMPLE: add(x, y)
+// SUPPORT: YES
 primary: number
     | scoped_identifier
     | hierarchical_identifier ( "[" expression "]" )* ( "[" range_expression "]" )?
@@ -2729,6 +3070,7 @@ primary: number
 // SYNTHESIZABLE: YES
 // EXAMPLE: {cout, sum}
 // EXAMPLE: data[7:0]
+// SUPPORT: YES
 net_lvalue: hierarchical_net_identifier ( ( "[" constant_expression "]" )* "[" constant_range_expression "]")?
     | "{" net_lvalue ( "," net_lvalue )* "}"
 // BNF: variable_lvalue ::=
@@ -2738,6 +3080,7 @@ net_lvalue: hierarchical_net_identifier ( ( "[" constant_expression "]" )* "[" c
 // SYNTHESIZABLE: YES
 // EXAMPLE: data[7:0]
 // EXAMPLE: {a, b, c}
+// SUPPORT: YES
 variable_lvalue: hierarchical_variable_identifier ( ( "[" expression "]" )* "[" range_expression "]" )?
     | "{" variable_lvalue ( "," variable_lvalue )* "}"
 
@@ -2807,6 +3150,7 @@ OP_BINARY_MPATH_BITWISE_EQUIV2: "~^"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: ~
+// SUPPORT: YES
 unary_operator: OP_UNARY_ARITH_ADD
     | OP_UNARY_ARITH_SUB
     | OP_UNARY_LOGIC_NEGATE
@@ -2825,6 +3169,7 @@ unary_operator: OP_UNARY_ARITH_ADD
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: +
+// SUPPORT: YES
 binary_operator: OP_BINARY_ARITH_ADD
     | OP_BINARY_ARITH_SUB
     | OP_BINARY_ARITH_MUL
@@ -2857,6 +3202,7 @@ binary_operator: OP_BINARY_ARITH_ADD
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: !
+// SUPPORT: NO
 unary_module_path_operator: OP_UNARY_MPATH_LOGIC_NEGATE
     | OP_UNARY_MPATH_BITWISE_NEGATE
     | OP_UNARY_MPATH_BITWISE_AND
@@ -2872,6 +3218,7 @@ unary_module_path_operator: OP_UNARY_MPATH_LOGIC_NEGATE
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: &&
+// SUPPORT: NO
 binary_module_path_operator: OP_BINARY_MPATH_LOGIC_EQ
     | OP_BINARY_MPATH_LOGIC_NEQ
     | OP_BINARY_MPATH_LOGIC_AND
@@ -2927,6 +3274,7 @@ CHQ: "?"
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8'hFF
+// SUPPORT: YES
 number: decimal_number
     | octal_number
     | binary_number
@@ -2937,6 +3285,7 @@ number: decimal_number
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: '0
+// SUPPORT: YES
 sv_fill_literal: SV_FILL_LITERAL
 SV_FILL_LITERAL: "'" /[01xXzZ]/
 
@@ -2944,6 +3293,7 @@ SV_FILL_LITERAL: "'" /[01xXzZ]/
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: 5'(i)
+// SUPPORT: YES
 sv_width_cast: unsigned_number "'" "(" expression ")"
     | IDENTIFIER "'" "(" expression ")"
 
@@ -2953,6 +3303,7 @@ sv_width_cast: unsigned_number "'" "(" expression ")"
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: 3.14
+// SUPPORT: NO
 real_number: REAL_NUMBER
     | unsigned_number "." unsigned_number
     | unsigned_number ( "." unsigned_number )? exp sign? unsigned_number
@@ -2960,6 +3311,7 @@ real_number: REAL_NUMBER
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
 // EXAMPLE: e
+// SUPPORT: NO
 exp: "e" | "E"
 // BNF: decimal_number ::=
 //     unsigned_number
@@ -2970,6 +3322,7 @@ exp: "e" | "E"
 // SYNTHESIZABLE: YES
 // EXAMPLE: 42
 // EXAMPLE: 8'd42
+// SUPPORT: YES
 decimal_number: unsigned_number
     | size? decimal_base unsigned_number
     | size? decimal_base x_digit "_"*
@@ -2979,71 +3332,85 @@ decimal_number: unsigned_number
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 4'b1010
+// SUPPORT: YES
 binary_number: size? binary_base binary_value
 // BNF: octal_number ::= [ size ] octal_base octal_value
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8'o77
+// SUPPORT: YES
 octal_number: size? octal_base octal_value
 // BNF: hex_number ::= [ size ] hex_base hex_value
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8'hFF
+// SUPPORT: YES
 hex_number: size? hex_base hex_value
 // BNF: sign ::= + | -
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: -
+// SUPPORT: YES
 sign: "+" | "-"
 // BNF: size ::= non_zero_unsigned_number
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 8
+// SUPPORT: YES
 size: non_zero_unsigned_number
 // BNF: non_zero_unsigned_number ::= non_zero_decimal_digit { _ | decimal_digit}
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 123
+// SUPPORT: YES
 non_zero_unsigned_number: non_zero_decimal_digit ( "_" | decimal_digit)*
 // BNF: unsigned_number ::= decimal_digit { _ | decimal_digit }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 42
+// SUPPORT: YES
 unsigned_number: decimal_digit ( "_" | decimal_digit )*
 // BNF: binary_value ::= binary_digit { _ | binary_digit }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 1010
+// SUPPORT: YES
 binary_value: binary_digit ( "_" | binary_digit )*
 // BNF: octal_value ::= octal_digit { _ | octal_digit }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 77
+// SUPPORT: YES
 octal_value: octal_digit ( "_" | octal_digit )*
 // BNF: hex_value ::= hex_digit { _ | hex_digit }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: FF
+// SUPPORT: YES
 hex_value: hex_digit ( "_" | hex_digit )*
 // BNF: decimal_base ::= '[s|S]d | '[s|S]D
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 'd
+// SUPPORT: YES
 decimal_base: DECIMAL_BASE
 // BNF: binary_base ::= '[s|S]b | '[s|S]B
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 'b
+// SUPPORT: YES
 binary_base: BINARY_BASE
 // BNF: octal_base ::= '[s|S]o | '[s|S]O
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 'o
+// SUPPORT: YES
 octal_base: OCTAL_BASE
 // BNF: hex_base ::= '[s|S]h | '[s|S]H
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 'h
+// SUPPORT: YES
 hex_base: HEX_BASE
 DECIMAL_BASE: /'[sS]?[dD]/
 BINARY_BASE: /'[sS]?[bB]/
@@ -3053,20 +3420,24 @@ HEX_BASE: /'[sS]?[hH]/
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 1
+// SUPPORT: YES
 non_zero_decimal_digit: CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7 | CH8 | CH9
 // BNF: decimal_digit ::= 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 5
+// SUPPORT: YES
 decimal_digit: CH0 | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7 | CH8 | CH9
 // BNF: binary_digit ::= x_digit | z_digit | 0 | 1
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 1
+// SUPPORT: YES
 binary_digit: x_digit | z_digit | CH0 | CH1
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: 7
+// SUPPORT: YES
 octal_digit: x_digit | z_digit | CH0 | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7
 // BNF: hex_digit ::=
 //     x_digit | z_digit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
@@ -3074,16 +3445,19 @@ octal_digit: x_digit | z_digit | CH0 | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: F
+// SUPPORT: YES
 hex_digit: x_digit | z_digit | CH0 | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7 | CH8 | CH9 | CHLA | CHLB | CHLC | CHLD | CHLE | CHLF | CHA | CHB | CHC | CHD | CHE | CHF
 // BNF: x_digit ::= x | X
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: x
+// SUPPORT: YES
 x_digit: CHLX | CHX
 // BNF: z_digit ::= z | Z | ?
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: z
+// SUPPORT: YES
 z_digit: CHLZ | CHZ | CHQ
 
 
@@ -3092,6 +3466,7 @@ z_digit: CHLZ | CHZ | CHQ
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: NO
 // EXAMPLE: "Hello World"
+// SUPPORT: YES
 string: /"[^"]*"/
 
 // SECTION: A.9 General
@@ -3100,17 +3475,20 @@ string: /"[^"]*"/
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: (* full_case *)
+// SUPPORT: YES
 attribute_instance: "(*" attr_spec ( "," attr_spec)* "*)"
 // BNF: attr_spec ::=
 //     attr_name [ = constant_expression ]
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: full_case = 1
+// SUPPORT: YES
 attr_spec: attr_name ( "=" constant_expression )?
 // BNF: attr_name ::= identifier
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: full_case
+// SUPPORT: YES
 attr_name: IDENTIFIER
 
 // SECTION:A.9.2 Comments  (see Lark section below)
@@ -3129,28 +3507,44 @@ BLOCK_IDENTIFIER: IDENTIFIER
 CELL_IDENTIFIER: IDENTIFIER
 CONFIG_IDENTIFIER: IDENTIFIER
 // BNF:escaped_identifier ::= \ {Any_ASCII_character_except_white_space} white_space
+// SUPPORT: YES
+// SUPPORT: YES
+// SUPPORT: YES
 ESCAPED_IDENTIFIER: /\\([^\s]+)/ // Escaped identifiers start with the backslash character \ and end with white space (space, tab or newline). They provide a means of including any of the printable ASCII characters in an identifier.
 EVENT_IDENTIFIER: IDENTIFIER
 FUNCTION_IDENTIFIER: IDENTIFIER
 GATE_INSTANCE_IDENTIFIER: IDENTIFIER
 GENERATE_BLOCK_IDENTIFIER: IDENTIFIER
 GENVAR_IDENTIFIER: IDENTIFIER
+// SUPPORT: YES
 hierarchical_block_identifier: hierarchical_identifier
+// SUPPORT: YES
 hierarchical_event_identifier: hierarchical_identifier
+// SUPPORT: YES
 hierarchical_function_identifier: hierarchical_identifier
 // BNF: hierarchical_identifier ::= { identifier [ [ constant_expression ] ] . } identifier
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: top.u1.counter
+// SUPPORT: YES
 hierarchical_identifier: (IDENTIFIER ( "[" constant_expression "]" )? "." )* IDENTIFIER
 // SV: scoped_identifier ::= package_identifier :: identifier
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: ibex_pkg::RV32BNone
+// SUPPORT: YES
+// SUPPORT: YES
+// SUPPORT: YES
+// SUPPORT: YES
+// SUPPORT: YES
 scoped_identifier: IDENTIFIER "::" IDENTIFIER
+// SUPPORT: YES
 hierarchical_net_identifier: hierarchical_identifier
+// SUPPORT: YES
 hierarchical_parameter_identifier: hierarchical_identifier
+// SUPPORT: YES
 hierarchical_variable_identifier: hierarchical_identifier
+// SUPPORT: YES
 hierarchical_task_identifier: hierarchical_identifier
 IDENTIFIER: SIMPLE_IDENTIFIER
           | ESCAPED_IDENTIFIER
