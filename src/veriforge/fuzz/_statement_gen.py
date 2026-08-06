@@ -164,8 +164,7 @@ class StatementGenerator:
     def _for_loop(self, rng: random.Random, depth: int) -> ForLoop:
         self._loop_counter += 1
         var_name = f"lv{self._loop_counter}"
-        loop_signal = self._ctx.add_local(rng, width=32, signed=True)
-        # Override the name to match what we use in the for loop init
+        loop_signal = self._ctx.add_reg(rng, width=32, signed=True)
         loop_signal.name = var_name
 
         start = rng.choice((0, 1, 2))
@@ -190,7 +189,7 @@ class StatementGenerator:
 
     def _while_loop(self, rng: random.Random, depth: int) -> SeqBlock:
         self._loop_counter += 1
-        ctrl_signal = self._ctx.add_local(rng, width=8, signed=False)
+        ctrl_signal = self._ctx.add_reg(rng, width=8, signed=False)
         ctrl_signal.name = f"wc{self._loop_counter}"
         max_val = rng.choice((3, 5, 8))
 
@@ -205,10 +204,7 @@ class StatementGenerator:
                 BlockingAssign(ctrl_signal.as_identifier(), Literal(0)),
                 WhileLoop(
                     BinaryOp("<", ctrl_signal.as_identifier(), Literal(max_val, width=8)),
-                    SeqBlock(
-                        [body, incr],
-                        local_vars=[Variable(ctrl_signal.name, VariableKind.REG, width=ctrl_signal.as_range())],
-                    ),
+                    SeqBlock([body, incr]),
                 ),
             ],
         )

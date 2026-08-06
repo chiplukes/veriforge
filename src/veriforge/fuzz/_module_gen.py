@@ -16,6 +16,8 @@ from ..model.statements import (
     Statement,
 )
 from ..model.assignments import ContinuousAssign
+from ..model.ports import PortDirection
+from ..model.variables import Variable, VariableKind
 
 from ._expression_gen import ExpressionGenerator
 from ._signal_context import SignalContext
@@ -99,6 +101,33 @@ class ModuleGenerator:
             mod.always_blocks.append(ab)
         for ca in ctx.continuous_assigns:
             mod.continuous_assigns.append(ca)
+
+        # Post-process output port types: if an output is driven ONLY by
+        # continuous assigns (not always blocks), drop the "reg" data_type
+        # so the emitter produces "output" (wire) instead of "output reg".
+        assign_outputs: set[str] = {str(ca.lhs.name) for ca in ctx.continuous_assigns if hasattr(ca.lhs, "name")}
+        always_outputs: set[str] = set()
+        for ab in ctx.always_blocks:
+            for sig in _collect_assigned_signals(ab.body):
+                always_outputs.add(sig)
+
+        for port in mod.ports:
+            if port.direction == PortDirection.OUTPUT:
+                if port.name in assign_outputs and port.name not in always_outputs:
+                    port.data_type = None
+
+        # Similarly for internal nets/variables: signals written only by
+        # continuous assigns stay as nets (wire); signals written by always
+        # blocks need to be variables (reg).  Move them accordingly.
+        always_nets: set[str] = set()
+        for ab in ctx.always_blocks:
+            for sig in _collect_assigned_signals(ab.body):
+                always_nets.add(sig)
+
+        for net in list(mod.nets):
+            if net.name in always_nets:
+                mod.variables.append(Variable(net.name, VariableKind.REG, width=net.width, signed=net.signed))
+                mod.nets.remove(net)
 
         return mod
 
@@ -337,3 +366,33 @@ class ModuleGenerator:
 
         ctx.continuous_assigns = assigns
         ctx.always_blocks = always_blocks
+
+
+def _collect_assigned_signals(stmt: Statement) -> set[str]:
+    """Walk a statement tree and return signal names written via assignment."""
+    from ..model.expressions import Identifier
+
+    names: set[str] = set()
+    stack: list = [stmt]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (BlockingAssign, NonblockingAssign)):
+            if isinstance(node.lhs, Identifier):
+                names.add(node.lhs.name)
+        if hasattr(node, "statements"):
+            stack.extend(node.statements)
+        if hasattr(node, "then_body") and node.then_body is not None:
+            stack.append(node.then_body)
+        if hasattr(node, "else_body") and node.else_body is not None:
+            stack.append(node.else_body)
+        if hasattr(node, "body") and node.body is not None:
+            stack.append(node.body)
+        if hasattr(node, "items"):
+            for item in node.items:
+                if item.body is not None:
+                    stack.append(item.body)
+        if hasattr(node, "init"):
+            stack.append(node.init)
+        if hasattr(node, "update"):
+            stack.append(node.update)
+    return names

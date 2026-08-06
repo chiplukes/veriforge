@@ -46,7 +46,8 @@ class Signal:
         return Net(self.name, kind=NetKind.WIRE, width=self.as_range(), signed=self.signed)
 
     def as_variable(self) -> Variable:
-        return Variable(self.name, kind=VariableKind.REG, width=self.as_range(), signed=self.signed)
+        kind = VariableKind.REG if self.kind in ("reg", "local") else VariableKind.LOGIC
+        return Variable(self.name, kind=kind, width=self.as_range(), signed=self.signed)
 
 
 class SignalContext:

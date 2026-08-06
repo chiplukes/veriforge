@@ -372,7 +372,10 @@ class FuzzRunner:
                     capture_output=True,
                     text=True,
                     cwd=str(tmp),
+                    timeout=10,
                 )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("vvp timed out (likely unbounded simulation loop)") from None
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"vvp: {exc.stderr.strip()}") from exc
 
@@ -397,16 +400,16 @@ class FuzzRunner:
         port_names = ", ".join(p.name for p in mod.ports)
         lines.append(f"    {mod.name} dut ({port_names});")
 
-        lines.append("    integer _vi;")
         lines.append("    initial begin")
         for _vi, vec in enumerate(vectors):
             for name in input_names:
                 val_repr = self._value_to_verilog(vec.get(name, Value(0)))
                 lines.append(f"        {name} = {val_repr};")
             lines.append("        #10;")
-            # $display outputs in a fixed order
-            display_parts = ", ".join(f"{n}" for n in sorted(output_names))
-            fmt_parts = ", ".join("%b" for _ in output_names)
+            # $display outputs in a fixed order, space-delimited in format
+            # so parsing with split() works; signal args use commas.
+            display_parts = ", ".join(sorted(output_names))
+            fmt_parts = " ".join("%b" for _ in output_names)
             lines.append(f'        $display("{fmt_parts}", {display_parts});')
         lines.append("        $finish;")
         lines.append("    end")
