@@ -147,6 +147,7 @@ and wires them to typed endpoint objects.
 - [notes/simulation/cycache.md](simulation/cycache.md) — compiled Cython cache
 - [notes/simulation/wide_signal_coverage.md](simulation/wide_signal_coverage.md) — compiled-engine wide-signal operation coverage
 - [notes/simulation/debug.md](simulation/debug.md) — debugging strategies and Python snippets for simulator issues
+- [notes/fuzzer.md](fuzzer.md) — grammar-driven cross-engine + Icarus differential fuzzing tool
 
 ## Refactor tooling
 

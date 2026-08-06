@@ -235,3 +235,24 @@ does not grow during test runs. Set `VERILOG_TOOLS_COMPILE_CACHE` in your
 shell to opt out of this and use a persistent cache instead.
 
 See [notes/pcache.md](pcache.md) and [notes/simulation/cycache.md](simulation/cycache.md) for details.
+
+## Fuzzing
+
+The grammar-driven fuzzer (`src/veriforge/fuzz/`) is a standalone tool for
+finding simulation bugs by generating random Verilog modules and comparing
+results across engines:
+
+```bash
+uv run -m veriforge.fuzz --max 100 --no-icarus
+```
+
+It is **not** a pytest test — it runs as a long-lived background process
+and logs mismatches to `fuzz_output/`. When a mismatch is found, reduce it
+to a minimal repro, add a deterministic test in `tests/test_sim/`, fix the
+bug, and (if it cannot be fixed yet) document it in `notes/known_issues.md`.
+
+The CI differential tests (`tests/test_sim/test_differential*.py`) are fast,
+bounded regression tests that prevent known bug shapes from recurring.  The
+fuzzer discovers new patterns that then feed into those tests.
+
+See [notes/fuzzer.md](fuzzer.md) for full usage and architecture.

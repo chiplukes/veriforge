@@ -223,6 +223,11 @@ case is solid, per the "mixing both styles in one module" pattern in
 
 ## Test infrastructure
 
+Grammar-driven fuzzer ([notes/fuzzer.md](fuzzer.md)) — implemented.  Generates
+arbitrary Verilog modules from the parse grammar, cross-checks all engines +
+Icarus, logs mismatches to disk.  Runs as a standalone CLI tool
+(`uv run -m veriforge.fuzz`).
+
 Proposed markers from [notes/test_taxonomy.md](test_taxonomy.md) not yet applied:
 
 - `cross_engine` — tests that parametrize behavior across engines

@@ -17,6 +17,7 @@ A Python library for parsing, analyzing, generating, and simulating Verilog/Syst
 - **Auto-generate testbenches** from any module
 - **Convert** parsed Verilog to DSL code (Verilog → Python translation)
 - **Simulate** — event-driven 4-state simulator (x and z share one representation — see [known issues](notes/known_issues.md)) with three engines (reference, bytecode VM, compiled Cython)
+- **Fuzz** — grammar-driven cross-engine + Icarus differential fuzzing tool ([docs](notes/fuzzer.md))
 - **VCD output** — IEEE 1364-2001 waveform dumps, cross-simulator validation
 - **Inspect** semantic models through lookup helpers and JSON serialization
 - **Language Server** — `veriforge-lsp` provides editor diagnostics, symbols, navigation, hover, and custom hierarchy/trace commands (install [Verible](https://github.com/chipsalliance/verible) for fast between-save diagnostics; the server falls back to the built-in Lark parser when Verible is absent)
@@ -34,6 +35,7 @@ A Python library for parsing, analyzing, generating, and simulating Verilog/Syst
 - [Roadmap](notes/roadmap.md) — known future work items
 - [Grammar Support Status](docs/grammar_support.md) — parser-rule metadata table
 - [Grammar Dependencies (JSON)](docs/grammar_deps.json) — machine-readable rule dependency map
+- [Fuzzer](notes/fuzzer.md) — grammar-driven cross-engine + Icarus differential fuzzing
 
 ## Quick Start
 
@@ -183,6 +185,13 @@ uv run --extra test pytest tests/test_verilog_parser/test_all.py tests/test_mode
 
 # Full local suite
 uv run --extra test pytest tests/ --tb=no -q
+```
+
+For long-running grammar-driven fuzz testing across all engines (including
+Icarus cross-check), see the standalone fuzzer at [notes/fuzzer.md](notes/fuzzer.md):
+
+```bash
+uv run -m veriforge.fuzz --max 100 --no-icarus
 ```
 
 ## Examples
