@@ -1919,6 +1919,44 @@ Verified: `test_differential.py`/`test_differential_statements.py`
 regression (7894 passed, the same 16 pre-existing failures, `-n 8`,
 ~34 min, zero new failures).
 
+**Systematic audit (user-requested) and the highest-leverage fix yet in
+this sequence.** Rather than keep whack-a-moling individual node-shape
+instances, ran two parallel forked audits — expression-level dispatch
+in `_expr_emitter.py`, and statement/entry-point-level dispatch in
+`_process_compiler.py`/`_stmt_emitters.py` — to find every remaining
+gap in the "wide value in narrow context" family systematically. Found
+a single root cause: `_rhs_needs_wide_eval` (the gate deciding whether
+a narrow-destination statement even attempts wide-path evaluation) was
+a hand-maintained list of per-operator checks ending in a catch-all
+(`_expr_uses_wide_signal`) that only detects an individually wide
+*signal* reference, never a *computed* wide value, and several of the
+per-op branches (`&&`/`||` in particular) returned unconditionally
+based on their own operands' small self-determined width without ever
+reaching that catch-all — silently skipping wide evaluation even when
+a wide signal was referenced deeper in the tree. Fixed by replacing
+the entire function with `self._expr_max_internal_width(rhs) >
+_WORD_BITS`, the same recursive scanner already used for scratch-array
+sizing, proven to be a strict superset of every prior per-op check.
+New regression test `test_computed_wide_function_argument_from_narrow_
+signals`. 9-seed x 300-case sweep: 47 -> 26 total failures, every seed
+improved or unchanged (zero regressions) — by far the largest single
+improvement in this sequence, confirming the systematic-audit approach
+was worth the detour. Full detail (including two further, deliberately
+NOT-yet-fixed findings from the audits — a function-call port itself
+declared >64 bits is unconditionally broken regardless of context, and
+`_emit_binary` has no wide-detection of its own) in `notes/known_
+issues.md`'s Seventeenth wave entry. Verified: `test_differential.py`/
+`test_differential_statements.py` (unaffected), `test_function_task.py`
+(29 passed), `test_power_operator.py` (60 passed, 1 xfail), `tests/
+test_sim/compiled/test_wide_ops.py` (106 passed), and a full fast-suite
+regression (7895 passed, same 16 pre-existing failures, `-n 8`, ~34
+min, zero new failures).
+
+The general "wide value in narrow context" bug family still has 26
+residual failures across the 9-seed sweep — including the two named
+findings above — left for the user to prioritize as a future
+follow-up, rather than continuing indefinitely.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

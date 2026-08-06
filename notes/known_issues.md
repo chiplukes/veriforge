@@ -2961,6 +2961,96 @@ originally-documented 8-seed `VERIFORGE_DIFF_FUNC_COMPILED=1` rotation
 remain fully green; other seeds will continue to hit residual gaps
 until a more systematic fix lands.
 
+**Systematic audit and single highest-leverage root-cause fix:
+`_rhs_needs_wide_eval` was checking the wrong thing.** Rather than keep
+finding and fixing individual node-shape instances of the "wide value
+in narrow context" family one at a time, two parallel audits (one over
+`sim/compiled/_expr_emitter.py`'s expression-level dispatch, one over
+`sim/compiled/_process_compiler.py`/`_stmt_emitters.py`'s statement-
+level entry points) were run to find every remaining gap systematically.
+The audits confirmed a single, high-leverage root cause: `_rhs_needs_
+wide_eval` (`sim/compiled/_wide_emitter.py`) -- the gate deciding
+whether a narrow-destination statement even ATTEMPTS wide-path
+evaluation at all -- was a hand-maintained list of per-operator special
+cases (`_WIDE_CMP_PRIMS` for comparisons, shifts, `_WIDE_BINARY_PRIMS`,
+reductions, `&&`/`||`, ternary branches), each checking only its own
+immediate operands' self-determined width, ending in a catch-all of
+`_expr_uses_wide_signal` (does the tree reference an individually wide
+*signal* anywhere?). Two independent failure modes fell through this:
+(1) a computed wide value assembled from several individually-narrow
+signals or literals (a concatenation/replication whose own combined
+width exceeds 64 bits) is invisible to `_expr_uses_wide_signal`; (2)
+several of the per-op branches (`&&`/`||` in particular) `return`
+UNCONDITIONALLY based on their own two operands' small self-determined
+width, without ever falling through to the catch-all that might
+otherwise have found a wide signal reference nested deeper in the
+tree. Confirmed against Icarus (cross-engine) for `((~&fn_add8({a4,
+a6, a7}, $unsigned(a5))) && {3{(~^$unsigned(a5[47:37]))}})` with `a5`
+(65 bits) and `a6` (80 bits): the outer `&&`'s own two operands are
+both self-determined-tiny (a reduction, and a 3-bit replication of a
+reduction), so the old `&&` branch returned `False` immediately,
+skipping wide-path evaluation for the whole statement even though `a5`/
+`a6` are referenced deep inside `fn_add8`'s arguments -- the pure-
+narrow fallback computed the `~&` reduction over only their low 64
+bits, spuriously marking bits 1-2 of the result as ambiguous (`mask=
+0x7` instead of the correct `0x1`). Fixed by replacing the entire
+function body with `self._expr_max_internal_width(rhs) > _WORD_BITS`
+-- the same recursive width-scanner already used correctly for
+scratch-array sizing and the `TernaryOp`-condition fix, proven to be a
+strict superset of every one of the old per-op checks (each one only
+ever inspected `_expr_width` of an operand, which `_expr_max_internal_
+width` already folds into its own `max(...)` at every recursion level)
+plus dedicated `Concatenation`/`Replication`/`FunctionCall`-argument
+cases the old checks lacked entirely. Being more inclusive than
+strictly necessary is safe -- `_emit_wide_lhs_write_new`/`_emit_wide_
+expr_to_scratch` already return `None` (falling through to the narrow
+path, unchanged) for any node shape the wide emitter doesn't yet
+support, so this can only additionally CORRECT cases that used to be
+silently wrong, never regress a case that used to work.
+
+Verified: new dedicated regression test
+`test_computed_wide_function_argument_from_narrow_signals` in
+`tests/test_sim/test_differential_functions.py` (confirmed to fail on
+the pre-fix baseline via `git stash`, passes after). A 9-seed x
+300-case sweep shows a MUCH larger improvement than any prior single
+fix in this sequence: 47 total failures (the prior wave's baseline) ->
+26, with every individual seed either improving or staying the same
+(zero regressions; several seeds dropped from 4-8 failures down to
+1-4). `test_differential.py`/`test_differential_statements.py`
+(unaffected, fully green), `test_function_task.py` (29 passed),
+`test_power_operator.py` (60 passed, 1 xfail), `tests/test_sim/
+compiled/test_wide_ops.py` (106 passed), and a full fast-suite
+regression (7895 passed, the same 16 pre-existing failures, `-n 8`,
+~34 min, zero new failures) all pass.
+
+The two audits also surfaced two further, NOT-yet-fixed findings,
+deliberately left for a future follow-up (this fix's scope was
+specifically the `_rhs_needs_wide_eval` root cause):
+- **A function-call PORT declared wider than 64 bits is unconditionally
+  broken, independent of the calling context's own width.**
+  `_emit_user_func_call_expr` (`sim/compiled/_expr_emitter.py`) always
+  computes each argument via the pure narrow emitter at the PORT's own
+  declared width (`self._emit_expr(a, w)` with no width check on `w`
+  itself) -- if the port itself is >64 bits, this silently truncates
+  regardless of whether `_rhs_needs_wide_eval` correctly routes the
+  overall statement through the wide path. Confirmed against Icarus
+  (cross-engine, both a 64-bit and a 128-bit destination) for a
+  function with a 71-bit port: `compiled` gives `val=0x0, mask=<all
+  ones>` where reference/vm/vm-fast agree on the correct value. None of
+  Phase 6's `FIXED_FUNCTIONS` have a port wider than 64 bits, so this
+  shape was never exercised by the existing fuzzer at all -- a
+  genuinely new, previously-undiscovered gap, unrelated to and not
+  fixed by anything in this wave.
+- `_emit_binary`'s comparison/logical/bitwise dispatch
+  (`_expr_emitter.py`) has no wide-detection check of its own at all
+  (unlike `_emit_unary`'s reduction branch and `_emit_ternary_value_
+  mask_exprs`, both fixed in earlier waves) -- relies entirely on
+  callers (like the now-fixed `_rhs_needs_wide_eval`) routing the whole
+  statement through the wide path first. A node shape that reaches
+  `_emit_binary` via some OTHER path that doesn't go through `_rhs_
+  needs_wide_eval` first (not yet identified) could still hit the same
+  silent-truncation failure mode.
+
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8
 batches) with `VERIFORGE_DIFF_COMPILED=1`/`VERIFORGE_DIFF_STMT_COMPILED=1`

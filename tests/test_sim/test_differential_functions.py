@@ -259,3 +259,80 @@ endmodule
         if ref_val is None:
             ref_val = got
         assert got == ref_val, f"engine={engine} got={got!r} expected={ref_val!r}"
+
+
+@pytest.mark.cross_engine
+def test_computed_wide_function_argument_from_narrow_signals() -> None:
+    """Regression test for a confirmed compiled-engine bug:
+    `_rhs_needs_wide_eval` (`sim/compiled/_wide_emitter.py`) -- the gate
+    deciding whether a narrow-destination statement even ATTEMPTS wide-
+    path evaluation -- never detected a function-call argument that is
+    itself a COMPUTED wide value (a concatenation of individually narrow
+    pieces whose combined width exceeds 64 bits), only an individually
+    wide SIGNAL reference anywhere in the tree (`_expr_uses_wide_signal`,
+    the old catch-all).
+
+    The outer `&&` is what actually trips the old bug: `_rhs_needs_wide_
+    eval`'s old `&&`/`||` branch UNCONDITIONALLY returned `max(_expr_
+    width(left), _expr_width(right)) > _WORD_BITS` -- both operands here
+    are self-determined-1-bit-ish (a reduction, and a 3-bit replication
+    of a reduction), so that comparison is always small and the branch
+    returns `False` immediately, without ever falling through to the
+    `_expr_uses_wide_signal` catch-all that would otherwise have found
+    `a5`/`a6` nested deep inside (as `fn_add8`'s `{a4, a6, a7}`/
+    `$unsigned(a5)` arguments, and `$unsigned(a5[47:37])`). Wide-path
+    evaluation never triggers, so the pure-narrow fallback computes
+    `fn_add8`'s wide arguments and the reduction over them using only
+    their low 64 bits, silently losing precision needed for the `~&`
+    reduction's own x-propagation. `_expr_max_internal_width` recurses
+    through the WHOLE tree regardless of the top-level operator, so it
+    isn't fooled by an outer op whose own self-determined width happens
+    to be small. Confirmed against Icarus (cross-engine): reference/vm/
+    vm-fast all agree (mask=0x1); only compiled disagreed before the fix
+    (mask=0x7, spuriously marking bits 1-2 as ambiguous).
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0
+);
+    function [7:0] fn_add8(input [7:0] a, input [7:0] b);
+        begin
+            fn_add8 = a + b;
+        end
+    endfunction
+    assign y0 = ((~&fn_add8({a4, a6, a7}, $unsigned(a5))) && {3{(~^$unsigned(a5[47:37]))}});
+endmodule
+"""
+    values = {
+        "a0": td.Value(0, width=1),
+        "a1": td.Value(132, width=8),
+        "a2": td.Value(11873, width=16),
+        "a3": td.Value(9109546452988579173, width=63),
+        "a4": td.Value(4948743542175063856, width=64),
+        "a5": td.Value(0, width=65, mask=0x1FFFFFFFFFFFFFFFF),
+        "a6": td.Value(124888234732848633443292, width=80),
+        "a7": td.Value(0, width=1),
+    }
+    ref_val = None
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        for name, value in values.items():
+            sim.drive(name, value)
+        sim.settle()
+        got = sim.read("y0")
+        if ref_val is None:
+            ref_val = got
+        assert got == ref_val, f"engine={engine} got={got!r} expected={ref_val!r}"

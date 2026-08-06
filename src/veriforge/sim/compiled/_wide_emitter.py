@@ -5113,34 +5113,36 @@ class _WideEmitterMixin:
         operands are wide but the result is 1 bit.  Also covers shifts where
         the source operand is wide — the scalar path misses x-bit propagation
         across word boundaries.
+
+        Delegates entirely to `_expr_max_internal_width` (already used for
+        scratch-array sizing), which recurses into every node type -- this
+        used to instead be a hand-maintained list of per-op special cases
+        (comparisons via `_WIDE_CMP_PRIMS`, shifts, `_WIDE_BINARY_PRIMS`,
+        reductions, `&&`/`||`, ternary branches) ending in a catch-all of
+        `_expr_uses_wide_signal`, which only detects an individually wide
+        *signal* reference anywhere in the tree -- never a *computed* wide
+        value assembled from several individually-narrow signals or
+        literals (a concatenation/replication whose own combined width
+        exceeds 64 bits, or such a concatenation passed as a function-call
+        argument). `_expr_max_internal_width` is a strict superset of every
+        one of those per-op checks (each one only ever inspects `_expr_
+        width` of an operand, which `_expr_max_internal_width` already
+        folds into its own `max(...)` at every level of the recursion) and
+        additionally has dedicated `Concatenation`/`Replication`/
+        `FunctionCall`-argument cases the old per-op checks and `_expr_
+        uses_wide_signal` both lacked. Confirmed against Icarus for a
+        function-call argument built from several 8-bit signals
+        concatenated together into a combined width over 64 bits (no
+        individual signal itself wide): the old catch-all returned False,
+        skipping wide-path evaluation entirely and silently truncating the
+        argument. Being more inclusive than strictly necessary is safe --
+        `_emit_wide_lhs_write_new`/`_emit_wide_expr_to_scratch` already
+        return `None` (falling through to the narrow path, exactly as
+        before) for any node shape the wide emitter doesn't yet support,
+        so a wider net here can only ever additionally CORRECT a case that
+        used to be silently wrong, never regress a case that used to work.
         """
-        if isinstance(rhs, BinaryOp):
-            if rhs.op in self._WIDE_CMP_PRIMS:
-                lw = self._expr_width(rhs.left)
-                rw = self._expr_width(rhs.right)
-                return max(lw, rw) > _WORD_BITS
-            if rhs.op in {"<<", ">>", ">>>"}:
-                if self._expr_width(rhs.left) > _WORD_BITS:
-                    return True
-                # Reduction of wide operand: (&wide) << N, (|wide) >> N, etc.
-                if isinstance(rhs.left, UnaryOp) and rhs.left.op in _REDUCTION_OPS:
-                    return self._expr_width(rhs.left.operand) > _WORD_BITS
-            if rhs.op in self._WIDE_BINARY_PRIMS:
-                lw = self._expr_width(rhs.left)
-                rw = self._expr_width(rhs.right)
-                if max(lw, rw) > _WORD_BITS:
-                    return True
-        if isinstance(rhs, UnaryOp) and rhs.op in {"|", "&", "^", "~|", "~&", "~^", "^~", "!"}:
-            return self._expr_width(rhs.operand) > _WORD_BITS
-        if isinstance(rhs, BinaryOp) and rhs.op in {"&&", "||"}:
-            return max(self._expr_width(rhs.left), self._expr_width(rhs.right)) > _WORD_BITS
-        if isinstance(rhs, TernaryOp):
-            return max(self._expr_width(rhs.true_expr), self._expr_width(rhs.false_expr)) > _WORD_BITS
-        # Catch-all: any expression that reads a wide signal needs the wide path
-        # to avoid the scalar fallback silently setting mask=0.
-        if self._expr_uses_wide_signal(rhs):
-            return True
-        return False
+        return self._expr_max_internal_width(rhs) > _WORD_BITS
 
     def _wide_sign_extend_to_dst_lines(
         self, slot: int, dst_width: int, n_words: int, src_width_expr: str, indent: int
