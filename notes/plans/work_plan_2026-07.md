@@ -1957,6 +1957,34 @@ residual failures across the 9-seed sweep — including the two named
 findings above — left for the user to prioritize as a future
 follow-up, rather than continuing indefinitely.
 
+**Follow-up: the function-call wide-port/return finding turned out to
+be an architectural limitation, not a routing gap — resolved by
+failing loudly instead of a full fix.** Investigating it further found
+the generated `_user_func_XXX` call ABI (`sim/compiled/_gen_sections.
+py`) is hardcoded to a single native `long long` per argument/return at
+three points (signature, port-binding write, return statement) — no
+multi-word representation exists anywhere in it, unlike every other fix
+this wave (all routing gaps around already-correct wide storage that
+just wasn't being reached). Properly supporting a wide port/return
+would mean redesigning the call ABI for multi-word passing — a
+substantial, multi-file feature addition; confirmed with the user
+before proceeding, who chose to fail loudly instead. Fixed by detecting
+any function port/return >64 bits at codegen time and raising
+`NotImplementedError` (mirroring the established phrasing used
+elsewhere for other unsupported-width RHS shapes) instead of silently
+corrupting the value. New regression test
+`test_compiled_function_wide_port_raises`. Verified: the other three
+engines are unaffected (they don't share this call ABI, so the
+wide-port case still computes correctly on reference/vm/vm-fast);
+`test_differential_functions.py` (18 passed), `test_function_task.py`
+(29 passed), `test_power_operator.py` (60 passed, 1 xfail), and a full
+fast-suite regression (7897 passed, same 16 pre-existing failures,
+`-n 8`, ~37 min, zero new failures).
+
+Remaining open item from the audits: `_emit_binary`'s comparison/
+logical/bitwise dispatch still has no wide-detection of its own —
+left for the user to prioritize as a future follow-up.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

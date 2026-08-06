@@ -3023,25 +3023,55 @@ compiled/test_wide_ops.py` (106 passed), and a full fast-suite
 regression (7895 passed, the same 16 pre-existing failures, `-n 8`,
 ~34 min, zero new failures) all pass.
 
-The two audits also surfaced two further, NOT-yet-fixed findings,
-deliberately left for a future follow-up (this fix's scope was
-specifically the `_rhs_needs_wide_eval` root cause):
-- **A function-call PORT declared wider than 64 bits is unconditionally
-  broken, independent of the calling context's own width.**
-  `_emit_user_func_call_expr` (`sim/compiled/_expr_emitter.py`) always
-  computes each argument via the pure narrow emitter at the PORT's own
-  declared width (`self._emit_expr(a, w)` with no width check on `w`
-  itself) -- if the port itself is >64 bits, this silently truncates
-  regardless of whether `_rhs_needs_wide_eval` correctly routes the
-  overall statement through the wide path. Confirmed against Icarus
-  (cross-engine, both a 64-bit and a 128-bit destination) for a
-  function with a 71-bit port: `compiled` gives `val=0x0, mask=<all
-  ones>` where reference/vm/vm-fast agree on the correct value. None of
-  Phase 6's `FIXED_FUNCTIONS` have a port wider than 64 bits, so this
-  shape was never exercised by the existing fuzzer at all -- a
-  genuinely new, previously-undiscovered gap, unrelated to and not
-  fixed by anything in this wave.
-- `_emit_binary`'s comparison/logical/bitwise dispatch
+The two audits also surfaced two further findings, deliberately left
+out of the `_rhs_needs_wide_eval` fix's own scope:
+
+**Follow-up: the function-call wide-port/return finding is now
+converted from a silent wrong answer into a loud compile-time error**
+(`sim/compiled/_gen_sections.py`'s `_gen_user_functions`). Investigating
+it further than the initial "unconditionally broken" characterization
+above found it is NOT a routing gap the way every other "wide value in
+narrow context" bug this wave was -- it is a genuine architectural
+limitation: the generated `_user_func_XXX` call ABI is hardcoded to a
+single native `long long` per argument/return at THREE separate points
+(the C function signature itself, the port-binding write inside the
+function body -- `c.val[sid] = arg_i_v & wmask(w)`, a single scalar
+write regardless of the port's real width -- and the return statement,
+`return c.val[ret_sid] & wmask(ret_w)`). There is no multi-word
+representation anywhere in this boundary for it to reach even if every
+CALLER correctly computed a wide argument -- unlike the reduction/
+`TernaryOp`-condition/`_rhs_needs_wide_eval` fixes earlier this wave,
+which were all cases where correct wide storage/computation already
+existed elsewhere and just wasn't being reached. Properly supporting a
+wide port or return would mean redesigning the call ABI for multi-word
+argument/return passing (pointer/array-based, touching the signature,
+every call site across the narrow value emitter, narrow mask emitter,
+and wide emitter, and the return-value handling) -- a substantial,
+multi-file feature addition, deliberately out of scope; confirmed with
+the user before proceeding. Fixed instead by detecting any function
+port or return exceeding 64 bits at codegen time and raising
+`NotImplementedError` with a clear message (mirroring the established
+"Compiled engine: ... not yet supported ... Use engine='vm' or
+engine='reference' ..." phrasing used elsewhere in this file), rather
+than silently corrupting the port/return value as before. Confirmed
+against Icarus (cross-engine, both a 64-bit and a 128-bit destination)
+for a function with a 71-bit port: `compiled` previously gave `val=0x0,
+mask=<all ones>` where reference/vm/vm-fast agreed on the correct
+value; now raises immediately at `Simulator(..., engine="compiled")`
+construction instead. New regression test
+`test_compiled_function_wide_port_raises` in `tests/test_sim/
+test_differential_functions.py` (covers both the wide-port and
+wide-return cases). None of Phase 6's `FIXED_FUNCTIONS` have a port
+wider than 64 bits, so this shape was never exercised by the existing
+fuzzer -- a genuinely new, previously-undiscovered gap. Verified: the
+other three engines (reference/vm/vm-fast) are unaffected (still
+compute the wide-port case correctly, since they don't share this call
+ABI); `test_differential_functions.py` (18 passed),
+`test_function_task.py` (29 passed), `test_power_operator.py` (60
+passed, 1 xfail), and a full fast-suite regression (7897 passed, the
+same 16 pre-existing failures, `-n 8`, ~37 min, zero new failures).
+
+**Still open, not addressed this wave**: `_emit_binary`'s comparison/logical/bitwise dispatch
   (`_expr_emitter.py`) has no wide-detection check of its own at all
   (unlike `_emit_unary`'s reduction branch and `_emit_ternary_value_
   mask_exprs`, both fixed in earlier waves) -- relies entirely on

@@ -336,3 +336,45 @@ endmodule
         if ref_val is None:
             ref_val = got
         assert got == ref_val, f"engine={engine} got={got!r} expected={ref_val!r}"
+
+
+def test_compiled_function_wide_port_raises() -> None:
+    """The compiled engine's `_user_func_XXX` call ABI is hardcoded to a
+    single native `long long` per argument/return, at three separate
+    points (the generated C signature, the port-binding write inside the
+    function body, and the return statement) -- there is no multi-word
+    representation anywhere in it, unlike every other "wide value in
+    narrow context" bug fixed this wave (those were routing gaps around
+    already-correct wide storage/computation; here there is no wide
+    storage for a function argument/return to reach at all). A function
+    port or return wider than 64 bits is therefore unconditionally
+    unrepresentable, regardless of the calling context's own width.
+    Rather than silently corrupt the value (confirmed against Icarus:
+    `compiled` previously gave a wrong result where reference/vm/vm-fast
+    agreed), the compiled engine now fails loudly at codegen time.
+    """
+    source_wide_port = """
+module t(a);
+    input [70:0] a;
+    function [7:0] fn_narrow(input [70:0] p);
+        begin
+            fn_narrow = p[7:0];
+        end
+    endfunction
+    wire [7:0] y = fn_narrow(a);
+endmodule
+"""
+    source_wide_ret = """
+module t(a);
+    input [7:0] a;
+    function [70:0] fn_wide_ret(input [7:0] p);
+        begin
+            fn_wide_ret = p;
+        end
+    endfunction
+    wire [70:0] y = fn_wide_ret(a);
+endmodule
+"""
+    for source in (source_wide_port, source_wide_ret):
+        with pytest.raises(NotImplementedError, match="wider than 64 bits"):
+            td._sim_for(source, "compiled")
