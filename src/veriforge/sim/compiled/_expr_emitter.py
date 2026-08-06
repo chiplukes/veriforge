@@ -771,6 +771,7 @@ class _ExprEmitterMixin:
             wide_cond = self._emit_wide_truthy_to_value(expr.condition)
             if wide_cond is not None:
                 cond, cond_mask = wide_cond
+
             # A `+`/`-`/`*`/`/`/`%` branch's VALUE was just computed
             # directly AT the outer `width` above (`op_width == width`
             # always for these ops in `_emit_binary`, per this function's
@@ -795,14 +796,35 @@ class _ExprEmitterMixin:
             # branch's mask, queried at its own 63-bit self-width instead
             # of the ternary's 64-bit outer width, left bit 63 spuriously
             # looking definite (0) instead of x.
-            true_mask_w = (
-                width if isinstance(expr.true_expr, BinaryOp) and expr.true_expr.op in ("+", "-", "*", "/", "%") else tw
-            )
-            false_mask_w = (
-                width
-                if isinstance(expr.false_expr, BinaryOp) and expr.false_expr.op in ("+", "-", "*", "/", "%")
-                else fw
-            )
+            # UnaryOp `-` (always context-determined, per `_emit_unary`'s
+            # own docstring: unlike `~`, it NEVER takes the fixed-self-
+            # determined-operand shortcut) shares the identical "computed
+            # directly at the outer width" property as the BinaryOp
+            # arithmetic ops just above -- this check originally only
+            # covered BinaryOp, missing this UnaryOp sibling entirely.
+            # `~` shares it too, but ONLY when its OWN operand is NOT
+            # `_is_fixed_self_determined` (a comparison/reduction/etc --
+            # THAT specific shortcut computes `~` at the operand's fixed
+            # width first, extending the RESULT afterward, so `tw`/`fw`
+            # remains correct for it, matching `_emit_unary`'s own
+            # branching logic exactly). Confirmed against Icarus for
+            # `(~((~(!a1)) ? (-(a3 == a7)) : (~&a0)))` with `a3` (63
+            # bits) entirely x and the ternary's own combined width 1
+            # (both branches self-determined-1-bit): `-(a3 == a7)`'s
+            # mask, queried at the branch's own 1-bit self-width instead
+            # of the OUTER `~`'s much wider context, left every bit but
+            # bit 0 spuriously looking definite instead of x.
+            def _mask_needs_outer_width(branch: Expression) -> bool:
+                if isinstance(branch, BinaryOp) and branch.op in ("+", "-", "*", "/", "%"):
+                    return True
+                if isinstance(branch, UnaryOp) and branch.op == "-":
+                    return True
+                return bool(
+                    isinstance(branch, UnaryOp) and branch.op == "~" and not _is_fixed_self_determined(branch.operand)
+                )
+
+            true_mask_w = width if _mask_needs_outer_width(expr.true_expr) else tw
+            false_mask_w = width if _mask_needs_outer_width(expr.false_expr) else fw
             true_mask = self._emit_mask_expr(expr.true_expr, true_mask_w)
             false_mask = self._emit_mask_expr(expr.false_expr, false_mask_w)
             # `_emit_mask_expr` has no `signed_override` parameter (unlike
@@ -1355,6 +1377,23 @@ class _ExprEmitterMixin:
         # context width before the operation, discarding upper bits.
         if expr.op in _NATURAL_WIDTH_OPS:
             op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+            # When the operands' own combined width exceeds a native
+            # register, computing them directly via `_emit_expr` below
+            # (correct only up to 64 bits) silently loses precision --
+            # route through the wide emitter instead. `dst_width` is 1
+            # for a self-determined-1-bit result (comparisons/`&&`/`||`),
+            # or this call's own requested `width` for a bitwise op
+            # (whose result is genuinely `op_width` bits, but the caller
+            # never wants more than `width` of it -- see
+            # `_emit_wide_binary_to_value`'s own docstring for why
+            # computing directly at `width` is exactly equivalent for a
+            # per-bit op). See that docstring for the concrete Icarus-
+            # confirmed repros this avoids.
+            if op_width > _WORD_BITS:
+                dst_width = 1 if expr.op in _COMPARISON_OPS else width
+                wide = self._emit_wide_binary_to_value(expr, dst_width)
+                if wide is not None:
+                    return wide[0]
         else:
             op_width = width
 
@@ -1999,7 +2038,41 @@ class _ExprEmitterMixin:
             eval_width = max(ow, width) if width else ow
             operand = self._emit_expr(expr.operand, eval_width, signed_override)
             eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
-            if eff_signed and eval_width > ow:
+            # `_emit_expr(expr.operand, eval_width, ...)` just above ALREADY
+            # computes the operand's value CORRECTLY at the full `eval_
+            # width` -- every node type it dispatches to either extends
+            # internally when asked for a width wider than its own natural
+            # width (an Identifier: see its own `_sign_ext` a few hundred
+            # lines up in this file) or, for a COMPOUND expression (another
+            # UnaryOp/BinaryOp/TernaryOp/etc.), computes its OWN correctly-
+            # sized result directly at `eval_width` -- the "compute
+            # directly at the requested width" convention this whole file
+            # relies on. Re-applying `_sign_ext(operand, ow)` here AGAIN,
+            # using the operand's own bare SELF-width `ow` as the "from"
+            # width, is therefore ALWAYS redundant for an Identifier (a
+            # true no-op: re-checking bit `ow-1` of an already-correctly-
+            # extended value and re-OR-ing in the same already-filled upper
+            # bits changes nothing) -- but for a COMPOUND operand, `operand`
+            # is a genuinely COMPUTED result string, not "a raw `ow`-bit
+            # value with upper bits still unfilled" -- reinterpreting
+            # whatever its OWN bit 0 happens to be as a sign bit to
+            # propagate corrupts an already-correct wide value. Confirmed
+            # against Icarus for `(-(-a0))` with `a0` a signed 1-bit `-1`
+            # (raw bit `1`) assigned into a 64-bit destination: the INNER
+            # `-a0`, computed directly at `eval_width=64` via the recursive
+            # `_emit_expr` call, correctly gives `1` (negating a0's own
+            # sign-extended `-1`) -- but this redundant step then
+            # re-sign-extended that already-clean `1` using `ow=1` (a0's
+            # bare self-width, since `_expr_width` for a further UnaryOp
+            # NON-reduction op returns its OPERAND's own self-width),
+            # spuriously treating bit 0 of the ALREADY-CORRECT `1` as an
+            # unfilled sign bit and corrupting it to `-1` -- so the OUTER
+            # `-` then negated an already-wrong `-1` back to `1` instead of
+            # correctly negating the true `1` to `-1`. Only apply this
+            # extension for a plain Identifier operand (confirmed-harmless
+            # no-op there, kept only for defensiveness/no behavior change
+            # in that specific case).
+            if eff_signed and eval_width > ow and type(expr.operand) is Identifier:
                 operand = f"_sign_ext({operand}, {ow})"
 
             if expr.op == "-":
@@ -2008,9 +2081,11 @@ class _ExprEmitterMixin:
                 # Same "force 0 wherever ambiguous" fix as the fixed-width
                 # branch above, extended (via the same sign/zero rule
                 # already applied to `operand` itself just above) to match
-                # `operand`'s own width here.
+                # `operand`'s own width here. Same Identifier-only
+                # restriction as the VALUE-side `operand` extension above
+                # -- see that comment for the full rationale.
                 operand_mask = self._emit_mask_expr(expr.operand, ow)
-                if eff_signed and eval_width > ow:
+                if eff_signed and eval_width > ow and type(expr.operand) is Identifier:
                     operand_mask = f"_sign_ext({operand_mask}, {ow})"
                 return f"((~({operand})) & (~({operand_mask})) & wmask({eval_width}))"
             return f"({operand})"
@@ -2153,6 +2228,151 @@ class _ExprEmitterMixin:
         self._et_pending.append(f"cdef long long _et{n}_m = <long long>_sc{truth_slot}_m[0]")
         self._et_node_vals[id(condition)] = f"_et{n}_v"
         self._et_node_masks[id(condition)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
+
+    def _emit_wide_binary_to_value(self, expr: BinaryOp, dst_width: int) -> tuple[str, str] | None:
+        """Compute a `_NATURAL_WIDTH_OPS` `BinaryOp` whose own combined
+        operand width (`op_width = max(width(left), width(right))`)
+        exceeds 64 bits via the wide emitter, returning `(value_expr,
+        mask_expr)` strings usable as plain `long long` sub-expressions.
+
+        `_emit_binary`/`_emit_mask_expr`'s BinaryOp branch both compute
+        `op_width` this way and then call straight into the NARROW
+        `_emit_expr`/`_emit_mask_expr` for each operand at that width --
+        correct only up to 64 bits, silently losing precision beyond
+        that for comparisons/`&&`/`||` (`_COMPARISON_OPS`, whose own
+        RESULT is always self-determined to 1 bit REGARDLESS of how wide
+        the operands needed to be to correctly determine it -- mirrors
+        the identical class of gap already fixed for reductions/ternary
+        conditions) and for bitwise ops (`&`/`|`/`^`/`~^`/`^~`, whose
+        result genuinely IS `op_width` bits wide, but the caller only
+        ever wants `width` bits of it -- since bitwise ops are strictly
+        per-bit/position-preserving, computing directly at the caller's
+        own `width` via the wide emitter, rather than at the wider
+        `op_width` then truncating, is exactly equivalent and avoids
+        ever needing to represent more than `dst_width` bits at once).
+        `_wide_emitter.py`'s `_emit_wide_expr_to_scratch` already has
+        correct wide handling for every op in `_NATURAL_WIDTH_OPS` (see
+        `notes/simulation/wide_signal_coverage.md`'s coverage table) --
+        it's just never been reachable from the NARROW emitter's own
+        `_emit_binary`/`_emit_mask_expr`. Confirmed against Icarus
+        (cross-engine) for `fn_sel1((a5 == a6), a3)` with `a5` 65 bits
+        and `a6` 80 bits (a comparison argument to a 1-bit port) and for
+        `fn_sel1(a0, (a5 & a6))` (a bitwise-AND argument to a 63-bit
+        port): both silently gave a wrong answer on compiled, matching
+        reference/vm/vm-fast everywhere else.
+
+        `dst_width` is the caller's REAL target width for the whole
+        expression's result -- 1 for a self-determined-1-bit op
+        (comparisons/`&&`/`||`), or the enclosing `width` for a bitwise
+        op (whose result is genuinely `dst_width` bits, not just 1).
+        Callers must pass `dst_width <= _WORD_BITS` (the established
+        narrow-emitter contract: `_emit_expr`'s own return value is
+        always a single `long long`-representable scalar) -- this
+        function only ever reads scratch word 0 back out.
+
+        Returns None if hoisting isn't available in this context, the
+        operands aren't actually wide, or the wide emitter doesn't
+        recognize this node shape -- caller falls back to the narrow
+        formula, which remains correct up to 64 bits either way.
+        """
+        if self._et_pending is None:
+            return None
+        op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+        if op_width <= _WORD_BITS:
+            return None
+        cached_v = self._et_node_vals.get(id(expr))
+        cached_m = self._et_node_masks.get(id(expr))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        n_words = max(1, (op_width + 63) // 64)
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        slot = self._alloc_scratch()
+        lines = self._emit_wide_expr_to_scratch(expr, slot, n_words, dst_width, 0)
+        if lines is None:
+            self._free_scratch(slot)
+            return None
+        self._needs_wide_helpers = True
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.extend(lines)
+        self._et_pending.append(f"cdef long long _et{n}_v = <long long>_sc{slot}_v[0]")
+        self._et_pending.append(f"cdef long long _et{n}_m = <long long>_sc{slot}_m[0]")
+        self._free_scratch(slot)
+        self._et_node_vals[id(expr)] = f"_et{n}_v"
+        self._et_node_masks[id(expr)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
+
+    def _emit_wide_arg_to_value(self, expr: Expression, dst_width: int) -> tuple[str, str] | None:
+        """Compute ANY expression whose own internal computation exceeds
+        64 bits via the wide emitter, returning `(value_expr, mask_expr)`
+        strings usable as plain `long long` sub-expressions -- a general-
+        purpose sibling of `_emit_wide_reduction_to_value`/`_emit_wide_
+        truthy_to_value`/`_emit_wide_binary_to_value`, all of which only
+        trigger for specific node shapes (a reduction's operand, a
+        ternary's condition, a `_NATURAL_WIDTH_OPS` BinaryOp's combined
+        operand width). This one triggers on `_expr_max_internal_width`
+        directly -- the same general recursive width-scanner `_rhs_
+        needs_wide_eval` now uses -- so it also catches shapes none of
+        those three narrower helpers do: chiefly a CONTEXT-DETERMINED
+        arithmetic op (`+`/`-`/`*`/`/`/`%`, which compute directly at
+        whatever width they're asked for -- `op_width == width` always,
+        per `_emit_binary`'s own docstring) whose OPERAND is itself wider
+        than 64 bits, requested at a narrower width by its caller (a
+        function-call argument bound to a narrow port is the confirmed
+        case, but this is not specific to that -- `_emit_user_func_call_
+        expr` is simply the first caller for it).
+
+        `/`/`%` in particular are NOT "residue-safe": `(a % b) mod N !=
+        ((a mod N) % (b mod N)) mod N` in general, so evaluating `a %
+        b` DIRECTLY at a narrow requested width (as the plain narrow
+        `_emit_expr`/`_emit_mask_expr` calls this replaces would) first
+        truncates the DIVIDEND down to that width, computing an entirely
+        different (wrong) quotient/remainder before the truncation to
+        the port's own width would even have been the correct final
+        step. Confirmed against Icarus (cross-engine) for `fn_add8({2{
+        {2{a0}}}}, (a6 % (a4[28:22] | 1)))` with `a6` 80 bits bound to
+        an 8-bit port `b`: computing the modulo directly at 8 bits
+        (a6's own low 8 bits, an arbitrary truncation with no relation
+        to the true 80-bit dividend) gave a materially different
+        remainder than computing the FULL 80-bit modulo first and only
+        THEN taking its low 8 bits for the port.
+
+        `dst_width` is the caller's real target width (typically a
+        function port's own declared width) -- must be `<= _WORD_BITS`
+        (the established narrow-emitter contract), since this function
+        only ever reads scratch word 0 back out.
+
+        Returns None if hoisting isn't available in this context, the
+        expression isn't actually internally wide, or the wide emitter
+        doesn't recognize this node shape -- caller falls back to the
+        narrow formula, which remains correct up to 64 bits either way.
+        """
+        if self._et_pending is None:
+            return None
+        max_w = self._expr_max_internal_width(expr)
+        if max_w <= _WORD_BITS:
+            return None
+        cached_v = self._et_node_vals.get(id(expr))
+        cached_m = self._et_node_masks.get(id(expr))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        n_words = max(1, (max_w + 63) // 64)
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        slot = self._alloc_scratch()
+        lines = self._emit_wide_expr_to_scratch(expr, slot, n_words, dst_width, 0)
+        if lines is None:
+            self._free_scratch(slot)
+            return None
+        self._needs_wide_helpers = True
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.extend(lines)
+        self._et_pending.append(f"cdef long long _et{n}_v = <long long>_sc{slot}_v[0]")
+        self._et_pending.append(f"cdef long long _et{n}_m = <long long>_sc{slot}_m[0]")
+        self._free_scratch(slot)
+        self._et_node_vals[id(expr)] = f"_et{n}_v"
+        self._et_node_masks[id(expr)] = f"_et{n}_m"
         return f"_et{n}_v", f"_et{n}_m"
 
     def _emit_reduction(self, op: str, operand: str, operand_mask: str, width: int) -> str:  # noqa: PLR0911
@@ -2465,7 +2685,30 @@ class _ExprEmitterMixin:
         if name == "$unsigned":
             if call.arguments:
                 arg_w = self._expr_width(call.arguments[0])
-                return self._emit_expr(call.arguments[0], arg_w)
+                arg = self._emit_expr(call.arguments[0], arg_w)
+                # A plain leaf/self-determined argument's raw C `long
+                # long` value is already meaningfully bounded to `arg_w`
+                # bits (upper bits 0 by the codebase-wide "value string
+                # is only meaningful within its own self-width" convention
+                # -- see `_emit_reduction`'s docstring), so masking here
+                # would be a no-op for that common case. But when the
+                # argument is ITSELF a further sign-extending computation
+                # (e.g. a nested `$signed(...)`, whose own `_sign_ext`
+                # call deliberately fills every bit through the FULL
+                # native register once the sign bit is set -- see
+                # `_sign_ext`'s own contract in `narrow_tail.pxi`, which
+                # requires the CALLER to mask first, doing none of its
+                # own), those already-sign-filled upper bits leak straight
+                # through an unmasked `$unsigned(...)` instead of being
+                # discarded as "reinterpret this same bit pattern as
+                # unsigned" requires. Confirmed against Icarus for
+                # `$unsigned($signed(a4[3:0]))` with `a4[3:0] == 4'b1101`:
+                # Icarus gives `13` (the same 4-bit pattern reinterpreted
+                # unsigned, then zero-extended to the destination), but
+                # without this mask the inner `$signed`'s sign-extended
+                # `-3` leaked through unchanged, then read as a huge
+                # unsigned magnitude at the wider destination.
+                return f"(({arg}) & wmask({arg_w}))"
             return "0"
         if name == "$signed":
             if call.arguments:
@@ -2535,12 +2778,27 @@ class _ExprEmitterMixin:
         for a value AND its x/z mask -- passing only the value would
         silently discard any x/z-ness in every argument before it ever
         reached the function body.
+
+        An argument whose own internal computation exceeds 64 bits (a
+        context-determined arithmetic op like `%`/`/` over a wide
+        operand is the confirmed case -- see `_emit_wide_arg_to_value`'s
+        own docstring) is routed through the wide emitter instead of the
+        plain narrow `_emit_expr`/`_emit_mask_expr` calls, even though
+        the port itself is narrow -- computing directly at the port's
+        own (possibly much narrower) width first can silently truncate
+        the argument's own computation before the result is even
+        determined, not just afterward as the port binding intends.
         """
         port_widths = [_range_width(port.width, self._param_env) for port in func.ports]
         args: list[str] = []
         for a, w in zip(call.arguments, port_widths, strict=False):
-            args.append(self._emit_expr(a, w))
-            args.append(self._emit_mask_expr(a, w))
+            wide = self._emit_wide_arg_to_value(a, w)
+            if wide is not None:
+                args.append(wide[0])
+                args.append(wide[1])
+            else:
+                args.append(self._emit_expr(a, w))
+                args.append(self._emit_mask_expr(a, w))
         safe_name = _safe_ident(call.name)
         return f"_user_func_{safe_name}(c, {', '.join(args)})" if args else f"_user_func_{safe_name}(c)"
 
@@ -2808,8 +3066,55 @@ class _ExprEmitterMixin:
             return "0"
 
         if etype is BinaryOp:
-            if expr.op in _COMPARISON_OPS:
+            if expr.op in _NATURAL_WIDTH_OPS:
+                # Must match `_emit_binary`'s IDENTICAL `op_width` gate
+                # (`_NATURAL_WIDTH_OPS`, not just `_COMPARISON_OPS`) --
+                # this used to only widen `op_width` for comparisons/
+                # `&&`/`||`, leaving bitwise `&`/`|`/`^`/`~^`/`^~` computing
+                # their OWN operand masks at the OUTER context `width`
+                # instead of their own combined `max(left, right)` width,
+                # unlike the VALUE side (which always uses `_NATURAL_
+                # WIDTH_OPS`). A bitwise op's own natural width can be
+                # NARROWER than the destination that requested it (e.g. a
+                # 63-bit `|` operand feeding a 64-bit destination) -- with
+                # the old narrower gate, an operand mask that legitimately
+                # (if redundantly) sign-extends up to ITS OWN width (e.g.
+                # `$signed(x)` requested at exactly `x`'s own width still
+                # unconditionally fills every bit through the native
+                # register once triggered -- see `_sign_ext`'s own
+                # contract in `narrow_tail.pxi`) had no bound to be masked
+                # back down to, so a spurious bit set beyond the op's own
+                # true width (but still within the OUTER `width`) leaked
+                # straight through as the whole expression's own mask.
+                # Confirmed against Icarus for `(fn_sub16s(a2[11:10], a7)
+                # | $signed(a3))` with `a3` (63 bits) entirely x: the `|`'s
+                # own combined width is 63 (`max(16, 63)`), but the old
+                # gate computed `op_width = width = 64` (the destination),
+                # so the `|`'s own mask formula's `& wmask(op_width)`
+                # bound (added alongside this fix, see below) was itself
+                # too wide to catch the overflow.
                 op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                # Mirrors `_emit_binary`'s identical wide-routing check
+                # on the VALUE side (`_emit_wide_binary_to_value`'s own
+                # docstring has the full rationale and Icarus-confirmed
+                # repros) -- a comparison/`&&`/`||`/bitwise-op whose
+                # combined operand width exceeds a native register needs
+                # the wide emitter to correctly determine its own mask
+                # too, not just its value. `dst_width` mirrors
+                # `_emit_binary`'s own identical choice: 1 for a self-
+                # determined-1-bit result (comparisons/`&&`/`||`), or the
+                # enclosing `width` for a bitwise op (whose result is
+                # genuinely that many bits, not 1). `_emit_wide_binary_to_
+                # value` checks its own `id(expr)`-keyed cache first, so
+                # this is a no-op if the value side already hoisted this
+                # exact node (the common case, value always computed
+                # before mask) -- but calling it independently here also
+                # covers a caller that only ever asks for the mask.
+                if op_width > _WORD_BITS:
+                    dst_width = 1 if expr.op in _COMPARISON_OPS else width
+                    wide = self._emit_wide_binary_to_value(expr, dst_width)
+                    if wide is not None:
+                        return wide[1]
             else:
                 op_width = width
             # If this node's mask was already hoisted to a named temp (by
@@ -2861,10 +3166,42 @@ class _ExprEmitterMixin:
                 # below, which IS correct there per Value._cmp's non-eq
                 # branch), plain (in)equality does NOT go straight to x
                 # just because some bit is unknown.
+                #
+                # The genuinely-ambiguous case must COLLAPSE `lm | rm` to
+                # the literal `1` (not return that raw pattern directly)
+                # -- a comparison's own RESULT is always self-determined
+                # to exactly 1 bit (IEEE 1364-2005 Table 5-22), so its
+                # mask, like every other self-determined-1-bit operator in
+                # this file (reductions, `!`, `&&`/`||` elsewhere in this
+                # same function), must read as exactly bit-0-ambiguous
+                # when unknown -- `lm | rm` instead returns the raw
+                # per-BIT-POSITION operand disagreement pattern (up to
+                # `op_width` bits wide), which then gets used DIRECTLY as
+                # the whole expression's own mask at whatever wider
+                # destination requested it, spuriously marking many more
+                # bits ambiguous than the actual 1-bit result ever
+                # occupies. Confirmed against Icarus for `(a2 == a3)` with
+                # `a3` (63 bits) entirely x and `a2` (16 bits) fully
+                # defined: Icarus gives exactly 1 bit of ambiguity (mask
+                # `1`) at the 64-bit destination, but the old formula
+                # returned `a3`'s own raw 63-bit-wide mask unchanged.
+                #
+                # `(lm or rm)` must still gate this -- collapsing
+                # UNCONDITIONALLY to `1` whenever `known_diff` is false
+                # was a real regression caught by re-running the fuzzer:
+                # `known_diff` is false BOTH when the operands are
+                # genuinely ambiguous (any x/z, no known bit disagrees)
+                # AND when they are fully defined and genuinely EQUAL
+                # (`lm == rm == 0`, correctly non-ambiguous) -- collapsing
+                # both cases to `1` broke the second one. Confirmed
+                # against Icarus for `{2{(a0 == a0)}}` with `a0` a fully
+                # DEFINED `0` (not x): Icarus gives a definite result
+                # (mask `0`, since anything equals itself), but the
+                # unconditional-`1` version spuriously marked it x.
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
                 known_diff = f"((({lv}) ^ ({rv})) & ~({lm}) & ~({rm}) & wmask({op_width}))"
-                return f"(0 if {known_diff} else (({lm}) | ({rm})))"
+                return f"(0 if {known_diff} else (1 if (({lm}) or ({rm})) else 0))"
             if expr.op in ("&&", "||"):
                 # A known-nonzero (truthy) operand forces || definitely
                 # true, and a known-EXACTLY-zero operand forces &&
@@ -2874,18 +3211,57 @@ class _ExprEmitterMixin:
                 # codebase's invariant that a value's bits at masked (x/z)
                 # positions are always 0, so a nonzero raw value implies a
                 # genuine known-1 bit.
+                #
+                # Same "must collapse `lm | rm` to the literal `1`, gated
+                # on `(lm or rm)`" fix as `==`/`!=` just above -- `&&`/`||`
+                # are ALSO self-determined to exactly 1 bit, so their
+                # genuinely-ambiguous case must read as bit-0-ambiguous,
+                # not the raw per-bit-position operand disagreement
+                # pattern (which then gets used directly as the whole
+                # expression's own mask at a wider destination). Confirmed
+                # against Icarus for `(a3 && $signed(a0))` with `a0` a
+                # signed 1-bit x-valued register (whose OWN mask,
+                # `_sign_ext`'d to match `$signed`'s cast, is a full
+                # 64-bit-wide `-1` pattern) and `a3` (63 bits) fully
+                # defined and nonzero: Icarus gives exactly 1 bit of
+                # ambiguity, but the old formula returned `a0`'s
+                # already-sign-extended 64-bit mask unchanged.
+                #
+                # Gating on `(lm or rm)` (not an unconditional `1`) is
+                # required for the same reason established for `==`/`!=`
+                # just above -- reaching this final fallback does NOT by
+                # itself mean genuine ambiguity (e.g. `(a0 || a0)` with
+                # `a0` fully DEFINED `0`: neither operand is truthy, so
+                # falls all the way to this fallback, but `lm == rm == 0`
+                # means the result is a definite `0`, not ambiguous).
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
+                ambiguous = f"(1 if (({lm}) or ({rm})) else 0)"
                 if expr.op == "||":
-                    return f"(0 if (({lv}) or ({rv})) else (({lm}) | ({rm})))"
+                    return f"(0 if (({lv}) or ({rv})) else {ambiguous})"
                 l_def_zero = f"(({lm}) == 0 and ({lv}) == 0)"
                 r_def_zero = f"(({rm}) == 0 and ({rv}) == 0)"
                 both_truthy = f"(({lv}) and ({rv}))"
-                return (
-                    f"(0 if ({l_def_zero}) else"
-                    f" (0 if ({r_def_zero}) else"
-                    f" (0 if ({both_truthy}) else (({lm}) | ({rm})))))"
-                )
+                return f"(0 if ({l_def_zero}) else (0 if ({r_def_zero}) else (0 if ({both_truthy}) else {ambiguous})))"
+            if expr.op in ("<", "<=", ">", ">="):
+                # Unlike `==`/`!=` above, relational comparisons have no
+                # "a known bit differs" short-circuit (IEEE ordering needs
+                # every bit to determine magnitude, not just find A
+                # difference) -- ANY unknown bit anywhere in either
+                # operand makes the whole self-determined-1-bit result
+                # ambiguous. This used to fall through to the generic
+                # `lm | rm` fallback at the very end of this function,
+                # which has the SAME "must collapse to the literal `1`"
+                # bug just fixed for `==`/`!=`/`&&`/`||` above -- a
+                # relational comparison's result is ALSO self-determined
+                # to exactly 1 bit, so its raw per-bit-position operand
+                # mask must not leak through as the whole expression's own
+                # mask at a wider destination. Confirmed against Icarus
+                # for `(a2[10:2] <= a3)` with `a3` (63 bits) entirely x:
+                # Icarus gives exactly 1 bit of ambiguity, but the old
+                # fallback returned `a3`'s own raw 63-bit-wide mask
+                # unchanged.
+                return f"(1 if (({lm}) or ({rm})) else 0)"
             if expr.op in {"+", "-", "*", "/", "%"}:
                 # Arithmetic ops need the conservative "ANY x/z bit
                 # ANYWHERE in either operand -> the ENTIRE result is x"
@@ -2992,6 +3368,31 @@ class _ExprEmitterMixin:
             # a temp context and the left operand is itself a |/& chain.  This
             # prevents O(k²) inline string growth (both lm and lv would otherwise
             # re-expand the same left subtree at each level of the chain).
+            #
+            # Both formulas below must end with `& wmask(op_width)`, mirroring
+            # the VALUE-side `|`/`&` core formula's own identical trailing
+            # mask (`_emit_binary`, a few hundred lines up in this same
+            # file) -- `lm`/`rm` (each operand's own mask, requested at
+            # `op_width`) can carry garbage bits ABOVE `op_width` even when
+            # `op_width` already equals the operand's own declared width:
+            # `_sign_ext(v, w)`'s own contract (see `narrow_tail.pxi`)
+            # unconditionally fills every bit from `w` through the FULL
+            # native register once the checked bit is set, regardless of
+            # whether the caller's own `w` already covers the operand's
+            # entire meaningful content -- a `$signed(x)` cast requested at
+            # exactly `x`'s own width still triggers this fill (a
+            # theoretically redundant call that's nonetheless made
+            # unconditionally). Confirmed against Icarus for
+            # `(fn_sub16s(a2[11:10], a7) | $signed(a3))` with `a3` (63
+            # bits, unsigned by declaration) entirely x: `$signed(a3)`
+            # requested at `a3`'s own 63-bit width still sign-extends via
+            # `_sign_ext(mask, 63)`, spuriously setting bit 63 (one bit
+            # beyond `a3`'s own width) on the MASK side only -- the VALUE
+            # side's own identical `_sign_ext` call is immediately masked
+            # back down to 63 bits afterward, but the mask formula here
+            # never was, so that spurious bit 63 then leaked straight
+            # through as the whole expression's own bit 63 at the 64-bit
+            # destination.
             if expr.op == "|":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
@@ -3004,7 +3405,7 @@ class _ExprEmitterMixin:
                     self._et_node_vals[id(expr.left)] = f"_et{n}_v"
                     lv = f"_et{n}_v"
                     lm = f"_et{n}_m"
-                return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})))"
+                return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})) & wmask({op_width}))"
             if expr.op == "&":
                 lv = self._emit_expr(expr.left, op_width)
                 rv = self._emit_expr(expr.right, op_width)
@@ -3017,7 +3418,7 @@ class _ExprEmitterMixin:
                     self._et_node_vals[id(expr.left)] = f"_et{n}_v"
                     lv = f"_et{n}_v"
                     lm = f"_et{n}_m"
-                return f"((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm})))"
+                return f"((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm})) & wmask({op_width}))"
             return f"({lm} | {rm})"
 
         if etype is UnaryOp:
@@ -3062,7 +3463,58 @@ class _ExprEmitterMixin:
                 # with a1 fully x.
                 opm = self._emit_mask_expr(expr.operand, ow)
                 return f"(wmask({width}) if ({opm}) else 0)"
-            return self._emit_mask_expr(expr.operand, ow)
+            # `~`/unary `+`: the operand's own mask, bit-for-bit unchanged,
+            # UNLESS this context is widening a signed operand narrower
+            # than the destination -- sign-extension replicates the
+            # operand's own sign bit into every newly-filled upper bit, so
+            # if that sign bit is itself ambiguous, every one of those
+            # replicated copies is ambiguous too (mirrors `_emit_unary`'s
+            # OWN identical sign-extension of `operand_mask` on the VALUE
+            # side, a few dozen lines up in this same file -- that fix was
+            # never mirrored here). Zero-extension (unsigned operand) needs
+            # no such propagation: the newly-filled upper bits are simply
+            # definite 0. Confirmed against Icarus for `(~a0)` with `a0` a
+            # signed 1-bit x-valued register assigned into a 64-bit
+            # destination: Icarus gives all 64 bits ambiguous (`~`
+            # complementing a fully sign-extended-to-x operand stays x
+            # everywhere), but the unextended mask here left only bit 0
+            # marked ambiguous.
+            #
+            # Querying the operand's mask at `ow` (its own bare self-
+            # width) is only correct when the operand is `_is_fixed_
+            # self_determined` (a comparison/reduction/`!`/`&&`/`||` --
+            # `_emit_unary`'s OWN VALUE-side `~` handling takes a SEPARATE
+            # fixed-width fast path for exactly that case, a few dozen
+            # lines up in this same file, never reaching this general
+            # branch at all). For any OTHER (context-determined) operand
+            # shape -- a TernaryOp chief among them -- the VALUE side
+            # instead computes `operand = self._emit_expr(expr.operand,
+            # eval_width, ...)`, widening the operand's OWN internal
+            # computation to the full context width `eval_width` (NOT its
+            # bare self-width `ow`) BEFORE `~` runs, since a nested
+            # context-determined sub-expression within a ternary branch
+            # (e.g. unary `-`) needs that outer width to correctly compute
+            # itself. Querying the mask at `ow` here instead silently
+            # narrowed that same internal computation, understating how
+            # widely an x/z bit's ambiguity should have propagated.
+            # Mirrors `eval_width` exactly as computed on the VALUE side.
+            # Confirmed against Icarus for `(~((~(!a1)) ? (-(a3 == a7)) :
+            # (~&a0)))` with `a3` (63 bits) entirely x and the ternary's
+            # condition definitely selecting the `-(a3 == a7)` branch: `-`
+            # of an ambiguous comparison must read as ALL `eval_width`
+            # bits ambiguous (unary `-`'s own "any x anywhere -> the
+            # WHOLE result is x" rule) once the ternary is correctly
+            # widened to `eval_width` -- querying at the ternary's own
+            # 1-bit self-width truncated that to just bit 0.
+            eval_width = max(ow, width) if width else ow
+            if _is_fixed_self_determined(expr.operand):
+                opm = self._emit_mask_expr(expr.operand, ow)
+            else:
+                opm = self._emit_mask_expr(expr.operand, eval_width, signed_override)
+            eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
+            if eff_signed and width > ow and _is_fixed_self_determined(expr.operand):
+                return f"_sign_ext({opm}, {ow})"
+            return opm
 
         if etype is TernaryOp:
             # Check if this node's mask was already hoisted (see symmetric block
@@ -3396,7 +3848,21 @@ class _ExprEmitterMixin:
                 arg_mask = self._emit_mask_expr(expr.arguments[0], arg_w)
                 if fname == "$signed":
                     return f"_sign_ext({arg_mask}, {arg_w})"
-                return arg_mask
+                # `$unsigned`: mirrors `_emit_func_call`'s identical
+                # VALUE-side mask (`& wmask(arg_w)`) -- `arg_mask` is only
+                # guaranteed clean up to `arg_w` bits for a plain leaf/
+                # self-determined argument; a NESTED `$signed(...)`
+                # argument's own mask was just sign-extended (the branch
+                # immediately above) to fill the full native register,
+                # which `$unsigned` must discard rather than pass through.
+                # Confirmed against Icarus for `$unsigned($signed(a2[6:1]
+                # ^ a1))` with `a2` fully x (mirrors the VALUE-side repro's
+                # own shape, `$unsigned($signed(a4[3:0]))`, one level
+                # deeper): without this mask, the inner `$signed`'s
+                # sign-extended-to-x upper bits leaked through as spurious
+                # ambiguity in bits the true 4-bit-wide value never
+                # actually occupies.
+                return f"(({arg_mask}) & wmask({arg_w}))"
             # User-defined function: `_user_func_XXX` returns only a
             # `long long` VALUE -- there is no mask channel in its call
             # signature at all, so its own internally-computed x/z bits

@@ -55,6 +55,7 @@ for operands that have nonzero upper words).
 | **Struct field read (wide)** | `wide_slice_extract` on packed base | ✅ | ✅ | `TestWideStructFieldSignals` — cont/combo/seq, 65-bit field |
 | **Struct field write (wide)** | dedicated emitter | ✅ | ✅ | `TestWideStructFieldSignals` — packed bus output verified |
 | **Edge detection on wide signal** | N/A — not supported | ✅ raises | ✅ | `TestWideEdgeDetection` — `NotImplementedError` for posedge/negedge on >64-bit |
+| **User-defined function — wide port or return (>64 bits)** | N/A — not supported | ✅ raises | ✅ | `test_compiled_function_wide_port_raises` — `NotImplementedError` at codegen time. The `_user_func_XXX` call ABI is hardcoded to a single native `long long` per argument/return (signature, port-binding write, and return statement); a wide port/return is architecturally unrepresentable, not a routing gap like the rest of this table — would need a call-ABI redesign (multi-word argument/return passing) to support. Reference/VM/VM-fast are unaffected. A wide *argument expression* passed to a narrow port is fine (see `_rhs_needs_wide_eval`, fixed 2026-08) — this row is specifically about the port/return declaration itself. |
 
 ## Test Selectors
 

@@ -1981,9 +1981,40 @@ wide-port case still computes correctly on reference/vm/vm-fast);
 fast-suite regression (7897 passed, same 16 pre-existing failures,
 `-n 8`, ~37 min, zero new failures).
 
-Remaining open item from the audits: `_emit_binary`'s comparison/
-logical/bitwise dispatch still has no wide-detection of its own —
-left for the user to prioritize as a future follow-up.
+**Eighteenth wave (August 2026): the `_emit_binary` gap is fixed, and a
+systematic follow-up campaign drove the residual failure count from 26
+down to 1**, per explicit user direction ("we need to pursue every
+known failure") rather than stopping at diminishing returns. New
+`_emit_wide_binary_to_value` helper (mirroring the established
+reduction/ternary-condition wide-routing pattern) wired into
+`_emit_binary` and `_emit_mask_expr`'s BinaryOp branch. Six more
+distinct, confirmed bugs found and fixed while re-running the fuzzer
+after each fix: a `~`/unary-`+` mask sign-extension gap (two rounds —
+first for plain Identifiers, then for compound operands like nested
+TernaryOp); `$unsigned(nested $signed(...))` leaking sign-extended
+garbage past its own argument width on both value and mask sides;
+`==`/`!=`/`&&`/`||`'s ambiguous-case mask not collapsing to a clean
+1-bit indicator (a first attempt regressed a different case — caught
+by re-running the fuzzer, corrected); the mask-side `op_width` gate
+only covering `_COMPARISON_OPS` instead of the broader
+`_NATURAL_WIDTH_OPS` the value side uses; ternary branch-mask-width
+selection missing UnaryOp `-`/`~` (only BinaryOp arithmetic was
+covered); a redundant double-sign-extension in `_emit_unary` corrupting
+already-correctly-computed compound operand values; and
+`_emit_user_func_call_expr` computing arithmetic arguments (`%`/`/`)
+directly at a narrow port width, truncating the dividend before the
+remainder was determined. New generic `_emit_wide_arg_to_value` helper
+added for that last one. Three new regression tests. Full detail
+(including the one deliberately-deferred residual case — a genuine
+conflict between two previously-confirmed test cases in `TernaryOp`'s
+`signed_override` handling, needing dedicated study rather than a
+same-session patch) in `notes/known_issues.md`'s Eighteenth wave entry.
+Verified: 9-seed x 300-case sweep dropped from 26 to 1 failure (that
+one residual case); `test_differential.py`/`test_differential_
+statements.py`/`test_function_task.py`/`test_power_operator.py`/
+`test_wide_ops.py` all unaffected; a full fast-suite regression (7897
+passed, same 16 pre-existing failures, `-n 8`, ~34 min, zero new
+failures).
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 

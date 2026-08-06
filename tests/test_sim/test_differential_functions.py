@@ -378,3 +378,173 @@ endmodule
     for source in (source_wide_port, source_wide_ret):
         with pytest.raises(NotImplementedError, match="wider than 64 bits"):
             td._sim_for(source, "compiled")
+
+
+def _assert_all_engines_agree(source: str, drives: dict) -> None:
+    """Shared helper: drive `drives` on all engines, assert every signal
+    read from ENGINES agrees with reference. `drives` maps signal name to
+    (value, width) or (value, width, mask).
+    """
+    ref_result = None
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        for name, spec in drives.items():
+            val, width = spec[0], spec[1]
+            mask = spec[2] if len(spec) > 2 else 0
+            sim.drive(name, td.Value(val, width=width, mask=mask))
+        sim.settle()
+        result = {name: sim.read(name) for name in ("y0", "y1") if f"output [63:0] {name}" in source}
+        if ref_result is None:
+            ref_result = result
+        for name, got in result.items():
+            assert got == ref_result[name], f"engine={engine} {name}: got={got!r} expected={ref_result[name]!r}"
+
+
+def test_compiled_natural_width_op_wide_operand_mask() -> None:
+    """Regression test for a family of confirmed compiled-engine mask
+    bugs in `_emit_mask_expr`'s `_NATURAL_WIDTH_OPS` (comparisons/`&&`/
+    `||`/bitwise) handling:
+
+    1. `==`/`!=`/`&&`/`||`'s genuinely-ambiguous case returned the raw
+       `lm | rm` operand-mask pattern directly instead of collapsing it
+       to the literal `1` (these ops are self-determined to exactly 1
+       bit, so their mask must be too) -- confirmed for `(a2 == a3)`
+       with `a3` entirely x.
+    2. The op_width GATE controlling that computation only widened for
+       `_COMPARISON_OPS`, leaving bitwise `&`/`|` computing their own
+       operand masks at the OUTER context width instead of their own
+       combined `max(left, right)` width (unlike the VALUE side, which
+       always uses the broader `_NATURAL_WIDTH_OPS`) -- confirmed for
+       `(fn_sub16s(...) | $signed(a3))` with `a3` (63 bits) entirely x.
+
+    Confirmed against Icarus (cross-engine): reference/vm/vm-fast agree;
+    only compiled disagreed before these fixes.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0,
+    output [63:0] y1
+);
+    function signed [15:0] fn_sub16s(input signed [15:0] a, input signed [15:0] b);
+        begin
+            fn_sub16s = a - b;
+        end
+    endfunction
+    assign y0 = (a2 == a3);
+    assign y1 = (fn_sub16s(a2[11:10], a7) | $signed(a3));
+endmodule
+"""
+    _assert_all_engines_agree(
+        source,
+        {
+            "a2": (45119, 16),
+            "a3": (0, 63, (1 << 63) - 1),
+            "a7": (0, 1),
+        },
+    )
+
+
+def test_compiled_nested_context_determined_operator_signedness() -> None:
+    """Regression test for a confirmed compiled-engine bug: `_emit_unary`'s
+    general (non-fixed-self-determined) `~`/unary-`-` handling computes
+    its operand once via `_emit_expr(operand, eval_width, ...)` (already
+    complete and correct at the full context width for ANY operand
+    shape, per the "compute directly at the requested width" convention
+    this file relies on), then REDUNDANTLY re-applied `_sign_ext(operand,
+    ow)` using the operand's own bare self-width `ow` -- a true no-op for
+    a plain Identifier operand (whose own `_emit_expr` already performed
+    the identical extension), but actively WRONG for a COMPOUND operand
+    (e.g. a further UnaryOp `-`), whose value at `eval_width` is a
+    genuinely COMPUTED result, not "a raw `ow`-bit value with unfilled
+    upper bits" -- reinterpreting its own bit 0 as an unfilled sign bit
+    to propagate corrupts an already-correct value.
+
+    Confirmed against Icarus (cross-engine) for `(-(-a0))` with `a0` a
+    signed 1-bit `-1` (raw bit `1`) assigned into a 64-bit destination:
+    reference/vm/vm-fast all correctly negate twice back to `+1`
+    (sign-extended); compiled corrupted the inner `-a0`'s own clean
+    result before the outer `-` ran.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0,
+    output [63:0] y1
+);
+    assign y0 = (-(-a0));
+    assign y1 = (~a0);
+endmodule
+"""
+    _assert_all_engines_agree(source, {"a0": (1, 1)})
+
+
+def test_compiled_wide_arithmetic_function_argument() -> None:
+    """Regression test for a confirmed compiled-engine bug:
+    `_emit_user_func_call_expr` always computed each argument via the
+    plain narrow `_emit_expr`/`_emit_mask_expr` at the PORT's own
+    declared width -- correct for most shapes (the generated function
+    helper re-masks the incoming value to the port's real width anyway),
+    but wrong for a context-determined arithmetic argument (`%`/`/` in
+    particular, NOT "residue-safe": `(a % b) mod N != ((a mod N) % (b
+    mod N)) mod N`) whose OWN operand is wider than 64 bits -- computing
+    the modulo directly at the narrow port width first truncates the
+    DIVIDEND before the remainder is even determined, giving an entirely
+    different (wrong) result than computing the full-precision modulo
+    first and only THEN taking its low bits for the port.
+
+    Confirmed against Icarus (cross-engine) for `fn_add8({2{{2{a0}}}},
+    (a6 % (a4[28:22] | 1)))` with `a6` 80 bits bound to an 8-bit port:
+    reference/vm/vm-fast agree; only compiled disagreed before the fix
+    (`_emit_wide_arg_to_value`, routing the argument through the wide
+    emitter whenever its own internal computation exceeds 64 bits).
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0
+);
+    function [7:0] fn_add8(input [7:0] a, input [7:0] b);
+        begin
+            fn_add8 = a + b;
+        end
+    endfunction
+    assign y0 = {2{fn_add8({2{{2{a0}}}}, (a6 % (a4[28:22] | 1)))}};
+endmodule
+"""
+    _assert_all_engines_agree(
+        source,
+        {
+            "a0": (1, 1),
+            "a4": (7571520453935328720, 64),
+            "a6": (725654678142160021167080, 80),
+        },
+    )

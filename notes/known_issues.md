@@ -3071,15 +3071,192 @@ ABI); `test_differential_functions.py` (18 passed),
 passed, 1 xfail), and a full fast-suite regression (7897 passed, the
 same 16 pre-existing failures, `-n 8`, ~37 min, zero new failures).
 
-**Still open, not addressed this wave**: `_emit_binary`'s comparison/logical/bitwise dispatch
-  (`_expr_emitter.py`) has no wide-detection check of its own at all
-  (unlike `_emit_unary`'s reduction branch and `_emit_ternary_value_
-  mask_exprs`, both fixed in earlier waves) -- relies entirely on
-  callers (like the now-fixed `_rhs_needs_wide_eval`) routing the whole
-  statement through the wide path first. A node shape that reaches
-  `_emit_binary` via some OTHER path that doesn't go through `_rhs_
-  needs_wide_eval` first (not yet identified) could still hit the same
-  silent-truncation failure mode.
+**Follow-up: `_emit_binary`'s comparison/logical/bitwise dispatch now
+has its own wide-detection.** Previously it relied entirely on callers
+(like `_rhs_needs_wide_eval`) routing the whole statement through the
+wide path first -- fixed by adding a new `_emit_wide_binary_to_value`
+helper (mirroring `_emit_wide_reduction_to_value`/`_emit_wide_truthy_
+to_value`'s established pattern), wired into both `_emit_binary` (VALUE
+side) and `_emit_mask_expr`'s BinaryOp branch (MASK side) whenever
+`op_width = max(width(left), width(right)) > 64`. Confirmed against
+Icarus (cross-engine) for `fn_sel1((a5 == a6), a3)` (a wide comparison
+argument to a narrow port) and `fn_sel1(a0, (a5 & a6))` (a wide bitwise
+AND argument): both silently wrong on compiled, matching reference/vm/
+vm-fast everywhere else.
+
+**Eighteenth wave (August 2026): a systematic follow-up campaign found
+and fixed six more distinct, confirmed compiled-engine bugs while
+chasing the 26-failure residual from an ad-hoc 9-seed x 300-case sweep
+down to zero (bar one deliberately-deferred item -- see below)**, per
+explicit user direction to pursue every known failure rather than stop
+at diminishing returns:
+- **`_emit_mask_expr`'s `~`/unary-`+` fallback never sign-extended the
+  operand's mask when widening a signed operand to a wider destination**
+  -- unlike the VALUE side (`_emit_unary`), which already correctly
+  sign-extends `operand_mask` when building its own formula. Fixed by
+  mirroring that same conditional sign-extension on the mask side.
+  Confirmed against Icarus for `(~a0)` with `a0` a signed 1-bit x-valued
+  register assigned into a 64-bit destination: Icarus gives all 64 bits
+  ambiguous; the unextended mask left only bit 0 marked ambiguous.
+  Further refined once a SECOND, deeper bug in the same fallback was
+  found: querying the operand's mask at its own bare self-width `ow`
+  (rather than the full context `eval_width`) is only correct for a
+  `_is_fixed_self_determined` operand (comparison/reduction/`!`/`&&`/
+  `||`) -- for any OTHER (context-determined) operand shape, chiefly a
+  TernaryOp, the VALUE side computes it directly at `eval_width` (since
+  a nested context-determined sub-expression within a ternary branch
+  needs that outer width to correctly compute itself), and querying the
+  mask at the narrower `ow` silently understated how widely an x/z
+  bit's ambiguity should have propagated. Confirmed against Icarus for
+  `(~((~(!a1)) ? (-(a3 == a7)) : (~&a0)))` with `a3` (63 bits) entirely
+  x and the ternary's condition definitely selecting the `-(a3 == a7)`
+  branch.
+- **`$unsigned(X)`'s value AND mask formulas never masked their result
+  to the argument's own width** (`_emit_func_call`/`_emit_mask_expr`'s
+  FunctionCall case) -- harmless for a plain leaf/self-determined
+  argument (whose raw value string is already meaningfully bounded to
+  its own width, upper bits 0 by convention), but wrong when the
+  argument is itself a further sign-extending computation (a nested
+  `$signed(...)`, whose own `_sign_ext` call deliberately fills every
+  bit through the FULL native register once triggered, per `_sign_ext`'s
+  own contract in `narrow_tail.pxi`, which requires the CALLER to mask
+  first) -- those already-sign-filled upper bits leaked straight through
+  an unmasked `$unsigned(...)` instead of being discarded as
+  "reinterpret this same bit pattern as unsigned" requires. Fixed by
+  adding `& wmask(arg_w)` to both formulas. Confirmed against Icarus for
+  `$unsigned($signed(a4[3:0]))` with `a4[3:0] == 4'b1101`: Icarus gives
+  `13` (the same bit pattern reinterpreted unsigned); the unmasked
+  version leaked the inner `$signed`'s sign-extended `-3` through
+  unchanged.
+- **`==`/`!=`/`&&`/`||`'s genuinely-ambiguous mask case returned the raw
+  `lm | rm` operand-mask pattern directly instead of collapsing it to
+  the literal `1`** -- these ops are ALL self-determined to exactly 1
+  bit (IEEE 1364-2005 Table 5-22), so their mask, like every other
+  self-determined-1-bit operator in this file (reductions, `!`), must
+  read as exactly bit-0-ambiguous when unknown; `lm | rm` instead
+  returns the raw per-BIT-POSITION operand disagreement pattern (up to
+  `op_width` bits wide), which then gets used DIRECTLY as the whole
+  expression's own mask at whatever wider destination requested it.
+  Fixed by collapsing to `1`. **A first attempt collapsed
+  UNCONDITIONALLY** (`0 if known_diff else 1`), which is itself a
+  regression caught by re-running the fuzzer: reaching the "not
+  known_diff" branch does NOT by itself mean genuine ambiguity -- it is
+  also reached when both operands are fully DEFINED and genuinely equal
+  (`lm == rm == 0`), which is a definite, non-ambiguous result.
+  Corrected to `0 if known_diff else (1 if (lm or rm) else 0)`.
+  Confirmed against Icarus for `(a2 == a3)` with `a3` (63 bits) entirely
+  x (needs the `1`-collapse) and `{2{(a0 == a0)}}` with `a0` fully
+  DEFINED `0` (needs the `(lm or rm)` gate, or the unconditional-`1`
+  version wrongly marks a trivially-true self-comparison as ambiguous).
+  Comparable `<`/`<=`/`>`/`>=` (previously reaching a generic `lm | rm`
+  fallback with the identical gap) got an explicit new branch with the
+  same `(1 if (lm or rm) else 0)` form -- these have no "known bit
+  differs" short-circuit (relational ordering needs every bit, not just
+  A difference), so any ambiguity in either operand makes the whole
+  result ambiguous.
+- **The MASK side's `op_width` gate only widened for `_COMPARISON_OPS`,
+  not the broader `_NATURAL_WIDTH_OPS` the VALUE side uses** -- leaving
+  bitwise `&`/`|`/`^`/`~^`/`^~` computing their own operand masks at the
+  OUTER context width instead of their own combined `max(left, right)`
+  width. Fixed by widening the gate to `_NATURAL_WIDTH_OPS`, matching
+  `_emit_binary` exactly, and adding a trailing `& wmask(op_width)` to
+  the `|`/`&` mask formulas (needed once `op_width` was correctly
+  narrower: an operand mask can carry garbage bits above `op_width` even
+  when `op_width` already equals the operand's own width, via the same
+  "`_sign_ext` doesn't self-clean" mechanism as the `~`/`$unsigned`
+  fixes above). Confirmed against Icarus for `(fn_sub16s(a2[11:10], a7)
+  | $signed(a3))` with `a3` (63 bits) entirely x.
+- **`_emit_ternary_value_mask_exprs`'s branch-mask-width selection only
+  special-cased BinaryOp arithmetic (`+ - * / %`), not the identical
+  "computed directly at the outer width" property UnaryOp `-` (always)
+  and `~` (when not `_is_fixed_self_determined`) share** -- so a `-`/`~`
+  branch's mask was queried at the branch's own bare self-width `tw`/
+  `fw` instead of the ternary's true (often much wider) combined width.
+  Fixed by extending the check to those UnaryOp shapes too. Confirmed
+  against Icarus for `(~((~(!a1)) ? (-(a3 == a7)) : (~&a0)))` (paired
+  with the `~`-fallback `eval_width` fix above -- both were needed
+  together: without this one, the ternary never even RECEIVED the wider
+  width to forward into its own branch computation).
+- **`_emit_unary`'s general (non-fixed-self-determined) `~`/unary-`-`
+  handling redundantly re-applied `_sign_ext(operand, ow)` to a VALUE
+  already fully and correctly computed at `eval_width`** -- a genuine
+  no-op for a plain Identifier operand (whose own `_emit_expr` call
+  already performed the identical extension internally), but actively
+  WRONG for a COMPOUND operand (a further UnaryOp, BinaryOp, TernaryOp,
+  etc.), whose value at `eval_width` is a genuinely COMPUTED result, not
+  "a raw `ow`-bit value with unfilled upper bits" -- reinterpreting its
+  own bit 0 as an unfilled sign bit to propagate corrupts an
+  already-correct wide value. Fixed by restricting this redundant
+  (harmless-only-for-Identifier) step to `type(expr.operand) is
+  Identifier`. Confirmed against Icarus for `(-(-a0))` with `a0` a
+  signed 1-bit `-1`: the inner `-a0`, computed directly at `eval_width`,
+  correctly gives `1` -- but this step then re-sign-extended that
+  already-clean `1` using `a0`'s own bare 1-bit self-width, spuriously
+  treating its bit 0 as an unfilled sign bit and corrupting it to `-1`,
+  so the outer `-` negated an already-wrong value back to `1` instead of
+  correctly negating the true `1` to `-1`.
+- **`_emit_user_func_call_expr` always computed each argument at the
+  PORT's own declared width via the plain narrow emitter** -- correct
+  for most shapes, but wrong for a context-determined arithmetic
+  argument (`%`/`/` in particular, NOT "residue-safe": `(a % b) mod N !=
+  ((a mod N) % (b mod N)) mod N`) whose own operand is wider than 64
+  bits: computing the modulo directly at the narrow port width first
+  truncates the DIVIDEND before the remainder is even determined. Fixed
+  by adding a new general-purpose `_emit_wide_arg_to_value` helper
+  (triggered by `_expr_max_internal_width(arg) > _WORD_BITS`, the same
+  general scanner `_rhs_needs_wide_eval` uses -- broader than the three
+  narrower existing wide-routing helpers, which only trigger for
+  specific node shapes) and routing each function-call argument through
+  it before falling back to the narrow emitter. Confirmed against
+  Icarus for `fn_add8({2{{2{a0}}}}, (a6 % (a4[28:22] | 1)))` with `a6`
+  80 bits bound to an 8-bit port.
+
+New regression tests added in `tests/test_sim/test_differential_functions.py`:
+`test_compiled_natural_width_op_wide_operand_mask`,
+`test_compiled_nested_context_determined_operator_signedness`,
+`test_compiled_wide_arithmetic_function_argument`. Verified after each
+individual fix (standard suites) and via a full 9-seed x 300-case sweep
+after all six: the original 26-failure baseline (before this wave)
+dropped to 1 -- see "Deliberately deferred" below for that one residual
+case. `test_differential.py`/`test_differential_statements.py`/
+`test_function_task.py`/`test_power_operator.py`/`tests/test_sim/
+compiled/test_wide_ops.py` all unaffected throughout, and a final full
+fast-suite regression (7897 passed, the same 16 pre-existing failures
+as every prior wave's baseline, `-n 8`, ~34 min, zero new failures).
+
+**Deliberately deferred (one residual case, confirmed but NOT fixed):
+`TernaryOp`'s `own_signed` computation lets an inherited `signed_
+override` win, where the reference evaluator (`sim/evaluator.py`)
+ALWAYS computes a fresh `own_signed` from the ternary's own branches,
+UNCONDITIONALLY IGNORING any inherited override.** Confirmed against
+Icarus (cross-engine agreement, reference/vm/vm-fast all correct) for
+`fn_add8({3{a4}}, (a3[35] ? (-(a1 ? a0 : a0)) : ($unsigned(a7) <<
+(!a2[4]))))`: the innermost `(a1 ? a0 : a0)` ternary (selecting `a0`,
+a signed 1-bit `-1`) is the OPERAND of a UnaryOp `-`, itself the TRUE
+branch of the OUTER ternary. The outer ternary's own combined
+signedness is FALSE (its false branch is `$unsigned(...)`), which
+propagates down as `signed_override=False` into the UnaryOp `-`'s
+own `_emit_expr` call for its operand -- and `_emit_ternary_value_
+mask_exprs`'s `own_signed = signed_override if signed_override is not
+None else self._expr_signed(expr)` lets that inherited `False` OVERRIDE
+the inner ternary's own combined signedness (which, computed fresh
+from ITS OWN branches -- `a0` both times, declared signed -- would be
+`True`), so `a0` gets zero- instead of sign-extended, corrupting `-a0`
+to negate `+1` instead of the correct `-1`. Reference's `own_signed =
+_expr_signed(expr, ctx)` (no override consulted at all -- "This
+establishes a *fresh* override for both branches, replacing whatever
+override... was active from further out", per its own comment)
+confirms this. NOT fixed: `_emit_ternary_value_mask_exprs`'s CURRENT
+"let signed_override win" design was itself a DELIBERATE, previously-
+confirmed fix (documented earlier in this same section, for `(a0 <=
+(a2 ? a0 : a6))`) -- reconciling these two seemingly-opposed confirmed
+cases (one requiring the override to win, one requiring it to be
+ignored) needs careful dedicated study of exactly which situations
+each rule applies to (the earlier case's ternary was the DIRECT operand
+of a comparison; this one's is nested inside a UnaryOp `-` first --
+plausibly the distinguishing factor, but not yet confirmed), not a
+same-session patch risked without that verification. Reported to the
+user for prioritization rather than silently left undocumented.
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8
