@@ -191,3 +191,71 @@ def test_differential_functions(batch_idx: int) -> None:
                     f"expected(reference)={exp_f!r} got({engine})={got_f!r}\n"
                     f"module source:\n{source}"
                 )
+
+
+@pytest.mark.cross_engine
+def test_reduction_of_wide_unary_minus_function_argument() -> None:
+    """Regression test for a confirmed compiled-engine bug: a reduction
+    over a wide (>64-bit) unary-`-` operand, passed as a function-call
+    argument, silently dropped the operand's high bit.
+
+    Root cause: the destination (`y0`, 64 bits) is narrow, but `a5`
+    (65 bits) negated inside a reduction needs 65 bits internally,
+    routing the WHOLE statement through `_wide_emitter.py`'s recursive
+    `_emit_wide_lhs_write_new` -> `_emit_wide_expr_to_scratch`. That
+    path recurses into the NARROW emitter for each function-call
+    argument (`_emit_user_func_call_expr`), and the reduction argument's
+    own attempt to hoist its wide sub-computation
+    (`_emit_wide_reduction_to_value`, in `_expr_emitter.py`) requires an
+    active `_et_pending` list to append to -- which `_emit_wide_lhs_
+    write_new` never opened, unlike every other top-level-statement
+    compiler that can reach the narrow emitter. Silently fell back to
+    the native-`long long`-only reduction formula, which only sees a5's
+    low 64 bits. Confirmed against Icarus (cross-engine): reference/
+    vm/vm-fast all agree; only compiled disagreed before the fix.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0
+);
+    function [62:0] fn_sel1(input [0:0] a, input [62:0] b);
+        begin
+            fn_sel1 = a ? b : ~b;
+        end
+    endfunction
+    assign y0 = fn_sel1({2{((~|a6[62]) && {a7, a6[5]})}}, (^(-a5)));
+endmodule
+"""
+    values = {
+        "a0": td.Value(1, width=1),
+        "a1": td.Value(4, width=8),
+        "a2": td.Value(56033, width=16),
+        "a3": td.Value(6082846213464634453, width=63),
+        "a4": td.Value(11875740104559844210, width=64),
+        "a5": td.Value(31503097247306016283, width=65),
+        "a6": td.Value(742502492484475909464865, width=80),
+        "a7": td.Value(0, width=1),
+    }
+    ref_val = None
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        for name, value in values.items():
+            sim.drive(name, value)
+        sim.settle()
+        got = sim.read("y0")
+        if ref_val is None:
+            ref_val = got
+        assert got == ref_val, f"engine={engine} got={got!r} expected={ref_val!r}"

@@ -5237,7 +5237,49 @@ class _WideEmitterMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
 
+        # This recursive scratch emitter can itself recurse into the
+        # NARROW emitter (e.g. a `FunctionCall` argument -- each
+        # argument is always computed via `_emit_expr`/`_emit_mask_expr`
+        # regardless of whether the call's own destination is wide, see
+        # `_emit_user_func_call_expr`), which may in turn need to hoist
+        # a wide sub-computation of its OWN into a named `cdef` temp
+        # (`_emit_wide_reduction_to_value`/`_emit_wide_truthy_to_value`
+        # in `_expr_emitter.py`) -- those both require an active
+        # `_et_pending` list to append to, and silently return None
+        # (falling back to the native-`long long`-only narrow formula,
+        # wrong beyond 64 bits) whenever `_et_pending` is None. Every
+        # OTHER top-level-statement compiler that can reach the narrow
+        # emitter (the continuous-assign and blocking/nonblocking-
+        # assignment fallback paths, both in `_process_compiler.py`/
+        # `_stmt_emitters.py`) already opens its own fresh `_et_pending`
+        # scope before calling into it -- this recursive wide emitter
+        # never did, since it does not itself need `_et_pending` (it
+        # writes its own multi-line output directly into `lines`
+        # instead), leaving `_et_pending` at whatever a PRIOR statement
+        # last left it as (`None` by default, from `__init__`, if this
+        # is the first statement compiled in the module). Confirmed
+        # against Icarus for `fn_sel1({2{((~|a6[62]) && {a7, a6[5]})}},
+        # (^(-a5)))` with `a5` 65 bits: the destination (`y0`, 64 bits)
+        # is narrow, but `(^(-a5))`'s 65-bit internal computation routes
+        # the WHOLE statement through this wide path (via
+        # `_rhs_needs_wide_eval`) to compute the function call itself --
+        # the reduction argument's own attempt to hoist through
+        # `_emit_wide_reduction_to_value` then silently failed and fell
+        # back to the narrow formula, discarding `a5`'s 65th bit.
+        old_et_pending = self._et_pending
+        old_et_count = self._et_count
+        old_et_node_vals = self._et_node_vals
+        old_et_node_masks = self._et_node_masks
+        self._et_pending = []
+        self._et_count = 0
+        self._et_node_vals = {}
+        self._et_node_masks = {}
         lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, lhs_w, indent)
+        et_pending = self._et_pending
+        self._et_pending = old_et_pending
+        self._et_count = old_et_count
+        self._et_node_vals = old_et_node_vals
+        self._et_node_masks = old_et_node_masks
         if lines is None:
             self._reset_scratch()
             return None
@@ -5245,6 +5287,7 @@ class _WideEmitterMixin:
         self._needs_wide_helpers = True
 
         pad = "    " * indent
+        lines = [f"{pad}{t}" for t in et_pending] + lines
         if is_nba:
             lines.append(f"{pad}wide_stage_signal(c, {dst_sid}, _sc{slot}_v, _sc{slot}_m, {n_words})")
         else:

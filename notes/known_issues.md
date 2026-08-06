@@ -2900,14 +2900,66 @@ error, and `test_codegen_basic.py::TestOrChainTemporaries::
 test_or_chain_max_line_length` -- both present identically without
 this fix, `-n 8`, ~34 min, zero new failures) all pass.
 
-The OTHER residual gap noted above (a reduction over a wide unary `-`
-operand nested inside a function-call argument, still wrong on
-compiled) remains deliberately deferred, mirroring the existing
-"compiled engine's 64-bit width limit is only partially resolved" work
-plan item 2.7 sub-item 4. `test_differential_functions.py`'s default
-(non-compiled) run and the originally-documented 8-seed
-`VERIFORGE_DIFF_FUNC_COMPILED=1` rotation remain fully green; other
-seeds may hit this residual gap until further follow-up work lands.
+**Fixed as a further follow-up: a reduction over a wide unary `-`
+operand nested inside a function-call argument** (`sim/compiled/
+_wide_emitter.py`) -- confirmed against Icarus for `fn_sel1({2{((~|a6
+[62]) && {a7, a6[5]})}}, (^(-a5)))` with `a5` 65 bits: the destination
+(`y0`) is only 64 bits, but `(^(-a5))`'s 65-bit internal computation
+routes the WHOLE statement through `_emit_wide_lhs_write_new` ->
+`_emit_wide_expr_to_scratch` (via `_rhs_needs_wide_eval`) to compute
+the function call. That recursive wide emitter's own `FunctionCall`
+case computes each argument through the NARROW emitter regardless of
+the call's destination width (`_emit_user_func_call_expr` always calls
+`_emit_expr`/`_emit_mask_expr`), and the reduction argument's own
+attempt to hoist its wide sub-computation through `_emit_wide_
+reduction_to_value` (the fix two waves back) requires an active
+`_et_pending` list to append to -- silently returning `None` (falling
+back to the native-`long long`-only reduction formula, wrong beyond 64
+bits) whenever `_et_pending` is `None`. Every OTHER top-level-statement
+compiler that can reach the narrow emitter (continuous-assign and
+blocking/nonblocking-assignment fallback paths) already opens its own
+fresh `_et_pending` scope before calling into it; `_emit_wide_lhs_
+write_new` never did, since it doesn't itself need `_et_pending` (it
+writes its own multi-line output directly) -- leaving `_et_pending` at
+whatever a PRIOR statement last left it as (`None` by default, if this
+is the first statement compiled in the module). Fixed by having
+`_emit_wide_lhs_write_new` open its own `_et_pending`/`_et_node_vals`/
+`_et_node_masks`/`_et_count` scope around the recursive
+`_emit_wide_expr_to_scratch` call, threading any hoisted lines into its
+own output (mirroring the identical save/reset/restore pattern already
+used by its sibling top-level-statement compilers).
+
+Verified: a new dedicated regression test,
+`test_reduction_of_wide_unary_minus_function_argument` in
+`tests/test_sim/test_differential_functions.py`, fails on the pre-fix
+baseline and passes after (confirmed via `git stash`). A 9-seed x
+300-case sweep (`11/22/33/44/55/66/77/111111/20260701`,
+`VERIFORGE_DIFF_FUNC_COMPILED=1`) shows a STRICT improvement with zero
+regressions (53 total failures on the pre-fix baseline -> 47 with the
+fix, confirmed case-by-case via `git stash` bisection per seed --
+several other, still-undiscovered instances of the same general "wide
+value in narrow context" bug family evidently remain, consistent with
+the framing below). `test_differential.py`/`test_differential_
+statements.py` (`VERIFORGE_DIFF_COMPILED=1`/`VERIFORGE_DIFF_STMT_
+COMPILED=1`, both fully green, unaffected by this shared-file change),
+`test_function_task.py` (29 passed), `test_power_operator.py` (60
+passed, 1 xfail), and a full fast-suite regression (7894 passed, the
+same 16 pre-existing failures, `-n 8`, ~34 min, zero new failures) all
+pass.
+
+The general "wide value in narrow context" bug family remains larger
+than the reduction, `TernaryOp`-condition, and this fix collectively
+cover -- confirmed by the 9-seed sweep above still showing 47 residual
+failures. Making the compiled engine's narrow emitter correctly route
+EVERY node type through the wide emitter whenever a nested sub-
+expression's own self-determined width exceeds 64 bits remains a
+larger, more systematic undertaking than any single fix in this
+sequence, mirroring the existing "compiled engine's 64-bit width limit
+is only partially resolved" work plan item 2.7 sub-item 4.
+`test_differential_functions.py`'s default (non-compiled) run and the
+originally-documented 8-seed `VERIFORGE_DIFF_FUNC_COMPILED=1` rotation
+remain fully green; other seeds will continue to hit residual gaps
+until a more systematic fix lands.
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8

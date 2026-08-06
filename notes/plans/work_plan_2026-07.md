@@ -1881,10 +1881,43 @@ wave entry. Verified: `tests/test_model/`/`tests/test_verilog_parser/`
 16 pre-existing failures as the baseline — confirmed via `git stash`
 bisection — and zero new failures, `-n 8`, ~34 min).
 
-Item (1) above (the wide-unary-`-`-in-function-argument reduction gap
-on compiled) remains open and deliberately deferred, mirroring item
-2.7 sub-item 4's framing — left for the user to prioritize as a future
-follow-up.
+**Follow-up to the follow-up to the follow-up: item (1) is now also
+fixed.** Root cause in `sim/compiled/_wide_emitter.py`'s
+`_emit_wide_lhs_write_new` (the recursive wide-destination-write
+entry point): when a NARROW destination's RHS still needs wide
+computation internally (e.g. `y0 = fn_sel1(..., (^(-a5)))` with `a5` 65
+bits, routed here via `_rhs_needs_wide_eval`), this function's own
+recursive `_emit_wide_expr_to_scratch` call can recurse into the
+NARROW emitter for a `FunctionCall` argument (`_emit_user_func_call_
+expr` always computes each argument via `_emit_expr`/`_emit_mask_
+expr`, regardless of the call's own destination width) — and that
+argument's own reduction, if wide, tries to hoist its computation via
+`_emit_wide_reduction_to_value`, which requires an active `_et_pending`
+list. `_emit_wide_lhs_write_new` never opened one (it doesn't itself
+need `_et_pending`, unlike its sibling top-level-statement compilers,
+which all already do), leaving it at whatever a PRIOR statement left
+it — `None` by default for the first statement in a module — so the
+hoist attempt silently failed and fell back to the narrow, 64-bit-only
+reduction formula. Fixed by having `_emit_wide_lhs_write_new` open its
+own `_et_pending` scope (mirroring its siblings) and thread any hoisted
+lines into its own output. New dedicated regression test
+`test_reduction_of_wide_unary_minus_function_argument` in
+`tests/test_sim/test_differential_functions.py` (confirmed to fail on
+the pre-fix baseline via `git stash`, passes after). A 9-seed x
+300-case sweep shows a strict improvement with zero regressions (53
+total failures pre-fix -> 47 post-fix, confirmed per-seed via `git
+stash` bisection) — the general "wide value in narrow context" bug
+family evidently still has further, as-yet-unfound instances beyond
+what this wave's three fixes (reduction, `TernaryOp` condition, this
+one) cover; making the compiled engine's narrow emitter correctly
+route EVERY node type through the wide emitter remains a larger,
+more systematic undertaking, mirroring item 2.7 sub-item 4's framing.
+Full detail in `notes/known_issues.md`'s Seventeenth wave entry.
+Verified: `test_differential.py`/`test_differential_statements.py`
+(unaffected, fully green), `test_function_task.py` (29 passed),
+`test_power_operator.py` (60 passed, 1 xfail), and a full fast-suite
+regression (7894 passed, the same 16 pre-existing failures, `-n 8`,
+~34 min, zero new failures).
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
