@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from enum import Enum, auto
 from typing import Callable
 
@@ -160,7 +161,11 @@ class ModuleGenerator:
 
         assigns: list[ContinuousAssign] = []
         for out in ctx.outputs:
-            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4))
+            # exclude=out.name: a continuous assign reading the same signal
+            # it drives (`assign o = f(o);`) is a genuine combinational
+            # feedback loop -- simulator-implementation-defined, not a
+            # well-defined result.
+            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4), exclude=out.name)
             assigns.append(ContinuousAssign(out.as_identifier(), rhs))
 
         ctx.continuous_assigns = assigns
@@ -200,9 +205,14 @@ class ModuleGenerator:
         )
 
         # Combinational output: assign o = expr(regs, inputs)
+        # exclude=out.name: same combinational self-feedback reasoning as
+        # `_gen_feedforward` above. (The reg_assignments block above is
+        # deliberately NOT excluded: `r <= r + 1`-style sequential self-
+        # reference via nonblocking assignment is legitimate, well-defined
+        # Verilog, not a race.)
         assigns: list[ContinuousAssign] = []
         for out in ctx.outputs:
-            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4))
+            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4), exclude=out.name)
             assigns.append(ContinuousAssign(out.as_identifier(), rhs))
 
         ctx.continuous_assigns = assigns
@@ -233,19 +243,7 @@ class ModuleGenerator:
         for _ in range(n_outputs):
             ctx.add_output(self._rng)
 
-        always_blocks: list[AlwaysBlock] = []
-        writable = ctx.all_writable()
-        for _ in range(n_always):
-            target = self._rng.choice(writable)
-            stmt = stmt_gen._assign_to(self._rng, target)
-            ab = AlwaysBlock(
-                stmt,
-                sensitivity_list=[],
-                sensitivity_type=SensitivityType.COMBINATIONAL,
-            )
-            always_blocks.append(ab)
-
-        ctx.always_blocks = always_blocks
+        ctx.always_blocks = self._gen_combinational_always_blocks(ctx, stmt_gen, n_always)
 
     # ------------------------------------------------------------------
     # Strategy: CLOCKED_SEQUENTIAL
@@ -345,27 +343,62 @@ class ModuleGenerator:
             ctx.add_output(self._rng)
 
         # Some continuous assigns
+        assign_wires = ctx.wires[: self._rng.randint(0, len(ctx.wires))]
         assigns: list[ContinuousAssign] = []
-        for wire in ctx.wires[: self._rng.randint(0, len(ctx.wires))]:
-            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 3))
+        for wire in assign_wires:
+            # exclude=wire.name: same combinational self-feedback reasoning
+            # as `_gen_feedforward`.
+            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 3), exclude=wire.name)
             assigns.append(ContinuousAssign(wire.as_identifier(), rhs))
 
-        # Some always @* blocks
-        always_blocks: list[AlwaysBlock] = []
-        writable = ctx.all_writable()
+        # Some always @* blocks -- excludes every signal already claimed by
+        # a continuous assign above, so a wire can never end up BOTH
+        # continuously and procedurally assigned (illegal in Verilog:
+        # Icarus rejects it as "Cannot perform procedural assignment to
+        # variable ... because it is also continuously assigned").
         n_always = self._rng.randint(1, 3)
-        for _ in range(n_always):
-            target = self._rng.choice(writable)
-            stmt = stmt_gen._assign_to(self._rng, target)
-            ab = AlwaysBlock(
-                stmt,
-                sensitivity_list=[],
-                sensitivity_type=SensitivityType.COMBINATIONAL,
-            )
-            always_blocks.append(ab)
+        already_assigned = {w.name for w in assign_wires}
+        always_blocks = self._gen_combinational_always_blocks(ctx, stmt_gen, n_always, exclude=already_assigned)
 
         ctx.continuous_assigns = assigns
         ctx.always_blocks = always_blocks
+
+    # ------------------------------------------------------------------
+    # Shared helper
+    # ------------------------------------------------------------------
+
+    def _gen_combinational_always_blocks(
+        self,
+        ctx: SignalContext,
+        stmt_gen: StatementGenerator,
+        n_always: int,
+        *,
+        exclude: Iterable[str] = (),
+    ) -> list[AlwaysBlock]:
+        """Build *n_always* `always @(*)` blocks, each driving a distinct
+        target signal.
+
+        Never lets two blocks (or a block and a name in *exclude*, e.g. a
+        signal already driven by a continuous assign) claim the same
+        target -- a real multiple-driver conflict whose outcome is
+        simulator-implementation-defined at best (two combinational
+        processes racing to write the same signal) or an outright illegal
+        continuous+procedural conflict at worst. Confirmed as the root
+        cause of the one genuine cross-engine (reference vs vm) divergence
+        found in an early fuzzer survey, traced back to two `always @(*)`
+        blocks both driving the same reg.
+        """
+        always_blocks: list[AlwaysBlock] = []
+        claimed = set(exclude)
+        for _ in range(n_always):
+            available = [s for s in ctx.all_writable() if s.name not in claimed]
+            if not available:
+                break
+            target = self._rng.choice(available)
+            claimed.add(target.name)
+            stmt = stmt_gen._assign_to(self._rng, target)
+            always_blocks.append(AlwaysBlock(stmt, sensitivity_list=[], sensitivity_type=SensitivityType.COMBINATIONAL))
+        return always_blocks
 
 
 def _collect_assigned_signals(stmt: Statement) -> set[str]:

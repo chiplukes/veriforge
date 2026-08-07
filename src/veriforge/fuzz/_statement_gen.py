@@ -71,14 +71,20 @@ class StatementGenerator:
 
     def _leaf_assign(self, rng: random.Random) -> Statement:
         target = self._ctx.pick_writable(rng)
-        rhs = self._expr.expr(rng, depth=rng.randint(1, 4))
+        # `exclude=target.name`: an RHS that directly reads the same signal
+        # it's writing (e.g. `o <= f(o);`) forms a combinational loop whose
+        # outcome is simulator-implementation-defined, not well-defined --
+        # a real source of cross-engine/Icarus mismatches, not a bug in any
+        # one engine.
+        rhs = self._expr.expr(rng, depth=rng.randint(1, 4), exclude=target.name)
         if rng.random() < 0.5:
             return BlockingAssign(target.as_identifier(), rhs)
         return NonblockingAssign(target.as_identifier(), rhs)
 
     def _assign_to(self, rng: random.Random, target_signal) -> Statement:
         """Generate an assignment with RHS constrained, writing to a specific signal."""
-        rhs = self._expr.expr(rng, depth=rng.randint(1, 3))
+        # Same self-reference reasoning as `_leaf_assign` above.
+        rhs = self._expr.expr(rng, depth=rng.randint(1, 3), exclude=target_signal.name)
         if rng.random() < 0.5:
             return BlockingAssign(target_signal.as_identifier(), rhs)
         return NonblockingAssign(target_signal.as_identifier(), rhs)
@@ -180,7 +186,14 @@ class StatementGenerator:
             BinaryOp("+", Identifier(var_name), Literal(1)),
         )
 
-        body = self.stmt(rng, depth - 1) if depth > 0 else self._leaf_assign(rng)
+        # Reserve the loop's own control variable while generating the body:
+        # otherwise the randomly generated body could itself pick `var_name`
+        # as an assignment target (indistinguishable from any other reg to
+        # the statement generator), clobbering the counter and turning a
+        # bounded loop into an unbounded one -- confirmed as the cause of
+        # observed "loop exceeded 100000 iterations" hangs.
+        with self._ctx.reserve(var_name):
+            body = self.stmt(rng, depth - 1) if depth > 0 else self._leaf_assign(rng)
         return ForLoop(init, cond, update, body, declares_var=True, signed_var=True)
 
     # ------------------------------------------------------------------
@@ -193,7 +206,9 @@ class StatementGenerator:
         ctrl_signal.name = f"wc{self._loop_counter}"
         max_val = rng.choice((3, 5, 8))
 
-        body = self.stmt(rng, depth - 1) if depth > 0 else self._leaf_assign(rng)
+        # Same reservation reasoning as `_for_loop` above.
+        with self._ctx.reserve(ctrl_signal.name):
+            body = self.stmt(rng, depth - 1) if depth > 0 else self._leaf_assign(rng)
         incr = BlockingAssign(
             ctrl_signal.as_identifier(),
             BinaryOp("+", ctrl_signal.as_identifier(), Literal(1)),

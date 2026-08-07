@@ -66,6 +66,11 @@ class SignalContext:
         self._params: list[Signal] = []
         self._scopes: list[list[Signal]] = [[]]  # stack of scoped locals
         self._counter = 0
+        # Names temporarily excluded from all_writable()/pick_writable() --
+        # e.g. a for/while loop's own control variable while generating its
+        # body, so the randomly generated body can't clobber the counter and
+        # turn the loop unbounded.
+        self._reserved: set[str] = set()
         # Populated by ModuleGenerator strategies after assembly
         self.always_blocks: list = []
         self.continuous_assigns: list = []
@@ -162,6 +167,21 @@ class SignalContext:
         finally:
             self._scopes.pop()
 
+    @contextmanager
+    def reserve(self, *names: str) -> Generator[SignalContext, None, None]:
+        """Temporarily exclude *names* from all_writable()/pick_writable().
+
+        Used while generating a for/while loop's own body so the randomly
+        generated body can't pick the loop's own control variable as an
+        assignment target -- clobbering it and turning a bounded loop into
+        an unbounded one.
+        """
+        self._reserved.update(names)
+        try:
+            yield self
+        finally:
+            self._reserved.difference_update(names)
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
@@ -205,18 +225,29 @@ class SignalContext:
         ]
 
     def all_writable(self) -> list[Signal]:
-        """Every signal that can appear on the LHS of an assignment."""
-        return [*self._wires, *self._regs, *self._outputs, *self.locals]
+        """Every signal that can appear on the LHS of an assignment.
+
+        Excludes anything currently `reserve()`d (e.g. an enclosing loop's
+        own control variable).
+        """
+        return [s for s in (*self._wires, *self._regs, *self._outputs, *self.locals) if s.name not in self._reserved]
 
     # ------------------------------------------------------------------
     # Random selection
     # ------------------------------------------------------------------
 
-    def pick_readable(self, rng: random.Random) -> Signal:
-        """Pick a random readable signal for use as an expression leaf."""
-        pool = self.all_readable()
+    def pick_readable(self, rng: random.Random, *, exclude: str | None = None) -> Signal:
+        """Pick a random readable signal for use as an expression leaf.
+
+        *exclude*, when set, drops that one signal name from the pool --
+        used so an assignment's RHS can't directly read the same signal
+        it's writing (a same-statement self-reference, e.g. `o <= f(o);`,
+        which forms a combinational loop with simulator-implementation-
+        defined behavior rather than a well-defined result).
+        """
+        pool = [s for s in self.all_readable() if s.name != exclude] if exclude else self.all_readable()
         if not pool:
-            pool = self._inputs  # fallback
+            pool = [s for s in self._inputs if s.name != exclude] if exclude else self._inputs  # fallback
         if not pool:
             return self.add_input(rng)  # create one as last resort
         return rng.choice(pool)

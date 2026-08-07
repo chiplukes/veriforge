@@ -65,9 +65,12 @@ class ExpressionGenerator:
     # Leaf / literal
     # ------------------------------------------------------------------
 
-    def leaf(self, rng: random.Random) -> Expression:
-        """Pick a signal from context, optionally bit/part selected."""
-        sig = self._ctx.pick_readable(rng)
+    def leaf(self, rng: random.Random, *, exclude: str | None = None) -> Expression:
+        """Pick a signal from context, optionally bit/part selected.
+
+        *exclude*: see ``expr()``'s docstring.
+        """
+        sig = self._ctx.pick_readable(rng, exclude=exclude)
         if sig.width == 1:
             return sig.as_identifier()
         roll = rng.random()
@@ -75,12 +78,25 @@ class ExpressionGenerator:
             return sig.as_identifier()
         if roll < 0.75:
             idx = rng.randrange(sig.width)
-            return BitSelect(sig.as_identifier(), Literal(idx))
+            return BitSelect(sig.as_identifier(), self._index_literal(idx))
         hi = rng.randrange(sig.width)
         lo = rng.randrange(hi + 1)
         if hi == lo:
-            return BitSelect(sig.as_identifier(), Literal(hi))
-        return RangeSelect(sig.as_identifier(), Literal(hi), Literal(lo))
+            return BitSelect(sig.as_identifier(), self._index_literal(hi))
+        return RangeSelect(sig.as_identifier(), self._index_literal(hi), self._index_literal(lo))
+
+    @staticmethod
+    def _index_literal(value: int) -> Literal:
+        """A small explicitly-sized literal for a bit-select/range-select
+        index. Bit-select/range-select indices don't themselves affect a
+        concatenation operand's own size (a select's width comes from the
+        select range, not the index), so leaving these unsized is likely
+        harmless -- sized defensively anyway to close off any doubt, at
+        zero cost. See `_make_nonzero` below for the literal that WAS
+        directly confirmed (against Icarus) to cause "concatenation operand
+        has indefinite width" errors.
+        """
+        return Literal(value, width=32, base="d", signed=False)
 
     def literal(self, rng: random.Random, *, width: int | None = None) -> Literal:
         """Generate a random literal with optional width constraint."""
@@ -100,6 +116,7 @@ class ExpressionGenerator:
         *,
         extra_signals: Sequence = (),
         callables: Sequence = (),
+        exclude: str | None = None,
     ) -> Expression:
         """Generate a random expression tree.
 
@@ -115,84 +132,92 @@ class ExpressionGenerator:
             data dependencies).  Not yet wired through SignalContext.
         callables:
             ``_FuncSpec`` objects allowing ``FunctionCall`` generation.
+        exclude:
+            A signal name to never read anywhere in the generated tree --
+            used by the statement generator to keep an assignment's RHS
+            from directly reading the same signal it's writing (a same-
+            statement self-reference forms a combinational loop with
+            simulator-implementation-defined behavior, not a well-defined
+            result -- confirmed as a real source of cross-engine/Icarus
+            mismatches, not just a theoretical concern).
         """
         if depth <= 0 or rng.random() < 0.35:
-            return self.leaf(rng)
+            return self.leaf(rng, exclude=exclude)
 
         kinds = self._NODE_KINDS if not callables else (*self._NODE_KINDS, "call")
         kind = rng.choice(kinds)
 
         if kind == "binary":
-            return self._binary(rng, depth, callables)
+            return self._binary(rng, depth, callables, exclude)
         if kind == "unary":
-            return self._unary(rng, depth, callables)
+            return self._unary(rng, depth, callables, exclude)
         if kind == "reduction":
-            return self._reduction(rng, depth, callables)
+            return self._reduction(rng, depth, callables, exclude)
         if kind == "ternary":
-            return self._ternary(rng, depth, callables)
+            return self._ternary(rng, depth, callables, exclude)
         if kind == "concat":
-            return self._concat(rng, depth, callables)
+            return self._concat(rng, depth, callables, exclude)
         if kind == "replicate":
-            return self._replicate(rng, depth, callables)
+            return self._replicate(rng, depth, callables, exclude)
         if kind == "cast":
-            return self._cast(rng, depth, callables)
+            return self._cast(rng, depth, callables, exclude)
         if kind == "call":
-            return self._call(rng, depth, callables)
+            return self._call(rng, depth, callables, exclude)
         raise AssertionError(f"unknown kind: {kind}")
 
     # ------------------------------------------------------------------
     # Compound generators
     # ------------------------------------------------------------------
 
-    def _binary(self, rng, depth, callables) -> BinaryOp:
+    def _binary(self, rng, depth, callables, exclude=None) -> BinaryOp:
         op = rng.choice(self._BINARY_OPS)
-        lhs = self.expr(rng, depth - 1, callables=callables)
-        rhs = self.expr(rng, depth - 1, callables=callables)
+        lhs = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
+        rhs = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
         if op in ("/", "%"):
             # Ensure RHS is non-zero to avoid div-by-zero noise
             rhs = self._make_nonzero(rhs)
         return BinaryOp(op, lhs, rhs)
 
-    def _unary(self, rng, depth, callables) -> UnaryOp:
+    def _unary(self, rng, depth, callables, exclude=None) -> UnaryOp:
         op = rng.choice(self._UNARY_OPS)
-        return UnaryOp(op, self.expr(rng, depth - 1, callables=callables))
+        return UnaryOp(op, self.expr(rng, depth - 1, callables=callables, exclude=exclude))
 
-    def _reduction(self, rng, depth, callables) -> UnaryOp:
+    def _reduction(self, rng, depth, callables, exclude=None) -> UnaryOp:
         op = rng.choice(self._REDUCTION_OPS)
-        return UnaryOp(op, self.expr(rng, depth - 1, callables=callables))
+        return UnaryOp(op, self.expr(rng, depth - 1, callables=callables, exclude=exclude))
 
-    def _ternary(self, rng, depth, callables) -> TernaryOp:
+    def _ternary(self, rng, depth, callables, exclude=None) -> TernaryOp:
         return TernaryOp(
-            condition=self.expr(rng, depth - 1, callables=callables),
-            true_expr=self.expr(rng, depth - 1, callables=callables),
-            false_expr=self.expr(rng, depth - 1, callables=callables),
+            condition=self.expr(rng, depth - 1, callables=callables, exclude=exclude),
+            true_expr=self.expr(rng, depth - 1, callables=callables, exclude=exclude),
+            false_expr=self.expr(rng, depth - 1, callables=callables, exclude=exclude),
         )
 
-    def _concat(self, rng, depth, callables) -> Concatenation:
+    def _concat(self, rng, depth, callables, exclude=None) -> Concatenation:
         n = rng.choice((2, 3))
-        parts = [self.expr(rng, depth - 1, callables=callables) for _ in range(n)]
+        parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
         return Concatenation(parts)
 
-    def _replicate(self, rng, depth, callables) -> Replication:
+    def _replicate(self, rng, depth, callables, exclude=None) -> Replication:
         n = rng.choice((2, 3))
         return Replication(
-            Literal(n),
-            self.expr(rng, depth - 1, callables=callables),
+            Literal(n, width=32, base="d", signed=False),
+            self.expr(rng, depth - 1, callables=callables, exclude=exclude),
         )
 
-    def _cast(self, rng, depth, callables) -> FunctionCall:
+    def _cast(self, rng, depth, callables, exclude=None) -> FunctionCall:
         cast = rng.choice(("$signed", "$unsigned"))
         return FunctionCall(
             cast,
-            [self.expr(rng, depth - 1, callables=callables)],
+            [self.expr(rng, depth - 1, callables=callables, exclude=exclude)],
             is_system=True,
         )
 
-    def _call(self, rng, depth, callables) -> FunctionCall:
+    def _call(self, rng, depth, callables, exclude=None) -> FunctionCall:
         from collections.abc import Sequence as Seq
 
         spec = rng.choice(callables if isinstance(callables, Seq) else list(callables))
-        args = [self.expr(rng, depth - 1, callables=callables) for _ in range(len(spec.arg_widths))]
+        args = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(len(spec.arg_widths))]
         return FunctionCall(spec.name, args)
 
     # ------------------------------------------------------------------
@@ -204,6 +229,14 @@ class ExpressionGenerator:
         """Wrap *expr* so it can never be zero at runtime.
 
         Uses ``expr | 1`` as a simple non-zero guard (same strategy as the
-        existing test_differential.py).
+        existing test_differential.py). The literal MUST be explicitly
+        sized: confirmed directly against Icarus that an unsized `1` here
+        makes the enclosing `/`/`%` expression's own width "indefinite"
+        (IEEE 1364-2005 §5.1.14) once embedded in a `{...}` concatenation
+        member -- `{a % (b | 1), a}` is rejected outright
+        ("Concatenation operand ... has indefinite width"), while
+        `{a % (b | 1'b1), a}` compiles fine. This was the confirmed root
+        cause of every observed "indefinite width" Icarus rejection from
+        this fuzzer.
         """
-        return BinaryOp("|", expr, Literal(1))
+        return BinaryOp("|", expr, Literal(1, width=1, base="b", signed=False))
