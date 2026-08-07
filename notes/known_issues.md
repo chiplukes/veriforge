@@ -3357,3 +3357,65 @@ for the known, separately-scoped gap just above); `test_function_task.py`
 (29 passed, unaffected) and `test_power_operator.py` (60 passed, 1
 xfail, unaffected); and a final full fast-suite regression (7122
 passed, 1 xfailed, 0 failed, `-n 8`, ~31 min, no regressions).
+
+**Nineteenth wave (August 2026): `TestWideSignalMemory`'s 12
+long-standing pre-existing failures (a Cython "Converting to Python
+object not allowed without gil" compile error) were a genuine
+compiled-engine correctness bug, not a Cython/tooling limitation** --
+root-caused and fixed while pursuing every remaining known failure per
+explicit user direction, rather than continuing to carry them as an
+accepted baseline. `_wide_emitter.py`'s `_emit_wide_expr_to_scratch`
+BitSelect case assumed every `BitSelect` node means a genuine
+single-bit select (`vec[3]`, always 1 bit, self-determined and
+unsigned per IEEE 1364-2005 §5.5.1) and unconditionally called
+`self._emit_expr(expr, 1)` / `self._emit_mask_expr(expr, 1)`, ANDing
+the result with `1` and zero-filling every other scratch word -- but
+`BitSelect` is also how the AST represents a *memory element* access
+(`mem[addr]`, the whole `elem_width`-bit word, not 1 bit), which
+`_expr_width` already special-cases correctly (`self._mem_info[mid][0]`,
+not 1 -- see `_expr_emitter.py`) but this function never checked. For a
+memory whose element width exceeds 64 bits, read combinationally into
+a wide-context destination (`always @(*) data_out = mem[rd_addr];`
+with `data_out`/`mem`'s elements 65/96/129 bits), this silently
+extracted only BIT 0 of word 0 of the memory element and zeroed every
+other word -- not merely "wrong," but discarding essentially the
+entire value. The `& gil` Cython compile error was collateral damage
+from a *different*, narrower code shape reached by the SAME bug (word
+0's read expression resolving, via the correctly-memory-aware narrow
+`_emit_expr`, to `c.mem_{mid}_val[idx]` -- a NARROW-memory-only struct
+field that was never declared for a wide memory in the first place,
+since wide memories only get `wide_mem_{mid}_val`/`wide_mem_{mid}_mask`
+-- Cython's "Converting to Python object" error was a confusing,
+misleading symptom of referencing an undeclared/mistyped field, not a
+genuine GIL issue).
+
+Fixed by special-casing memory-element access FIRST in this BitSelect
+branch (via the same `_resolve_memory_element_access` helper the
+narrow emitter already uses): for each scratch word, read from the
+already-existing per-word helpers `_wmem{mid}_word_val`/`_wmem{mid}_
+word_mask` (generated for every wide memory regardless of whether
+anything else in a given design happens to use them) when the memory
+itself is wide, or `c.mem_{mid}_val`/`c.mem_{mid}_mask` word 0 when
+narrow, masking the tail word to the element's own remaining bits and
+zero-filling (or, when `signed_override` is set, sign-extending via
+the existing `_wide_sign_extend_to_dst_lines` helper) beyond the
+element's own width up to the destination width -- mirroring the
+proven-correct masking logic already used by `_whole_assign_mem_elem_
+{mid}` (the analogous helper for continuous-assign whole-memory-element
+reads, which this BitSelect path doesn't share since it's reached from
+the general recursive wide-scratch emitter, not the continuous-assign-
+specific compiler).
+
+Verified: all 15 `TestWideSignalMemory` parametrized tests now pass
+(12 previously failing + 3 already passing); `tests/test_sim/
+compiled/test_memories.py`/`test_wide_ops.py`/`tests/test_sim/
+test_memory.py` (295 passed, unaffected); and a full fast-suite
+regression (7921 passed -- 15 more than the prior wave's 7906, exactly
+matching the 15 tests that flipped from failing to passing -- down to
+just 1 pre-existing failure, `test_or_chain_max_line_length`, an
+unrelated codegen line-length formatting check; `-n 8`, ~33 min, zero
+new failures). This closes 15 of the 16 failures that had been carried
+as an accepted "pre-existing baseline" through this entire multi-
+session bug-hunt, confirming the user's standing "pursue every known
+failure" directive was warranted even for failures that had been
+carried as accepted baseline for a long time.

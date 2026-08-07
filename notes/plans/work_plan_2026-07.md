@@ -2069,6 +2069,31 @@ this wave's prior 7900 matching the 6 new tests added, same 16
 pre-existing failures, `-n 8`, ~34.5 min, zero new failures). Full
 detail in `notes/known_issues.md`.
 
+**Nineteenth wave (August 2026): the 12 `TestWideSignalMemory`
+pre-existing failures — carried as an accepted baseline through this
+entire multi-session bug-hunt — turned out to be a genuine compiled-
+engine correctness bug, not a Cython/tooling limitation.**
+`_wide_emitter.py`'s recursive scratch emitter treated every
+`BitSelect` node as a genuine single-bit select, unconditionally
+extracting just bit 0 and zero-filling the rest — correct for `vec[3]`,
+but wrong for a *memory element* access (`mem[addr]`), which the same
+AST node also represents. For a memory with element width > 64 bits
+read combinationally into a wide destination, this silently discarded
+almost the entire value; the misleading Cython "Converting to Python
+object not allowed without gil" compile error was collateral damage
+from the same bug reaching an undeclared narrow-memory struct field
+for what should have been a wide-memory access. Fixed by special-
+casing memory-element access first, reading word-by-word through the
+existing (always-generated) `_wmem{mid}_word_val`/`_wmem{mid}_word_
+mask` helpers, mirroring the proven-correct masking logic already used
+by continuous assigns' `_whole_assign_mem_elem_{mid}`. Verified: all 15
+`TestWideSignalMemory` tests pass (12 previously failing + 3 already
+passing); `test_memories.py`/`test_wide_ops.py`/`test_memory.py` (295
+passed); full fast-suite regression (7921 passed — 15 more than the
+prior wave, matching exactly — down to just 1 pre-existing failure,
+`test_or_chain_max_line_length`, unrelated; `-n 8`, ~33 min, zero new
+failures). Full detail in `notes/known_issues.md`.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible
