@@ -2094,6 +2094,37 @@ prior wave, matching exactly — down to just 1 pre-existing failure,
 `test_or_chain_max_line_length`, unrelated; `-n 8`, ~33 min, zero new
 failures). Full detail in `notes/known_issues.md`.
 
+**Twentieth wave (August 2026): the last remaining documented gap —
+`AssignmentPattern`'s "theoretical" `signed_override` handling — was
+real, and reference-engine-only (vm/vm-fast/compiled already
+correct).** Two compounding bugs in `sim/evaluator.py`, both invisible
+to the differential fuzzer since it never generates `'{...}` nodes:
+`_expr_self_width` had no `AssignmentPattern` case (fell through to a
+bogus `32`-bit default, corrupting `$signed(...)`'s own self-width
+evaluation of its argument before the cast's sign-extend step ever
+ran), and even once that's fixed, `eval()`'s three `AssignmentPattern`
+branches never consulted `signed_override`, always zero-extending via
+`.resize()` instead of `.sign_extend()`. Confirmed against cross-engine
+agreement for `$signed('{flag})` with flag=1: only reference gave the
+wrong zero-extended `0x01` instead of `0xFF`. Fixed both gaps. New
+regression tests in `tests/test_sim/test_sim_sv.py`
+(`TestAssignmentPatternSignedOverride`, parametrized over all four
+engines), confirmed to fail on reference only before the fix via `git
+stash` bisection. Verified: `test_sim_sv.py` (73 passed),
+`test_differential_functions.py`/`test_function_task.py` (unaffected),
+full fast-suite regression (7929 passed — 8 more than the prior wave,
+matching the 8 new tests — same single remaining pre-existing failure,
+`-n 8`, ~38 min, zero new failures). Full detail in `notes/known_
+issues.md`.
+
+This closes every compiled-engine and cross-engine correctness gap
+this multi-session bug-hunt set out to chase — the only items left in
+`notes/known_issues.md` are the `vm-fast` `**` (power) over a >64-bit
+operand gap (a genuine architectural limitation needing real feature
+work in `_interp_fast.pyx`, not a bug fix, already pinned as strict
+xfail) and `test_or_chain_max_line_length` (an unrelated codegen
+line-length formatting check, not a correctness issue).
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

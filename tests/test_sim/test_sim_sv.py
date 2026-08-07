@@ -898,6 +898,82 @@ class TestAssignmentPatternSensitivity:
         assert sim.read("out_bus").val == 0x95, f"engine={engine}"
 
 
+# ── Assignment pattern signed_override (regression) ─────────────────
+
+from veriforge.analysis.resolver import link_instances, resolve_port_connections  # noqa: E402
+from veriforge.transforms.tree_to_model import tree_to_design  # noqa: E402
+from veriforge.verilog_parser import verilog_parser  # noqa: E402
+
+
+class TestAssignmentPatternSignedOverride:
+    """Regression test for a confirmed reference-engine bug: `$signed(...)`
+    wrapping an assignment pattern (`'{...}`) sign-extended incorrectly.
+
+    Two independent, compounding gaps in `sim/evaluator.py`, both in the
+    reference engine only (vm/vm-fast/compiled were already correct):
+
+    1. `_expr_self_width` had no `AssignmentPattern` case, silently
+       falling through to the generic `32`-bit default -- so `$signed`'s
+       own handling (`eval(inner, ctx, _expr_self_width(inner, ctx))`)
+       evaluated the pattern at a bogus self-width of 32 instead of its
+       true width, corrupting the value before the cast's own
+       sign-extend-to-context-width step ever ran.
+    2. Even with (1) fixed, `eval()`'s own `AssignmentPattern` branches
+       (named_pairs/positional/default_value) never consulted
+       `signed_override` when resizing to a wider requested `width`,
+       unconditionally calling `.resize()` (zero-extend) instead of
+       `.sign_extend()` when the context demands sign extension.
+
+    Confirmed against cross-engine agreement for `$signed('{flag})` with
+    flag=1: vm/vm-fast/compiled all correctly sign-extend to `-1`
+    (0xFF at 8 bits); reference incorrectly zero-extended to `1` (0x01)
+    before this fix.
+    """
+
+    @staticmethod
+    def _sim_for(source: str, engine: str) -> Simulator:
+        vp = verilog_parser(start="source_text")
+        tree = vp.build_tree(source)
+        design = tree_to_design(tree, source_file="t.v")
+        link_instances(design)
+        resolve_port_connections(design)
+        top = next(m for m in design.modules if m.name == "t")
+        return Simulator(top, engine=engine, design=design)
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signed_cast_of_positional_pattern_sign_extends(self, engine):
+        source = """
+module t(
+    input flag,
+    output [7:0] y0
+);
+    assign y0 = $signed('{flag});
+endmodule
+"""
+        sim = self._sim_for(source, engine)
+        sim.drive("flag", Value(1, width=1))
+        sim.settle()
+        assert sim.read("y0").val == 0xFF, f"engine={engine}"
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signed_cast_of_named_pattern_sign_extends(self, engine):
+        source = """
+module t(
+    input flag,
+    output [7:0] y0
+);
+    typedef struct packed {
+        logic flag;
+    } s1_t;
+    assign y0 = $signed('{flag: flag});
+endmodule
+"""
+        sim = self._sim_for(source, engine)
+        sim.drive("flag", Value(1, width=1))
+        sim.settle()
+        assert sim.read("y0").val == 0xFF, f"engine={engine}"
+
+
 # ── Struct with NBA (sequential) ────────────────────────────────────
 
 

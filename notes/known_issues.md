@@ -707,9 +707,46 @@ characterized. Specific known-remaining gaps:
   than the prior wave's 7900, matching the 6 new tests added this
   follow-up -- the same 16 pre-existing failures, `-n 8`, ~34.5 min,
   zero new failures).
-- `AssignmentPattern`'s theoretical `signed_override` gap (all three
-  sub-branches only ever `.resize()`, never `.sign_extend()`) remains
-  unfixed — deferred as low-priority/rare, not observed in fuzzer output.
+- **Follow-up (August 2026): the "theoretical" `AssignmentPattern`
+  `signed_override` gap was real -- confirmed and fixed, in the
+  REFERENCE engine only (vm/vm-fast/compiled were already correct).**
+  Two independent, compounding bugs in `sim/evaluator.py`, both
+  invisible to the differential fuzzer because it never generates
+  `'{...}` assignment-pattern nodes (see the Eighteenth-wave follow-up
+  above, same limitation): (1) `_expr_self_width` had no
+  `AssignmentPattern` case, silently falling through to the generic
+  `32`-bit default -- so `$signed(...)`'s own handling (`eval(inner,
+  ctx, _expr_self_width(inner, ctx))`, evaluating its argument at its
+  own self-determined width before deciding how to extend it to the
+  requested context width) evaluated the pattern at a bogus 32-bit
+  self-width instead of its true width, corrupting the value before the
+  cast's own sign-extend step ever ran; (2) even with (1) fixed, `eval
+  ()`'s three `AssignmentPattern` branches (named_pairs/positional/
+  default_value) never consulted `signed_override` at all when resizing
+  to a wider requested `width`, unconditionally `.resize()`-ing
+  (zero-extending) instead of `.sign_extend()`-ing when the context
+  demands sign extension. Confirmed against cross-engine agreement for
+  `$signed('{flag})` with `flag=1`: vm/vm-fast/compiled all correctly
+  give `0xFF` (sign-extended -1); reference gave `0x01` (wrongly
+  zero-extended) before this fix -- caught while investigating this
+  exact gap per explicit user direction to keep pursuing every known
+  failure, rather than continuing to carry it as an accepted "low-
+  priority/rare, not observed" deferral. Fixed by adding the missing
+  `AssignmentPattern` case to `_expr_self_width` (computing the true
+  self-width via `match_assignment_pattern_layout`'s `total_width` for
+  named_pairs, summed part self-widths for positional, or the default
+  value's own self-width) and threading `signed_override` through all
+  three `eval()` branches' width-mismatch handling. New regression
+  tests `TestAssignmentPatternSignedOverride::test_signed_cast_of_
+  positional_pattern_sign_extends`/`test_signed_cast_of_named_pattern_
+  sign_extends` (parametrized over all four engines) in `tests/test_sim/
+  test_sim_sv.py`, confirmed to fail on reference only (not vm/vm-fast/
+  compiled) before the fix via `git stash` bisection. Verified:
+  `test_sim_sv.py` (73 passed), `test_differential_functions.py`/
+  `test_function_task.py` (unaffected), and a full fast-suite regression
+  (7929 passed -- 8 more than the prior wave's 7921, matching the 8 new
+  tests added -- down to just the 1 remaining pre-existing failure,
+  `test_or_chain_max_line_length`, `-n 8`, ~38 min, zero new failures).
 - Any new divergence found in this area should be checked against Icarus
   before assuming the compiled engine is at fault, per the reference-engine
   bug found in wave two above.
