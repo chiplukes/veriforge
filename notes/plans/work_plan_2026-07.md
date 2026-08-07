@@ -1983,11 +1983,11 @@ fast-suite regression (7897 passed, same 16 pre-existing failures,
 
 **Eighteenth wave (August 2026): the `_emit_binary` gap is fixed, and a
 systematic follow-up campaign drove the residual failure count from 26
-down to 1**, per explicit user direction ("we need to pursue every
+down to 0**, per explicit user direction ("we need to pursue every
 known failure") rather than stopping at diminishing returns. New
 `_emit_wide_binary_to_value` helper (mirroring the established
 reduction/ternary-condition wide-routing pattern) wired into
-`_emit_binary` and `_emit_mask_expr`'s BinaryOp branch. Six more
+`_emit_binary` and `_emit_mask_expr`'s BinaryOp branch. Seven more
 distinct, confirmed bugs found and fixed while re-running the fuzzer
 after each fix: a `~`/unary-`+` mask sign-extension gap (two rounds —
 first for plain Identifiers, then for compound operands like nested
@@ -2004,15 +2004,20 @@ already-correctly-computed compound operand values; and
 `_emit_user_func_call_expr` computing arithmetic arguments (`%`/`/`)
 directly at a narrow port width, truncating the dividend before the
 remainder was determined. New generic `_emit_wide_arg_to_value` helper
-added for that last one. Three new regression tests. Full detail
-(including the one deliberately-deferred residual case — a genuine
-conflict between two previously-confirmed test cases in `TernaryOp`'s
-`signed_override` handling, needing dedicated study rather than a
-same-session patch) in `notes/known_issues.md`'s Eighteenth wave entry.
-Verified: 9-seed x 300-case sweep dropped from 26 to 1 failure (that
-one residual case); `test_differential.py`/`test_differential_
+added for that last one. The final, deepest case was `_emit_ternary_
+value_mask_exprs`'s `own_signed` letting an inherited `signed_override`
+win over the ternary's own combined signedness instead of always
+recomputing fresh from its own branches — fixed by making it
+unconditionally fresh (`own_signed = self._expr_signed(expr)`),
+matching `sim/evaluator.py`'s TernaryOp handling exactly; the design
+this replaced was a previously-deliberate fix for a different case that
+turned out to be coincidentally-correct there rather than necessary,
+so no regression resulted. Four new regression tests. Full detail in
+`notes/known_issues.md`'s Eighteenth wave entry. Verified: 9-seed x
+300-case sweep fully green across all 9 seeds (down from 26 failures
+at the start of this wave); `test_differential.py`/`test_differential_
 statements.py`/`test_function_task.py`/`test_power_operator.py`/
-`test_wide_ops.py` all unaffected; a full fast-suite regression (7897
+`test_wide_ops.py` all unaffected; a full fast-suite regression (7900
 passed, same 16 pre-existing failures, `-n 8`, ~34 min, zero new
 failures).
 

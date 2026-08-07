@@ -2829,7 +2829,11 @@ newly fixes):
   through `_emit_wide_reduction_to_value` (`ow > _WORD_BITS`), but
   something in the wide emitter's own recursive handling of a nested
   unary `-` at that width still produces a wrong answer (root cause not
-  yet isolated). Not fixed.
+  yet isolated). Not fixed at the time this paragraph was written --
+  **since fixed as a further follow-up a few waves later** (missing
+  `_et_pending` scope in `_emit_wide_lhs_write_new`); see the "Fixed as
+  a further follow-up" entry below with regression test
+  `test_reduction_of_wide_unary_minus_function_argument`.
 The `vm`-vs-`vm-fast` divergence noted above (`sim/vm/interpreter.py`
 giving a different answer than `sim/vm/_interp_fast.pyx` for the exact
 same `TernaryOp`-condition repro, despite executing identical bytecode)
@@ -3224,39 +3228,51 @@ compiled/test_wide_ops.py` all unaffected throughout, and a final full
 fast-suite regression (7897 passed, the same 16 pre-existing failures
 as every prior wave's baseline, `-n 8`, ~34 min, zero new failures).
 
-**Deliberately deferred (one residual case, confirmed but NOT fixed):
-`TernaryOp`'s `own_signed` computation lets an inherited `signed_
-override` win, where the reference evaluator (`sim/evaluator.py`)
-ALWAYS computes a fresh `own_signed` from the ternary's own branches,
-UNCONDITIONALLY IGNORING any inherited override.** Confirmed against
-Icarus (cross-engine agreement, reference/vm/vm-fast all correct) for
-`fn_add8({3{a4}}, (a3[35] ? (-(a1 ? a0 : a0)) : ($unsigned(a7) <<
-(!a2[4]))))`: the innermost `(a1 ? a0 : a0)` ternary (selecting `a0`,
-a signed 1-bit `-1`) is the OPERAND of a UnaryOp `-`, itself the TRUE
-branch of the OUTER ternary. The outer ternary's own combined
-signedness is FALSE (its false branch is `$unsigned(...)`), which
-propagates down as `signed_override=False` into the UnaryOp `-`'s
-own `_emit_expr` call for its operand -- and `_emit_ternary_value_
-mask_exprs`'s `own_signed = signed_override if signed_override is not
-None else self._expr_signed(expr)` lets that inherited `False` OVERRIDE
-the inner ternary's own combined signedness (which, computed fresh
-from ITS OWN branches -- `a0` both times, declared signed -- would be
-`True`), so `a0` gets zero- instead of sign-extended, corrupting `-a0`
-to negate `+1` instead of the correct `-1`. Reference's `own_signed =
-_expr_signed(expr, ctx)` (no override consulted at all -- "This
-establishes a *fresh* override for both branches, replacing whatever
-override... was active from further out", per its own comment)
-confirms this. NOT fixed: `_emit_ternary_value_mask_exprs`'s CURRENT
-"let signed_override win" design was itself a DELIBERATE, previously-
-confirmed fix (documented earlier in this same section, for `(a0 <=
-(a2 ? a0 : a6))`) -- reconciling these two seemingly-opposed confirmed
-cases (one requiring the override to win, one requiring it to be
-ignored) needs careful dedicated study of exactly which situations
-each rule applies to (the earlier case's ternary was the DIRECT operand
-of a comparison; this one's is nested inside a UnaryOp `-` first --
-plausibly the distinguishing factor, but not yet confirmed), not a
-same-session patch risked without that verification. Reported to the
-user for prioritization rather than silently left undocumented.
+**Follow-up: the deferred `TernaryOp` `own_signed`/`signed_override`
+conflict is now resolved.** `_emit_ternary_value_mask_exprs`'s
+`own_signed` (the ternary's own combined signedness, threaded into its
+branches as `t_signed_override`/`f_signed_override`) previously let an
+inherited `signed_override` parameter WIN over the ternary's own fresh
+computation from its two branches (`own_signed = signed_override if
+signed_override is not None else self._expr_signed(expr)`). Fixed by
+making it ALWAYS compute fresh, UNCONDITIONALLY ignoring the inherited
+override -- `own_signed = self._expr_signed(expr)` -- mirroring `sim/
+evaluator.py`'s TernaryOp handling exactly ("This establishes a *fresh*
+override for both branches, replacing whatever override... was active
+from further out", per its own comment).
+
+Root-caused by bisecting: the letting-override-win design was itself a
+DELIBERATE, previously-confirmed fix (documented earlier in this same
+section) for `(a0 <= (a2 ? a0 : a6))` (`a0`/`a6` both declared signed).
+A temporary `own_signed = self._expr_signed(expr)` experiment (always
+fresh) was tested against BOTH that confirmed case and the new one --
+and gave the CORRECT answer for both. The two designs turn out to be
+INDISTINGUISHABLE for the `(a0 <= ...)` case specifically: the
+comparison's inherited override and the ternary's own fresh computation
+independently evaluate to the SAME value (`True`) there, so removing
+the override's influence never actually changed that case's outcome --
+the letting-override-win design was not WRONG for that case, just
+never actually NECESSARY for it, and happened to be actively wrong for
+this new one. (First bisection attempt looked like it DIDN'T fix the
+new case even with the always-fresh experiment in place -- turned out
+to be the established "Compiled-engine cache collision" gotcha:
+testing two different modules named `t` back-to-back in the same
+Python process without clearing `.cycache` between them. Re-tested
+each module in a fully separate process to confirm.)
+
+Verified: new regression test `test_compiled_ternary_own_signed_
+ignores_inherited_override` in `tests/test_sim/test_differential_
+functions.py` (covers BOTH confirmed shapes -- the original
+letting-override-win fix, and the case that fix's design got wrong --
+to guard against a future change re-introducing either direction of
+this bug; confirmed to fail without the fix via a temporary revert). A
+9-seed x 300-case sweep, previously showing exactly this one residual
+failure, is now FULLY GREEN across all 9 seeds (36/36 passing batches
+each). `test_differential.py`/`test_differential_statements.py`/
+`test_function_task.py`/`test_power_operator.py`/`test_wide_ops.py`
+all unaffected, and a final full fast-suite regression (7900 passed,
+the same 16 pre-existing failures as every prior wave's baseline,
+`-n 8`, ~34 min, zero new failures).
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8
