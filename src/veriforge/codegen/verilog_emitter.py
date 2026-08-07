@@ -722,9 +722,6 @@ def _prec(op: str) -> int:
     return _BINARY_PREC.get(op, 0)
 
 
-_REDUCTION_OPS = frozenset({"~&", "~|", "~^", "^~", "&", "|", "^"})
-
-
 def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
     """Emit an Expression as Verilog text."""
     if isinstance(expr, Literal):
@@ -738,14 +735,13 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         # BinaryOp/TernaryOp operands need parens: ~(a & b) not ~a & b.
         # Nested UnaryOp operands need parens because Verilog grammar
         # requires unary_operator → primary; a UnaryOp expression tree
-        # like ~~x is not a primary, so we emit ~(~x).
-        # Concatenation/Replication/FunctionCall operands need parens
-        # when followed by a reduction op (which MUST be before a primary).
-        if isinstance(expr.operand, (BinaryOp, TernaryOp)):
-            operand_str = f"({operand_str})"
-        elif isinstance(expr.operand, UnaryOp):
-            operand_str = f"({operand_str})"
-        elif isinstance(expr.operand, (Concatenation, Replication, FunctionCall)) and expr.op in _REDUCTION_OPS:
+        # like ~~x is not a primary, so we emit ~(~x). Concatenation/
+        # Replication/FunctionCall/etc. operands are already valid
+        # primaries regardless of which unary operator precedes them, so
+        # they never need extra parens (confirmed against both this
+        # project's grammar and Icarus Verilog: `~&{a,b}`, `~|{2{a}}`,
+        # and `^foo(a)` all parse fine unparenthesized).
+        if isinstance(expr.operand, (BinaryOp, TernaryOp, UnaryOp)):
             operand_str = f"({operand_str})"
         return f"{expr.op}{operand_str}"
     if isinstance(expr, BinaryOp):
