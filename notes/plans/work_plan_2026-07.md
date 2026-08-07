@@ -2021,6 +2021,25 @@ statements.py`/`test_function_task.py`/`test_power_operator.py`/
 passed, same 16 pre-existing failures, `-n 8`, ~34 min, zero new
 failures).
 
+**Follow-up: the pre-existing `_emit_concat`/`_emit_replication`
+"residual gap" note (narrow-path `if shift >= 64: continue` truncation)
+re-investigated and confirmed closed** — a side effect of this wave's
+`_expr_max_internal_width` generalization, not a new fix. Any
+Concatenation whose own combined width exceeds 64 bits now always gets
+routed through the wide scratch emitter before `_emit_concat`'s narrow
+path is reached, making its `shift >= 64` branch unreachable dead code.
+Verified with five hand-built cross-engine repros matching the note's
+exact scenarios; new regression test `test_compiled_wide_concat_in_
+narrow_context_not_truncated` pins two of them. No production code
+change needed. While investigating, found a genuinely separate,
+still-open gap: `_emit_assignment_pattern`/`_emit_py_assignment_
+pattern` call `_emit_expr` on each field directly with no wide-routing
+check, and `_expr_max_internal_width` has no `AssignmentPattern` case
+to recurse through — a narrow-self-width field (e.g. a comparison or
+reduction) that internally needs wide computation could still be
+silently wrong. Not yet confirmed with a concrete repro; flagged in
+`notes/known_issues.md` for follow-up.
+
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 
 **Goal**: make compiled-engine fallback visible

@@ -619,3 +619,68 @@ endmodule
         y0, y1 = sim.read("y0"), sim.read("y1")
         assert y0 == td.Value(1, width=64), f"engine={engine} y0={y0!r}"
         assert y1 == td.Value(43, width=64), f"engine={engine} y1={y1!r}"
+
+
+def test_compiled_wide_concat_in_narrow_context_not_truncated() -> None:
+    """Regression test guarding the `notes/known_issues.md` "residual
+    gap" note about `_emit_concat`/`_emit_replication`'s narrow-path
+    `if shift >= 64: continue` line: a genuinely wide (>64-bit)
+    concatenation embedded as a ternary's CONDITION, or inside a
+    comparison passed as a function-call argument, both under an
+    otherwise-narrow destination.
+
+    Investigation found this scenario is NOT reachable in practice given
+    the current routing: any Concatenation whose own combined width
+    exceeds 64 bits already reports that width via `_expr_width`
+    (`sum(part widths)`), which `_expr_max_internal_width` folds into its
+    own `max(...)` at every level of the recursion -- so `_rhs_needs_
+    wide_eval` (statement-level), `_emit_wide_truthy_to_value` (ternary
+    condition), `_emit_wide_binary_to_value` (comparison operand), and
+    `_emit_wide_arg_to_value` (function-call argument) all correctly
+    route such a concatenation through the wide scratch-based emitter
+    -- which has its own dedicated `Concatenation`/`Replication` handling
+    in `_wide_emitter.py` -- before `_emit_concat`'s narrow path (whose
+    `shift` can only ever reach 64 when the concatenation's own total
+    width already exceeds 64, i.e. exactly when it's unreachable) is
+    ever invoked. Confirmed against Icarus (cross-engine): reference/vm/
+    vm-fast/compiled all already agree on both shapes below -- this test
+    exists purely to pin that agreement as a regression guard rather
+    than to fix a live bug.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0,
+    output [63:0] y1
+);
+    function [7:0] fn_sel(input [7:0] a, input b);
+        begin
+            fn_sel = b ? a : ~a;
+        end
+    endfunction
+    assign y0 = (({a6, a1}) ? a2[7:0] : a3[7:0]);
+    assign y1 = fn_sel(a3[7:0], (({a6, a1}) > 0));
+endmodule
+"""
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        sim.drive("a1", td.Value(0, width=8))
+        sim.drive("a2", td.Value(52301, width=16))
+        sim.drive("a3", td.Value(1067708165146980894, width=63))
+        sim.drive("a6", td.Value(1 << 60, width=80))
+        sim.settle()
+        y0, y1 = sim.read("y0"), sim.read("y1")
+        assert y0 == td.Value(77, width=64), f"engine={engine} y0={y0!r}"
+        assert y1 == td.Value(30, width=64), f"engine={engine} y1={y1!r}"

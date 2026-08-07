@@ -617,23 +617,48 @@ reference/VM engines each reimplement width/signedness/x-propagation
 independently, per-node-type, rather than sharing `semantics.py`'s already-
 unified logic — see item 4.2's explicit non-goal), not yet exhaustively
 characterized. Specific known-remaining gaps:
-- The narrow/scalar compiled-engine emitter (`_emit_concat`/
-  `_emit_replication` in `_expr_emitter.py`) silently drops any part whose
-  shift amount would reach or exceed 64 bits (`if shift >= 64: continue`)
-  — correct when the ENCLOSING expression's own width is ≤64 bits (the
-  normal case for this code path), but when a genuinely wide (>64-bit)
-  subexpression is embedded as e.g. a ternary's CONDITION inside an
-  otherwise-narrow-result context (a comparison, an arithmetic op nested
-  under a narrow destination), the condition's higher-order contributions
-  are silently truncated away. Did not cause an observed wrong answer in
-  either wave-four fix above (the informative/nonzero bits happened to
-  survive truncation in both cases) but is a latent correctness gap for
-  the general case — fixing it properly likely means routing such
-  subexpressions through wide scratch + `wide_logical_truth` even when the
-  enclosing statement's own destination width is narrow, mirroring
-  `_rhs_needs_wide_eval`'s existing statement-level "narrow result, wide
-  internals" detection but applied recursively per-subexpression rather
-  than only at the top level.
+- **Follow-up (August 2026): re-investigated, confirmed no longer
+  reachable — was a real gap at the time this note was written, closed
+  as a side effect of the Eighteenth wave's `_expr_max_internal_width`
+  generalization.** The narrow/scalar compiled-engine emitter
+  (`_emit_concat`/`_emit_replication` in `_expr_emitter.py`) silently
+  drops any part whose shift amount would reach or exceed 64 bits (`if
+  shift >= 64: continue`) — but `Concatenation`'s own `_expr_width` is
+  exactly `sum(part widths)`, and `_expr_max_internal_width` folds that
+  `own` width into its `max(...)` at every level of recursion
+  (`BinaryOp`/`UnaryOp`/`TernaryOp`/`Concatenation`/`Replication`/select/
+  `FunctionCall`-argument), so any Concatenation whose own combined
+  width exceeds 64 bits now always causes `_rhs_needs_wide_eval`
+  (statement level), `_emit_wide_truthy_to_value` (ternary condition),
+  `_emit_wide_binary_to_value` (comparison/binary operand), and
+  `_emit_wide_arg_to_value` (function-call argument) to route it through
+  the wide scratch-based emitter — which has its own dedicated
+  `Concatenation`/`Replication` handling in `_wide_emitter.py`
+  (`_emit_wide_expr_to_scratch`) — before `_emit_concat`'s narrow path
+  is ever reached. `_emit_concat`/`_emit_replication`'s own `shift`
+  variable starts at `sum(widths)` and only decreases, so it can only
+  reach 64 when the concatenation's own total width already exceeds 64
+  — precisely the case that's now always intercepted upstream. In other
+  words the `if shift >= 64: continue` line is currently unreachable
+  dead code, not a live truncation gap. Verified directly (not merely
+  inferred): five hand-built cross-engine repros matching this note's
+  exact scenarios (a wide concat as a ternary condition under a narrow
+  destination; as a comparison operand feeding a ternary condition; as
+  a comparison inside a function-call argument; a wide concat directly
+  truncated to a narrower destination; a wide concat used as a shift
+  amount) all agree across reference/vm/vm-fast/compiled. New regression
+  test `test_compiled_wide_concat_in_narrow_context_not_truncated` in
+  `tests/test_sim/test_differential_functions.py` pins the first two of
+  those shapes (ternary condition + function-argument comparison) as a
+  guard against a future routing regression re-exposing this path. No
+  production code change was needed. (The related `AssignmentPattern`
+  gap below is a genuinely separate, still-open case: `_emit_assignment_
+  pattern`/`_emit_py_assignment_pattern` call `_emit_expr` on each field
+  directly with no wide-routing check at all, and `_expr_max_internal_
+  width` has no `AssignmentPattern` case to recurse through — so a
+  narrow-self-width field (e.g. a comparison or reduction) that
+  internally needs wide computation would still be silently wrong. Not
+  yet confirmed with a concrete repro; flagged for follow-up.)
 - `AssignmentPattern`'s theoretical `signed_override` gap (all three
   sub-branches only ever `.resize()`, never `.sign_extend()`) remains
   unfixed — deferred as low-priority/rare, not observed in fuzzer output.
