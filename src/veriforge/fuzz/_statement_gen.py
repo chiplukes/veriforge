@@ -15,7 +15,6 @@ from ..model.statements import (
     CaseStatement,
     ForLoop,
     IfStatement,
-    NonblockingAssign,
     SeqBlock,
     Statement,
     WhileLoop,
@@ -77,17 +76,29 @@ class StatementGenerator:
         # a real source of cross-engine/Icarus mismatches, not a bug in any
         # one engine.
         rhs = self._expr.expr(rng, depth=rng.randint(1, 4), exclude=target.name)
-        if rng.random() < 0.5:
-            return BlockingAssign(target.as_identifier(), rhs)
-        return NonblockingAssign(target.as_identifier(), rhs)
+        # Always blocking: `_leaf_assign` is only ever reached from
+        # combinational `always @(*)` generation (via `stmt()`, used
+        # exclusively by MULTI_ALWAYS/MIXED/NESTED_BLOCKS strategies), never
+        # from a clocked block. A nonblocking write inside `always @(*)`
+        # defers the update to the NBA region -- a later statement (or the
+        # NEXT trigger of this same always block, once the deferred write
+        # lands and changes a signal the block reads) can observe the
+        # PRE-update value, an unstable read-your-own-stale-write hazard
+        # that's a well-known source of simulator-implementation-defined
+        # oscillation. Confirmed as the actual cause of every residual
+        # Icarus "unbounded simulation loop" timeout still reproducing
+        # after the combinational-dependency-cycle fix above: each one
+        # mixed nonblocking assignment into a combinational context.
+        return BlockingAssign(target.as_identifier(), rhs)
 
     def _assign_to(self, rng: random.Random, target_signal) -> Statement:
         """Generate an assignment with RHS constrained, writing to a specific signal."""
         # Same self-reference reasoning as `_leaf_assign` above.
         rhs = self._expr.expr(rng, depth=rng.randint(1, 3), exclude=target_signal.name)
-        if rng.random() < 0.5:
-            return BlockingAssign(target_signal.as_identifier(), rhs)
-        return NonblockingAssign(target_signal.as_identifier(), rhs)
+        # Always blocking -- same reasoning as `_leaf_assign` above
+        # (`_assign_to` is likewise only ever reached from combinational
+        # `always @(*)` generation, in MULTI_ALWAYS/MIXED).
+        return BlockingAssign(target_signal.as_identifier(), rhs)
 
     # ------------------------------------------------------------------
     # If / else-if chain

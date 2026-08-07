@@ -71,6 +71,18 @@ class SignalContext:
         # body, so the randomly generated body can't clobber the counter and
         # turn the loop unbounded.
         self._reserved: set[str] = set()
+        # Direct combinational dependency edges: target -> signals directly
+        # read while computing target's value, across EVERY continuous
+        # assign / always @(*) block in the module (module-wide, not
+        # per-block -- two separate always @(*) blocks each driving a
+        # different signal can still form a cycle between them). Populated
+        # incrementally by `pick_readable` whenever it's called with
+        # `exclude` set (which every combinational call site does -- see
+        # `record_comb_dep`'s docstring). Deliberately NOT populated for
+        # `always @(posedge clk)` reads, where self/mutual reference via
+        # nonblocking assignment (`r <= r + 1`, `a <= b; b <= a;`) is
+        # legitimate, well-defined Verilog, not a race.
+        self._comb_adj: dict[str, set[str]] = {}
         # Populated by ModuleGenerator strategies after assembly
         self.always_blocks: list = []
         self.continuous_assigns: list = []
@@ -239,18 +251,71 @@ class SignalContext:
     def pick_readable(self, rng: random.Random, *, exclude: str | None = None) -> Signal:
         """Pick a random readable signal for use as an expression leaf.
 
-        *exclude*, when set, drops that one signal name from the pool --
-        used so an assignment's RHS can't directly read the same signal
-        it's writing (a same-statement self-reference, e.g. `o <= f(o);`,
-        which forms a combinational loop with simulator-implementation-
-        defined behavior rather than a well-defined result).
+        *exclude*, when set, is the signal name of the combinational
+        assignment (continuous assign or `always @(*)`) currently being
+        built for -- every current call site passes its own write target
+        here. Two things happen:
+
+        1. That one signal is dropped from the pool -- a same-statement
+           self-reference (`o <= f(o);`) forms a combinational loop with
+           simulator-implementation-defined behavior, not a well-defined
+           result.
+        2. Any OTHER signal that would close a longer combinational cycle
+           back to *exclude* (directly or transitively, and possibly
+           through an entirely different always @(*) block -- e.g. block A
+           driving `x` from `y` while block B drives `y` from `x`) is also
+           dropped. Confirmed as a real, not just theoretical, cause of
+           Icarus (and occasionally our own engines') "unbounded
+           simulation loop" hangs from this fuzzer.
+
+        The chosen signal's dependency edge is then recorded via
+        `record_comb_dep` so later picks (in this expression, this
+        statement, or any later statement/block in the module) see it.
+
+        Pass ``exclude=None`` (the default) for a genuinely sequential read
+        (`always @(posedge clk)`), where self/mutual reference via
+        nonblocking assignment is legitimate and must NOT be restricted or
+        recorded into the combinational dependency graph.
         """
-        pool = [s for s in self.all_readable() if s.name != exclude] if exclude else self.all_readable()
+        if exclude:
+            pool = [s for s in self.all_readable() if s.name != exclude and not self.comb_reaches(s.name, exclude)]
+        else:
+            pool = self.all_readable()
         if not pool:
             pool = [s for s in self._inputs if s.name != exclude] if exclude else self._inputs  # fallback
-        if not pool:
-            return self.add_input(rng)  # create one as last resort
-        return rng.choice(pool)
+        picked = self.add_input(rng) if not pool else rng.choice(pool)  # create one as last resort
+        if exclude:
+            self.record_comb_dep(exclude, picked.name)
+        return picked
+
+    # ------------------------------------------------------------------
+    # Combinational dependency graph (cycle avoidance)
+    # ------------------------------------------------------------------
+
+    def record_comb_dep(self, target: str, read_name: str) -> None:
+        """Record that *target*'s combinational value directly reads *read_name*."""
+        self._comb_adj.setdefault(target, set()).add(read_name)
+
+    def comb_reaches(self, start: str, goal: str) -> bool:
+        """True if *goal* is reachable from *start* via recorded direct
+        combinational dependency edges, i.e. *start* already (directly or
+        transitively) depends on *goal*'s value.
+
+        Module-sized graphs here are tiny (a handful of signals), so a
+        fresh traversal per query is simpler and plenty fast -- no need
+        for incremental transitive-closure bookkeeping.
+        """
+        seen: set[str] = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            if node == goal:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(self._comb_adj.get(node, ()))
+        return False
 
     def pick_writable(self, rng: random.Random) -> Signal:
         """Pick a random writable signal for use as an assignment target."""
