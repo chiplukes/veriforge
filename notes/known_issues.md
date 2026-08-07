@@ -652,13 +652,61 @@ characterized. Specific known-remaining gaps:
   those shapes (ternary condition + function-argument comparison) as a
   guard against a future routing regression re-exposing this path. No
   production code change was needed. (The related `AssignmentPattern`
-  gap below is a genuinely separate, still-open case: `_emit_assignment_
-  pattern`/`_emit_py_assignment_pattern` call `_emit_expr` on each field
-  directly with no wide-routing check at all, and `_expr_max_internal_
-  width` has no `AssignmentPattern` case to recurse through — so a
-  narrow-self-width field (e.g. a comparison or reduction) that
-  internally needs wide computation would still be silently wrong. Not
-  yet confirmed with a concrete repro; flagged for follow-up.)
+  gap below turned out, on investigation, NOT to be a live compiled-
+  engine width-truncation bug: a field whose own self-width is narrow
+  but internally needs wide computation (e.g. a reduction over a
+  negated >64-bit operand) is already correctly hoisted through
+  `_emit_wide_reduction_to_value`/etc., because `_et_pending` is opened
+  unconditionally by the enclosing narrow-statement compiler regardless
+  of whether `_rhs_needs_wide_eval` flagged the AssignmentPattern
+  itself wide — each field's own local wide-hoisting check is what
+  matters, not a routing decision made at the AssignmentPattern level.
+  A genuinely >64-bit-total AssignmentPattern destination is also
+  handled correctly, via the Python-bignum fallback path (`_emit_py_
+  assignment_pattern`) when the C wide-scratch emitter's `_emit_wide_
+  expr_to_scratch` returns `None` for the unhandled node shape (slower,
+  but correct). Confirmed both with concrete cross-engine repros.
+
+  **What WAS found while building those repros: a genuine, more severe,
+  NON-compiled-engine bug** — a signal referenced ONLY inside an
+  assignment pattern's field values was invisible to sensitivity/
+  dependency analysis on the reference and vm/vm-fast engines
+  (`sim/scheduler.py`'s `_walk_expr_reads` and `sim/vm/compiler.py`'s
+  `_walk_expr_signals` both dispatch per node type with no
+  `AssignmentPattern` case, silently falling through to a no-op instead
+  of recursing into `named_pairs`/`positional`/`default_value`), so a
+  continuous assign or `always @(*)` block driven solely by such a
+  signal was NEVER scheduled to (re-)run — output permanently `x`. The
+  compiled engine's analogous collector (`compiled_scheduler.py`'s
+  `_walk_for_idents`) walks every AST node's `__slots__` generically
+  rather than dispatching per type, so it alone was unaffected — this
+  is how the asymmetry was first noticed (compiled gave a correct,
+  concrete answer while the other three gave `x`). Fixed by adding the
+  missing `AssignmentPattern` case to both walkers. New regression test
+  `TestAssignmentPatternSensitivity::test_signal_only_in_assignment_
+  pattern_is_sensed` (parametrized over all four engines) in `tests/
+  test_sim/test_sim_sv.py`, confirmed to fail on reference/vm/vm-fast
+  (compiled unaffected) before the fix via `git stash` bisection.
+
+  **Self-caught regression during verification**: the first version of
+  this fix iterated `expr.positional` unconditionally (`for value_expr
+  in expr.positional`) — but `AssignmentPattern.positional` is typed
+  `list[Expression] | None` and defaults to `None` (every other
+  consumer in the codebase guards with `if expr.positional:` first, per
+  `expressions.py`). Any assignment pattern using only `named_pairs` or
+  `default_value` (e.g. the common `'{default: '0}` reset idiom) hit a
+  `TypeError: 'NoneType' object is not iterable` inside the sensitivity
+  walker for every such design — caught immediately by a full
+  fast-suite run spiking to 115+ failures instead of the expected 16
+  partway through, well before it finished. Fixed by adding the missing
+  `if expr.positional:` guard in both files.
+
+  Verified (with the guard in place): `test_sim_sv.py` (65 passed),
+  `test_differential_functions.py` (23 passed), `test_function_task.py`
+  (52 passed), plus a full fast-suite regression (7906 passed -- 6 more
+  than the prior wave's 7900, matching the 6 new tests added this
+  follow-up -- the same 16 pre-existing failures, `-n 8`, ~34.5 min,
+  zero new failures).
 - `AssignmentPattern`'s theoretical `signed_override` gap (all three
   sub-branches only ever `.resize()`, never `.sign_extend()`) remains
   unfixed — deferred as low-priority/rare, not observed in fuzzer output.

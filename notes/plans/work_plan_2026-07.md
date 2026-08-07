@@ -2031,14 +2031,43 @@ path is reached, making its `shift >= 64` branch unreachable dead code.
 Verified with five hand-built cross-engine repros matching the note's
 exact scenarios; new regression test `test_compiled_wide_concat_in_
 narrow_context_not_truncated` pins two of them. No production code
-change needed. While investigating, found a genuinely separate,
-still-open gap: `_emit_assignment_pattern`/`_emit_py_assignment_
-pattern` call `_emit_expr` on each field directly with no wide-routing
-check, and `_expr_max_internal_width` has no `AssignmentPattern` case
-to recurse through — a narrow-self-width field (e.g. a comparison or
-reduction) that internally needs wide computation could still be
-silently wrong. Not yet confirmed with a concrete repro; flagged in
-`notes/known_issues.md` for follow-up.
+change needed.
+
+**Follow-up to the follow-up: chased the suspected `AssignmentPattern`
+wide-field gap down and found it was a false lead — but building the
+repros surfaced a real, more severe, non-compiled-engine bug.** The
+suspected gap (`_emit_assignment_pattern` calling `_emit_expr` on each
+field with no wide-routing check) turned out not to matter in practice:
+each field's own local wide-hoisting check (`_emit_wide_reduction_to_
+value` etc.) already fires correctly regardless, since `_et_pending` is
+opened unconditionally by the enclosing narrow-statement compiler; a
+genuinely wide AssignmentPattern destination is also handled correctly
+via the Python-bignum fallback path. Confirmed both with cross-engine
+repros. What the repros DID find: `sim/scheduler.py`'s `_walk_expr_
+reads` (reference engine) and `sim/vm/compiler.py`'s `_walk_expr_
+signals` (vm/vm-fast) both had no `AssignmentPattern` case in their
+per-node-type dispatch, silently skipping any signal referenced only
+inside an assignment pattern — so a continuous assign or `always @(*)`
+block driven solely by such a signal was never scheduled to re-run,
+leaving its output permanently `x` on three of the four engines. The
+compiled engine's own dependency collector walks `__slots__`
+generically rather than dispatching per type, so it was the only engine
+unaffected — that asymmetry is what surfaced the bug. Fixed by adding
+the missing case to both walkers. New regression test in `tests/
+test_sim/test_sim_sv.py` (`TestAssignmentPatternSensitivity`,
+parametrized over all four engines), confirmed to fail on reference/vm/
+vm-fast before the fix via `git stash` bisection. Self-caught a
+regression while verifying: the first version iterated `expr.
+positional` unconditionally, but that field is `list[Expression] |
+None` and defaults to `None` (every other consumer guards it) — any
+`'{default: ...}`/named-only pattern threw `TypeError` inside the
+sensitivity walker, spiking the full fast-suite to 115+ failures
+partway through instead of the expected 16; caught before the run even
+finished, fixed with the missing `if expr.positional:` guard. Verified
+after the guard: full fast-suite regression (7906 passed, 6 more than
+this wave's prior 7900 matching the 6 new tests added, same 16
+pre-existing failures, `-n 8`, ~34.5 min, zero new failures). Full
+detail in `notes/known_issues.md`.
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 

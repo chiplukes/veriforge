@@ -815,6 +815,89 @@ class TestStructSimCompiled:
         assert sim.read("out_data").val == 0xFF
 
 
+# ── Assignment pattern sensitivity (regression) ─────────────────────
+
+from veriforge.model.expressions import AssignmentPattern  # noqa: E402
+
+
+class TestAssignmentPatternSensitivity:
+    """Regression test for a confirmed cross-engine bug: a signal
+    referenced ONLY inside a SystemVerilog assignment pattern (`'{...}`)
+    was invisible to sensitivity/dependency analysis on the reference
+    and vm/vm-fast engines, so a continuous assign or always @(*) block
+    driven solely by such a signal was never scheduled to (re-)run,
+    leaving its output permanently x.
+
+    Root cause: `sim/scheduler.py`'s `_walk_expr_reads` (reference
+    engine) and `sim/vm/compiler.py`'s `_walk_expr_signals` (vm/
+    vm-fast) both dispatch on expression node type with an explicit
+    case per shape, and neither had a case for `AssignmentPattern` --
+    silently falling through to a no-op instead of recursing into
+    `named_pairs`/`positional`/`default_value`. The compiled engine's
+    analogous collector (`compiled_scheduler.py`'s `_walk_for_idents`)
+    walks every AST node's `__slots__` generically rather than
+    dispatching per type, so it was unaffected. Confirmed against
+    Icarus (cross-engine): compiled already gave the correct answer;
+    reference/vm/vm-fast all gave `x` before this fix.
+    """
+
+    def _make_pattern_module(self):
+        """bus_t bus; assign bus = '{in_flag, in_rest}; assign out = bus;"""
+        st = StructType(
+            [
+                StructField("flag", "logic"),
+                StructField("rest", "logic", width=Range(Literal(6), Literal(0))),
+            ],
+            packed=True,
+        )
+        td = TypedefDecl("bus_t", struct_type=st)
+
+        ports = [
+            Port("in_flag", PortDirection.INPUT),
+            Port("in_rest", PortDirection.INPUT, width=Range(Literal(6), Literal(0))),
+            Port("out_bus", PortDirection.OUTPUT, width=Range(Literal(7), Literal(0))),
+        ]
+        nets = [
+            Net("in_flag", NetKind.WIRE),
+            Net("in_rest", NetKind.WIRE, width=Range(Literal(6), Literal(0))),
+            Net("out_bus", NetKind.WIRE, width=Range(Literal(7), Literal(0))),
+        ]
+        variables = [
+            Variable("bus", VariableKind.REG, width=Range(Literal(7), Literal(0)), type_name="bus_t"),
+        ]
+        cas = [
+            ContinuousAssign(
+                Identifier("bus"),
+                AssignmentPattern(positional=[Identifier("in_flag"), Identifier("in_rest")]),
+            ),
+            ContinuousAssign(Identifier("out_bus"), Identifier("bus")),
+        ]
+
+        m = ModelModule("pattern_test", ports=ports, nets=nets, variables=variables)
+        m.continuous_assigns = cas
+        m.typedefs = [td]
+        return m
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signal_only_in_assignment_pattern_is_sensed(self, engine):
+        # `settle()` (not `run()`) is what exercises the buggy path: it
+        # only re-evaluates a continuous assign whose precomputed
+        # sensitivity set overlaps the just-driven signals
+        # (`Scheduler._run_dirty_continuous_assigns`) -- `run()` doesn't
+        # gate on that same precomputed set, so it doesn't reproduce
+        # this bug.
+        m = self._make_pattern_module()
+        sim = Simulator(m, engine=engine)
+        sim.drive("in_flag", Value(1, width=1))
+        sim.drive("in_rest", Value(0x2A, width=7))
+        sim.settle()
+        assert sim.read("out_bus").val == 0xAA, f"engine={engine}"
+
+        sim.drive("in_rest", Value(0x15, width=7))
+        sim.settle()
+        assert sim.read("out_bus").val == 0x95, f"engine={engine}"
+
+
 # ── Struct with NBA (sequential) ────────────────────────────────────
 
 
