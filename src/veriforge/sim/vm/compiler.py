@@ -959,7 +959,18 @@ class Compiler:  # cm:8c1e4a
                 # `(|a3[45]) % (($signed(a4[23]) - a0) | 1)`) and
                 # `_wide_emitter.py`'s/`_expr_emitter.py`'s equivalent
                 # `combined_override` fixes.
-                op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                # `width` (the OUTER destination context, when known) is
+                # folded in as a FLOOR on op_width, not a replacement for
+                # the max-of-operands computation -- needed for a `~`/
+                # unary-`-` operand: it must extend ITS OWN operand to the
+                # width it's compiled AT before complementing/negating, not
+                # complement/negate narrow then get zero-extended
+                # afterward. When such an operand's own self-width already
+                # equals the OTHER operand's self-width, op_width alone
+                # doesn't widen it at all. Mirrors the identical fix in
+                # `sim/evaluator.py` (see its docstring for the concrete
+                # Icarus-confirmed repro, `o5 | ~i3[6:3]`).
+                op_width = max(self._expr_width(expr.left), self._expr_width(expr.right), width or 0)
                 self._compile_expr(expr.left, program, op_width)
                 left_eff_signed = self._expr_signed(expr.left)
                 if left_eff_signed:

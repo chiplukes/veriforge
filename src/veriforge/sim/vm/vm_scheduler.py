@@ -432,6 +432,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 cur = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
             if cur == snap and not (self.interpreter and self.interpreter.dirty):
                 break
+
+        # NOTE: a matching "bootstrap combinational always blocks once at
+        # elaborate() time" fix was attempted here and REVERTED -- see the
+        # detailed note in `sim/scheduler.py`'s `elaborate()` (same fix,
+        # same revert reason: it broke `test_forever_loop_cross`, a module
+        # with a genuinely infinite combinational forever loop meant to be
+        # triggered only later via explicit stimulus, by running it
+        # unconditionally at elaborate() time instead). The gap that note
+        # describes remains open here too.
+
         self._sync_ref_ctx()
 
     def _sync_ref_ctx(self, names: set[str] | None = None) -> None:  # noqa: PLR0912

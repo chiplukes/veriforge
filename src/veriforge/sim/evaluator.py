@@ -488,7 +488,29 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # signed) wrongly zero-extended `a0` instead of sign-
                 # extending it, corrupting the divisor's own computed
                 # value from 1 to a huge wraparound magnitude.
-                op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                # `width` (the OUTER destination context, when known) is
+                # folded in as a FLOOR on op_width, not a replacement for
+                # the max-of-operands computation above it -- needed for a
+                # `~`/unary-`-` operand specifically: those must extend
+                # their OWN operand to the width they're evaluated AT
+                # before complementing/negating (zero-extending a narrow
+                # `~` RESULT afterward is wrong -- see the UnaryOp branch's
+                # own extensive comment on this). When such an operand's
+                # own self-width already happens to equal the OTHER
+                # operand's self-width (so op_width alone doesn't widen it
+                # at all), it would otherwise complement/negate at that
+                # narrow width and only get zero-extended afterward at the
+                # tail below -- computing the wrong padding bits. Widening
+                # op_width to the outer context up front instead lets `~`
+                # (or `-`) see and extend to the TRUE final width itself,
+                # before it runs. Confirmed against Icarus for `o5 |
+                # ~i3[6:3]` (o5 unsigned 3 bits, `i3[6:3]` an unsigned
+                # 4-bit part-select, destination 8 bits): Icarus gives
+                # `11111111` (i3[6:3] zero-extended to 8 bits, THEN
+                # complemented); the old op_width=4 computed `~i3[6:3]`
+                # at 4 bits first (`1111`), then zero-extended the already-
+                # complemented result to `00001111`.
+                op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx), width or 0)
                 left = self.eval(expr.left, ctx, op_width)
                 right = self.eval(expr.right, ctx, op_width)
                 if left.width != op_width:

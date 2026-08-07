@@ -1422,6 +1422,29 @@ class _ExprEmitterMixin:
         else:
             op_width = width
 
+        # `bitwise_op_width`: used ONLY for `&`/`|`/`^`/`~^`/`^~`'s actual
+        # VALUE computation below (comparisons keep using `op_width`
+        # unchanged) -- folds the OUTER destination `width` in as a floor,
+        # not a replacement for `op_width`'s max-of-operands computation.
+        # Needed for a `~`/unary-`-` operand: it must extend ITS OWN
+        # operand to the width it's emitted AT before complementing/
+        # negating (masking a narrow `~` RESULT to a wider width afterward
+        # is wrong -- `_emit_expr`'s UnaryOp case already extends-then-
+        # complements correctly when given the right width directly, but
+        # only ever received `op_width`, which can equal that operand's
+        # own self-width exactly -- e.g. when the OTHER operand happens to
+        # be at least as wide -- giving it no reason to extend at all).
+        # Always equals `op_width` for every op outside the bitwise set
+        # (a no-op substitution everywhere else). Confirmed against Icarus
+        # for `o5 | ~i3[6:3]` (o5 unsigned 3 bits, `i3[6:3]` an unsigned
+        # 4-bit part-select, destination 8 bits): Icarus gives `11111111`
+        # (i3[6:3] zero-extended to 8 bits, THEN complemented); the old
+        # op_width=4 computed `~i3[6:3]` at 4 bits first (`1111`), then
+        # zero-extended the already-complemented result to `00001111`.
+        # Mirrors the identical fix in `sim/evaluator.py`/`sim/vm/
+        # compiler.py`.
+        bitwise_op_width = max(op_width, width or 0) if expr.op in ("&", "|", "^", "~^", "^~") else op_width
+
         # `>>` is ALWAYS a logical (unsigned/zero-fill) shift in Verilog
         # regardless of the left operand's own declared signedness -- only
         # `>>>` sign-extends. Force unsigned explicitly for `>>` only;
@@ -1544,7 +1567,7 @@ class _ExprEmitterMixin:
             left_signed_override = None
         else:
             left_signed_override = False if expr.op == ">>" else combined_override
-        left = self._emit_expr(expr.left, op_width, left_signed_override)
+        left = self._emit_expr(expr.left, bitwise_op_width, left_signed_override)
         # The shift COUNT is self-determined (IEEE 1364-2005 Table 5-22 /
         # SS5.6): it must be evaluated at its OWN natural width, not
         # `op_width` (the enclosing context) -- requesting a wider context
@@ -1570,7 +1593,7 @@ class _ExprEmitterMixin:
         elif expr.op == "**":
             right = self._emit_expr(expr.right, self._expr_width(expr.right), signed_override)
         else:
-            right = self._emit_expr(expr.right, op_width, combined_override)
+            right = self._emit_expr(expr.right, bitwise_op_width, combined_override)
 
         # Sign-extend signed operands when context width exceeds operand width
         # (IEEE 1364-2005 §5.5.2).  Skip comparisons (handled separately) and
@@ -1670,8 +1693,8 @@ class _ExprEmitterMixin:
         # side was a known 1, XORed against an x bit stored as 0, giving a
         # spurious raw value=1 and wrongly taking the true branch.
         if expr.op in ("~^", "^~"):
-            lm = self._emit_mask_expr(expr.left, op_width, combined_override)
-            rm = self._emit_mask_expr(expr.right, op_width, combined_override)
+            lm = self._emit_mask_expr(expr.left, bitwise_op_width, combined_override)
+            rm = self._emit_mask_expr(expr.right, bitwise_op_width, combined_override)
             core = f"(~(({left}) ^ ({right})) & ~(({lm}) | ({rm})))"
             return f"({core}) & wmask({width})"
 
@@ -1906,8 +1929,8 @@ class _ExprEmitterMixin:
             # explicitly so `core` upholds the "value reads 0 wherever the
             # true result is ambiguous" convention -- see the identical fix
             # (and its Icarus-confirmed repro) on the `~^`/`^~` branch above.
-            xor_lm = self._emit_mask_expr(expr.left, op_width, combined_override)
-            xor_rm = self._emit_mask_expr(expr.right, op_width, combined_override)
+            xor_lm = self._emit_mask_expr(expr.left, bitwise_op_width, combined_override)
+            xor_rm = self._emit_mask_expr(expr.right, bitwise_op_width, combined_override)
             core = f"(({core}) & ~(({xor_lm}) | ({xor_rm})))"
         if expr.op in ("&", "|", "^"):
             # `needs_mask` is False for these -- their natural-width
@@ -1917,23 +1940,26 @@ class _ExprEmitterMixin:
             # rather than a direct assignment RHS (e.g. the divisor of
             # `%`): no outer mask ever runs, and an individual operand's
             # own sign-extension (`_sign_ext`, which fills the full native
-            # C register, not bounded to `op_width`) leaks straight through
-            # as garbage bits above `op_width`. Mask to `op_width` first
-            # (clearing that garbage), THEN -- only if the caller asked for
-            # a wider `width` than this operator's own natural op_width --
-            # extend using the WHOLE EXPRESSION's own combined signedness
-            # (IEEE 1364-2005 §5.5.1), mirroring `sim/evaluator.py`'s
-            # bitwise-op branch. Confirmed wrong (cross-engine, against the
-            # reference oracle) for `a3 % (a0 | 1)` where `a0` is a signed
-            # 1-bit register: `a0`'s own sign-extension leaked past the
-            # `|`'s natural 32-bit width into the divisor once nested
-            # inside the modulus's wider context.
-            if op_width < _WORD_BITS:
-                core = f"(({core}) & wmask({op_width}))"
-            if width and width > op_width:
+            # C register, not bounded to `bitwise_op_width`) leaks straight
+            # through as garbage bits above `bitwise_op_width`. Mask to
+            # `bitwise_op_width` first (clearing that garbage), THEN --
+            # only if the caller asked for a wider `width` than THAT
+            # (shouldn't happen given `bitwise_op_width`'s own `max(...,
+            # width)` floor, but kept as a defensive fallback rather than
+            # asserting the invariant away) -- extend using the WHOLE
+            # EXPRESSION's own combined signedness (IEEE 1364-2005
+            # §5.5.1), mirroring `sim/evaluator.py`'s bitwise-op branch.
+            # Confirmed wrong (cross-engine, against the reference oracle)
+            # for `a3 % (a0 | 1)` where `a0` is a signed 1-bit register:
+            # `a0`'s own sign-extension leaked past the `|`'s natural
+            # 32-bit width into the divisor once nested inside the
+            # modulus's wider context.
+            if bitwise_op_width < _WORD_BITS:
+                core = f"(({core}) & wmask({bitwise_op_width}))"
+            if width and width > bitwise_op_width:
                 eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
                 if eff_signed:
-                    return f"(_sign_ext({core}, {op_width})) & wmask({width})"
+                    return f"(_sign_ext({core}, {bitwise_op_width})) & wmask({width})"
                 return f"({core}) & wmask({width})"
             return core
         if needs_mask:
@@ -3142,6 +3168,30 @@ class _ExprEmitterMixin:
                         return wide[1]
             else:
                 op_width = width
+            # `bitwise_op_width`: mirrors `_emit_binary`'s identical fix on
+            # the VALUE side -- folds the OUTER destination `width` in as a
+            # floor on `op_width`, ONLY for `&`/`|`/`^`/`~^`/`^~` (never
+            # comparisons, which keep using `op_width` unchanged
+            # throughout this function). Needed for the SAME reason as the
+            # value side: a `~`/unary-`-`/`$signed`/`$unsigned` operand's
+            # own MASK must be computed at the width it's actually going
+            # to be combined/read at, not bitwise-op's own narrower
+            # natural width -- e.g. `$signed(a3)`'s mask, requested at
+            # only `a3`'s own 63-bit self-width, never got a chance to
+            # sign-extend into bit 63 even when `a3`'s own sign bit (mask
+            # position 62) is genuinely ambiguous, though the `|`'s
+            # destination is 64 bits. A prior fix here (see the trailing
+            # `& wmask(op_width)` on the `|`/`&` formulas below) narrowed
+            # `op_width` specifically to AVOID including `width`, believing
+            # that let a spurious bit leak through -- re-verified directly
+            # against Icarus for the exact repro that fix cited (`(fn_
+            # sub16s(a2[11:10], a7) | $signed(a3))` with `a3` 63 bits
+            # entirely x): Icarus gives ALL 64 bits of the result
+            # ambiguous, i.e. bit 63 genuinely IS ambiguous here, so that
+            # prior fix's own verification was mistaken -- `bitwise_op_
+            # width` corrects this while leaving every OTHER op (which it
+            # reduces to a no-op substitution for) untouched.
+            bitwise_op_width = max(op_width, width or 0) if expr.op in ("&", "|", "^", "~^", "^~") else op_width
             # If this node's mask was already hoisted to a named temp (by
             # _emit_binary for +/- or by _emit_mask_expr below for |/&),
             # return it directly to keep the mask path O(k).
@@ -3166,7 +3216,7 @@ class _ExprEmitterMixin:
                 mask_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
             else:
                 mask_override = signed_override
-            lm = self._emit_mask_expr(expr.left, op_width, mask_override)
+            lm = self._emit_mask_expr(expr.left, bitwise_op_width, mask_override)
             # The shift COUNT is self-determined -- see the identical note
             # in `_emit_binary`. Most node types' mask handling already
             # ignores an over-wide requested width internally (e.g. `~`
@@ -3180,7 +3230,7 @@ class _ExprEmitterMixin:
                 # identical note in `_emit_binary`.
                 rm = self._emit_mask_expr(expr.right, self._expr_width(expr.right))
             else:
-                rm = self._emit_mask_expr(expr.right, op_width, mask_override)
+                rm = self._emit_mask_expr(expr.right, bitwise_op_width, mask_override)
             if expr.op in ("==", "!="):
                 # A KNOWN bit that differs resolves the comparison to a
                 # definite result regardless of x/z bits elsewhere (mirrors
@@ -3394,33 +3444,39 @@ class _ExprEmitterMixin:
             # prevents O(k²) inline string growth (both lm and lv would otherwise
             # re-expand the same left subtree at each level of the chain).
             #
-            # Both formulas below must end with `& wmask(op_width)`, mirroring
-            # the VALUE-side `|`/`&` core formula's own identical trailing
-            # mask (`_emit_binary`, a few hundred lines up in this same
-            # file) -- `lm`/`rm` (each operand's own mask, requested at
-            # `op_width`) can carry garbage bits ABOVE `op_width` even when
-            # `op_width` already equals the operand's own declared width:
-            # `_sign_ext(v, w)`'s own contract (see `narrow_tail.pxi`)
-            # unconditionally fills every bit from `w` through the FULL
-            # native register once the checked bit is set, regardless of
-            # whether the caller's own `w` already covers the operand's
-            # entire meaningful content -- a `$signed(x)` cast requested at
-            # exactly `x`'s own width still triggers this fill (a
-            # theoretically redundant call that's nonetheless made
-            # unconditionally). Confirmed against Icarus for
-            # `(fn_sub16s(a2[11:10], a7) | $signed(a3))` with `a3` (63
-            # bits, unsigned by declaration) entirely x: `$signed(a3)`
-            # requested at `a3`'s own 63-bit width still sign-extends via
-            # `_sign_ext(mask, 63)`, spuriously setting bit 63 (one bit
-            # beyond `a3`'s own width) on the MASK side only -- the VALUE
-            # side's own identical `_sign_ext` call is immediately masked
-            # back down to 63 bits afterward, but the mask formula here
-            # never was, so that spurious bit 63 then leaked straight
-            # through as the whole expression's own bit 63 at the 64-bit
-            # destination.
+            # Both formulas below must end with `& wmask(bitwise_op_width)`,
+            # mirroring the VALUE-side `|`/`&` core formula's own identical
+            # trailing mask (`_emit_binary`, a few hundred lines up in this
+            # same file) -- `lm`/`rm` (each operand's own mask, requested
+            # at `bitwise_op_width`) can carry garbage bits ABOVE that
+            # width even when it already equals the operand's own declared
+            # width: `_sign_ext(v, w)`'s own contract (see `narrow_tail.
+            # pxi`) unconditionally fills every bit from `w` through the
+            # FULL native register once the checked bit is set, regardless
+            # of whether the caller's own `w` already covers the operand's
+            # entire meaningful content.
+            #
+            # This trailing mask previously used the narrower `op_width`
+            # (the bitwise op's own natural `max(left, right)` width,
+            # deliberately excluding the outer destination `width`) --
+            # believed, per an earlier fix here, to be necessary to avoid
+            # a "spurious" extra bit leaking through beyond the op's own
+            # width. Re-verified directly against Icarus for the EXACT
+            # repro that earlier fix cited, `(fn_sub16s(a2[11:10], a7) |
+            # $signed(a3))` with `a3` (63 bits) entirely x: Icarus gives
+            # ALL 64 bits of the result ambiguous (including bit 63, one
+            # bit beyond `a3`'s own 63-bit width) -- that bit is NOT
+            # spurious, `a3`'s sign bit genuinely being ambiguous
+            # legitimately propagates into it once `$signed(a3)` is
+            # evaluated at the wider `bitwise_op_width` (see this
+            # function's own `bitwise_op_width` computation above, and its
+            # value-side mirror in `_emit_binary`, for why `~i3[6:3]`/
+            # `$signed(a3)`-style operands need to see that wider width to
+            # begin with). The earlier fix's own verification of this
+            # exact case was mistaken.
             if expr.op == "|":
-                lv = self._emit_expr(expr.left, op_width)
-                rv = self._emit_expr(expr.right, op_width)
+                lv = self._emit_expr(expr.left, bitwise_op_width)
+                rv = self._emit_expr(expr.right, bitwise_op_width)
                 if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
@@ -3430,10 +3486,10 @@ class _ExprEmitterMixin:
                     self._et_node_vals[id(expr.left)] = f"_et{n}_v"
                     lv = f"_et{n}_v"
                     lm = f"_et{n}_m"
-                return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})) & wmask({op_width}))"
+                return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})) & wmask({bitwise_op_width}))"
             if expr.op == "&":
-                lv = self._emit_expr(expr.left, op_width)
-                rv = self._emit_expr(expr.right, op_width)
+                lv = self._emit_expr(expr.left, bitwise_op_width)
+                rv = self._emit_expr(expr.right, bitwise_op_width)
                 if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
@@ -3443,7 +3499,7 @@ class _ExprEmitterMixin:
                     self._et_node_vals[id(expr.left)] = f"_et{n}_v"
                     lv = f"_et{n}_v"
                     lm = f"_et{n}_m"
-                return f"((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm})) & wmask({op_width}))"
+                return f"((({lm}) | ({rm})) & ~(~({lv}) & ~({lm})) & ~(~({rv}) & ~({rm})) & wmask({bitwise_op_width}))"
             return f"({lm} | {rm})"
 
         if etype is UnaryOp:

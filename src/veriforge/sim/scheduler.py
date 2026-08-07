@@ -439,6 +439,30 @@ class Scheduler:  # cm:9a7f2c
             if not self._run_continuous_assigns():
                 break
 
+        # NOTE: a matching "bootstrap combinational always blocks once at
+        # elaborate() time" fix (mirroring the continuous-assign bootstrap
+        # just above, for the same reason: `run()` already does this
+        # unconditionally on every call, but a caller that only ever calls
+        # settle() -- never run() -- never reaches it, so a combinational
+        # block entirely "downstream" of signals nothing ever externally
+        # drives stays stuck at its default x value forever under
+        # settle()-only usage, while Icarus/`run()`-based usage correctly
+        # evaluate it once at simulation start) was attempted here and
+        # REVERTED: unconditionally running every combinational block at
+        # elaborate() time, before any real stimulus is ever applied,
+        # broke `test_forever_loop_cross` (a module with a genuinely
+        # infinite combinational forever loop, meant to be triggered only
+        # later via explicit stimulus/settle() calls -- this fix made it
+        # fire during elaborate() instead) and an analogous compiled-
+        # engine attempt caused native crashes in division-heavy designs
+        # (dividing against genuinely undriven/uninitialized operands at
+        # construction time). This needs a more careful, narrower fix than
+        # "run everything unconditionally" -- e.g. only bootstrapping
+        # combinational processes that are provably unreachable from any
+        # input port, or deferring the bootstrap to the first settle()
+        # call instead of elaborate() -- not attempted here. The gap this
+        # note describes therefore remains open in all four engines.
+
     def _eval_initial_value(self, init_expr: object, width: int) -> Value:
         """Evaluate an initial_value expression, returning Value.x if absent."""
         if init_expr is None:

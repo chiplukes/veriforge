@@ -4053,6 +4053,28 @@ class _WideEmitterMixin:
                     op_width = max(dst_width, self._expr_width(expr.left), self._expr_width(expr.right))
                 else:
                     op_width = dst_width
+                # `bitwise_op_width`: used ONLY for `&`/`|`/`^`/`~^`/`^~`'s
+                # actual scratch computation below (comparisons keep using
+                # `op_width` unchanged) -- folds `dst_width` in as a floor,
+                # not a replacement for `op_width`'s max-of-operands
+                # computation. Needed for a `~`/unary-`-` operand: it must
+                # extend ITS OWN operand to the width it's emitted AT
+                # before complementing/negating, not complement/negate
+                # narrow then get zero-extended afterward. When such an
+                # operand's own self-width already equals the OTHER
+                # operand's self-width, `op_width` alone doesn't widen it
+                # at all. Always equals `op_width` for every op outside the
+                # bitwise set (a no-op substitution everywhere else).
+                # Mirrors the identical fix in `sim/evaluator.py`/`sim/vm/
+                # compiler.py`/`_expr_emitter.py`'s narrow `_emit_binary`
+                # (see either docstring for the concrete Icarus-confirmed
+                # repro, `o5 | ~i3[6:3]`) -- this is that same fix's wide-
+                # destination counterpart: `o5 | ~i3[117:77]` only reaches
+                # THIS file at all because `i3` (128 bits) is itself a wide
+                # signal, even though the assignment's own destination
+                # (`o6`, 59 bits) and the natural op_width (41 bits) are
+                # both <=64 bits.
+                bitwise_op_width = max(op_width, dst_width) if op in ("&", "|", "^", "~^", "^~") else op_width
                 # Division/modulus is NOT "residue-safe" like +/-/* (whose
                 # modular arithmetic is invariant to whether each operand
                 # was individually sign- or zero-extended, as long as each
@@ -4125,13 +4147,13 @@ class _WideEmitterMixin:
                 else:
                     combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
                 llines = self._emit_wide_expr_to_scratch(
-                    expr.left, lslot, n_words, op_width, indent, signed_override=combined_override
+                    expr.left, lslot, n_words, bitwise_op_width, indent, signed_override=combined_override
                 )
                 if llines is None:
                     self._free_scratch(lslot, rslot)
                     return None
                 rlines = self._emit_wide_expr_to_scratch(
-                    expr.right, rslot, n_words, op_width, indent, signed_override=combined_override
+                    expr.right, rslot, n_words, bitwise_op_width, indent, signed_override=combined_override
                 )
                 if rlines is None:
                     self._free_scratch(lslot, rslot)
@@ -4152,7 +4174,7 @@ class _WideEmitterMixin:
                 # out of the scratch array, so any extra high words beyond
                 # that are simply never read, no separate narrowing step
                 # needed here.
-                prim_width = op_width if op in ("/", "%") else min(op_width, dst_width)
+                prim_width = op_width if op in ("/", "%") else min(bitwise_op_width, dst_width)
                 lines.append(
                     f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m,"
                     f" _sc{lslot}_v, _sc{lslot}_m,"
@@ -4164,11 +4186,11 @@ class _WideEmitterMixin:
                 # signedness) -- not each operand individually, since it's
                 # the combined expression's signedness that governs here
                 # (IEEE 1364-2005 SS5.5.2).
-                if op_width < dst_width:
+                if bitwise_op_width < dst_width:
                     eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
                     if eff_signed:
                         lines.extend(
-                            self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(op_width), indent)
+                            self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(bitwise_op_width), indent)
                         )
                 self._free_scratch(lslot, rslot)
                 return lines

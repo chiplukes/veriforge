@@ -1108,6 +1108,31 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.extend(self._initial_lines)
             lines.append("        self._raise_runtime_error()")
 
+        # NOTE: a matching "bootstrap combinational always blocks once at
+        # construction" fix (mirroring `sim/scheduler.py`'s and `sim/vm/
+        # vm_scheduler.py`'s `elaborate()`) was attempted here and
+        # REVERTED -- calling `delta_loop()` unconditionally in `__init__`
+        # runs EVERY combinational/continuous process immediately at
+        # construction, before any caller has driven real stimulus. That
+        # broke existing, deliberate tests (`test_while_loop_limit_raises`
+        # et al. in `tests/test_sim/compiled/test_execution.py`, which
+        # construct a `CompiledSim` for a module with a genuinely infinite
+        # combinational loop and expect construction to succeed, only
+        # raising the loop-limit error later once explicitly triggered)
+        # and caused native crashes in division-heavy designs (dividing
+        # against genuinely undriven/uninitialized operands at
+        # construction time hit undefined behavior in the generated C,
+        # not just a wrong Verilog x-result). This needs a more careful,
+        # narrower fix than "run everything unconditionally" -- e.g. only
+        # bootstrapping combinational processes that are provably
+        # unreachable from any input port (rather than every one), or
+        # deferring the bootstrap to the first settle()/step() call
+        # instead of `__init__` -- not attempted here. The compiled
+        # engine therefore still has the underlying gap this note
+        # describes (a combinational block entirely downstream of a
+        # signal nothing ever drives stays stuck at its default x value
+        # under settle()-only usage), while reference/vm/vm-fast do not.
+
         # drive method
         lines.extend(
             [

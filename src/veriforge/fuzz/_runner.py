@@ -400,12 +400,40 @@ class FuzzRunner:
         port_names = ", ".join(p.name for p in mod.ports)
         lines.append(f"    {mod.name} dut ({port_names});")
 
+        # `clk` gets an explicit, clean one-pulse-per-vector toggle below,
+        # matching `_simulate`'s handling for our own engines EXACTLY
+        # (settle, clk=1, settle, clk=0) -- it must NOT be driven from
+        # `vec`'s own (randomly generated, since `_gen_stimulus` treats
+        # every input port identically) value here. Before this fix, `clk`
+        # was driven like any other input -- a random bit per vector, often
+        # not even changing between consecutive vectors -- so Icarus's
+        # `always @(posedge clk)` blocks fired on a completely different
+        # (effectively uncorrelated) schedule than our own engines', which
+        # always get exactly one clean edge per vector regardless of what
+        # `vec["clk"]` happened to contain. Confirmed as the dominant cause
+        # of value mismatches from this fuzzer: 43 of 46 mismatches in one
+        # survey were on clocked modules, and none were a genuine engine
+        # disagreement (`reference`/`vm`/`vm-fast` always agreed with each
+        # other -- only the Icarus comparison, driven by this diverging
+        # clock schedule, disagreed).
+        has_clock = "clk" in input_names
         lines.append("    initial begin")
+        if has_clock:
+            lines.append("        clk = 1'b0;")
         for _vi, vec in enumerate(vectors):
-            for name in input_names:
+            for name in sorted(input_names):
+                if name == "clk":
+                    continue
                 val_repr = self._value_to_verilog(vec.get(name, Value(0)))
                 lines.append(f"        {name} = {val_repr};")
-            lines.append("        #10;")
+            if has_clock:
+                lines.append("        #5;")
+                lines.append("        clk = 1'b1;")
+                lines.append("        #5;")
+                lines.append("        clk = 1'b0;")
+                lines.append("        #5;")
+            else:
+                lines.append("        #10;")
             # $display outputs in a fixed order, space-delimited in format
             # so parsing with split() works; signal args use commas.
             display_parts = ", ".join(sorted(output_names))
