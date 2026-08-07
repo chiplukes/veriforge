@@ -2973,6 +2973,22 @@ class Compiler:  # cm:8c1e4a
             self._walk_expr_signals(expr.typ_val, signals)
             return
 
+        if isinstance(expr, AssignmentPattern):
+            # Previously unhandled: fell through to a silent no-op, so any
+            # signal referenced ONLY inside an assignment pattern's field
+            # values was invisible to sensitivity analysis. See the
+            # matching fix/comment in `sim/scheduler.py`'s `_walk_expr_
+            # reads` for the reference-engine counterpart of this same
+            # bug (confirmed cross-engine against Icarus).
+            for _name, value_expr in expr.named_pairs:
+                self._walk_expr_signals(value_expr, signals)
+            if expr.positional:
+                for value_expr in expr.positional:
+                    self._walk_expr_signals(value_expr, signals)
+            if expr.default_value is not None:
+                self._walk_expr_signals(expr.default_value, signals)
+            return
+
     def _collect_stmt_signals(self, stmt: Statement, signals: set[int]) -> None:  # noqa: PLR0912, PLR0911
         """Collect signal IDs read in a statement's expressions."""
         if stmt is None:

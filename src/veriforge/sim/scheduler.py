@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
 from veriforge.model.expressions import (
+    AssignmentPattern,
     BinaryOp,
     BitSelect,
     Concatenation,
@@ -1239,6 +1240,26 @@ def _walk_expr_reads(expr: Expression, reads: set[str]) -> None:  # noqa: PLR091
     if isinstance(expr, FunctionCall):
         for arg in expr.arguments:
             _walk_expr_reads(arg, reads)
+        return
+
+    if isinstance(expr, AssignmentPattern):
+        # Previously unhandled: fell through to a silent no-op, so any
+        # signal referenced ONLY inside an assignment pattern's field
+        # values was invisible to sensitivity analysis -- a continuous
+        # assign or always @(*) block driven solely by such a signal
+        # would never be scheduled to (re-)run, leaving its output
+        # permanently x. Confirmed against Icarus (cross-engine): vm/
+        # vm-fast share this same gap (`sim/vm/compiler.py`'s analogous
+        # `_walk_expr_signals`); only compiled (which collects signal
+        # references via a generic reflective `__slots__` walk, not a
+        # hand-maintained per-node-type dispatch) was unaffected.
+        for _name, value_expr in expr.named_pairs:
+            _walk_expr_reads(value_expr, reads)
+        if expr.positional:
+            for value_expr in expr.positional:
+                _walk_expr_reads(value_expr, reads)
+        if expr.default_value is not None:
+            _walk_expr_reads(expr.default_value, reads)
         return
 
 

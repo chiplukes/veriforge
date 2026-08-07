@@ -973,18 +973,37 @@ class ExpressionEvaluator:  # cm:7e8b5d
                         field_val = field_val.resize(field_width)
                     parts.append(field_val)
                 result = _concat_values(parts)
-                return result.resize(width) if width and result.width != width else result
+                # An assignment pattern has no inherent sign of its own (IEEE
+                # 1364-2005 -- its bits are just packed together); `signed_
+                # override`, when set, comes from an enclosing `$signed()`
+                # cast or forced-signed context (a ternary/bitwise-op's
+                # combined signedness) reinterpreting the pattern's OWN
+                # packed bit pattern as signed before extending to `width`.
+                # Confirmed against cross-engine agreement (vm/vm-fast/
+                # compiled all correctly sign-extend `$signed('{flag})`;
+                # only this branch's unconditional `.resize()` zero-extended
+                # instead) for `$signed('{flag})` with flag=1: extending an
+                # 8-bit destination should give -1 (all 1s), not 1.
+                if width and result.width != width:
+                    return result.sign_extend(width) if signed_override else result.resize(width)
+                return result
 
             if expr.positional:
                 # Self-determined, same reasoning as Concatenation above.
                 parts = [self.eval(part, ctx, _expr_self_width(part, ctx)) for part in expr.positional]
                 result = _concat_values(parts)
-                return result.resize(width) if width and result.width != width else result
+                # Same signed_override reasoning as the named_pairs branch above.
+                if width and result.width != width:
+                    return result.sign_extend(width) if signed_override else result.resize(width)
+                return result
 
             if expr.default_value is not None:
                 default_width = width or self.eval(expr.default_value, ctx).width
                 default_val = self.eval(expr.default_value, ctx, width=default_width)
-                return default_val.resize(width) if width and default_val.width != width else default_val
+                # Same signed_override reasoning as the named_pairs branch above.
+                if width and default_val.width != width:
+                    return default_val.sign_extend(width) if signed_override else default_val.resize(width)
+                return default_val
 
             return Value(0, width=width or 1)
 
@@ -1411,6 +1430,25 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         return _expr_self_width(expr.operand, ctx)
     if etype is TernaryOp:
         return max(_expr_self_width(expr.true_expr, ctx), _expr_self_width(expr.false_expr, ctx))
+    if etype is AssignmentPattern:
+        # Previously unhandled: fell through to the generic `32` default,
+        # silently wrong whenever an assignment pattern's true width isn't
+        # 32 -- e.g. `$signed('{flag})` (a 1-bit pattern) evaluating `inner`
+        # at a bogus self-width of 32 before the `$signed` cast's own
+        # sign-extend-to-context-width step ever runs, corrupting the
+        # result. Confirmed against cross-engine agreement (vm/vm-fast/
+        # compiled all correctly give `-1` sign-extended to 8 bits for
+        # `$signed('{flag})` with flag=1; only reference, via this gap,
+        # gave `1` zero-extended instead).
+        if expr.named_pairs:
+            layout = match_assignment_pattern_layout(expr, ctx._struct_type_map)
+            if layout is not None:
+                return layout.total_width
+        elif expr.positional:
+            return sum(_expr_self_width(part, ctx) for part in expr.positional)
+        elif expr.default_value is not None:
+            return _expr_self_width(expr.default_value, ctx)
+        return 32
     if etype is FunctionCall:
         name = expr.name.lower()
         if name in ("$signed", "$unsigned") and expr.arguments:

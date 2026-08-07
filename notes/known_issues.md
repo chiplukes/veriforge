@@ -617,26 +617,136 @@ reference/VM engines each reimplement width/signedness/x-propagation
 independently, per-node-type, rather than sharing `semantics.py`'s already-
 unified logic — see item 4.2's explicit non-goal), not yet exhaustively
 characterized. Specific known-remaining gaps:
-- The narrow/scalar compiled-engine emitter (`_emit_concat`/
-  `_emit_replication` in `_expr_emitter.py`) silently drops any part whose
-  shift amount would reach or exceed 64 bits (`if shift >= 64: continue`)
-  — correct when the ENCLOSING expression's own width is ≤64 bits (the
-  normal case for this code path), but when a genuinely wide (>64-bit)
-  subexpression is embedded as e.g. a ternary's CONDITION inside an
-  otherwise-narrow-result context (a comparison, an arithmetic op nested
-  under a narrow destination), the condition's higher-order contributions
-  are silently truncated away. Did not cause an observed wrong answer in
-  either wave-four fix above (the informative/nonzero bits happened to
-  survive truncation in both cases) but is a latent correctness gap for
-  the general case — fixing it properly likely means routing such
-  subexpressions through wide scratch + `wide_logical_truth` even when the
-  enclosing statement's own destination width is narrow, mirroring
-  `_rhs_needs_wide_eval`'s existing statement-level "narrow result, wide
-  internals" detection but applied recursively per-subexpression rather
-  than only at the top level.
-- `AssignmentPattern`'s theoretical `signed_override` gap (all three
-  sub-branches only ever `.resize()`, never `.sign_extend()`) remains
-  unfixed — deferred as low-priority/rare, not observed in fuzzer output.
+- **Follow-up (August 2026): re-investigated, confirmed no longer
+  reachable — was a real gap at the time this note was written, closed
+  as a side effect of the Eighteenth wave's `_expr_max_internal_width`
+  generalization.** The narrow/scalar compiled-engine emitter
+  (`_emit_concat`/`_emit_replication` in `_expr_emitter.py`) silently
+  drops any part whose shift amount would reach or exceed 64 bits (`if
+  shift >= 64: continue`) — but `Concatenation`'s own `_expr_width` is
+  exactly `sum(part widths)`, and `_expr_max_internal_width` folds that
+  `own` width into its `max(...)` at every level of recursion
+  (`BinaryOp`/`UnaryOp`/`TernaryOp`/`Concatenation`/`Replication`/select/
+  `FunctionCall`-argument), so any Concatenation whose own combined
+  width exceeds 64 bits now always causes `_rhs_needs_wide_eval`
+  (statement level), `_emit_wide_truthy_to_value` (ternary condition),
+  `_emit_wide_binary_to_value` (comparison/binary operand), and
+  `_emit_wide_arg_to_value` (function-call argument) to route it through
+  the wide scratch-based emitter — which has its own dedicated
+  `Concatenation`/`Replication` handling in `_wide_emitter.py`
+  (`_emit_wide_expr_to_scratch`) — before `_emit_concat`'s narrow path
+  is ever reached. `_emit_concat`/`_emit_replication`'s own `shift`
+  variable starts at `sum(widths)` and only decreases, so it can only
+  reach 64 when the concatenation's own total width already exceeds 64
+  — precisely the case that's now always intercepted upstream. In other
+  words the `if shift >= 64: continue` line is currently unreachable
+  dead code, not a live truncation gap. Verified directly (not merely
+  inferred): five hand-built cross-engine repros matching this note's
+  exact scenarios (a wide concat as a ternary condition under a narrow
+  destination; as a comparison operand feeding a ternary condition; as
+  a comparison inside a function-call argument; a wide concat directly
+  truncated to a narrower destination; a wide concat used as a shift
+  amount) all agree across reference/vm/vm-fast/compiled. New regression
+  test `test_compiled_wide_concat_in_narrow_context_not_truncated` in
+  `tests/test_sim/test_differential_functions.py` pins the first two of
+  those shapes (ternary condition + function-argument comparison) as a
+  guard against a future routing regression re-exposing this path. No
+  production code change was needed. (The related `AssignmentPattern`
+  gap below turned out, on investigation, NOT to be a live compiled-
+  engine width-truncation bug: a field whose own self-width is narrow
+  but internally needs wide computation (e.g. a reduction over a
+  negated >64-bit operand) is already correctly hoisted through
+  `_emit_wide_reduction_to_value`/etc., because `_et_pending` is opened
+  unconditionally by the enclosing narrow-statement compiler regardless
+  of whether `_rhs_needs_wide_eval` flagged the AssignmentPattern
+  itself wide — each field's own local wide-hoisting check is what
+  matters, not a routing decision made at the AssignmentPattern level.
+  A genuinely >64-bit-total AssignmentPattern destination is also
+  handled correctly, via the Python-bignum fallback path (`_emit_py_
+  assignment_pattern`) when the C wide-scratch emitter's `_emit_wide_
+  expr_to_scratch` returns `None` for the unhandled node shape (slower,
+  but correct). Confirmed both with concrete cross-engine repros.
+
+  **What WAS found while building those repros: a genuine, more severe,
+  NON-compiled-engine bug** — a signal referenced ONLY inside an
+  assignment pattern's field values was invisible to sensitivity/
+  dependency analysis on the reference and vm/vm-fast engines
+  (`sim/scheduler.py`'s `_walk_expr_reads` and `sim/vm/compiler.py`'s
+  `_walk_expr_signals` both dispatch per node type with no
+  `AssignmentPattern` case, silently falling through to a no-op instead
+  of recursing into `named_pairs`/`positional`/`default_value`), so a
+  continuous assign or `always @(*)` block driven solely by such a
+  signal was NEVER scheduled to (re-)run — output permanently `x`. The
+  compiled engine's analogous collector (`compiled_scheduler.py`'s
+  `_walk_for_idents`) walks every AST node's `__slots__` generically
+  rather than dispatching per type, so it alone was unaffected — this
+  is how the asymmetry was first noticed (compiled gave a correct,
+  concrete answer while the other three gave `x`). Fixed by adding the
+  missing `AssignmentPattern` case to both walkers. New regression test
+  `TestAssignmentPatternSensitivity::test_signal_only_in_assignment_
+  pattern_is_sensed` (parametrized over all four engines) in `tests/
+  test_sim/test_sim_sv.py`, confirmed to fail on reference/vm/vm-fast
+  (compiled unaffected) before the fix via `git stash` bisection.
+
+  **Self-caught regression during verification**: the first version of
+  this fix iterated `expr.positional` unconditionally (`for value_expr
+  in expr.positional`) — but `AssignmentPattern.positional` is typed
+  `list[Expression] | None` and defaults to `None` (every other
+  consumer in the codebase guards with `if expr.positional:` first, per
+  `expressions.py`). Any assignment pattern using only `named_pairs` or
+  `default_value` (e.g. the common `'{default: '0}` reset idiom) hit a
+  `TypeError: 'NoneType' object is not iterable` inside the sensitivity
+  walker for every such design — caught immediately by a full
+  fast-suite run spiking to 115+ failures instead of the expected 16
+  partway through, well before it finished. Fixed by adding the missing
+  `if expr.positional:` guard in both files.
+
+  Verified (with the guard in place): `test_sim_sv.py` (65 passed),
+  `test_differential_functions.py` (23 passed), `test_function_task.py`
+  (52 passed), plus a full fast-suite regression (7906 passed -- 6 more
+  than the prior wave's 7900, matching the 6 new tests added this
+  follow-up -- the same 16 pre-existing failures, `-n 8`, ~34.5 min,
+  zero new failures).
+- **Follow-up (August 2026): the "theoretical" `AssignmentPattern`
+  `signed_override` gap was real -- confirmed and fixed, in the
+  REFERENCE engine only (vm/vm-fast/compiled were already correct).**
+  Two independent, compounding bugs in `sim/evaluator.py`, both
+  invisible to the differential fuzzer because it never generates
+  `'{...}` assignment-pattern nodes (see the Eighteenth-wave follow-up
+  above, same limitation): (1) `_expr_self_width` had no
+  `AssignmentPattern` case, silently falling through to the generic
+  `32`-bit default -- so `$signed(...)`'s own handling (`eval(inner,
+  ctx, _expr_self_width(inner, ctx))`, evaluating its argument at its
+  own self-determined width before deciding how to extend it to the
+  requested context width) evaluated the pattern at a bogus 32-bit
+  self-width instead of its true width, corrupting the value before the
+  cast's own sign-extend step ever ran; (2) even with (1) fixed, `eval
+  ()`'s three `AssignmentPattern` branches (named_pairs/positional/
+  default_value) never consulted `signed_override` at all when resizing
+  to a wider requested `width`, unconditionally `.resize()`-ing
+  (zero-extending) instead of `.sign_extend()`-ing when the context
+  demands sign extension. Confirmed against cross-engine agreement for
+  `$signed('{flag})` with `flag=1`: vm/vm-fast/compiled all correctly
+  give `0xFF` (sign-extended -1); reference gave `0x01` (wrongly
+  zero-extended) before this fix -- caught while investigating this
+  exact gap per explicit user direction to keep pursuing every known
+  failure, rather than continuing to carry it as an accepted "low-
+  priority/rare, not observed" deferral. Fixed by adding the missing
+  `AssignmentPattern` case to `_expr_self_width` (computing the true
+  self-width via `match_assignment_pattern_layout`'s `total_width` for
+  named_pairs, summed part self-widths for positional, or the default
+  value's own self-width) and threading `signed_override` through all
+  three `eval()` branches' width-mismatch handling. New regression
+  tests `TestAssignmentPatternSignedOverride::test_signed_cast_of_
+  positional_pattern_sign_extends`/`test_signed_cast_of_named_pattern_
+  sign_extends` (parametrized over all four engines) in `tests/test_sim/
+  test_sim_sv.py`, confirmed to fail on reference only (not vm/vm-fast/
+  compiled) before the fix via `git stash` bisection. Verified:
+  `test_sim_sv.py` (73 passed), `test_differential_functions.py`/
+  `test_function_task.py` (unaffected), and a full fast-suite regression
+  (7929 passed -- 8 more than the prior wave's 7921, matching the 8 new
+  tests added -- down to just the 1 remaining pre-existing failure,
+  `test_or_chain_max_line_length`, `-n 8`, ~38 min, zero new failures).
 - Any new divergence found in this area should be checked against Icarus
   before assuming the compiled engine is at fault, per the reference-engine
   bug found in wave two above.
@@ -2829,7 +2939,11 @@ newly fixes):
   through `_emit_wide_reduction_to_value` (`ow > _WORD_BITS`), but
   something in the wide emitter's own recursive handling of a nested
   unary `-` at that width still produces a wrong answer (root cause not
-  yet isolated). Not fixed.
+  yet isolated). Not fixed at the time this paragraph was written --
+  **since fixed as a further follow-up a few waves later** (missing
+  `_et_pending` scope in `_emit_wide_lhs_write_new`); see the "Fixed as
+  a further follow-up" entry below with regression test
+  `test_reduction_of_wide_unary_minus_function_argument`.
 The `vm`-vs-`vm-fast` divergence noted above (`sim/vm/interpreter.py`
 giving a different answer than `sim/vm/_interp_fast.pyx` for the exact
 same `TernaryOp`-condition repro, despite executing identical bytecode)
@@ -3224,39 +3338,51 @@ compiled/test_wide_ops.py` all unaffected throughout, and a final full
 fast-suite regression (7897 passed, the same 16 pre-existing failures
 as every prior wave's baseline, `-n 8`, ~34 min, zero new failures).
 
-**Deliberately deferred (one residual case, confirmed but NOT fixed):
-`TernaryOp`'s `own_signed` computation lets an inherited `signed_
-override` win, where the reference evaluator (`sim/evaluator.py`)
-ALWAYS computes a fresh `own_signed` from the ternary's own branches,
-UNCONDITIONALLY IGNORING any inherited override.** Confirmed against
-Icarus (cross-engine agreement, reference/vm/vm-fast all correct) for
-`fn_add8({3{a4}}, (a3[35] ? (-(a1 ? a0 : a0)) : ($unsigned(a7) <<
-(!a2[4]))))`: the innermost `(a1 ? a0 : a0)` ternary (selecting `a0`,
-a signed 1-bit `-1`) is the OPERAND of a UnaryOp `-`, itself the TRUE
-branch of the OUTER ternary. The outer ternary's own combined
-signedness is FALSE (its false branch is `$unsigned(...)`), which
-propagates down as `signed_override=False` into the UnaryOp `-`'s
-own `_emit_expr` call for its operand -- and `_emit_ternary_value_
-mask_exprs`'s `own_signed = signed_override if signed_override is not
-None else self._expr_signed(expr)` lets that inherited `False` OVERRIDE
-the inner ternary's own combined signedness (which, computed fresh
-from ITS OWN branches -- `a0` both times, declared signed -- would be
-`True`), so `a0` gets zero- instead of sign-extended, corrupting `-a0`
-to negate `+1` instead of the correct `-1`. Reference's `own_signed =
-_expr_signed(expr, ctx)` (no override consulted at all -- "This
-establishes a *fresh* override for both branches, replacing whatever
-override... was active from further out", per its own comment)
-confirms this. NOT fixed: `_emit_ternary_value_mask_exprs`'s CURRENT
-"let signed_override win" design was itself a DELIBERATE, previously-
-confirmed fix (documented earlier in this same section, for `(a0 <=
-(a2 ? a0 : a6))`) -- reconciling these two seemingly-opposed confirmed
-cases (one requiring the override to win, one requiring it to be
-ignored) needs careful dedicated study of exactly which situations
-each rule applies to (the earlier case's ternary was the DIRECT operand
-of a comparison; this one's is nested inside a UnaryOp `-` first --
-plausibly the distinguishing factor, but not yet confirmed), not a
-same-session patch risked without that verification. Reported to the
-user for prioritization rather than silently left undocumented.
+**Follow-up: the deferred `TernaryOp` `own_signed`/`signed_override`
+conflict is now resolved.** `_emit_ternary_value_mask_exprs`'s
+`own_signed` (the ternary's own combined signedness, threaded into its
+branches as `t_signed_override`/`f_signed_override`) previously let an
+inherited `signed_override` parameter WIN over the ternary's own fresh
+computation from its two branches (`own_signed = signed_override if
+signed_override is not None else self._expr_signed(expr)`). Fixed by
+making it ALWAYS compute fresh, UNCONDITIONALLY ignoring the inherited
+override -- `own_signed = self._expr_signed(expr)` -- mirroring `sim/
+evaluator.py`'s TernaryOp handling exactly ("This establishes a *fresh*
+override for both branches, replacing whatever override... was active
+from further out", per its own comment).
+
+Root-caused by bisecting: the letting-override-win design was itself a
+DELIBERATE, previously-confirmed fix (documented earlier in this same
+section) for `(a0 <= (a2 ? a0 : a6))` (`a0`/`a6` both declared signed).
+A temporary `own_signed = self._expr_signed(expr)` experiment (always
+fresh) was tested against BOTH that confirmed case and the new one --
+and gave the CORRECT answer for both. The two designs turn out to be
+INDISTINGUISHABLE for the `(a0 <= ...)` case specifically: the
+comparison's inherited override and the ternary's own fresh computation
+independently evaluate to the SAME value (`True`) there, so removing
+the override's influence never actually changed that case's outcome --
+the letting-override-win design was not WRONG for that case, just
+never actually NECESSARY for it, and happened to be actively wrong for
+this new one. (First bisection attempt looked like it DIDN'T fix the
+new case even with the always-fresh experiment in place -- turned out
+to be the established "Compiled-engine cache collision" gotcha:
+testing two different modules named `t` back-to-back in the same
+Python process without clearing `.cycache` between them. Re-tested
+each module in a fully separate process to confirm.)
+
+Verified: new regression test `test_compiled_ternary_own_signed_
+ignores_inherited_override` in `tests/test_sim/test_differential_
+functions.py` (covers BOTH confirmed shapes -- the original
+letting-override-win fix, and the case that fix's design got wrong --
+to guard against a future change re-introducing either direction of
+this bug; confirmed to fail without the fix via a temporary revert). A
+9-seed x 300-case sweep, previously showing exactly this one residual
+failure, is now FULLY GREEN across all 9 seeds (36/36 passing batches
+each). `test_differential.py`/`test_differential_statements.py`/
+`test_function_task.py`/`test_power_operator.py`/`test_wide_ops.py`
+all unaffected, and a final full fast-suite regression (7900 passed,
+the same 16 pre-existing failures as every prior wave's baseline,
+`-n 8`, ~34 min, zero new failures).
 
 Verified via all 8 expression-tree fuzzer seeds (150 cases each, 15/15
 batches) and all 14 statement-fuzzer seeds (150 cases each, 8/8
@@ -3268,3 +3394,65 @@ for the known, separately-scoped gap just above); `test_function_task.py`
 (29 passed, unaffected) and `test_power_operator.py` (60 passed, 1
 xfail, unaffected); and a final full fast-suite regression (7122
 passed, 1 xfailed, 0 failed, `-n 8`, ~31 min, no regressions).
+
+**Nineteenth wave (August 2026): `TestWideSignalMemory`'s 12
+long-standing pre-existing failures (a Cython "Converting to Python
+object not allowed without gil" compile error) were a genuine
+compiled-engine correctness bug, not a Cython/tooling limitation** --
+root-caused and fixed while pursuing every remaining known failure per
+explicit user direction, rather than continuing to carry them as an
+accepted baseline. `_wide_emitter.py`'s `_emit_wide_expr_to_scratch`
+BitSelect case assumed every `BitSelect` node means a genuine
+single-bit select (`vec[3]`, always 1 bit, self-determined and
+unsigned per IEEE 1364-2005 §5.5.1) and unconditionally called
+`self._emit_expr(expr, 1)` / `self._emit_mask_expr(expr, 1)`, ANDing
+the result with `1` and zero-filling every other scratch word -- but
+`BitSelect` is also how the AST represents a *memory element* access
+(`mem[addr]`, the whole `elem_width`-bit word, not 1 bit), which
+`_expr_width` already special-cases correctly (`self._mem_info[mid][0]`,
+not 1 -- see `_expr_emitter.py`) but this function never checked. For a
+memory whose element width exceeds 64 bits, read combinationally into
+a wide-context destination (`always @(*) data_out = mem[rd_addr];`
+with `data_out`/`mem`'s elements 65/96/129 bits), this silently
+extracted only BIT 0 of word 0 of the memory element and zeroed every
+other word -- not merely "wrong," but discarding essentially the
+entire value. The `& gil` Cython compile error was collateral damage
+from a *different*, narrower code shape reached by the SAME bug (word
+0's read expression resolving, via the correctly-memory-aware narrow
+`_emit_expr`, to `c.mem_{mid}_val[idx]` -- a NARROW-memory-only struct
+field that was never declared for a wide memory in the first place,
+since wide memories only get `wide_mem_{mid}_val`/`wide_mem_{mid}_mask`
+-- Cython's "Converting to Python object" error was a confusing,
+misleading symptom of referencing an undeclared/mistyped field, not a
+genuine GIL issue).
+
+Fixed by special-casing memory-element access FIRST in this BitSelect
+branch (via the same `_resolve_memory_element_access` helper the
+narrow emitter already uses): for each scratch word, read from the
+already-existing per-word helpers `_wmem{mid}_word_val`/`_wmem{mid}_
+word_mask` (generated for every wide memory regardless of whether
+anything else in a given design happens to use them) when the memory
+itself is wide, or `c.mem_{mid}_val`/`c.mem_{mid}_mask` word 0 when
+narrow, masking the tail word to the element's own remaining bits and
+zero-filling (or, when `signed_override` is set, sign-extending via
+the existing `_wide_sign_extend_to_dst_lines` helper) beyond the
+element's own width up to the destination width -- mirroring the
+proven-correct masking logic already used by `_whole_assign_mem_elem_
+{mid}` (the analogous helper for continuous-assign whole-memory-element
+reads, which this BitSelect path doesn't share since it's reached from
+the general recursive wide-scratch emitter, not the continuous-assign-
+specific compiler).
+
+Verified: all 15 `TestWideSignalMemory` parametrized tests now pass
+(12 previously failing + 3 already passing); `tests/test_sim/
+compiled/test_memories.py`/`test_wide_ops.py`/`tests/test_sim/
+test_memory.py` (295 passed, unaffected); and a full fast-suite
+regression (7921 passed -- 15 more than the prior wave's 7906, exactly
+matching the 15 tests that flipped from failing to passing -- down to
+just 1 pre-existing failure, `test_or_chain_max_line_length`, an
+unrelated codegen line-length formatting check; `-n 8`, ~33 min, zero
+new failures). This closes 15 of the 16 failures that had been carried
+as an accepted "pre-existing baseline" through this entire multi-
+session bug-hunt, confirming the user's standing "pursue every known
+failure" directive was warranted even for failures that had been
+carried as accepted baseline for a long time.

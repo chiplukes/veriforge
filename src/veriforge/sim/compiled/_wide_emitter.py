@@ -3654,20 +3654,54 @@ class _WideEmitterMixin:
             return lines
 
         # ── BitSelect ───────────────────────────────────────────────────────
-        # Always exactly 1 bit, self-determined and unsigned (IEEE 1364-2005
-        # §5.5.1) regardless of the target's own width or signedness -- reuse
-        # the existing narrow (scalar) emitters, which already correctly
-        # handle bit-selects on wide targets via word-extraction helpers, and
-        # just drop the 1-bit result into scratch word 0. Without this case,
-        # a BitSelect nested anywhere inside a wide-context expression (e.g.
-        # `{a1[0], a3[8:7]}` assigned to a >64-bit destination) makes the
-        # whole recursive emission bail out to None here, silently falling
-        # through to the narrow scalar LHS-write fallback -- which is wrong
-        # for a >64-bit destination (`c.val`/`c.mask` are 64-bit fields) and
-        # was observed to drop the x-mask entirely for NBA assignments,
-        # which -- unlike continuous assigns -- have no separate/redundant
-        # wide-array-updating code path to fall back on.
+        # `BitSelect` is overloaded for two entirely different shapes: a
+        # genuine single-bit select on a vector (`vec[3]`, always exactly 1
+        # bit, self-determined and unsigned per IEEE 1364-2005 §5.5.1), and a
+        # full *memory element* access (`mem[addr]`, whole `elem_width`-bit
+        # word) -- the parser/AST use the same node for both. The memory case
+        # must be checked FIRST: `_expr_width` already special-cases it
+        # (returning the memory's element width, not 1 -- see `_expr_
+        # emitter.py`), but this function historically didn't, so it treated
+        # every memory-element read as a genuine 1-bit select -- reading only
+        # bit 0 of the memory word and zero-filling every other scratch word,
+        # silently corrupting any `mem[addr]` read into a >64-bit-per-element
+        # memory (`data_out = mem[rd_addr];` with `mem`'s element width > 64
+        # bits, embedded in a wide-context assignment). Confirmed against
+        # Icarus (cross-engine): reference/vm/vm-fast correct, compiled read
+        # only the low bit of word 0 plus zeros.
         if et is BitSelect:
+            mem_access = self._resolve_memory_element_access(expr)
+            if mem_access is not None:
+                mid, idx, _name, _indices = mem_access
+                elem_w = self._mem_info[mid][0]
+                wide_mem = elem_w > _WORD_BITS
+                words = self._mem_words(mid) if wide_mem else 1
+                lines = []
+                for wi in range(n_words):
+                    remaining_w = elem_w - wi * _WORD_BITS
+                    if remaining_w <= 0:
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                        continue
+                    if wide_mem and wi < words:
+                        v_expr = f"_wmem{mid}_word_val(c, {idx}, {wi})"
+                        m_expr = f"_wmem{mid}_word_mask(c, {idx}, {wi})"
+                    elif not wide_mem and wi == 0:
+                        v_expr = f"<unsigned long long>c.mem_{mid}_val[{idx}]"
+                        m_expr = f"<unsigned long long>c.mem_{mid}_mask[{idx}]"
+                    else:
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                        continue
+                    if remaining_w < _WORD_BITS:
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = ({v_expr}) & _word_mask64({remaining_w})")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = ({m_expr}) & _word_mask64({remaining_w})")
+                    else:
+                        lines.append(f"{pad}_sc{slot}_v[{wi}] = {v_expr}")
+                        lines.append(f"{pad}_sc{slot}_m[{wi}] = {m_expr}")
+                if signed_override and elem_w < dst_width:
+                    lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(elem_w), indent))
+                return lines
             val_expr = self._emit_expr(expr, 1)
             mask_expr = self._emit_mask_expr(expr, 1)
             if signed_override:

@@ -1983,11 +1983,11 @@ fast-suite regression (7897 passed, same 16 pre-existing failures,
 
 **Eighteenth wave (August 2026): the `_emit_binary` gap is fixed, and a
 systematic follow-up campaign drove the residual failure count from 26
-down to 1**, per explicit user direction ("we need to pursue every
+down to 0**, per explicit user direction ("we need to pursue every
 known failure") rather than stopping at diminishing returns. New
 `_emit_wide_binary_to_value` helper (mirroring the established
 reduction/ternary-condition wide-routing pattern) wired into
-`_emit_binary` and `_emit_mask_expr`'s BinaryOp branch. Six more
+`_emit_binary` and `_emit_mask_expr`'s BinaryOp branch. Seven more
 distinct, confirmed bugs found and fixed while re-running the fuzzer
 after each fix: a `~`/unary-`+` mask sign-extension gap (two rounds —
 first for plain Identifiers, then for compound operands like nested
@@ -2004,17 +2004,126 @@ already-correctly-computed compound operand values; and
 `_emit_user_func_call_expr` computing arithmetic arguments (`%`/`/`)
 directly at a narrow port width, truncating the dividend before the
 remainder was determined. New generic `_emit_wide_arg_to_value` helper
-added for that last one. Three new regression tests. Full detail
-(including the one deliberately-deferred residual case — a genuine
-conflict between two previously-confirmed test cases in `TernaryOp`'s
-`signed_override` handling, needing dedicated study rather than a
-same-session patch) in `notes/known_issues.md`'s Eighteenth wave entry.
-Verified: 9-seed x 300-case sweep dropped from 26 to 1 failure (that
-one residual case); `test_differential.py`/`test_differential_
+added for that last one. The final, deepest case was `_emit_ternary_
+value_mask_exprs`'s `own_signed` letting an inherited `signed_override`
+win over the ternary's own combined signedness instead of always
+recomputing fresh from its own branches — fixed by making it
+unconditionally fresh (`own_signed = self._expr_signed(expr)`),
+matching `sim/evaluator.py`'s TernaryOp handling exactly; the design
+this replaced was a previously-deliberate fix for a different case that
+turned out to be coincidentally-correct there rather than necessary,
+so no regression resulted. Four new regression tests. Full detail in
+`notes/known_issues.md`'s Eighteenth wave entry. Verified: 9-seed x
+300-case sweep fully green across all 9 seeds (down from 26 failures
+at the start of this wave); `test_differential.py`/`test_differential_
 statements.py`/`test_function_task.py`/`test_power_operator.py`/
-`test_wide_ops.py` all unaffected; a full fast-suite regression (7897
+`test_wide_ops.py` all unaffected; a full fast-suite regression (7900
 passed, same 16 pre-existing failures, `-n 8`, ~34 min, zero new
 failures).
+
+**Follow-up: the pre-existing `_emit_concat`/`_emit_replication`
+"residual gap" note (narrow-path `if shift >= 64: continue` truncation)
+re-investigated and confirmed closed** — a side effect of this wave's
+`_expr_max_internal_width` generalization, not a new fix. Any
+Concatenation whose own combined width exceeds 64 bits now always gets
+routed through the wide scratch emitter before `_emit_concat`'s narrow
+path is reached, making its `shift >= 64` branch unreachable dead code.
+Verified with five hand-built cross-engine repros matching the note's
+exact scenarios; new regression test `test_compiled_wide_concat_in_
+narrow_context_not_truncated` pins two of them. No production code
+change needed.
+
+**Follow-up to the follow-up: chased the suspected `AssignmentPattern`
+wide-field gap down and found it was a false lead — but building the
+repros surfaced a real, more severe, non-compiled-engine bug.** The
+suspected gap (`_emit_assignment_pattern` calling `_emit_expr` on each
+field with no wide-routing check) turned out not to matter in practice:
+each field's own local wide-hoisting check (`_emit_wide_reduction_to_
+value` etc.) already fires correctly regardless, since `_et_pending` is
+opened unconditionally by the enclosing narrow-statement compiler; a
+genuinely wide AssignmentPattern destination is also handled correctly
+via the Python-bignum fallback path. Confirmed both with cross-engine
+repros. What the repros DID find: `sim/scheduler.py`'s `_walk_expr_
+reads` (reference engine) and `sim/vm/compiler.py`'s `_walk_expr_
+signals` (vm/vm-fast) both had no `AssignmentPattern` case in their
+per-node-type dispatch, silently skipping any signal referenced only
+inside an assignment pattern — so a continuous assign or `always @(*)`
+block driven solely by such a signal was never scheduled to re-run,
+leaving its output permanently `x` on three of the four engines. The
+compiled engine's own dependency collector walks `__slots__`
+generically rather than dispatching per type, so it was the only engine
+unaffected — that asymmetry is what surfaced the bug. Fixed by adding
+the missing case to both walkers. New regression test in `tests/
+test_sim/test_sim_sv.py` (`TestAssignmentPatternSensitivity`,
+parametrized over all four engines), confirmed to fail on reference/vm/
+vm-fast before the fix via `git stash` bisection. Self-caught a
+regression while verifying: the first version iterated `expr.
+positional` unconditionally, but that field is `list[Expression] |
+None` and defaults to `None` (every other consumer guards it) — any
+`'{default: ...}`/named-only pattern threw `TypeError` inside the
+sensitivity walker, spiking the full fast-suite to 115+ failures
+partway through instead of the expected 16; caught before the run even
+finished, fixed with the missing `if expr.positional:` guard. Verified
+after the guard: full fast-suite regression (7906 passed, 6 more than
+this wave's prior 7900 matching the 6 new tests added, same 16
+pre-existing failures, `-n 8`, ~34.5 min, zero new failures). Full
+detail in `notes/known_issues.md`.
+
+**Nineteenth wave (August 2026): the 12 `TestWideSignalMemory`
+pre-existing failures — carried as an accepted baseline through this
+entire multi-session bug-hunt — turned out to be a genuine compiled-
+engine correctness bug, not a Cython/tooling limitation.**
+`_wide_emitter.py`'s recursive scratch emitter treated every
+`BitSelect` node as a genuine single-bit select, unconditionally
+extracting just bit 0 and zero-filling the rest — correct for `vec[3]`,
+but wrong for a *memory element* access (`mem[addr]`), which the same
+AST node also represents. For a memory with element width > 64 bits
+read combinationally into a wide destination, this silently discarded
+almost the entire value; the misleading Cython "Converting to Python
+object not allowed without gil" compile error was collateral damage
+from the same bug reaching an undeclared narrow-memory struct field
+for what should have been a wide-memory access. Fixed by special-
+casing memory-element access first, reading word-by-word through the
+existing (always-generated) `_wmem{mid}_word_val`/`_wmem{mid}_word_
+mask` helpers, mirroring the proven-correct masking logic already used
+by continuous assigns' `_whole_assign_mem_elem_{mid}`. Verified: all 15
+`TestWideSignalMemory` tests pass (12 previously failing + 3 already
+passing); `test_memories.py`/`test_wide_ops.py`/`test_memory.py` (295
+passed); full fast-suite regression (7921 passed — 15 more than the
+prior wave, matching exactly — down to just 1 pre-existing failure,
+`test_or_chain_max_line_length`, unrelated; `-n 8`, ~33 min, zero new
+failures). Full detail in `notes/known_issues.md`.
+
+**Twentieth wave (August 2026): the last remaining documented gap —
+`AssignmentPattern`'s "theoretical" `signed_override` handling — was
+real, and reference-engine-only (vm/vm-fast/compiled already
+correct).** Two compounding bugs in `sim/evaluator.py`, both invisible
+to the differential fuzzer since it never generates `'{...}` nodes:
+`_expr_self_width` had no `AssignmentPattern` case (fell through to a
+bogus `32`-bit default, corrupting `$signed(...)`'s own self-width
+evaluation of its argument before the cast's sign-extend step ever
+ran), and even once that's fixed, `eval()`'s three `AssignmentPattern`
+branches never consulted `signed_override`, always zero-extending via
+`.resize()` instead of `.sign_extend()`. Confirmed against cross-engine
+agreement for `$signed('{flag})` with flag=1: only reference gave the
+wrong zero-extended `0x01` instead of `0xFF`. Fixed both gaps. New
+regression tests in `tests/test_sim/test_sim_sv.py`
+(`TestAssignmentPatternSignedOverride`, parametrized over all four
+engines), confirmed to fail on reference only before the fix via `git
+stash` bisection. Verified: `test_sim_sv.py` (73 passed),
+`test_differential_functions.py`/`test_function_task.py` (unaffected),
+full fast-suite regression (7929 passed — 8 more than the prior wave,
+matching the 8 new tests — same single remaining pre-existing failure,
+`-n 8`, ~38 min, zero new failures). Full detail in `notes/known_
+issues.md`.
+
+This closes every compiled-engine and cross-engine correctness gap
+this multi-session bug-hunt set out to chase — the only items left in
+`notes/known_issues.md` are the `vm-fast` `**` (power) over a >64-bit
+operand gap (a genuine architectural limitation needing real feature
+work in `_interp_fast.pyx`, not a bug fix, already pinned as strict
+xfail) and `test_or_chain_max_line_length` (an unrelated codegen
+line-length formatting check, not a correctness issue).
 
 ### 3.5 `Simulator.engine_report()` (S/M) ✅
 

@@ -815,6 +815,165 @@ class TestStructSimCompiled:
         assert sim.read("out_data").val == 0xFF
 
 
+# ── Assignment pattern sensitivity (regression) ─────────────────────
+
+from veriforge.model.expressions import AssignmentPattern  # noqa: E402
+
+
+class TestAssignmentPatternSensitivity:
+    """Regression test for a confirmed cross-engine bug: a signal
+    referenced ONLY inside a SystemVerilog assignment pattern (`'{...}`)
+    was invisible to sensitivity/dependency analysis on the reference
+    and vm/vm-fast engines, so a continuous assign or always @(*) block
+    driven solely by such a signal was never scheduled to (re-)run,
+    leaving its output permanently x.
+
+    Root cause: `sim/scheduler.py`'s `_walk_expr_reads` (reference
+    engine) and `sim/vm/compiler.py`'s `_walk_expr_signals` (vm/
+    vm-fast) both dispatch on expression node type with an explicit
+    case per shape, and neither had a case for `AssignmentPattern` --
+    silently falling through to a no-op instead of recursing into
+    `named_pairs`/`positional`/`default_value`. The compiled engine's
+    analogous collector (`compiled_scheduler.py`'s `_walk_for_idents`)
+    walks every AST node's `__slots__` generically rather than
+    dispatching per type, so it was unaffected. Confirmed against
+    Icarus (cross-engine): compiled already gave the correct answer;
+    reference/vm/vm-fast all gave `x` before this fix.
+    """
+
+    def _make_pattern_module(self):
+        """bus_t bus; assign bus = '{in_flag, in_rest}; assign out = bus;"""
+        st = StructType(
+            [
+                StructField("flag", "logic"),
+                StructField("rest", "logic", width=Range(Literal(6), Literal(0))),
+            ],
+            packed=True,
+        )
+        td = TypedefDecl("bus_t", struct_type=st)
+
+        ports = [
+            Port("in_flag", PortDirection.INPUT),
+            Port("in_rest", PortDirection.INPUT, width=Range(Literal(6), Literal(0))),
+            Port("out_bus", PortDirection.OUTPUT, width=Range(Literal(7), Literal(0))),
+        ]
+        nets = [
+            Net("in_flag", NetKind.WIRE),
+            Net("in_rest", NetKind.WIRE, width=Range(Literal(6), Literal(0))),
+            Net("out_bus", NetKind.WIRE, width=Range(Literal(7), Literal(0))),
+        ]
+        variables = [
+            Variable("bus", VariableKind.REG, width=Range(Literal(7), Literal(0)), type_name="bus_t"),
+        ]
+        cas = [
+            ContinuousAssign(
+                Identifier("bus"),
+                AssignmentPattern(positional=[Identifier("in_flag"), Identifier("in_rest")]),
+            ),
+            ContinuousAssign(Identifier("out_bus"), Identifier("bus")),
+        ]
+
+        m = ModelModule("pattern_test", ports=ports, nets=nets, variables=variables)
+        m.continuous_assigns = cas
+        m.typedefs = [td]
+        return m
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signal_only_in_assignment_pattern_is_sensed(self, engine):
+        # `settle()` (not `run()`) is what exercises the buggy path: it
+        # only re-evaluates a continuous assign whose precomputed
+        # sensitivity set overlaps the just-driven signals
+        # (`Scheduler._run_dirty_continuous_assigns`) -- `run()` doesn't
+        # gate on that same precomputed set, so it doesn't reproduce
+        # this bug.
+        m = self._make_pattern_module()
+        sim = Simulator(m, engine=engine)
+        sim.drive("in_flag", Value(1, width=1))
+        sim.drive("in_rest", Value(0x2A, width=7))
+        sim.settle()
+        assert sim.read("out_bus").val == 0xAA, f"engine={engine}"
+
+        sim.drive("in_rest", Value(0x15, width=7))
+        sim.settle()
+        assert sim.read("out_bus").val == 0x95, f"engine={engine}"
+
+
+# ── Assignment pattern signed_override (regression) ─────────────────
+
+from veriforge.analysis.resolver import link_instances, resolve_port_connections  # noqa: E402
+from veriforge.transforms.tree_to_model import tree_to_design  # noqa: E402
+from veriforge.verilog_parser import verilog_parser  # noqa: E402
+
+
+class TestAssignmentPatternSignedOverride:
+    """Regression test for a confirmed reference-engine bug: `$signed(...)`
+    wrapping an assignment pattern (`'{...}`) sign-extended incorrectly.
+
+    Two independent, compounding gaps in `sim/evaluator.py`, both in the
+    reference engine only (vm/vm-fast/compiled were already correct):
+
+    1. `_expr_self_width` had no `AssignmentPattern` case, silently
+       falling through to the generic `32`-bit default -- so `$signed`'s
+       own handling (`eval(inner, ctx, _expr_self_width(inner, ctx))`)
+       evaluated the pattern at a bogus self-width of 32 instead of its
+       true width, corrupting the value before the cast's own
+       sign-extend-to-context-width step ever ran.
+    2. Even with (1) fixed, `eval()`'s own `AssignmentPattern` branches
+       (named_pairs/positional/default_value) never consulted
+       `signed_override` when resizing to a wider requested `width`,
+       unconditionally calling `.resize()` (zero-extend) instead of
+       `.sign_extend()` when the context demands sign extension.
+
+    Confirmed against cross-engine agreement for `$signed('{flag})` with
+    flag=1: vm/vm-fast/compiled all correctly sign-extend to `-1`
+    (0xFF at 8 bits); reference incorrectly zero-extended to `1` (0x01)
+    before this fix.
+    """
+
+    @staticmethod
+    def _sim_for(source: str, engine: str) -> Simulator:
+        vp = verilog_parser(start="source_text")
+        tree = vp.build_tree(source)
+        design = tree_to_design(tree, source_file="t.v")
+        link_instances(design)
+        resolve_port_connections(design)
+        top = next(m for m in design.modules if m.name == "t")
+        return Simulator(top, engine=engine, design=design)
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signed_cast_of_positional_pattern_sign_extends(self, engine):
+        source = """
+module t(
+    input flag,
+    output [7:0] y0
+);
+    assign y0 = $signed('{flag});
+endmodule
+"""
+        sim = self._sim_for(source, engine)
+        sim.drive("flag", Value(1, width=1))
+        sim.settle()
+        assert sim.read("y0").val == 0xFF, f"engine={engine}"
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_signed_cast_of_named_pattern_sign_extends(self, engine):
+        source = """
+module t(
+    input flag,
+    output [7:0] y0
+);
+    typedef struct packed {
+        logic flag;
+    } s1_t;
+    assign y0 = $signed('{flag: flag});
+endmodule
+"""
+        sim = self._sim_for(source, engine)
+        sim.drive("flag", Value(1, width=1))
+        sim.settle()
+        assert sim.read("y0").val == 0xFF, f"engine={engine}"
+
+
 # ── Struct with NBA (sequential) ────────────────────────────────────
 
 

@@ -666,12 +666,12 @@ class _ExprEmitterMixin:
         # (signed only if BOTH branches are signed) governs sign- vs
         # zero-extension of whichever branch is selected -- not each
         # branch's own individual signedness. This is threaded into the
-        # branch's own evaluation as `signed_override` (forced True/False,
-        # never None -- None would mean "fall back to the branch's own
-        # signedness", exactly the bug being fixed here), not applied as a
-        # post-hoc `_sign_ext` wrap around a self-determined-width result:
-        # a branch that is itself a context-determined operator (UnaryOp
-        # ~/+/-, arithmetic BinaryOp, or a signed Identifier)
+        # branch's own evaluation as `t_signed_override`/`f_signed_
+        # override` below (forced True/False, never None -- None would
+        # mean "fall back to the branch's own signedness"), not applied
+        # as a post-hoc `_sign_ext` wrap around a self-determined-width
+        # result: a branch that is itself a context-determined operator
+        # (UnaryOp ~/+/-, arithmetic BinaryOp, or a signed Identifier)
         # needs its *operand(s)* extended using the override before the
         # operator runs -- computing it self-determined then wrapping the
         # result afterward is not equivalent (e.g. `~a` where `a` is 1 bit:
@@ -679,21 +679,46 @@ class _ExprEmitterMixin:
         # which is just `a`'s own single bit replicated -- not the same
         # value as sign-extending `a` to the full width first and THEN
         # complementing).
-        # `signed_override`, when set, is a decision already forced by an
-        # even-further-out caller (e.g. a comparison's own combined-
-        # signedness, or an enclosing ternary's own combined decision when
-        # this TernaryOp is itself a branch of another ternary) -- it must
-        # win over this ternary's OWN `_expr_signed` computation, exactly
-        # like every other `signed_override` use in this file. Previously
-        # ignored entirely (no parameter existed), so an outer forced
-        # decision never reached a nested ternary. Confirmed wrong (cross-
-        # engine, against the reference oracle) for `(a0 <= (a2 ? a0 :
-        # a6))`: the comparison's own combined-signedness decision (both
-        # `a0` and `a6` declared signed) never propagated into the
-        # ternary's branch-selection, so the selected `a0` branch was
-        # zero- rather than sign-extended to the ternary's 80-bit combined
-        # width, corrupting the comparison.
-        own_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+        #
+        # `own_signed` (the decision THREADED as that override) must be
+        # computed FRESH from this ternary's OWN two branches every time,
+        # UNCONDITIONALLY IGNORING the incoming `signed_override`
+        # parameter -- mirroring `sim/evaluator.py`'s TernaryOp handling
+        # exactly (`own_signed = _expr_signed(expr, ctx)`, no override
+        # consulted at all): "This establishes a *fresh* override for
+        # both branches, replacing whatever override... was active from
+        # further out" (that function's own comment). A PRIOR version of
+        # this code let an inherited `signed_override` WIN over this
+        # ternary's own computation instead (reasoning that an outer
+        # forced decision, e.g. a comparison's own combined-signedness,
+        # "must win... like every other signed_override use in this
+        # file") -- which happened to still give the right answer for the
+        # confirmed case that originally motivated adding the parameter
+        # (`(a0 <= (a2 ? a0 : a6))`, both `a0`/`a6` declared signed: the
+        # ternary's OWN fresh `own_signed` and the comparison's inherited
+        # override both independently evaluate to `True` here, so the two
+        # designs are indistinguishable for THIS specific case) but is
+        # confirmed WRONG (cross-engine, against the reference oracle,
+        # bisected via a temporary `own_signed = self._expr_signed(expr)`
+        # experiment that fixed it without breaking the `(a0 <= ...)`
+        # case) for `fn_add8({3{a4}}, (a3[35] ? (-(a1 ? a0 : a0)) :
+        # ($unsigned(a7) << (!a2[4]))))`: the INNERMOST `(a1 ? a0 : a0)`
+        # ternary (own combined signedness `True`, both branches `a0`,
+        # declared signed) is the operand of a UnaryOp `-`, itself the
+        # TRUE branch of the OUTER ternary -- whose OWN combined
+        # signedness is `False` (its false branch is `$unsigned(...)`).
+        # Letting that inherited `False` win over the INNER ternary's own
+        # `True` zero- instead of sign-extends `a0`, corrupting `-a0`
+        # (negating `+1` instead of the correct `-1`). `signed_override`
+        # remains an accepted parameter (every OTHER call site in this
+        # file still needs to pass one, and the general "an outer forced
+        # decision reaches nested context-determined operators" principle
+        # the docstring above describes is still correct and still
+        # applies -- just not to a TernaryOp's OWN `own_signed`
+        # specifically, which always re-establishes itself fresh, exactly
+        # like every OTHER node type that has its own combined-signedness
+        # concept, e.g. `_emit_binary`'s comparisons/`&&`/`||`).
+        own_signed = self._expr_signed(expr)
         tw = self._expr_width(expr.true_expr)
         fw = self._expr_width(expr.false_expr)
         if py:

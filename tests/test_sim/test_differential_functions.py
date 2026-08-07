@@ -548,3 +548,139 @@ endmodule
             "a6": (725654678142160021167080, 80),
         },
     )
+
+
+def test_compiled_ternary_own_signed_ignores_inherited_override() -> None:
+    """Regression test for a confirmed compiled-engine bug:
+    `_emit_ternary_value_mask_exprs`'s `own_signed` (the ternary's own
+    combined signedness, threaded into its branches as `t_signed_
+    override`/`f_signed_override`) let an inherited `signed_override`
+    parameter WIN over the ternary's own fresh computation from its two
+    branches -- unlike `sim/evaluator.py`'s TernaryOp handling, which
+    ALWAYS computes `own_signed` fresh, unconditionally ignoring any
+    inherited override ("This establishes a *fresh* override for both
+    branches, replacing whatever override... was active from further
+    out").
+
+    The letting-override-win design was itself a deliberate, previously
+    confirmed fix for `(a0 <= (a2 ? a0 : a6))` (`a0`, `a6` both declared
+    signed) -- but that case's inherited override and the ternary's own
+    fresh computation happen to independently agree (both `True`) for
+    that specific shape, making the two designs indistinguishable there.
+    They diverge for a ternary that is the operand of a UnaryOp `-`,
+    itself a branch of an OUTER ternary with a DIFFERENT combined
+    signedness: the INNER ternary's own fresh signedness must win,
+    exactly as the always-fresh reference behavior gives.
+
+    This test covers BOTH confirmed shapes (`y0`: the original
+    letting-override-win fix; `y1`: the case that fix's design got
+    wrong) to guard against a future change re-introducing either
+    direction of this bug. Confirmed against Icarus (cross-engine):
+    reference/vm/vm-fast agree on both; only compiled disagreed on `y1`
+    before this fix.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0,
+    output [63:0] y1
+);
+    function [7:0] fn_add8(input [7:0] a, input [7:0] b);
+        begin
+            fn_add8 = a + b;
+        end
+    endfunction
+    assign y0 = (a0 <= (a2 ? a0 : a6));
+    assign y1 = fn_add8({3{a4}}, (a3[35] ? (-(a1 ? a0 : a0)) : ($unsigned(a7) << (!a2[4]))));
+endmodule
+"""
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        sim.drive("a0", td.Value(1, width=1))
+        sim.drive("a1", td.Value(89, width=8))
+        sim.drive("a2", td.Value(52297, width=16))
+        sim.drive("a3", td.Value(1067708165146980894, width=63))
+        sim.drive("a4", td.Value(7429227395453986858, width=64))
+        sim.drive("a6", td.Value(1026619480069701007101656, width=80))
+        sim.drive("a7", td.Value(0, width=1, mask=1))
+        sim.settle()
+        y0, y1 = sim.read("y0"), sim.read("y1")
+        assert y0 == td.Value(1, width=64), f"engine={engine} y0={y0!r}"
+        assert y1 == td.Value(43, width=64), f"engine={engine} y1={y1!r}"
+
+
+def test_compiled_wide_concat_in_narrow_context_not_truncated() -> None:
+    """Regression test guarding the `notes/known_issues.md` "residual
+    gap" note about `_emit_concat`/`_emit_replication`'s narrow-path
+    `if shift >= 64: continue` line: a genuinely wide (>64-bit)
+    concatenation embedded as a ternary's CONDITION, or inside a
+    comparison passed as a function-call argument, both under an
+    otherwise-narrow destination.
+
+    Investigation found this scenario is NOT reachable in practice given
+    the current routing: any Concatenation whose own combined width
+    exceeds 64 bits already reports that width via `_expr_width`
+    (`sum(part widths)`), which `_expr_max_internal_width` folds into its
+    own `max(...)` at every level of the recursion -- so `_rhs_needs_
+    wide_eval` (statement-level), `_emit_wide_truthy_to_value` (ternary
+    condition), `_emit_wide_binary_to_value` (comparison operand), and
+    `_emit_wide_arg_to_value` (function-call argument) all correctly
+    route such a concatenation through the wide scratch-based emitter
+    -- which has its own dedicated `Concatenation`/`Replication` handling
+    in `_wide_emitter.py` -- before `_emit_concat`'s narrow path (whose
+    `shift` can only ever reach 64 when the concatenation's own total
+    width already exceeds 64, i.e. exactly when it's unreachable) is
+    ever invoked. Confirmed against Icarus (cross-engine): reference/vm/
+    vm-fast/compiled all already agree on both shapes below -- this test
+    exists purely to pin that agreement as a regression guard rather
+    than to fix a live bug.
+    """
+    source = """
+module t(
+    input clk,
+    input signed [0:0] a0,
+    input [7:0] a1,
+    input signed [15:0] a2,
+    input [62:0] a3,
+    input signed [63:0] a4,
+    input [64:0] a5,
+    input signed [79:0] a6,
+    input [0:0] a7,
+    output [63:0] y0,
+    output [63:0] y1
+);
+    function [7:0] fn_sel(input [7:0] a, input b);
+        begin
+            fn_sel = b ? a : ~a;
+        end
+    endfunction
+    assign y0 = (({a6, a1}) ? a2[7:0] : a3[7:0]);
+    assign y1 = fn_sel(a3[7:0], (({a6, a1}) > 0));
+endmodule
+"""
+    for engine in ENGINES:
+        sim = td._sim_for(source, engine)
+        sim.drive("clk", td.Value(0, width=1))
+        for name, width, _signed in td.FIXED_SIGNALS:
+            sim.drive(name, td.Value(0, width=width))
+        sim.settle()
+        sim.drive("a1", td.Value(0, width=8))
+        sim.drive("a2", td.Value(52301, width=16))
+        sim.drive("a3", td.Value(1067708165146980894, width=63))
+        sim.drive("a6", td.Value(1 << 60, width=80))
+        sim.settle()
+        y0, y1 = sim.read("y0"), sim.read("y1")
+        assert y0 == td.Value(77, width=64), f"engine={engine} y0={y0!r}"
+        assert y1 == td.Value(30, width=64), f"engine={engine} y1={y1!r}"
