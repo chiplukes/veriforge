@@ -4225,3 +4225,85 @@ as an accepted "pre-existing baseline" through this entire multi-
 session bug-hunt, confirming the user's standing "pursue every known
 failure" directive was warranted even for failures that had been
 carried as accepted baseline for a long time.
+
+### vm-fast: `**` (power) silently wrong for >64-bit operand or destination (RESOLVED)
+
+**Status**: Fixed (August 2026, after the archive split above -- this
+entry was added directly here rather than round-tripping through
+`known_issues.md`, since it went from open to resolved within the same
+session).
+**Found**: earlier the same session, while root-causing and fixing a
+separate `**` signedness/negative-exponent bug family (see this
+archive's "Compiled-engine ternary/context-determined-operator
+codegen..." entry above — this gap was a pre-existing side-discovery,
+not introduced by or specific to that fix).
+**Severity when found**: Medium-high in kind (silently WRONG, not even
+a crash or x) but narrow in scope — only triggered when `**`'s base or
+exponent, or the assignment destination, exceeded 64 bits, on the
+`vm-fast` engine specifically.
+
+Neither `Op.POW` nor `Op.SPOW` (`sim/vm/_interp_fast.pyx`) consulted the
+wide (`wflag`/`wv`/`wm`) stack representation at all — both only ever
+read a stack slot's narrow low-word fields, computing a plausible-
+looking but wrong answer with no warning for a >64-bit base or exponent.
+Pinned as strict `xfail` in `tests/test_sim/test_power_operator.py`
+(`wide_operand_not_yet_supported_on_c_engines`) until fixed.
+
+**Fix**: gave both opcodes the exact same wide-operand dispatch shape
+`Op.MUL`/`Op.DIV`/`Op.MOD` already had (check both operands for x, wide
+or narrow; if either operand is wide or the result width exceeds 64,
+drop into a `with gil:` block calling a new Python-bignum helper; else
+fall through to the existing fast narrow-only path unchanged). Added
+`_wide_pow_py` (unsigned, `dst = a_py ** b_py` via Python's
+arbitrary-precision `**` — strictly more efficient than the narrow
+path's own pre-existing O(n) repeated-multiply loop, not a regression)
+and `_wide_spow_py` (signed, replicating `Op.SPOW`'s existing Table 5-6
+special-value logic — `0**negative` is undefined, `|base|==1` has its
+own rules, `|base|>1` with a negative exponent truncates toward 0 — just
+with arbitrary-precision Python ints standing in for the narrow path's
+`long long` sa/sb).
+
+**A real bug caught during verification, not just in the original
+gap**: the first version of the `Op.SPOW` wide dispatch called
+`_wm_mask_to_width` unconditionally after `_wide_spow_py` returned, to
+trim the result mask down to the true destination width. That function
+is NOT a generic "clear bits above width `w`" utility despite reading
+like one — every one of its other call sites first sets an ENTIRE
+all-1s (fully ambiguous) mask array from scratch, and `_wm_mask_to_width`
+trims that down to exactly `w` ambiguous bits. Called on `_wide_spow_py`'s
+NORMAL (fully-defined, all-0) result instead, it unconditionally
+overwrote the width-boundary word back to a nonzero (ambiguous) value,
+corrupting an already-correct answer. Caught via direct verification
+against `(-1) ** (-3)` with an 80-bit wide base assigned into an
+80-bit-EXACT destination (no downstream sign-extension involved at all,
+isolating the bug to the opcode's own dispatch): `reference`/`vm` both
+correctly gave all-1s (`-1`, per Table 5-6's odd-negative-exponent
+`base==-1` rule), `vm-fast` gave the top 16 bits `x` and the bottom 64
+bits `1`. Fixed by only calling `_wm_mask_to_width` in the genuinely
+undefined branch (detected by checking word 0 of the mask array, which
+`_wide_spow_py` always writes uniformly as all-0 or all-1 across every
+word) — the normal case's already-correct all-0 mask needs no trimming
+at all.
+
+**Verified**: rebuilt clean (`setup.py build_ext --inplace`, no
+warnings); the previously-`xfail` case now `XPASS`es (confirmed via a
+direct run before removing the marker, so the fix's effect was observed
+directly rather than assumed); the marker was then removed and the full
+`test_power_operator.py` suite passes (61/61); an independent sweep
+against Icarus directly (unsigned wide base, signed wide base with a
+negative exponent, wide exponent with a narrow base, the `0**negative`
+undefined case, and a 128-bit base) — all match `reference`/`vm`/`vm-fast`
+identically for every case where Icarus itself produces a sensible
+answer (Icarus's own wide-`**` handling appears to have a separate,
+unrelated quirk giving `0` instead of the IEEE Table 5-6 answer for two
+of the swept cases — `reference`/`vm` were already independently
+established, differential-fuzzer-verified ground truth before this fix
+touched anything, and both agree with `vm-fast` post-fix, so this is
+noted as a likely Icarus-side gap, not chased further, consistent with
+this file's established practice of trusting cross-engine agreement over
+a single external oracle's edge-case behavior). Full VM suite green with
+the Cython extension built (1126 passed) and with
+`VERIFORGE_DISABLE_CYTHON_VM=1` (391 passed, confirming the pure-Python
+fallback — which never touches this code — is correctly unaffected);
+full `-n 8` regression clean (see the session's own final report for the
+exact count).

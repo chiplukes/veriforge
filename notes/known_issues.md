@@ -12,37 +12,6 @@
 
 ## Open defects
 
-### vm-fast: `**` (power) silently wrong for >64-bit operand or destination
-
-**Status**: Open.
-**Found**: August 2026, while root-causing and fixing a separate `**`
-signedness/negative-exponent bug family (see the archive's "Compiled-engine
-ternary/context-determined-operator codegen..." entry — this gap was a
-pre-existing side-discovery, not introduced by or specific to that fix).
-**Severity**: Medium-high in kind (silently WRONG, not even a crash or x)
-but narrow in scope — only triggers when `**`'s base or exponent, or the
-assignment destination, exceeds 64 bits, on the `vm-fast` engine
-specifically.
-
-Neither `Op.POW` nor `Op.SPOW` (`sim/vm/_interp_fast.pyx`) consult the
-wide (`wflag`/`wv`/`wm`) stack representation at all — they only ever read
-a stack slot's narrow low-word fields. For a >64-bit base or exponent this
-computes a plausible-looking but wrong answer with no warning of any kind.
-Pinned as strict `xfail` in `tests/test_sim/test_power_operator.py` (two
-cases) so it can't silently regress further or get accidentally "fixed"
-without the xfail marker forcing a deliberate look. The `compiled` engine
-had the identical shape of gap and is now fixed (raises `NotImplementedError`
-at codegen time instead of silently corrupting the result — see the
-archive). `reference` and `vm` (pure Python, arbitrary-precision `int`)
-are unaffected.
-
-**Fix shape, if picked up**: mirror the compiled engine's fix
-philosophy — either implement real wide `**` support in `_interp_fast.pyx`
-(would need multi-word integer exponentiation over the `wv`/`wm` word
-arrays), or at minimum raise a loud, clear error instead of a silent wrong
-answer, matching the "loud failure beats silent corruption" precedent
-already established for the compiled engine's own version of this gap.
-
 ### Compiled engine: wide (>64-bit) signal posedge/negedge not supported
 
 **Status**: Open, by design (not attempted) — fails loudly, not silently.

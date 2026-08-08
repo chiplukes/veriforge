@@ -473,6 +473,115 @@ cdef int _wide_unsigned_cmp_py(
         return 1 if a_py >= b_py else 0
 
 
+cdef void _wide_pow_py(
+    unsigned long long *dst_v, unsigned long long *dst_m,
+    unsigned long long *a_v, int a_width, int a_is_wide, long long a_narrow,
+    unsigned long long *b_v, int b_width, int b_is_wide, long long b_narrow,
+) noexcept:
+    """Unsigned wide `**`: dst = a_py ** b_py, truncated to WIDE_WORDS words.
+
+    Mirrors `_wide_mul_py`'s exact structure/aliasing discipline (`dst_v`
+    may alias `a_v` -- every read happens before any write). Uses
+    Python's arbitrary-precision `**` (efficient O(log n) repeated
+    squaring) rather than OP_POW's narrow-path O(n) multiply loop --
+    strictly better, not a regression, for large exponents (the O(n)
+    loop's own theoretical hang-on-huge-exponent risk is pre-existing and
+    out of scope here either way -- real RTL never uses `**` with an
+    astronomically large exponent). `dst_m` is always 0: an unsigned
+    power of two fully-defined operands is always fully defined (unlike
+    the signed case's `0 ** negative` special value -- see
+    `_wide_spow_py`).
+    """
+    cdef object a_py, b_py, result_py
+    cdef int wi
+    if a_is_wide:
+        a_py = <object>0
+        for wi in range(WIDE_WORDS):
+            a_py = a_py | ((<object>a_v[wi]) << (wi * 64))
+        a_py = a_py & (((<object>1) << a_width) - 1)
+    else:
+        a_py = (<object>(<unsigned long long>a_narrow)) & (((<object>1) << a_width) - 1)
+    if b_is_wide:
+        b_py = <object>0
+        for wi in range(WIDE_WORDS):
+            b_py = b_py | ((<object>b_v[wi]) << (wi * 64))
+        b_py = b_py & (((<object>1) << b_width) - 1)
+    else:
+        b_py = (<object>(<unsigned long long>b_narrow)) & (((<object>1) << b_width) - 1)
+    result_py = a_py ** b_py
+    for wi in range(WIDE_WORDS):
+        dst_v[wi] = <unsigned long long>((result_py >> (wi * 64)) & <object>0xFFFFFFFFFFFFFFFF)
+        dst_m[wi] = 0
+
+
+cdef void _wide_spow_py(
+    unsigned long long *dst_v, unsigned long long *dst_m,
+    unsigned long long *a_v, int a_width, int a_is_wide, long long a_narrow,
+    unsigned long long *b_v, int b_width, int b_is_wide, long long b_narrow,
+) noexcept:
+    """Signed wide `**`: IEEE 1364-2005 Table 5-6 special values,
+    wide-operand-aware. Mirrors OP_SPOW's narrow-path logic (see its own
+    comment in `_execute_core`) exactly, just with arbitrary-precision
+    Python ints standing in for the narrow path's `long long` sa/sb, and
+    the caller applying the final `a_width`-bit mask (via
+    `_wm_mask_to_width`, mirroring the narrow path's `& wmask`) instead
+    of doing it here.
+
+    `a_py == 0 and b_py < 0` is the table's one genuinely-undefined
+    (`'bx`) cell -- signaled by writing all-1s into `dst_m` directly
+    (the caller still trims it to `a_width` via `_wm_mask_to_width`,
+    exactly like the all-x branch already does for x-contaminated
+    operands) rather than a return value, since every other `_wide_*_py`
+    helper in this file is `void` and this keeps the calling convention
+    uniform.
+    """
+    cdef object a_py, b_py, result_py
+    cdef int wi
+    if a_is_wide:
+        a_py = <object>0
+        for wi in range(WIDE_WORDS):
+            a_py = a_py | ((<object>a_v[wi]) << (wi * 64))
+        a_py = a_py & (((<object>1) << a_width) - 1)
+        if a_py >> (a_width - 1):
+            a_py = a_py - ((<object>1) << a_width)
+    else:
+        a_py = <object>a_narrow
+        if a_width > 0 and a_width < 64 and (a_narrow >> (a_width - 1)) & 1:
+            a_py = a_narrow - (<long long>1 << a_width)
+    if b_is_wide:
+        b_py = <object>0
+        for wi in range(WIDE_WORDS):
+            b_py = b_py | ((<object>b_v[wi]) << (wi * 64))
+        b_py = b_py & (((<object>1) << b_width) - 1)
+        if b_py >> (b_width - 1):
+            b_py = b_py - ((<object>1) << b_width)
+    else:
+        b_py = <object>b_narrow
+        if b_width > 0 and b_width < 64 and (b_narrow >> (b_width - 1)) & 1:
+            b_py = b_narrow - (<long long>1 << b_width)
+    if b_py == 0:
+        result_py = <object>1
+    elif b_py > 0:
+        result_py = a_py ** b_py
+    elif a_py == 0:
+        # 0 ** negative -- the table's one genuinely-undefined cell.
+        for wi in range(WIDE_WORDS):
+            dst_m[wi] = <unsigned long long>(-1)
+        return
+    elif a_py == 1:
+        result_py = <object>1
+    elif a_py == -1:
+        result_py = <object>(-1) if (b_py & 1) else <object>1
+    else:
+        # |base| > 1, negative exponent -- true rational result has
+        # magnitude < 1, truncated toward zero (mirrors the narrow
+        # path's already-documented `2 ** -1 == 0` example).
+        result_py = <object>0
+    for wi in range(WIDE_WORDS):
+        dst_v[wi] = <unsigned long long>((result_py >> (wi * 64)) & <object>0xFFFFFFFFFFFFFFFF)
+        dst_m[wi] = 0
+
+
 cdef void _wm_mask_to_width(unsigned long long *wm_base, int w) noexcept nogil:
     """Clear bits in wm_base[] that lie above bit position w-1."""
     cdef int wsp = w >> 6
@@ -1476,8 +1585,10 @@ cdef int _execute_core(
         if op == OP_POW:
             sp -= 1
             b = stack[sp]
+            b_wide = wflag[sp]
             sp -= 1
             a = stack[sp]
+            a_wide = wflag[sp]
             # IEEE 1364-2005 Table 5-22: `**`'s result width is `L(i)`
             # (the BASE's own width) -- grouped with the shift-operator
             # row, not max(L(i),L(j)) -- verified directly against the
@@ -1488,8 +1599,49 @@ cdef int _execute_core(
             # fix in `sim/value.py`'s `Value.__pow__`.
             w = a.width
             wmask = mask_for_width(w)
-            if a.mask or b.mask:
+            # Wide-operand dispatch mirrors OP_MUL/OP_DIV/OP_MOD exactly
+            # (check-for-x, then wide-vs-narrow branch) -- this was
+            # previously MISSING entirely for `**`: neither this opcode
+            # nor OP_SPOW ever consulted `wflag`/`wv`/`wm`, so a >64-bit
+            # base/exponent/destination silently computed a plausible-
+            # looking but WRONG answer with no warning (confirmed via
+            # valgrind... no, via direct comparison against Icarus/
+            # reference -- see notes/known_issues.md's vm-fast `**` entry
+            # and tests/test_sim/test_power_operator.py's formerly-xfail
+            # `wide_operand_not_yet_supported_on_c_engines` case, now
+            # passing).
+            a_any_x = 1 if a.mask else 0
+            b_any_x = 1 if b.mask else 0
+            if not a_any_x and a_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[sp * WIDE_WORDS + wi]: a_any_x = 1; break
+            if not b_any_x and b_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_any_x = 1; break
+            if a_any_x or b_any_x:
+                if w > 64:
+                    for wi in range(WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = 0
+                        wm[sp * WIDE_WORDS + wi] = <unsigned long long>(-1)
+                    _wm_mask_to_width(&wm[sp * WIDE_WORDS], w)
+                    wflag[sp] = 1
+                else:
+                    wflag[sp] = 0
                 stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
+            elif a_wide or b_wide or w > 64:
+                with gil:
+                    _wide_pow_py(
+                        &wv[sp * WIDE_WORDS], &wm[sp * WIDE_WORDS],
+                        &wv[sp * WIDE_WORDS], a.width, a_wide, a.val,
+                        &wv[(sp+1) * WIDE_WORDS], b.width, b_wide, b.val,
+                    )
+                if w > 64:
+                    wflag[sp] = 1
+                else:
+                    wflag[sp] = 0
+                stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+                stack[sp].mask = 0
+                stack[sp].width = w
             else:
                 # Simple integer power, truncated to width. Correct even
                 # though `result_val` is a wrapping 64-bit `long long`:
@@ -1505,14 +1657,17 @@ cdef int _execute_core(
                 stack[sp].val = result_val & wmask
                 stack[sp].mask = 0
                 stack[sp].width = w
+                wflag[sp] = 0
             sp += 1
             continue
 
         if op == OP_SPOW:
             sp -= 1
             b = stack[sp]
+            b_wide = wflag[sp]
             sp -= 1
             a = stack[sp]
+            a_wide = wflag[sp]
             # Signed power: IEEE 1364-2005 SS5.5.1 ("if all operands are
             # signed, the result will be signed") plus Table 5-6's
             # negative-base/negative-exponent special values only apply
@@ -1521,10 +1676,70 @@ cdef int _execute_core(
             # `sim/evaluator.py`'s `_eval_signed_pow`.
             w = a.width
             wmask = mask_for_width(w)
-            if a.mask or b.mask:
+            # Wide-operand dispatch mirrors OP_POW's own (see its comment
+            # for the "this was previously missing entirely" backstory).
+            a_any_x = 1 if a.mask else 0
+            b_any_x = 1 if b.mask else 0
+            if not a_any_x and a_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[sp * WIDE_WORDS + wi]: a_any_x = 1; break
+            if not b_any_x and b_wide:
+                for wi in range(WIDE_WORDS):
+                    if wm[(sp + 1) * WIDE_WORDS + wi]: b_any_x = 1; break
+            if a_any_x or b_any_x:
+                if w > 64:
+                    for wi in range(WIDE_WORDS):
+                        wv[sp * WIDE_WORDS + wi] = 0
+                        wm[sp * WIDE_WORDS + wi] = <unsigned long long>(-1)
+                    _wm_mask_to_width(&wm[sp * WIDE_WORDS], w)
+                    wflag[sp] = 1
+                else:
+                    wflag[sp] = 0
                 stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
                 sp += 1
                 continue
+            if a_wide or b_wide or w > 64:
+                with gil:
+                    _wide_spow_py(
+                        &wv[sp * WIDE_WORDS], &wm[sp * WIDE_WORDS],
+                        &wv[sp * WIDE_WORDS], a.width, a_wide, a.val,
+                        &wv[(sp+1) * WIDE_WORDS], b.width, b_wide, b.val,
+                    )
+                # `_wide_spow_py` signals Table 5-6's one undefined
+                # (`0 ** negative`) cell by writing all-1s into EVERY
+                # `wm` word, else all-0s (the normal, fully-defined
+                # case) -- checking word 0 is enough to tell which,
+                # since it's always uniform. `_wm_mask_to_width` must
+                # ONLY run in the undefined branch: it's built to trim
+                # an ALREADY-fully-ambiguous mask down to exactly width
+                # `w` (every other call site sets every word to -1
+                # first, exactly like the x-operand branch above) --
+                # calling it on the all-0s normal-case data would
+                # incorrectly SET (not clear) the width-boundary word's
+                # low bits back to 1, corrupting an already-correct
+                # defined result. Confirmed via a direct repro
+                # (`(-1)**(-3)` with an 80-bit wide base into an
+                # 80-bit-exact destination -- no downstream extension
+                # involved at all): calling it unconditionally left the
+                # boundary word's bits spuriously marked x instead of
+                # the correct all-1s (-1).
+                if wm[sp * WIDE_WORDS]:
+                    _wm_mask_to_width(&wm[sp * WIDE_WORDS], w)
+                    stack[sp].val = 0; stack[sp].mask = wmask
+                else:
+                    stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+                    stack[sp].mask = 0
+                if w > 64:
+                    wflag[sp] = 1
+                else:
+                    wflag[sp] = 0
+                stack[sp].width = w
+                sp += 1
+                continue
+            # a.mask/b.mask are both guaranteed 0 here: the `a_any_x or
+            # b_any_x` branch above already covers (and returns for) the
+            # x-operand case for both narrow and wide operands alike, so
+            # there's no separate narrow-only x-check left to do.
             sa = a.val
             if a.width > 0 and a.width < 64 and (a.val >> (a.width - 1)) & 1:
                 sa = a.val - (<long long>1 << a.width)
@@ -1542,6 +1757,7 @@ cdef int _execute_core(
                 # 0 ** (negative) is the table's one genuinely-undefined
                 # ('bx) cell.
                 stack[sp].val = 0; stack[sp].mask = wmask; stack[sp].width = w
+                wflag[sp] = 0
                 sp += 1
                 continue
             elif sa == 1:
@@ -1556,6 +1772,7 @@ cdef int _execute_core(
             stack[sp].val = result_val & wmask
             stack[sp].mask = 0
             stack[sp].width = w
+            wflag[sp] = 0
             sp += 1
             continue
 

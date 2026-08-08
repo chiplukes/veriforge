@@ -25,10 +25,14 @@ the same cross-engine-parametrized pattern as `test_compiled_edge_shapes.py`.
 
 Using `**` on wide (>64-bit) operands also surfaced a SEPARATE,
 pre-existing architectural gap on the two C-based engines (`compiled`,
-`vm-fast`) -- see the "Known, pre-existing, separately-scoped gap"
-section below and `test_wide_power_destination_raises_on_compiled` for
-the loud-failure fix that WAS made for the `compiled` engine's silent
-no-op (making `**` fully WORK on wide operands remains out of scope).
+`vm-fast`) -- see the "Wide-operand `**` support" section below.
+`compiled`'s wide-DESTINATION case was fixed by converting a silent
+no-op into a loud `NotImplementedError`
+(`test_wide_power_destination_raises_on_compiled`); `vm-fast` was fixed
+properly -- `Op.POW`/`Op.SPOW` now dispatch through the wide word-array
+representation (mirroring `Op.MUL`/`Op.DIV`/`Op.MOD`'s existing
+GIL-held-Python-bignum pattern) instead of silently computing a wrong
+answer.
 """
 
 from __future__ import annotations
@@ -67,8 +71,6 @@ class PowCase:
     source: str
     drives: tuple[tuple[str, Value], ...]
     expected: tuple[tuple[str, Value], ...]
-    xfail_engines: frozenset[str] = frozenset()
-    """Engines with a known, documented (not this-fix's-scope) bug for this case."""
 
 
 _RESULTS_CACHE: dict[tuple[str, str], dict[str, Value]] = {}
@@ -163,27 +165,31 @@ _TABLE_5_6_CASES = [
 ]
 
 # =====================================================================
-# Known, pre-existing, separately-scoped gap: `**` over a >64-bit
-# operand on the two C-based engines. Neither `OP_POW`/`OP_SPOW`
-# (`_interp_fast.pyx`) nor the compiled engine's `**` codegen consult the
-# wide (`wflag`/`wv`/`wm` or `c.wide_val`) representation at all -- both
-# only ever read a signal's narrow low-word slot.
+# Wide-operand `**` support: `**` over a >64-bit base, exponent, or
+# destination surfaced a pre-existing architectural gap on the two
+# C-based engines. Neither `OP_POW`/`OP_SPOW` (`_interp_fast.pyx`) nor
+# the compiled engine's `**` codegen originally consulted the wide
+# (`wflag`/`wv`/`wm` or `c.wide_val`) representation at all -- both only
+# ever read a signal's narrow low-word slot.
 #
-# `compiled`'s wide-DESTINATION case is no longer a silent-corruption
-# bug: `_compile_continuous_assigns`/`_emit_lhs_write`'s last-resort
-# narrow-scalar fallback now raises `NotImplementedError` instead of
-# emitting code that writes only `c.val[lhs_sid]` while the real
-# `c.wide_val` storage silently stays at 0 forever -- see
-# `test_wide_power_destination_raises_on_compiled` below, which tests
-# that fix directly. `vm-fast` has no such guard and still silently
-# computes a WRONG (not narrow-truncated, genuinely wrong) answer, since
-# the exponent's own wide/narrow-slot bookkeeping gets misread too --
-# still pinned as strict xfail below. `reference` and `vm` (pure Python,
-# arbitrary-width `int`) are both unaffected either way. See
-# notes/known_issues.md for the full write-up of both the original
-# silent-corruption finding and the loud-failure fix; making `**` fully
-# WORK on wide operands (rather than just failing safely) remains
-# deliberately out of scope.
+# `compiled`'s wide-DESTINATION case: `_compile_continuous_assigns`/
+# `_emit_lhs_write`'s last-resort narrow-scalar fallback used to emit
+# code that wrote only `c.val[lhs_sid]`, silently leaving the real
+# `c.wide_val` storage at 0 forever -- fixed by raising
+# `NotImplementedError` instead (see
+# `test_wide_power_destination_raises_on_compiled` below); making `**`
+# fully WORK on wide operands for `compiled` remains out of scope (would
+# need `_wide_emitter.py`/`_expr_emitter.py` codegen support, a larger
+# project than the `vm-fast` fix below, which could reuse the interpreter's
+# existing GIL-held-Python-bignum escape hatch).
+#
+# `vm-fast`: fixed properly. `Op.POW`/`Op.SPOW` now dispatch through the
+# wide word-array representation exactly like `Op.MUL`/`Op.DIV`/`Op.MOD`
+# already did (check-for-x, then wide-vs-narrow branch, `with gil:` into
+# a `_wide_pow_py`/`_wide_spow_py` helper using Python's arbitrary-
+# precision `**`/`pow()` for the actual math). `reference` and `vm`
+# (pure Python, arbitrary-width `int`) were always unaffected. See
+# notes/known_issues.md for the original silent-corruption finding.
 # =====================================================================
 
 _WIDE_DEST_CASES = [
@@ -192,7 +198,6 @@ _WIDE_DEST_CASES = [
         source="module t(input clk, input [79:0] wa, output [95:0] y);\n    assign y = wa ** 2'd2;\nendmodule\n",
         drives=(("wa", Value(3, width=80)),),
         expected=(("y", Value(9, width=96)),),
-        xfail_engines=frozenset({"vm-fast"}),
     ),
 ]
 
@@ -209,16 +214,7 @@ def _combo_params() -> list:
                 # test_wide_power_destination_raises_on_compiled below.
                 continue
             pid = f"{engine}-{case.id}"
-            marks = []
-            if engine in case.xfail_engines:
-                marks.append(
-                    pytest.mark.xfail(
-                        strict=True,
-                        reason="vm-fast: ** doesn't consult the wide word-array "
-                        "representation for operands >64 bits (see notes/known_issues.md)",
-                    )
-                )
-            params.append(pytest.param(engine, case, id=pid, marks=marks))
+            params.append(pytest.param(engine, case, id=pid))
     return params
 
 
