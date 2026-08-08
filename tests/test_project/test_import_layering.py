@@ -52,6 +52,10 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "refactor": {"model", "analysis", "codegen"},
     "semantics": {"model"},
     "scaffold": {"model", "analysis", "transforms", "verilog_parser", "preprocessor", "project", "sim", "dsl"},
+    # Grammar-driven fuzzer: builds random `model` designs, renders them via
+    # `codegen`, and simulates them via `sim` (cross-engine + Icarus
+    # comparison); `lark_file` supplies grammar metadata for generation.
+    "fuzz": {"model", "codegen", "sim", "lark_file"},
 }
 
 # File-level exceptions for the sim <-> dsl boundary, which the coarse

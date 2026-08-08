@@ -1100,14 +1100,54 @@ class TestOrChainTemporaries:
         vals = {f"a{i}": 1 << i for i in range(5)}
         self._run(mod, vals, Value(0b11111, width=8))
 
+    def _or_chain_value_line_len(self, k: int) -> int:
+        """Length of the module's own OR-chain value expression line.
+
+        Measuring "the single longest line in the whole generated file"
+        (the original version of this test) is noisy at small k: shared
+        `.pxi`-template boilerplate (e.g. wide-multiply helper signatures,
+        ~199 chars) dominates until the chain itself grows past that, so
+        two very different k values can report an identical max_len purely
+        from boilerplate, masking the chain's own growth rate entirely.
+        Isolate the chain's own value line instead (it's the one
+        referencing both the first and last operand) for a clean signal.
+        """
+        mod = _make_or_chain_module(k)
+        cg = CythonCodegen()
+        pyx = cg.generate(mod)
+        matches = [line for line in pyx.split("\n") if "c.val[0]" in line and f"c.val[{k - 1}]" in line]
+        assert matches, f"k={k}: couldn't find the OR-chain's own value line in generated output"
+        return max(len(line) for line in matches)
+
     def test_or_chain_max_line_length(self):
-        """OR-chain expression temps keep generated line length bounded (O(k) not O(k²))."""
-        for k in [5, 10, 20]:
-            mod = _make_or_chain_module(k)
-            cg = CythonCodegen()
-            pyx = cg.generate(mod)
-            max_len = max(len(line) for line in pyx.split("\n"))
-            assert max_len < 500, f"k={k}: max line length {max_len} exceeds 500 — OR mask O(k²) not fixed"
+        """OR-chain expression temps keep generated line length growing linearly in k, not quadratically.
+
+        Each `|` step in `_emit_binary`'s natural-width bitwise-op branch
+        re-masks its own result to `bitwise_op_width` even when nested
+        inside another `|` at the identical width (where the operand is
+        already provably masked) -- see notes/known_issues.md/
+        known_issues_archive.md for why this is safe-but-verbose rather
+        than a correctness bug (masking a signed leaf operand's full-
+        register sign-extension is genuinely necessary in general; eliding
+        it only for the provably-safe nested-same-width-bitwise-op case
+        would need careful AST analysis this test doesn't attempt). That
+        makes each term cost a small CONSTANT number of extra characters
+        (~30, empirically flat across k=10/20/40 -- confirmed via direct
+        measurement before writing this test), not a quadratically-growing
+        one -- a single large absolute threshold (the original version of
+        this test used 500, which k=20's ~32 char/term genuinely-linear
+        growth just happens to cross) can't distinguish "linear with a
+        larger-than-expected constant" from "quadratic", so assert the
+        GROWTH RATE instead: doubling k should roughly double the line
+        length (linear), not roughly quadruple it (quadratic).
+        """
+        len_10 = self._or_chain_value_line_len(10)
+        len_20 = self._or_chain_value_line_len(20)
+        ratio = len_20 / len_10
+        assert ratio < 2.5, (
+            f"k=10->20 (2x) line length grew {ratio:.2f}x (10:{len_10}, 20:{len_20}) "
+            "-- exceeds the linear-growth budget (quadratic growth would be ~4x); OR mask O(k²) not fixed"
+        )
 
 
 class TestTernaryChainTemporaries:
