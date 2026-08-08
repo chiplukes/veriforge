@@ -10,7 +10,7 @@ It is not a replacement for focused tests or subsystem-specific notes. Instead,
 it links those detailed sources together so support claims live in one obvious
 place.
 
-`docs\grammar_support.md` remains the generated parser-rule inventory. It is
+[`docs/grammar_support.md`](../docs/grammar_support.md) remains the generated parser-rule inventory. It is
 useful for grammar coverage and examples, but it does not describe the full
 runtime/tooling stack.
 
@@ -34,13 +34,13 @@ current detailed story.
 
 | Surface | Primary detail source | Notes |
 | --- | --- | --- |
-| Parser / model / emitter / formatter | `docs\grammar_support.md`, `notes\python_overview.md` | Grammar metadata plus codebase structure overview. |
-| Reference and VM simulation | focused `tests\test_sim\...` files | Simulator test suites are the primary coverage record. |
-| Compiled simulation | `notes\simulation\wide_signal_coverage.md` | Wide-signal operation coverage matrix for the compiled engine. |
-| DSL builder | `notes\dsl\dsl_coverage.md` | Detailed builder-oriented construct matrix. |
-| Verilog-to-DSL converter | `notes\dsl\dsl_conversion_coverage.md` | Explicit current unsupported output shapes and recommended next steps. |
-| LSP | `notes\veriforge_lsp.md` | Standard features, custom commands, and current safe refactor subsets. |
-| Hierarchy/refactor tooling | `notes\veriforge_lsp.md` | Implemented preview/apply surface, diagnostics, and remaining blocked cases. Forward work in `notes/roadmap.md`. |
+| Parser / model / emitter / formatter | [`docs/grammar_support.md`](../docs/grammar_support.md), [`notes/python_overview.md`](python_overview.md) | Grammar metadata plus codebase structure overview. |
+| Reference and VM simulation | focused `tests/test_sim/...` files | Simulator test suites are the primary coverage record. |
+| Compiled simulation | [`notes/simulation/wide_signal_coverage.md`](simulation/wide_signal_coverage.md) | Wide-signal operation coverage matrix for the compiled engine. |
+| DSL builder | [`notes/dsl/dsl_coverage.md`](dsl/dsl_coverage.md) | Detailed builder-oriented construct matrix. |
+| Verilog-to-DSL converter | [`notes/dsl/dsl_conversion_coverage.md`](dsl/dsl_conversion_coverage.md) | Explicit current unsupported output shapes and recommended next steps. |
+| LSP | [`notes/veriforge_lsp.md`](veriforge_lsp.md) | Standard features, custom commands, and current safe refactor subsets. |
+| Hierarchy/refactor tooling | [`notes/veriforge_lsp.md`](veriforge_lsp.md) | Implemented preview/apply surface, diagnostics, and remaining blocked cases. Forward work in [`notes/roadmap.md`](roadmap.md). |
 
 ## Scope notes
 
@@ -80,11 +80,11 @@ detailed DSL-specific notes.
 
 | Area | DSL builder | Verilog-to-DSL converter | Notes |
 | --- | --- | --- | --- |
-| Ports, wires, regs, parameters, localparams | Supported | Supported for common cases | See `notes\dsl\dsl_coverage.md`. |
-| Arithmetic, bitwise, logical, comparison, ternary, concat, replication, selects | Supported for common operators | Partial | Arithmetic shifts and case equality now convert through explicit DSL helpers; broader control-flow and module-level converter gaps remain. See `notes\dsl\dsl_conversion_coverage.md`. |
+| Ports, wires, regs, parameters, localparams | Supported | Supported for common cases | See [`notes/dsl/dsl_coverage.md`](dsl/dsl_coverage.md). |
+| Arithmetic, bitwise, logical, comparison, ternary, concat, replication, selects | Supported for common operators | Partial | Arithmetic shifts and case equality now convert through explicit DSL helpers; broader control-flow and module-level converter gaps remain. See [`notes/dsl/dsl_conversion_coverage.md`](dsl/dsl_conversion_coverage.md). |
 | Always blocks, initial blocks, if/else, case | Supported | Supported for common cases | Control-flow-heavy testbench constructs remain less complete in the converter. |
 | System tasks and common system functions | Supported for common cases | Partial | Converter support is intentionally incremental; `$time`, `$clog2`, `$signed`, and `$unsigned` now map to explicit DSL helpers. |
-| Functions, tasks, generate blocks | Python functions and Python control flow are preferred | Partial / unsupported | Some Verilog constructs are intentionally translated into Python-side patterns rather than direct DSL equivalents; see `notes\dsl\dsl_conversion_coverage.md` for manual rewrite guidance. |
+| Functions, tasks, generate blocks | Python functions and Python control flow are preferred | Partial / unsupported | Some Verilog constructs are intentionally translated into Python-side patterns rather than direct DSL equivalents; see [`notes/dsl/dsl_conversion_coverage.md`](dsl/dsl_conversion_coverage.md) for manual rewrite guidance. |
 | Specify blocks | Out of scope for DSL construction | Unsupported | Parsed/emitted opaquely elsewhere. |
 
 ## Hierarchy refactor and editor support
@@ -114,8 +114,8 @@ detailed DSL-specific notes.
    unsupported, or delegated to a different plan.
 2. Link support claims to detailed notes, tests, or examples when possible.
 3. Do not expand compiled-simulator claims here without checking the active
-   plans in `notes\plans\` and
-   `notes\simulation\wide_signal_coverage.md`.
-4. Keep `notes\dsl\dsl_coverage.md` and
-   `notes\dsl\dsl_conversion_coverage.md` as the detailed DSL sources; this file
+   plans in [`notes/plans/`](plans/) and
+   [`notes/simulation/wide_signal_coverage.md`](simulation/wide_signal_coverage.md).
+4. Keep [`notes/dsl/dsl_coverage.md`](dsl/dsl_coverage.md) and
+   [`notes/dsl/dsl_conversion_coverage.md`](dsl/dsl_conversion_coverage.md) as the detailed DSL sources; this file
    is the cross-surface overview.

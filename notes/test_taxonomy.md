@@ -40,6 +40,34 @@ Registered in `tests\conftest.py`:
 | `--clear-cython-cache` | Delete cached Cython compiled extensions before the run. |
 | `--vcd-dir DIR` | Write simulator VCD outputs for tests that support tracing. |
 
+## Compiled-engine suite specifics
+
+`tests/test_sim/compiled/` is the compiled-engine regression suite —
+split (July 2026) from a single 62k-line `test_compiled.py` into a
+feature-organized package (`tests/test_sim/compiled/*.py`), same tests,
+same collected count.
+
+The bulk of the tests live in `TestWideSignalExternalIO` (~3843
+parametrized tests across wide-signal ops and values). They're tagged
+`slow` and skipped by default; use `--run-slow` to include them:
+
+```
+uv run pytest tests/test_sim/compiled/ --run-slow
+```
+
+Full count with slow tests enabled: **4516 tests** (down from 6304 after
+a May 2026 redundancy-reduction pass). Each slow test compiles a unique
+Cython module (~5s first-run, <1s on cache hit).
+
+`.cycache/` content-hashes compiled `.pyd`/`.so` files per module, keyed
+so `-n auto` parallel workers never collide. Use `--clear-cython-cache`
+to wipe and rebuild from scratch.
+
+**Known xfail**: `TestWideSignalExternalIO::test_wide_posedge_signal_probe_cross_engine`
+— posedge on >64-bit signals is not supported in the compiled engine
+(`NotImplementedError`, by design — see `known_issues.md`). Marked strict
+xfail.
+
 ## CI policy
 
 `.github\workflows\test.yml` uses a two-job policy:

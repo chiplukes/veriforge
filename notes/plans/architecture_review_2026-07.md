@@ -155,39 +155,58 @@ one release and emit a `DeprecationWarning`; update
 `developer_guide.md` / `cycache.md` / `simulator_compile_cython.md` together.
 A single `veriforge/_env.py` accessor keeps the fallback logic in one place.
 
-## 8. Latent compiled-engine wide unary masking bug
+## 8. Latent compiled-engine wide unary masking bug (RESOLVED — this review's own diagnosis was backwards)
 
-From `known_issues.md`: `_wide_emitter.py` passes `dst_width` instead of the
-operand's self-determined width as the tail-mask parameter of
-`wide_not`/`wide_neg` (IEEE Table 5-22 violation class; same family as the
-narrow-path `_emit_unary` fix of May 2026). Still present as of this review
-(`_wide_emitter.py` ~line 3590: operand evaluated at `op_width` but primitive
-masked at `dst_width`).
+**Status (August 2026)**: not a bug. Re-verified against Icarus with this
+item's own suggested repro (`~a`/`-a`, `a` both 1-bit and 71-bit, evaluated
+in a 96-bit destination context) — all four engines, including compiled,
+match Icarus exactly.
 
-**Plan.** Write the triggering test first (>64-bit `~a` / `-a` evaluated in a
-strictly wider context, cross-engine), then pass `op_width` — with the operand
-zero/sign-extension to `dst_width` handled explicitly after the primitive.
-Fold into the item-2 differential harness as a seed case.
+This review originally described masking the `wide_not`/`wide_neg`
+primitive's result at `dst_width` (rather than the operand's own
+self-determined width) as an IEEE Table 5-22 violation. That got the rule
+backwards: unary `~`/`-` are *context-determined* operators (Table 5-22),
+which means the OPERAND must be extended to the full destination context
+width BEFORE the operator runs — masking the primitive's result at
+`dst_width` is exactly correct once the operand has already been recursed
+into at `dst_width` (which `_wide_emitter.py`'s `_emit_wide_expr_to_scratch`
+already does — see its own extensive comment at the `if op in {"~", "-"}:`
+branch). This was conclusively established by a much later, more
+rigorous investigation (see `notes/known_issues.md`'s seed 2182 entry: a
+systematic truth-table sweep across six fixed-self-determined operators
+and both `~`/unary `-`, which found Icarus extends-then-applies in every
+case, never the reverse). The current code already implements the correct
+behavior — whether that was already true when this review was written and
+misdiagnosed, or fixed since as a side effect of the seed 2182 work, is
+not worth re-litigating; what matters is the current, verified state.
 
-## 9. Documentation architecture: statuses live in too many places
+## 9. Documentation architecture: statuses live in too many places (RESOLVED)
 
-Support status is spread across `roadmap.md`, `known_issues.md`,
-`support_matrix.md`, per-subsystem notes, and (until this review) `setup.py`.
-Several "planned" roadmap items were already implemented (near-miss detection,
-LSP Lark fallback, `.pxi` templates) — i.e. the docs lag the code in the
-*optimistic* direction, which is the benign failure mode, but it still costs
-trust.
+**Status (August 2026)**: done. All three plan steps completed:
+1. `known_issues.md` now holds only currently-open defects (trimmed from
+   ~4200 to ~130 lines; the full historical record of resolved defects
+   moved to `known_issues_archive.md`). `roadmap.md` was already
+   appropriately terse/future-work-only on inspection and needed no
+   changes. `support_matrix.md` was already serving as the status index.
+   (The same treatment was also applied to `work_plan_2026-07.md`, not
+   explicitly called out in this item's original plan but the same
+   problem in the same place: trimmed to a completion checklist plus the
+   still-open items 4.3-4.5, full execution history moved to
+   `work_plan_2026-07_archive.md`.)
+2. `tools/check_overview.py` already had the staleness check running in
+   CI (`All doc references valid (N files checked)` — confirmed still
+   passing after the above reorganization, 51 files checked).
+3. `support_matrix.md`'s backslash paths (`notes\...`) — found still
+   present despite item 1.4's "done" mark (that item covered other
+   docs, not this file) — converted to forward-slash markdown links.
 
-**Plan.**
-1. Make `support_matrix.md` the single status index; `roadmap.md` holds only
-   future work; `known_issues.md` holds only defects. Move anything else into
-   the owning subsystem note.
-2. Extend `tools/check_overview.py` (already in CI) with a cheap staleness
-   check: every `notes/...` path mentioned in markdown must exist (the review
-   found 5 references to files that don't exist — all fixed inline; keep them
-   from coming back).
-3. Convert `support_matrix.md` backslash paths (`notes\...`) to forward slashes
-   so they render as links and the checker can verify them.
+Original problem statement, for context: support status was spread
+across `roadmap.md`, `known_issues.md`, `support_matrix.md`,
+per-subsystem notes, and (until this review) `setup.py`. Several
+"planned" roadmap items were already implemented (near-miss detection,
+LSP Lark fallback, `.pxi` templates) — i.e. the docs lagged the code in
+the *optimistic* direction, which is the benign failure mode, but it
+still cost trust.
 
 ## 10. Deferred / rejected simplifications (assessed, not planned)
 
