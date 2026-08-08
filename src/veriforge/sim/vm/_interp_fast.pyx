@@ -294,6 +294,7 @@ cdef struct DeltaCtx:
     char      *is_changed
     char      *is_work        # current-pass CA input sigs (zeroed between passes)
     int       *changed_buf
+    int        changed_cap     # current allocated capacity of changed_buf (grows via realloc)
     char      *trig_flag
     int       *triggered_buf
     NBAEntry  *nba_buf
@@ -3613,6 +3614,51 @@ cdef int _execute_core(
 
 # ── Continuous-assign multi-pass propagation ─────────────────────────
 
+cdef inline int _changed_buf_push(DeltaCtx *dc, int sid, int *p_changed_count) noexcept nogil:
+    """Push *sid* onto dc.changed_buf, growing it via realloc if full.
+
+    changed_buf's initial allocation is dc.sig_count entries (the common
+    case: each signal changes at most once per delta cycle), but that is
+    NOT a safe upper bound on how many times it can be written across a
+    single run_delta_loop() call: _propagate_cont_assigns's own
+    diamond-propagation re-queueing (see its docstring -- a signal's
+    is_changed flag is deliberately cleared at the start of a pass so it
+    can be re-pushed if a later continuous assign in the SAME pass dirties
+    it again) means the same signal ID can appear in changed_buf many
+    times over. This was a genuine heap-buffer-overflow crash (confirmed
+    via valgrind, see notes/known_issues.md's vm-fast heap-corruption
+    entry) before this fix: every push site wrote `changed_buf[changed_
+    count]` with no bounds check at all, silently corrupting adjacent
+    heap memory once a design's continuous-assign dependency shape caused
+    enough re-queueing (a minimal repro needs only 6 signals / 3
+    processes / a 2-level cross-process dependency chain). There's no
+    tight, always-safe sig_count-based cap to fall back to instead (worst
+    case scales with sig_count * delta_limit, the latter defaulting to
+    10,000) -- growing on demand is the only approach that's both correct
+    and doesn't waste memory on designs that never need it.
+
+    Returns 0 on success, 3 if realloc fails (out of memory) -- a
+    DISTINCT status from this file's existing status==2 ("NBA/display
+    capacity exceeded", a fixed compile-time cap meant to be bumped and
+    rebuilt) convention, since this is genuine memory exhaustion during
+    on-demand growth, not a capacity constant to increase. Lets the
+    Python layer raise a clear, accurately-worded error instead of
+    corrupting memory or aborting.
+    """
+    cdef int new_cap
+    cdef int *new_buf
+    if p_changed_count[0] >= dc.changed_cap:
+        new_cap = dc.changed_cap * 2 if dc.changed_cap > 0 else 16
+        new_buf = <int *>realloc(dc.changed_buf, new_cap * sizeof(int))
+        if new_buf == NULL:
+            return 3
+        dc.changed_buf = new_buf
+        dc.changed_cap = new_cap
+    dc.changed_buf[p_changed_count[0]] = sid
+    p_changed_count[0] += 1
+    return 0
+
+
 cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept nogil:
     """Propagate continuous assigns to convergence using a worklist.
 
@@ -3672,8 +3718,9 @@ cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept no
                     sid = dc.dirty_buf[j]
                     if not dc.is_changed[sid]:
                         dc.is_changed[sid] = 1
-                        dc.changed_buf[changed_count] = sid
-                        changed_count += 1
+                        status = _changed_buf_push(dc, sid, &changed_count)
+                        if status != 0:
+                            break
                 if status != 0:
                     # Restore is_work to zero before returning
                     for j in range(work_lo, work_hi):
@@ -3830,8 +3877,10 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 sid = dc.dirty_buf[j]
                 if not dc.is_changed[sid]:
                     dc.is_changed[sid] = 1
-                    dc.changed_buf[changed_count] = sid
-                    changed_count += 1
+                    status = _changed_buf_push(dc, sid, &changed_count)
+                    if status != 0:
+                        p_changed_count[0] = 0
+                        return status
 
             if status == 1:
                 p_changed_count[0] = 0
@@ -3857,8 +3906,10 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 dc.sig_mask[sid] = new_m
                 if not dc.is_changed[sid]:
                     dc.is_changed[sid] = 1
-                    dc.changed_buf[changed_count] = sid
-                    changed_count += 1
+                    status = _changed_buf_push(dc, sid, &changed_count)
+                    if status != 0:
+                        p_changed_count[0] = 0
+                        return status
 
         # ── Apply wide signal NBAs (full-signal replace) ──
         if dc.wctx.sig_offset != NULL and dc.wctx.nba_count != NULL:
@@ -3873,8 +3924,10 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                         dc.wctx.sig_mask[off + j] = <unsigned long long>new_m
                         if not dc.is_changed[sid]:
                             dc.is_changed[sid] = 1
-                            dc.changed_buf[changed_count] = sid
-                            changed_count += 1
+                            status = _changed_buf_push(dc, sid, &changed_count)
+                            if status != 0:
+                                p_changed_count[0] = 0
+                                return status
             dc.wctx.nba_count[0] = 0
 
         # ── Apply wide partial NBAs (read-modify-write: NBA_BIT/NBA_RANGE on wide signals) ──
@@ -3909,8 +3962,10 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                         dc.wctx.sig_mask[off + j] = p_new_m
                         if not dc.is_changed[sid]:
                             dc.is_changed[sid] = 1
-                            dc.changed_buf[changed_count] = sid
-                            changed_count += 1
+                            status = _changed_buf_push(dc, sid, &changed_count)
+                            if status != 0:
+                                p_changed_count[0] = 0
+                                return status
             dc.wctx.nba_part_count[0] = 0
 
         # ── Apply memory NBAs ──
@@ -3925,8 +3980,10 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 # Mark memory marker signal as changed for combo re-eval
                 if marker_sid < dc.sig_count and not dc.is_changed[marker_sid]:
                     dc.is_changed[marker_sid] = 1
-                    dc.changed_buf[changed_count] = marker_sid
-                    changed_count += 1
+                    status = _changed_buf_push(dc, marker_sid, &changed_count)
+                    if status != 0:
+                        p_changed_count[0] = 0
+                        return status
 
         # ── Run dirty continuous assigns (multi-pass worklist) ──
         if changed_count > 0 and dc.cont_count > 0:
@@ -4329,7 +4386,10 @@ cdef class CyContext:
     cdef char      *seq_fired         # [n_procs]
     cdef char      *is_changed        # [sig_count]
     cdef char      *is_work           # [sig_count] current-pass CA input sigs
-    cdef int       *changed_buf       # [sig_count]
+    cdef int       *changed_buf       # [changed_cap] -- grows via realloc past sig_count;
+                                       # see _changed_buf_push's docstring for why sig_count
+                                       # alone is not a safe upper bound.
+    cdef int        changed_cap       # current allocated capacity of changed_buf
     cdef char      *trig_flag         # [n_procs]
     cdef int       *triggered_buf     # [n_procs]
     cdef public bint _procs_setup
@@ -4402,6 +4462,7 @@ cdef class CyContext:
         self.is_changed = NULL
         self.is_work = NULL
         self.changed_buf = NULL
+        self.changed_cap = 0
         self.trig_flag = NULL
         self.triggered_buf = NULL
         self._procs_setup = False
@@ -5067,7 +5128,15 @@ cdef class CyContext:
         self.triggered_buf = <int *>malloc(self.n_procs * sizeof(int))
         self.is_changed   = <char *>malloc(self.sig_count * sizeof(char))
         self.is_work      = <char *>malloc(self.sig_count * sizeof(char))
-        self.changed_buf  = <int *>malloc(self.sig_count * sizeof(int))
+        # changed_buf starts at sig_count entries (the common case: each
+        # signal changes at most once per delta cycle) but is NOT actually
+        # bounded by sig_count -- _propagate_cont_assigns's diamond-
+        # propagation re-queueing can push the same signal multiple times
+        # across passes, so it grows via realloc (see _changed_buf_push)
+        # whenever it fills up, rather than assuming this initial size is
+        # a hard cap.
+        self.changed_cap  = self.sig_count
+        self.changed_buf  = <int *>malloc(self.changed_cap * sizeof(int))
         for i in range(self.n_procs):
             self.seq_fired[i] = 0
             self.trig_flag[i] = 0
@@ -5104,6 +5173,8 @@ cdef class CyContext:
         cdef DeltaCtx dc
         cdef int changed_count = len(changed_sids)
         cdef int i, status, sid
+        cdef int new_cap
+        cdef int *new_buf
 
         # Populate DeltaCtx from self
         dc.sig_val = self.sig_val
@@ -5135,6 +5206,7 @@ cdef class CyContext:
         dc.is_changed = self.is_changed
         dc.is_work = self.is_work
         dc.changed_buf = self.changed_buf
+        dc.changed_cap = self.changed_cap
         dc.trig_flag = self.trig_flag
         dc.triggered_buf = self.triggered_buf
         dc.nba_buf = self.nba_buf
@@ -5158,15 +5230,36 @@ cdef class CyContext:
         self.wide_part_nba_count = 0      # reset before delta loop
         dc.wctx = self.wctx_c   # copied by value; nba_count/nba_part_count ptrs stay valid
 
-        # Populate the initial changed set
+        # Populate the initial changed set. Grow changed_buf up front if the
+        # caller handed us more entries than it currently holds -- mirrors
+        # _changed_buf_push's growth (see its docstring) rather than
+        # assuming len(changed_sids) <= dc.changed_cap.
+        if changed_count > dc.changed_cap:
+            new_cap = changed_count
+            new_buf = <int *>realloc(dc.changed_buf, new_cap * sizeof(int))
+            if new_buf == NULL:
+                raise MemoryError("VM Cython interpreter: out of memory growing changed_buf")
+            dc.changed_buf = new_buf
+            dc.changed_cap = new_cap
+            self.changed_buf = dc.changed_buf
+            self.changed_cap = dc.changed_cap
         for i in range(changed_count):
             sid = <int>changed_sids[i]
-            self.changed_buf[i] = sid
+            dc.changed_buf[i] = sid
             self.is_changed[sid] = 1
 
         # Run entirely in C (no GIL needed)
         with nogil:
             status = _run_delta_loop_core(&dc, &changed_count)
+
+        # Sync back regardless of status: _changed_buf_push may have grown
+        # (and therefore moved) dc.changed_buf via realloc inside the nogil
+        # call -- if we don't propagate the new pointer/capacity back to
+        # self here, self.changed_buf is left dangling (realloc may have
+        # freed the old block when it moved), and the next call -- or
+        # __dealloc__ -- would read/free through a stale pointer.
+        self.changed_buf = dc.changed_buf
+        self.changed_cap = dc.changed_cap
 
         if status == 1:
             raise CyStopSimulation()
@@ -5175,6 +5268,8 @@ cdef class CyContext:
                 "VM Cython interpreter: buffer overflow (NBA/display capacity exceeded). "
                 "Increase NBA_MAX/DISP_BUF_CAP and rebuild."
             )
+        if status == 3:
+            raise MemoryError("VM Cython interpreter: out of memory growing changed_buf")
         if status == -1:
             raise RuntimeError(f"Delta cycle limit ({delta_limit}) exceeded")
 

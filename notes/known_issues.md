@@ -53,9 +53,16 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
-### vm-fast: native heap-corruption crash on a wide-signal module (undiagnosed)
+### vm-fast: native heap-corruption crash on a wide-signal module (RESOLVED)
 
-**Status**: Open, not investigated beyond isolating a minimal repro.
+**Status**: Fixed (August 2026). Root-caused with `valgrind` after
+installing it into the environment, then fixed and verified: the
+original crash, the minimal repro, and all 18 intermediate bisection
+variants collected while narrowing it down now run clean under both a
+plain run and a `valgrind --tool=memcheck` run (zero `_interp_fast`-
+related errors either way — the only remaining valgrind output is a
+pre-existing, unrelated uninitialised-value warning inside CPython
+3.14's own GC internals, present identically before and after this fix).
 **Found**: August 2026, incidentally, while verifying the fuzzer's new
 Icarus-first-activation-artifact filter (`random-verilog-gen` branch) —
 not a targeted crash hunt.
@@ -67,12 +74,11 @@ the process aborts) but apparently narrow in practical scope so far: only
 `vm-fast` crashes, `reference` and `vm` handle the identical module and
 stimulus cleanly, and only one module in a 300-seed sweep triggered it.
 
-**Repro**: `uv run python -m veriforge.fuzz --repro 91` (seed 91, this
-branch's grammar-driven fuzzer) — reproduces cleanly and immediately with
-`--engines reference vm-fast --no-icarus` (Icarus and the `vm` engine are
-not needed to trigger it; `reference` alone is fine). Generated module
-(103/113-bit inputs, a 127-bit output built from nested concatenations,
-ternaries, reductions, and signed casts):
+**Original repro**: `uv run python -m veriforge.fuzz --repro 91` (seed
+91, this branch's grammar-driven fuzzer) — reproduces cleanly and
+immediately with `--engines reference vm-fast --no-icarus`. Generated
+module (103/113-bit inputs, a 127-bit output built from nested
+concatenations, ternaries, reductions, and signed casts):
 
 ```verilog
 module t (
@@ -89,19 +95,153 @@ module t (
 endmodule
 ```
 
-Not yet root-caused: suspect a wide-value (>64-bit) scratch/stack buffer
-in `sim/vm/_interp_fast.pyx` sized or indexed incorrectly for this
-specific nesting shape (127-bit destination, multiple >64-bit
-intermediate concat/ternary results) — this would be the `vm-fast`
-analogue of the `compiled` engine's own long-running "64-bit signal width
-limit" gap (see the entry below), but is a *crash*, not a silent wrong
-value, and hasn't been connected to that entry's root cause or scope.
-Deliberately not investigated further per explicit user direction
-("just document it for now") — the next step, if picked up, should be
-bisecting which piece of the expression (the 127-bit concat destination,
-the nested ternary, or the reduction) actually triggers the corruption,
-e.g. by trying reduced variants of the module above under `vm-fast`
-directly (bypass the fuzzer entirely once isolated).
+**Minimal repro** (found via Verilog-level bisection — reduced the
+module above statement-by-statement, driving `vm-fast` directly through
+`Simulator`/`sim.settle()` rather than the fuzzer, checking the process
+exit code after each variant): crashes identically, with NO wide (>64
+bit) signals at all, disproving the original "wide-value scratch buffer"
+suspicion entirely:
+
+```verilog
+module t (
+    input [30:0] i1,
+    input [7:0] i3,
+    input [3:0] i4,
+    output [31:0] o4,
+    output [8:0] o5,
+    output signed [1:0] o6
+);
+    assign o4 = {i1[29:0], o6};
+    assign o5 = i3;
+    assign o6 = i1[1:0];
+endmodule
+```
+
+Drive any values, call `sim.settle()` once, then `del sim` (or let the
+`Simulator`/`CyContext` go out of scope) — the corruption happens during
+`settle()` but is only detected later when Python's GC frees the
+corrupted heap chunk during `CyContext.__dealloc__`, which is why
+`MALLOC_CHECK_=3` doesn't move the crash earlier (the corrupted chunk
+just isn't freed until then) and why the crash can appear to happen
+"after" a script's own work looks complete.
+
+**Bisection findings** (all four factors are independently necessary —
+removing any ONE of them, keeping the other three, eliminates the
+crash):
+1. **Exactly 6 signals total** (`self.sig_count` in `_interp_fast.pyx`'s
+   `CyContext`) — 5 or fewer never crashes with this same program shape;
+   width and signedness of the signals are irrelevant (confirmed with
+   ALL SIX signals narrow, `n_wide_words=0` — the wide-signal pool
+   mechanism, `setup_wide()`/`WideCtx`, is provably NOT involved at all,
+   contradicting the original "wide-value scratch buffer" suspicion).
+2. **Exactly 3 processes** (`self.n_procs`) — adding a 4th trivial
+   continuous assign (keeping 6 signals) eliminates the crash.
+3. **A 2-level combinational dependency CHAIN across processes**: `o4`'s
+   own assign must read `o6`, where `o6` is itself a SEPARATE
+   continuous assign's output (`o4 = {i1[29:0], o6}` / `o6 = i1[1:0]`) —
+   collapsing this to a single process, or making `o4` depend only on
+   inputs (no cross-process signal read), eliminates the crash.
+4. **A third, independent process reading a primary input directly**
+   (`o5 = i3`) — replacing this with a constant (`o5 = 0`) eliminates
+   the crash even with the chain from (3) and the same signal/process
+   counts intact; the specific expression used for `o5` doesn't matter
+   otherwise (confirmed both `o5 = i3` and `o5 = i3 + i4` crash
+   identically) — only that it reads an input.
+
+Because the crash required this specific *combination* of counts and
+dependency shape (not any single factor alone), the Verilog-level
+bisection above correctly pointed at the delta-cycle scheduling
+machinery rather than the wide-signal pool, but couldn't pin down the
+exact line — that needed `valgrind`. Once installed
+(`sudo apt install -y valgrind gdb` on this Ubuntu 22.04 environment;
+both the `_interp_fast.cpython-*.so` and the debug symbols needed for a
+useful trace were already present — `file` reported `with debug_info,
+not stripped`, so no special rebuild was needed just to get a trace),
+running the minimal repro under
+`PYTHONMALLOC=malloc valgrind --tool=memcheck --track-origins=yes uv run python <repro>.py`
+immediately reported an `Invalid write`/multiple `Invalid read`s all
+pointing at `_interp_fast.c:35625`/`36008`/`36050`/`36329`/`38207`
+(`_propagate_cont_assigns`/`_run_delta_loop_core`) with the address
+description `is 0 bytes after a block of size 24 alloc'd ... at
+CyContext.setup_processes (_interp_fast.c:50346)` — i.e. exactly one
+`int` (4 bytes) past the end of a 24-byte (6×`int`) block, matching
+`sig_count=6` precisely.
+
+**Root cause**: `changed_buf` — the delta-cycle worklist of "signals
+that still need re-propagating" — was allocated at exactly `sig_count`
+entries (`self.changed_buf = malloc(self.sig_count * sizeof(int))` in
+`setup_processes()`), on the implicit assumption that each signal
+appears in it at most once. But `_propagate_cont_assigns`'s own
+docstring already explained the real algorithm: it deliberately clears
+a signal's `is_changed` flag at the start of each pass specifically so
+a signal that gets re-dirtied via a second dependency path ("diamond
+propagation" — exactly what the bisected repro's `o4 ← o6` chain plus
+the independent `o5 ← i3` process sets up) can be *re-queued* into
+`changed_buf`. None of the six `dc.changed_buf[changed_count] = sid;
+changed_count += 1` push sites (in `_propagate_cont_assigns` and
+`_run_delta_loop_core`) had any bounds check — even though
+`_propagate_cont_assigns`'s own docstring already claimed it could
+return "2 = buffer overflow", that path was simply never wired up for
+this specific buffer. Once a design's continuous-assign dependency
+structure caused enough re-queueing within one `run_delta_loop()` call,
+`changed_count` walked past `sig_count` and wrote off the end of the
+heap block — this file is built with `boundscheck=False` (see
+`setup.py`), so nothing caught it at the point of the actual bad write;
+it only surfaced later as `glibc` heap-metadata corruption when the
+block was freed.
+
+There's no tight, always-safe `sig_count`-based cap to fall back to
+instead: worst-case growth scales with `sig_count * delta_limit` (the
+latter defaults to 10,000), which would be wildly wasteful to
+preallocate for every design.
+
+**Fix**: made `changed_buf` grow on demand via `realloc` (already
+imported in this file) instead of assuming a fixed `sig_count` cap.
+Added a `changed_cap` field (to both the `DeltaCtx` struct and the
+persistent `CyContext`), a new `_changed_buf_push()` helper that checks
+capacity and doubles it via `realloc` before every write (starting at
+`sig_count`, doubling from 16 if that's ever 0), and routed all six push
+sites through it. `_changed_buf_push` returns a NEW, distinct status
+code (`3`) on `realloc` failure (genuine OOM), kept separate from the
+pre-existing status `2` ("NBA/display capacity exceeded" — a fixed
+compile-time constant meant to be bumped and rebuilt, a materially
+different situation from on-demand-growth OOM) so `run_delta_loop()`'s
+Python-level caller can raise an accurately-worded `MemoryError` instead
+of a misleading "increase NBA_MAX" message. Also fixed two related gaps
+surfaced while wiring this up, both in `run_delta_loop()` (`sim/vm/
+_interp_fast.pyx`):
+- `dc.changed_cap` was never actually populated from `self.changed_cap`
+  when building the `DeltaCtx` for a call (an oversight from adding the
+  new field) — without it, the nogil delta loop would start from a
+  stale/zero capacity every time.
+- The initial-changed-set population loop (writing the caller's
+  `changed_sids` into `self.changed_buf` before entering the delta loop)
+  had no bounds check either — fixed by growing up front if needed,
+  mirroring `_changed_buf_push`'s own logic.
+- **Most importantly**: after `_run_delta_loop_core` returns,
+  `self.changed_buf`/`self.changed_cap` are now ALWAYS synced back from
+  `dc.changed_buf`/`dc.changed_cap`, regardless of status. Skipping this
+  would have been a NEW bug on top of the fix: `realloc` can move a
+  block, which frees the old pointer — if growth happened inside the
+  nogil call and `self.changed_buf` were left pointing at the old,
+  already-freed address, the next `run_delta_loop()` call (or
+  `__dealloc__` on simulator teardown) would read/free through a
+  dangling pointer.
+
+**Verified**: rebuilt via `uv run python setup.py build_ext --inplace`
+(clean compile, no warnings). The original seed-91 fuzzer repro, the
+minimal 6-signal repro, and all 18 intermediate variants collected
+during the earlier bisection pass now run to completion with exit code
+0, both directly and under `valgrind --tool=memcheck` (zero
+`_interp_fast`-related errors in the valgrind log — see Status above).
+Full `tests/test_sim/test_vm.py` +
+`test_differential*.py` + `test_assignment_matrix.py` +
+`test_precedence_and_fixes.py` (1126 passed) with the Cython extension
+built, plus a second pass of the VM-specific tests with
+`VERIFORGE_DISABLE_CYTHON_VM=1` (353 passed, confirming the pure-Python
+fallback path — which never touches this code at all — is unaffected),
+plus a full `-n 8` regression sweep (see the session's own final report
+for the outcome).
 
 ### Fresh fuzzer mismatches (August 2026 survey, `random-verilog-gen` branch) — first-pass triage only
 
