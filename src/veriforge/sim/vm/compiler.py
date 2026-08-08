@@ -1202,42 +1202,27 @@ class Compiler:  # cm:8c1e4a
             # complement (only sign-extension does), confirmed against
             # Icarus/Verilator (see notes/known_issues.md).
             if expr.op in ("~", "+", "-"):
-                # This "compile at the operand's own fixed width, THEN
-                # extend the RESULT" special case applies to `~` ONLY, not
-                # unary `-` (despite both being grouped together above as
-                # "context-determined") -- the two behave differently
-                # under width-extension precisely BECAUSE `~` is a
-                # bitwise, per-bit-independent operation while `-` is a
-                # genuine two's-complement ARITHMETIC negation:
-                # zero-extending a 1-bit value and THEN complementing
-                # flips all the newly-added padding bits too (wrong --
-                # `~` must run at the fixed width first, confirmed against
-                # Icarus for `$signed(~({a0, a6, a0} && a7))`), but
-                # zero-extending a value and THEN negating gives exactly
-                # the modular two's-complement wraparound representation
-                # of "minus that value" at the wider width -- which is
-                # what real hardware (and Icarus) actually computes,
-                # confirmed wrong the other way (compile-at-1-bit-then-
-                # extend-result gives `1`, not Icarus's `all-ones`/-1) for
-                # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
-                # destination. So unary `-` (like `+`, a no-op either way)
-                # always falls through to the normal context-determined
-                # path below -- it must NEVER take this fixed-width
-                # shortcut, even when its operand is itself a comparison/
-                # reduction/&&/||/! result. Mirrors the identical fix in
-                # `sim/evaluator.py`.
-                if expr.op == "~" and _is_fixed_self_determined(expr.operand):
-                    self._compile_expr(expr.operand, program)
-                    program.append(instr(op))
-                    if width:
-                        result_w = self._expr_width(expr)
-                        if result_w < width:
-                            eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
-                            if eff_signed:
-                                program.append(instr(Op.SIGN_EXT, width, 0))
-                            else:
-                                program.append(instr(Op.RESIZE, width))
-                    return
+                # `~` used to be special-cased here: compile at the
+                # operand's own FIXED self-determined width first (when
+                # the operand is itself a comparison/reduction/&&/||/!
+                # result), THEN extend the RESULT -- on the theory that
+                # zero-extending a fixed-width value and THEN
+                # complementing flips the newly-added padding bits too
+                # (wrong), unlike unary `-`, left on the normal "compile
+                # at context width FIRST, then apply" path below since
+                # two's-complement negation of an already-extended value
+                # gives the correct modular wraparound regardless. A
+                # systematic truth-table sweep (see notes/known_issues.md's
+                # seed 2182 entry) found this backwards for `~`: Icarus
+                # extends the operand to context width FIRST, THEN applies
+                # `~` to the WHOLE extended value, exactly like unary `-`
+                # already does -- there is no special case for either
+                # operator. Confirmed against Icarus for `~(a && b)` in a
+                # 16-bit unsigned context with `a=b=1`: Icarus gives
+                # `16'hFFFE`, not the `16'h0000` the old special case
+                # computed. `~` now simply falls through to the same
+                # context-determined path as `+`/`-` below. Mirrors the
+                # identical fix in `sim/evaluator.py`.
                 # Compile the operand directly at `target` (max of the
                 # enclosing context width and its own static
                 # self-determined width), NOT `width` alone -- mirrors the
@@ -3285,29 +3270,6 @@ def _is_signed_call(expr) -> bool:
 
 
 _FIXED_SELF_DETERMINED_BINOPS = frozenset({"==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"})
-_FIXED_SELF_DETERMINED_UNOPS = frozenset({"&", "|", "^", "~&", "~|", "~^", "^~", "!"})
-
-
-def _is_fixed_self_determined(expr: Expression) -> bool:
-    """True when *expr*'s own result width is ALWAYS fixed at 1 bit
-    (IEEE 1364-2005 Table 5-22's self-determined operators: comparisons,
-    &&/||, reduction ops, !) regardless of any enclosing context.
-
-    Used by the `~`/unary `-` branch of `_compile_expr`: such an operand
-    must never be widened to match `~`/`-`'s enclosing context width
-    BEFORE the operator compiles -- unlike a regular signal or an
-    arithmetic operand (where extension commutes with the operation),
-    extending a bitwise-complement or negation's operand changes which
-    bits get flipped/negated. Only `~`/`-`'s own RESULT should be
-    extended, after the operator runs at the operand's fixed width.
-    Mirrors the identical helper in `sim/evaluator.py`.
-    """
-    etype = type(expr)
-    if etype is BinaryOp:
-        return expr.op in _FIXED_SELF_DETERMINED_BINOPS
-    if etype is UnaryOp:
-        return expr.op in _FIXED_SELF_DETERMINED_UNOPS
-    return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

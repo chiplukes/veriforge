@@ -31,7 +31,6 @@ from veriforge.sim.compiled._codegen_utils import (
     _NATURAL_WIDTH_OPS,
     _REDUCTION_OPS,
 )
-from veriforge.sim.compiled._expr_emitter import _is_fixed_self_determined
 from veriforge.sim.value import Value
 
 
@@ -3760,55 +3759,25 @@ class _WideEmitterMixin:
             # Identifier further down agrees with this node's own decision.
             if op in {"~", "-"}:
                 prim = "wide_not" if op == "~" else "wide_neg"
-                # EXCEPTION to the "recurse at dst_width" rule above: when
-                # the operand's own result is ALWAYS fixed at 1 bit
-                # regardless of context (IEEE 1364-2005 Table 5-22:
-                # comparisons, &&/||, reduction ops, !), recursing at
-                # dst_width doesn't actually widen the VALUE (the operand's
-                # own wide-emitter case ignores dst_width and always
-                # produces a proper 1-bit result zero-filled into the rest
-                # of the scratch words) -- but `wide_not`/`wide_neg`
-                # afterward then complements/negates ALL dst_width bits of
-                # that zero-filled operand, which is wrong the same way the
-                # narrow emitter's identical bug was (zero-extending a 1-bit
-                # `&&` result before complementing gives `~0...01` instead
-                # of the correct `resize(~1'b1)`). Compute at the operand's
-                # own fixed 1-bit width instead, THEN extend the RESULT.
-                # Confirmed against Icarus for
-                # `$signed(~({a0, a6, a0} && a7)))`; mirrors the identical
-                # fix in `_expr_emitter.py`/`sim/evaluator.py`/
-                # `sim/vm/compiler.py`.
-                #
-                # This fixed-width special case applies to `~` ONLY, not
-                # `-` (unary minus): `~` is bitwise/per-bit-independent, so
-                # zero-extending before complementing flips the padding
-                # bits too (wrong, per the confirmed case above) -- but
-                # `-` is a genuine two's-complement ARITHMETIC negation,
-                # where zero-extending the operand and THEN negating gives
-                # exactly the modular wraparound representation of "minus
-                # that value" at the wider width, which is what real
-                # hardware (and Icarus) actually computes. Confirmed wrong
-                # the other way (compute-at-1-bit-then-extend-result gives
-                # `1`, not Icarus's `all-ones`/-1) for
-                # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
-                # destination -- `-` must always fall through to the
-                # normal "recurse at dst_width" path above instead.
-                if op == "~" and _is_fixed_self_determined(expr.operand):
-                    op_slot = self._alloc_scratch()
-                    lines = self._emit_wide_expr_to_scratch(expr.operand, op_slot, 1, 1, indent)
-                    if lines is None:
-                        self._free_scratch(op_slot)
-                        return None
-                    lines.append(f"{pad}{prim}(_sc{slot}_v, _sc{slot}_m, _sc{op_slot}_v, _sc{op_slot}_m, 1, 1)")
-                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
-                    if eff_signed:
-                        lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, "1", indent))
-                    else:
-                        for wi in range(1, n_words):
-                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
-                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
-                    self._free_scratch(op_slot)
-                    return lines
+                # `~` used to be special-cased here: when the operand's own
+                # result is ALWAYS fixed at 1 bit regardless of context
+                # (IEEE 1364-2005 Table 5-22: comparisons, &&/||, reduction
+                # ops, !), compute `~` at the operand's own fixed 1-bit
+                # width first, THEN extend the RESULT -- on the theory that
+                # zero-extending a 1-bit value and THEN complementing flips
+                # the newly-added padding bits too (wrong), unlike `-`
+                # (unary minus), left on the normal "recurse at dst_width"
+                # path below since two's-complement negation of an
+                # already-extended value gives the correct modular
+                # wraparound regardless. A systematic truth-table sweep
+                # (see notes/known_issues.md's seed 2182 entry) found this
+                # backwards for `~`: Icarus extends the operand to context
+                # width FIRST, THEN applies `~` to the WHOLE extended
+                # value, exactly like `-` already does -- there is no
+                # special case for either operator. `~` now simply falls
+                # through to the same "recurse at dst_width" path as `-`
+                # below. Mirrors the identical fix in `_expr_emitter.py`/
+                # `sim/evaluator.py`/`sim/vm/compiler.py`.
                 if op == "-":
                     # `-` (unlike `~`, handled by the plain `n_words`-sized
                     # path below) needs its operand computed at its OWN

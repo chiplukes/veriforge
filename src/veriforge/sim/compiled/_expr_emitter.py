@@ -48,30 +48,6 @@ if TYPE_CHECKING:
     from veriforge.model.expressions import Range
     from veriforge.model.variables import Variable
 
-_FIXED_SELF_DETERMINED_UNOPS = _REDUCTION_OPS | frozenset({"!"})
-
-
-def _is_fixed_self_determined(expr: Expression) -> bool:
-    """True when *expr*'s own result width is ALWAYS fixed at 1 bit
-    (IEEE 1364-2005 Table 5-22's self-determined operators: comparisons,
-    &&/||, reduction ops, !) regardless of any enclosing context.
-
-    Used by `_emit_unary`'s `~`/unary `-` branch: such an operand must
-    never be widened to match `~`/`-`'s enclosing context width BEFORE the
-    operator runs -- unlike a regular signal or an arithmetic operand
-    (where extension commutes with the operation), extending a bitwise-
-    complement or negation's operand changes which bits get flipped/
-    negated. Only `~`/`-`'s own RESULT should be extended, after the
-    operator runs at the operand's fixed width. Mirrors the identical
-    helper in `sim/evaluator.py`/`sim/vm/compiler.py`.
-    """
-    etype = type(expr)
-    if etype is BinaryOp:
-        return expr.op in _COMPARISON_OPS
-    if etype is UnaryOp:
-        return expr.op in _FIXED_SELF_DETERMINED_UNOPS
-    return False
-
 
 class _ExprEmitterMixin:
     """Mixin providing expression and signal-walk emitters for CythonCodegen."""
@@ -821,32 +797,27 @@ class _ExprEmitterMixin:
             # branch's mask, queried at its own 63-bit self-width instead
             # of the ternary's 64-bit outer width, left bit 63 spuriously
             # looking definite (0) instead of x.
-            # UnaryOp `-` (always context-determined, per `_emit_unary`'s
-            # own docstring: unlike `~`, it NEVER takes the fixed-self-
-            # determined-operand shortcut) shares the identical "computed
-            # directly at the outer width" property as the BinaryOp
-            # arithmetic ops just above -- this check originally only
-            # covered BinaryOp, missing this UnaryOp sibling entirely.
-            # `~` shares it too, but ONLY when its OWN operand is NOT
-            # `_is_fixed_self_determined` (a comparison/reduction/etc --
-            # THAT specific shortcut computes `~` at the operand's fixed
-            # width first, extending the RESULT afterward, so `tw`/`fw`
-            # remains correct for it, matching `_emit_unary`'s own
-            # branching logic exactly). Confirmed against Icarus for
-            # `(~((~(!a1)) ? (-(a3 == a7)) : (~&a0)))` with `a3` (63
-            # bits) entirely x and the ternary's own combined width 1
-            # (both branches self-determined-1-bit): `-(a3 == a7)`'s
-            # mask, queried at the branch's own 1-bit self-width instead
-            # of the OUTER `~`'s much wider context, left every bit but
-            # bit 0 spuriously looking definite instead of x.
+            # UnaryOp `~`/`-` (both always context-determined, per
+            # `_emit_unary`'s own docstring: since the seed 2182 fix
+            # removed `~`'s old fixed-self-determined-operand shortcut,
+            # neither operator ever takes it anymore) share the identical
+            # "computed directly at the outer width" property as the
+            # BinaryOp arithmetic ops just above -- this check originally
+            # only covered BinaryOp, missing this UnaryOp sibling
+            # entirely, and `~` used to be excluded further whenever its
+            # own operand was fixed-self-determined (a comparison/
+            # reduction/etc), back when that shortcut still existed.
+            # Confirmed against Icarus for `(~((~(!a1)) ? (-(a3 == a7)) :
+            # (~&a0)))` with `a3` (63 bits) entirely x and the ternary's
+            # own combined width 1 (both branches self-determined-1-bit):
+            # `-(a3 == a7)`'s mask, queried at the branch's own 1-bit
+            # self-width instead of the OUTER `~`'s much wider context,
+            # left every bit but bit 0 spuriously looking definite instead
+            # of x.
             def _mask_needs_outer_width(branch: Expression) -> bool:
                 if isinstance(branch, BinaryOp) and branch.op in ("+", "-", "*", "/", "%"):
                     return True
-                if isinstance(branch, UnaryOp) and branch.op == "-":
-                    return True
-                return bool(
-                    isinstance(branch, UnaryOp) and branch.op == "~" and not _is_fixed_self_determined(branch.operand)
-                )
+                return bool(isinstance(branch, UnaryOp) and branch.op in ("~", "-"))
 
             true_mask_w = width if _mask_needs_outer_width(expr.true_expr) else tw
             false_mask_w = width if _mask_needs_outer_width(expr.false_expr) else fw
@@ -2075,61 +2046,26 @@ class _ExprEmitterMixin:
         # sign-extension does), confirmed against Icarus/Verilator (see
         # notes/known_issues.md).
         if expr.op in ("~", "+", "-"):
-            # This "evaluate at the operand's own fixed width, THEN extend
-            # the RESULT" special case applies to `~` ONLY, not unary `-`
-            # (despite both being grouped together above as "context-
-            # determined") -- the two behave differently under width-
-            # extension precisely BECAUSE `~` is a bitwise, per-bit-
-            # independent operation while `-` is a genuine two's-
-            # complement ARITHMETIC negation: zero-extending a 1-bit value
-            # and THEN complementing flips all the newly-added padding
-            # bits too (wrong -- `~` must run at the fixed width first,
-            # confirmed against Icarus for `$signed(~({a0, a6, a0} &&
-            # a7))`), but zero-extending a value and THEN negating gives
-            # exactly the modular two's-complement wraparound
-            # representation of "minus that value" at the wider width --
-            # which is what real hardware (and Icarus) actually computes,
-            # confirmed wrong the other way (evaluate-at-1-bit-then-
-            # extend-result gives `1`, not Icarus's `all-ones`/-1) for
-            # `-(~&{2{(a5[5:2] < a0)}})` widened into a 96-bit
-            # destination. So unary `-` (like `+`, a no-op either way)
-            # always falls through to the normal context-determined path
-            # below -- it must NEVER take this fixed-width shortcut, even
-            # when its operand is itself a comparison/reduction/&&/||/!
-            # result. Mirrors the identical fix in `sim/evaluator.py`/
-            # `sim/vm/compiler.py`.
-            if expr.op == "~" and _is_fixed_self_determined(expr.operand):
-                operand = self._emit_expr(expr.operand, ow)
-                if expr.op == "-":
-                    core = f"((-({operand})) & wmask({ow}))"
-                elif expr.op == "~":
-                    # `~` must independently force 0 wherever the operand is
-                    # ambiguous, not just complement whatever raw value bits
-                    # it received -- an ambiguous bit's value is
-                    # conventionally stored as 0 (see `_emit_reduction`'s
-                    # docstring for the general "value is 0 wherever the
-                    # true result is x" convention this whole codebase
-                    # relies on), so a plain `~` flips it to a SPURIOUS
-                    # known-1, violating the very invariant callers like
-                    # `&&`'s mask formula depend on ("a nonzero raw value
-                    # implies a genuine known-1 bit"). Confirmed against
-                    # Icarus (cross-engine) for `((0 < 4) && (~{2{(!(!a7))}}))`
-                    # with `a7` fully x: `!(!a7)` correctly reads VALUE=0
-                    # (ambiguous), but `~` on the replicated result flipped
-                    # those ambiguous-stored-as-0 bits to 1, making `&&`'s
-                    # own "both operands look truthy" check wrongly
-                    # conclude the whole condition was definitely true.
-                    operand_mask = self._emit_mask_expr(expr.operand, ow)
-                    core = f"((~({operand})) & (~({operand_mask})) & wmask({ow}))"
-                else:
-                    core = f"({operand})"
-                eval_width = max(ow, width) if width else ow
-                if eval_width <= ow:
-                    return core
-                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
-                if eff_signed:
-                    return f"(_sign_ext({core}, {ow}) & wmask({eval_width}))"
-                return f"(({core}) & wmask({eval_width}))"
+            # `~` used to be special-cased here: evaluate at the operand's
+            # own FIXED self-determined width first (when the operand is
+            # itself a comparison/reduction/&&/||/! result), THEN extend
+            # the RESULT -- on the theory that zero-extending a fixed-
+            # width value and THEN complementing flips the newly-added
+            # padding bits too (wrong), unlike unary `-`, left on the
+            # normal "evaluate at context width FIRST, then apply" path
+            # below since two's-complement negation of an already-
+            # extended value gives the correct modular wraparound
+            # regardless. A systematic truth-table sweep (see
+            # notes/known_issues.md's seed 2182 entry) found this
+            # backwards for `~`: Icarus extends the operand to context
+            # width FIRST, THEN applies `~` to the WHOLE extended value,
+            # exactly like unary `-` already does -- there is no special
+            # case for either operator. Confirmed against Icarus for
+            # `~(a && b)` in a 16-bit unsigned context with `a=b=1`:
+            # Icarus gives `16'hFFFE`, not the `16'h0000` the old special
+            # case computed. `~` now simply falls through to the same
+            # context-determined path as `+`/`-` below. Mirrors the
+            # identical fix in `sim/evaluator.py`/`sim/vm/compiler.py`.
             eval_width = max(ow, width) if width else ow
             operand = self._emit_expr(expr.operand, eval_width, signed_override)
             eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
@@ -3622,58 +3558,30 @@ class _ExprEmitterMixin:
                 # with a1 fully x.
                 opm = self._emit_mask_expr(expr.operand, ow)
                 return f"(wmask({width}) if ({opm}) else 0)"
-            # `~`/unary `+`: the operand's own mask, bit-for-bit unchanged,
-            # UNLESS this context is widening a signed operand narrower
-            # than the destination -- sign-extension replicates the
-            # operand's own sign bit into every newly-filled upper bit, so
-            # if that sign bit is itself ambiguous, every one of those
-            # replicated copies is ambiguous too (mirrors `_emit_unary`'s
-            # OWN identical sign-extension of `operand_mask` on the VALUE
-            # side, a few dozen lines up in this same file -- that fix was
-            # never mirrored here). Zero-extension (unsigned operand) needs
-            # no such propagation: the newly-filled upper bits are simply
-            # definite 0. Confirmed against Icarus for `(~a0)` with `a0` a
-            # signed 1-bit x-valued register assigned into a 64-bit
-            # destination: Icarus gives all 64 bits ambiguous (`~`
-            # complementing a fully sign-extended-to-x operand stays x
-            # everywhere), but the unextended mask here left only bit 0
-            # marked ambiguous.
-            #
-            # Querying the operand's mask at `ow` (its own bare self-
-            # width) is only correct when the operand is `_is_fixed_
-            # self_determined` (a comparison/reduction/`!`/`&&`/`||` --
-            # `_emit_unary`'s OWN VALUE-side `~` handling takes a SEPARATE
-            # fixed-width fast path for exactly that case, a few dozen
-            # lines up in this same file, never reaching this general
-            # branch at all). For any OTHER (context-determined) operand
-            # shape -- a TernaryOp chief among them -- the VALUE side
-            # instead computes `operand = self._emit_expr(expr.operand,
-            # eval_width, ...)`, widening the operand's OWN internal
-            # computation to the full context width `eval_width` (NOT its
-            # bare self-width `ow`) BEFORE `~` runs, since a nested
-            # context-determined sub-expression within a ternary branch
-            # (e.g. unary `-`) needs that outer width to correctly compute
-            # itself. Querying the mask at `ow` here instead silently
-            # narrowed that same internal computation, understating how
-            # widely an x/z bit's ambiguity should have propagated.
-            # Mirrors `eval_width` exactly as computed on the VALUE side.
-            # Confirmed against Icarus for `(~((~(!a1)) ? (-(a3 == a7)) :
-            # (~&a0)))` with `a3` (63 bits) entirely x and the ternary's
-            # condition definitely selecting the `-(a3 == a7)` branch: `-`
-            # of an ambiguous comparison must read as ALL `eval_width`
-            # bits ambiguous (unary `-`'s own "any x anywhere -> the
-            # WHOLE result is x" rule) once the ternary is correctly
-            # widened to `eval_width` -- querying at the ternary's own
-            # 1-bit self-width truncated that to just bit 0.
+            # `~`/unary `+`: the operand's mask, queried at the full
+            # `eval_width` (the operand's own bare self-width `ow`, or the
+            # wider outer context width when this context is asking for
+            # more) via a recursive `_emit_mask_expr` call, mirroring
+            # `_emit_unary`'s VALUE-side handling exactly -- since the
+            # seed 2182 fix removed `~`'s old "compute at the operand's
+            # own fixed self-determined width, extend the RESULT
+            # afterward" shortcut, `~` (like unary `-`/`+`) always widens
+            # its operand to `eval_width` BEFORE running, for every
+            # operand shape alike, so there is no separate fixed-width
+            # case to special-case here either. The recursive call already
+            # handles any needed sign-extension of the mask internally
+            # (mirroring the VALUE side's identical `_emit_expr(expr.
+            # operand, eval_width, signed_override)` call). Confirmed
+            # against Icarus for `(~((~(!a1)) ? (-(a3 == a7)) : (~&a0)))`
+            # with `a3` (63 bits) entirely x and the ternary's condition
+            # definitely selecting the `-(a3 == a7)` branch: `-` of an
+            # ambiguous comparison must read as ALL `eval_width` bits
+            # ambiguous (unary `-`'s own "any x anywhere -> the WHOLE
+            # result is x" rule) once the ternary is correctly widened to
+            # `eval_width` -- querying at the ternary's own 1-bit
+            # self-width truncated that to just bit 0.
             eval_width = max(ow, width) if width else ow
-            if _is_fixed_self_determined(expr.operand):
-                opm = self._emit_mask_expr(expr.operand, ow)
-            else:
-                opm = self._emit_mask_expr(expr.operand, eval_width, signed_override)
-            eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.operand)
-            if eff_signed and width > ow and _is_fixed_self_determined(expr.operand):
-                return f"_sign_ext({opm}, {ow})"
-            return opm
+            return self._emit_mask_expr(expr.operand, eval_width, signed_override)
 
         if etype is TernaryOp:
             # Check if this node's mask was already hoisted (see symmetric block

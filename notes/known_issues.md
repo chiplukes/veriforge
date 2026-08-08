@@ -105,27 +105,24 @@ directly (bypass the fuzzer entirely once isolated).
 
 ### Fresh fuzzer mismatches (August 2026 survey, `random-verilog-gen` branch) — first-pass triage only
 
-**Status**: All ten seeds triaged; one large fix still pending. Of the
+**Status**: All ten seeds triaged and resolved (either confirmed-Icarus
+or confirmed-and-fixed) — no open items remain from this batch. Of the
 original 10 mismatched seeds: 4 are confirmed genuine Icarus-specific
 bugs (2166, 2208, 2219, 2261), 1 is fully explained as a downstream
-propagation of an already-known Icarus artifact (2154), 2 were genuine
-bugs in THIS codebase's own engines, found and FIXED across all four
-engines (2197 — `$signed`/`$unsigned` ignoring an enclosing ternary's own
-combined signedness; 2243 — a bitwise op's `op_width` floor was folded
+propagation of an already-known Icarus artifact (2154), and 3 genuine
+bugs in THIS codebase's own engines were found and FIXED across all four
+engines: 2197 (`$signed`/`$unsigned` ignoring an enclosing ternary's own
+combined signedness); 2243 (a bitwise op's `op_width` floor was folded
 into BOTH operands unconditionally instead of only a `~`/unary-`-`
 operand, letting a nested operand's individual signedness leak past the
 enclosing operator's own combined-signedness decision — see the
 op_width/combined-signedness writeup further down in this file for the
 full mechanism and the `FunctionDecl.signed` parser gap it exposed along
-the way), 2 (2182, 2102) plus part of a third (2262's `o9`)
-are root-caused to a THIRD genuine bug in this codebase's own
-engines — `_is_fixed_self_determined()`'s special-casing of `~`/unary
-`-` for comparison/reduction/`&&`/`||`/`!` operands appears to be
-backwards (see seed 2182's entry below for the full truth-table
-characterization) — but this one is NOT YET FIXED, deliberately, given
-its size (a large, multi-engine, heavily-cited piece of prior work with
-follow-on fixes built on top of it). This is now the only remaining
-open item from this batch. Separately, a genuine bug was found and fixed in the
+the way); and 2182/2102/2262's `o9` (`_is_fixed_self_determined()`'s
+special-casing of `~` for comparison/reduction/`&&`/`||`/`!` operands was
+backwards — see seed 2182's entry below for the full truth-table
+characterization and the fix, which simply removes the special case
+entirely). Separately, a genuine bug was found and fixed in the
 fuzzer's own test harness (x-contaminated stimulus was silently sent to
 Icarus as `z` instead of `x` — see below) — a real, confirmed fix on its
 own merits, but it does not explain any of the 10 seeds: every case
@@ -376,19 +373,19 @@ explained by that bug — both mismatch identically either way; module
 source + Icarus's raw `$display` output only, deliberately not
 annotated with a guessed root cause beyond what's noted):
 
-- **Seed 2102 — root-caused, same bug as seed 2182 below, NOT YET
-  FIXED.** Clocked feedback (`r3 <= ~(r3 && ~|o6);`) where Icarus
+- **Seed 2102 — RESOLVED, same bug as seed 2182 below, FIXED (same
+  commit).** Clocked feedback (`r3 <= ~(r3 && ~|o6);`) where Icarus
   stabilizes `o7` (`r3[36:28]`, truncated into a 2-bit port) to `2'b11`
-  from the first vector onward; our reference gives `2'b00`. This is
-  `~` applied directly to `r3 && ~|o6` (a plain `&&`, fixed-self-
-  determined, no `$signed` wrapper, no ternary) — exactly the bare-`~`-
-  of-`&&` shape the seed 2182 truth-table sweep below characterizes.
-  Not independently re-verified with the full sweep methodology (the
-  2182 sweep used simpler synthetic modules), but the shape match is
-  strong enough that this is very likely the same root cause, not a
-  fourth one — treat as such rather than re-diagnosing from scratch.
-- **Seed 2182 — RESOLVED via systematic truth-table sweep (root cause
-  found, fix NOT yet applied — see below for why).** Follow-up
+  from the first vector onward; before the fix, our reference gave
+  `2'b00`. This is `~` applied directly to `r3 && ~|o6` (a plain `&&`,
+  fixed-self-determined, no `$signed` wrapper, no ternary) — exactly the
+  bare-`~`-of-`&&` shape the seed 2182 truth-table sweep below
+  characterizes. Independently re-verified (not just assumed from the
+  shape match) by rebuilding this exact module with a clocked drive loop
+  on all four engines: all four now give `2'b11` on every edge, matching
+  a direct Icarus run of the same module/stimulus exactly.
+- **Seed 2182 — RESOLVED, root cause found AND FIXED across all four
+  engines.** Follow-up
   investigation (triggered by the seed 2197 fix above) explains the
   earlier "contradictory evidence": the fifth-wave fix's own citation
   (`$signed(~({a0, a6, a0} && a7))`) is degenerate for a DIFFERENT reason
@@ -429,17 +426,30 @@ annotated with a guessed root cause beyond what's noted):
   original (pre-fifth-wave) behavior — treating `~`/`-` as ordinary
   context-determined operators with no special case for a
   fixed-self-determined operand — appears to be correct after all.
-  **Not yet fixed**: this touches a large, heavily-cited, multi-engine
-  piece of prior work (present in `sim/evaluator.py`, `sim/vm/
-  compiler.py`, `sim/compiled/_expr_emitter.py`, `_wide_emitter.py`, plus
-  several MASK-side call sites that reference the same helper — e.g. the
-  eighteenth-wave entries above), with follow-on fixes built on top of it
-  across multiple later waves; per explicit user direction, this was
-  investigated to full characterization but deliberately NOT fixed in
-  this session, pending a decision on how to approach reverting/
-  correcting something this broadly depended-upon. This is also almost
-  certainly the same root cause as seed 2102 (`r3 <= ~(r3 && ~|o6);`,
-  identical bare-`~`-of-`&&` shape) and seed 2262's `o9` sub-case.
+  **Fixed** by removing `_is_fixed_self_determined()`'s entire special
+  case for `~` (both the frozensets and the helper function itself, now
+  entirely dead code, deleted) in `sim/evaluator.py`, `sim/vm/
+  compiler.py`, `sim/compiled/_expr_emitter.py` (main `_emit_unary`
+  branch, the ternary-branch mask-width helper `_mask_needs_outer_width`,
+  and the mask-side `~`/unary-`+` handler in `_emit_mask_expr`), and
+  `sim/compiled/_wide_emitter.py` (which imported the same helper from
+  `_expr_emitter.py`; the import is removed too). `~` now falls through
+  to the exact same "extend operand to context width FIRST, then apply"
+  path unary `-` already used, for every operand shape alike — no special
+  case for either operator. Verified against Icarus for the sweep's own
+  `~(a && b)` case (`16'hFFFE` for `a=b=1` in a 16-bit context, both
+  narrow AND wide/>64-bit destinations) on all four engines, and directly
+  against the seed 2102 module itself (`r3 <= ~(r3 && ~|o6);`, identical
+  bare-`~`-of-`&&` shape — see below) via a clocked drive loop on all
+  four engines, matching Icarus's stable `o7 = 2'b11` from the first edge
+  onward (was `2'b00` before the fix). Also re-verified the ORIGINAL
+  fifth-wave citation that motivated adding this special case in the
+  first place (`$signed(~({a0, a6, a0} && a7))`) still gives the same
+  (correct, Icarus-matching) answer with the special case removed,
+  confirming it really was degenerate as suspected, not a case the fix
+  was quietly relying on. This is also the same root cause as seed 2102
+  (now independently re-verified, see its own entry below) and seed
+  2262's `o9` sub-case.
 - **Seed 2243 — RESOLVED, genuine bug in this codebase, FIXED across all
   four engines.** `o10 = (i5 ^ r8[32'd4]) & i4;` (continuous, reads a
   clocked reg `r8`, itself fed back from `o10[32'd0]` among other
@@ -475,34 +485,31 @@ annotated with a guessed root cause beyond what's noted):
   operators/widths/operand ordering) as a side effect of this fix
   combined with the already-existing `+`/`-`/`*` combined-signedness fix
   below; it was never a separate bug needing its own fix.
-- **Seed 2262** — two `always @(*)` blocks reading a mutually-undriven
+- **Seed 2262 — `o9` RESOLVED, same fix as seed 2182 above (same
+  commit).** Two `always @(*)` blocks reading a mutually-undriven
   internal reg (`r6`, never assigned anywhere) through `w4 = {3{i2}} &&
-  ~&r6[1];` and `o9 = ~(r6[9:0] || w4);`. Re-checked with `_compare`
-  directly: `o8`/`o10`'s mismatches ARE the already-known Icarus
-  first-activation artifact and get auto-filtered (confirmed via
-  `icarus_artifacts_filtered` incrementing by exactly the count of those
-  entries) — only `o9` is a genuine remaining mismatch, and it's the
-  SAME complement-like shape as seed 2182
-  (`expected=0b0000000000000000 x=1 got=1111111111111110 x=1` — our
-  engine gives a mostly-0 value, Icarus gives the bitwise complement
-  mostly-1, both agreeing only on bit 0 being ambiguous). Treat as a
-  probable third instance of whatever seed 2182's still-undetermined rule
-  is, not a fourth distinct bug — do not investigate this one separately
-  until 2182's rule itself is pinned down.
-- **Seed 2381** — pure combinational, `o6 = ~(!(~i1[32'd61] % (i3[10:0]
-  | 1'b1)));` — several nested context-determined operators (`~`, `%`,
-  `!`, outer `~`) stacked together. Icarus gives `o6` all-1s (110 bits);
-  ours gives only bit 0 set. Same family of concern as seed 2182 (see its
-  entry above for why this needs a dedicated re-derivation, not a
-  re-guess), with enough additional nesting (`%`'s own width
-  contribution, `!`'s fixed-width result feeding a further `~`) that it
-  may not even share the exact same root cause as 2182 — do not assume
-  it does until 2182's own rule is actually pinned down.
+  ~&r6[1];` and `o9 = ~(r6[9:0] || w4);`. `o8`/`o10`'s mismatches remain
+  the already-known Icarus first-activation artifact (auto-filtered,
+  unrelated to this fix). `o9` was the SAME complement-like shape as seed
+  2182 (`expected=0b0000000000000000 x=1 got=1111111111111110 x=1` — our
+  engine gave a mostly-0 value, Icarus the bitwise complement mostly-1,
+  agreeing only on bit 0 being ambiguous). Independently re-verified
+  (rebuilt the exact `w4`/`o9` shape standalone) on all four engines:
+  all four now give `16'b111111111111111x` — the mostly-1 pattern with
+  bit 0 ambiguous, matching Icarus.
+- **Seed 2381 — RESOLVED, same fix as seed 2182 above (same commit).**
+  Pure combinational, `o6 = ~(!(~i1[32'd61] % (i3[10:0] | 1'b1)));` —
+  several nested context-determined operators (`~`, `%`, `!`, outer `~`)
+  stacked together. Icarus gives `o6` all-1s except bit 0 (110 bits,
+  `0x3fff...ffe`); before the fix, our engines gave only bit 0 set.
+  Re-verified directly against Icarus with the exact repro (`i1` bit 61
+  set, `i3=0`): all four engines now give
+  `110'b111...1110`, matching Icarus's `0x3ffffffffffffffffffffffffffe`
+  exactly.
 
 **If this batch is picked up**: all ten originally-mismatched seeds have
-now been triaged to a conclusion — every seed is either confirmed-Icarus,
-confirmed-and-fixed, or root-caused-but-not-yet-fixed. Only the last
-category (2182/2102/2262's `o9`) remains open:
+now been triaged AND resolved — every seed is either confirmed-Icarus or
+confirmed-and-fixed. Nothing from this batch remains open:
 - 2166/2208/2219/2261: confirmed genuine Icarus bugs (three distinct
   mechanisms — division re-evaluation, compound-expression constant
   folding, and sequential-feedback freezing — but all in the same family
@@ -518,19 +525,16 @@ category (2182/2102/2262's `o9`) remains open:
   above).
 - 2182, 2102, and 2262's `o9` sub-case: a THIRD genuine bug in this
   codebase's own engines, root-caused via a systematic truth-table sweep
-  but deliberately **NOT YET FIXED** given its size (see seed 2182's
-  entry above for the full characterization and exact fix locations to
-  touch — `_is_fixed_self_determined()`'s special-casing of `~`/unary
-  `-` in `sim/evaluator.py`, `sim/vm/compiler.py`,
+  and now FIXED (see seed 2182's entry above for the full
+  characterization and fix) by removing `_is_fixed_self_determined()`'s
+  special-casing of `~` entirely (the helper itself is now dead code,
+  deleted) in `sim/evaluator.py`, `sim/vm/compiler.py`,
   `sim/compiled/_expr_emitter.py`, `_wide_emitter.py`, and the MASK-side
-  call sites that reference the same helper). **This is the natural next
-  thing to pick up** if continuing this batch: the root cause is solid
-  (a clean, multi-operator, multi-position truth table, not a guess), the
-  fix shape is simple to describe (remove the special case, let `~`/`-`
-  behave like any other context-determined operator), but it needs the
-  SAME careful one-engine-at-a-time-plus-full-regression discipline as
-  item 2.6/2.7's own waves, given how much later work cites/builds on
-  the mechanism being changed.
+  call sites that referenced the same helper. `~` now behaves like any
+  other context-determined operator, exactly like unary `-` already did.
+  Bonus: also fixes seed 2381 (not one of the original ten, but flagged
+  in this same family — see its own entry above), independently
+  re-verified against Icarus.
 - 2262's `o8`/`o10`: already attributed to the first-activation artifact
   (auto-filtered by the fuzzer harness).
 
