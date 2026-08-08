@@ -95,6 +95,7 @@ class FuzzRunner:
         self.total_modules = 0
         self.total_mismatches = 0
         self.mismatches_by_engine: dict[str, int] = {}
+        self.icarus_artifacts_filtered = 0
         self._start_time = time.time()
 
     # ------------------------------------------------------------------
@@ -301,8 +302,8 @@ class FuzzRunner:
     # Comparison
     # ------------------------------------------------------------------
 
-    @staticmethod
     def _compare(
+        self,
         oracle: list[dict[str, Value]],
         got: list[dict[str, Value]],
         engine: str,
@@ -313,6 +314,11 @@ class FuzzRunner:
         Returns a list of mismatch descriptions (human-readable).
         """
         diffs: list[str] = []
+        # Mismatches are grouped per-signal (across all vectors) before being
+        # formatted so the iverilog-only artifact filter below can look at a
+        # whole signal's mismatch history at once, not just one vector.
+        per_signal: dict[str, list[tuple[int, Value, Value]]] = {}
+
         for vi, (exp_vec, got_vec) in enumerate(zip(oracle, got, strict=True)):
             if len(exp_vec) != len(got_vec):
                 diffs.append(
@@ -326,9 +332,14 @@ class FuzzRunner:
                     diffs.append(f"[{engine}] vector {vi} signal {sig}: missing in one result")
                     continue
                 if exp != got_val:
-                    diffs.append(
-                        f"[{engine}] vector {vi} signal {sig}: expected={_val_repr(exp)} got={_val_repr(got_val)}"
-                    )
+                    per_signal.setdefault(sig, []).append((vi, exp, got_val))
+
+        for sig, sig_mismatches in per_signal.items():
+            if engine == "iverilog" and _is_icarus_first_activation_artifact(sig_mismatches):
+                self.icarus_artifacts_filtered += len(sig_mismatches)
+                continue
+            for vi, exp, got_val in sig_mismatches:
+                diffs.append(f"[{engine}] vector {vi} signal {sig}: expected={_val_repr(exp)} got={_val_repr(got_val)}")
         return diffs
 
     # ------------------------------------------------------------------
@@ -504,6 +515,7 @@ class FuzzRunner:
             "total_modules": self.total_modules,
             "total_mismatches": self.total_mismatches,
             "mismatches_by_engine": self.mismatches_by_engine,
+            "icarus_artifacts_filtered": self.icarus_artifacts_filtered,
             "elapsed_seconds": elapsed,
             "rate": self.total_modules / max(elapsed, 0.1),
             "engines": self._engines,
@@ -534,6 +546,46 @@ class FuzzRunner:
                     bits.append("1" if (value.val >> i) & 1 else "0")
             return f"{w}'b{''.join(bits)}"
         return f"{w}'d{value.val}"
+
+
+def _is_icarus_first_activation_artifact(mismatches: list[tuple[int, Value, Value]]) -> bool:
+    """Recognize Icarus's own first-activation x-extension quirk.
+
+    See notes/known_issues.md ("Icarus first-activation x-extension
+    artifact"): a combinational always block's very first evaluation of an
+    ambiguous self-determined-width RHS (comparison/reduction/!/&&/||)
+    extended into a wider destination sometimes gives fully-x in Icarus,
+    while every later re-evaluation of the identical block (and every
+    continuous-assign equivalent) deterministically zero-extends instead --
+    confirmed, via minimal isolated repro directly against `iverilog`, to be
+    an Icarus-specific artifact rather than a genuine Verilog semantic.
+
+    This recognizes that exact signature for one signal's full mismatch
+    history across a fuzz run's vectors: Icarus (`got`) reports the signal
+    as FULLY ambiguous every time, our engine (`exp`) reports it as only
+    PARTIALLY ambiguous (a strict subset of Icarus's x bits) every time, and
+    -- critically -- our engine's value is IDENTICAL across every
+    mismatching vector. That last condition is the safety net: it only ever
+    holds for a signal driven by something genuinely never externally
+    driven (which can't change after the block's first activation); a real
+    x-precision regression reacts to the vectors' actually-changing input
+    values and would not hold constant like this.
+    """
+    if not mismatches:
+        return False
+    _, first_exp, _ = mismatches[0]
+    width = first_exp.width
+    full_mask = (1 << width) - 1 if width > 0 else 0
+    for _vi, exp, got_val in mismatches:
+        if exp.width != width or got_val.width != width:
+            return False
+        if got_val.mask != full_mask:
+            return False
+        if exp.mask == full_mask:
+            return False
+        if (exp.val, exp.mask) != (first_exp.val, first_exp.mask):
+            return False
+    return True
 
 
 def _expr_to_int(expr) -> int:

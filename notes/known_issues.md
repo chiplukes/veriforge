@@ -53,6 +53,56 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### vm-fast: native heap-corruption crash on a wide-signal module (undiagnosed)
+
+**Status**: Open, not investigated beyond isolating a minimal repro.
+**Found**: August 2026, incidentally, while verifying the fuzzer's new
+Icarus-first-activation-artifact filter (`random-verilog-gen` branch) —
+not a targeted crash hunt.
+**Severity**: High in kind (native heap corruption, not just a wrong
+value — `glibc`'s `free(): invalid next size (fast)` abort, which means
+some earlier write already corrupted heap metadata before the crashing
+`free()` call; the actual out-of-bounds write happened upstream of where
+the process aborts) but apparently narrow in practical scope so far: only
+`vm-fast` crashes, `reference` and `vm` handle the identical module and
+stimulus cleanly, and only one module in a 300-seed sweep triggered it.
+
+**Repro**: `uv run python -m veriforge.fuzz --repro 91` (seed 91, this
+branch's grammar-driven fuzzer) — reproduces cleanly and immediately with
+`--engines reference vm-fast --no-icarus` (Icarus and the `vm` engine are
+not needed to trigger it; `reference` alone is fine). Generated module
+(103/113-bit inputs, a 127-bit output built from nested concatenations,
+ternaries, reductions, and signed casts):
+
+```verilog
+module t (
+    input [102:0] i1,
+    input [112:0] i2,
+    input signed [7:0] i3,
+    output [126:0] o4,
+    output signed [55:0] o5,
+    output signed [1:0] o6
+);
+    assign o4 = {$unsigned($unsigned(i2)), {$signed(o5 == i2), $unsigned(o6[32'd1:32'd0]) ? {i3, o6[32'd0], o5[32'd3]} : o6[32'd0]}, i3[32'd2:32'd0] ? {o6, i2 != o6, -i3[32'd4:32'd2]} : ~o6[32'd1]};
+    assign o5 = $unsigned(i3) ? ~i3[32'd2] : i1[32'd25] == o6[32'd1];
+    assign o6 = ^i1[32'd15:32'd3];
+endmodule
+```
+
+Not yet root-caused: suspect a wide-value (>64-bit) scratch/stack buffer
+in `sim/vm/_interp_fast.pyx` sized or indexed incorrectly for this
+specific nesting shape (127-bit destination, multiple >64-bit
+intermediate concat/ternary results) — this would be the `vm-fast`
+analogue of the `compiled` engine's own long-running "64-bit signal width
+limit" gap (see the entry below), but is a *crash*, not a silent wrong
+value, and hasn't been connected to that entry's root cause or scope.
+Deliberately not investigated further per explicit user direction
+("just document it for now") — the next step, if picked up, should be
+bisecting which piece of the expression (the 127-bit concat destination,
+the nested ternary, or the reduction) actually triggers the corruption,
+e.g. by trying reduced variants of the module above under `vm-fast`
+directly (bypass the fuzzer entirely once isolated).
+
 ### Cython VM interpreter drift (vm-fast engine)
 
 **Status**: Resolved (July 2026, work plan item 3.3). CI now builds the
@@ -2217,6 +2267,64 @@ pullups, and high-impedance detection are not simulatable. This is a
 deliberate RTL-subset trade-off (consistent with the support matrix's
 "strength and tristate resolution: low priority"), but note that docs and
 docstrings describing the simulator as "4-state" overstate it slightly.
+
+### Icarus first-activation x-extension artifact (investigated, not a bug — do not replicate)
+
+**Status**: Investigated and closed — not a simulator bug.
+**Found**: triaging two fuzzer-generated mismatches deferred during the
+`settle()`-bootstrap (Bug 2) work on the `random-verilog-gen` branch
+(`mismatch_01066`, `mismatch_01045`).
+
+`mismatch_01066` (an `o7`/`o8` self-referential combinational feedback
+case) is now fixed — confirmed via `--repro`, all four engines match
+Icarus's originally-recorded expected value, as a side effect of the
+`settle()` bootstrap-convergence fix.
+
+`mismatch_01045` looked like a second, distinct bug: `always @(*) o10 = r7
+!= $signed(o9[0]);` with `r7`/`o9` both entirely undriven (all-x). Icarus's
+original run recorded `o10` as fully ambiguous (all 63 bits x); all four
+engines here agree with each other but only mark bit 0 ambiguous (the rest
+deterministically zero, i.e. zero-extending the comparison's self-
+determined-1-bit-x result — matching `!=`'s IEEE-unsigned-result rule and
+this codebase's own established, differential-fuzzer-verified extension
+logic from work plan item 2.7's ninth wave).
+
+Minimal, isolated reproduction against Icarus directly
+(`iverilog -g2012`) shows this is specific to a combinational `always`
+block's **very first activation**, not a general procedural-vs-continuous
+assignment-extension rule:
+- `assign y = (a != b);` (continuous) with `a`,`b` both x: `y = 0000000x`
+  (correct, deterministic zero-extend) — always, regardless of declared
+  signedness.
+- `always @(*) y = (a != b);` / `always @(a or b) y = (a != b);` (implicit
+  or explicit sensitivity, identical result) with `a`,`b` both x **on the
+  block's first-ever evaluation**: `y = xxxxxxxx` (fully ambiguous).
+- The SAME `always @(*)` block, once it has already evaluated at least
+  once with a fully-defined (non-x) result (e.g. after `a=b=0` settles
+  `y=00000000`), then re-evaluated with `a`,`b` returned to x: `y =
+  0000000x` — the CORRECT, deterministic zero-extend, matching the
+  continuous-assign case exactly.
+- A plain blocking assign inside an `initial` block (`y = 8'b11110000; a =
+  1'bx; y = a;`, no `always` block involved at all) also gives the
+  correct `0000000x`, even with pre-seeded non-zero "garbage" upper bits —
+  ruling out any "leave prior bits untouched when ambiguous" theory.
+
+Conclusion: Icarus has a first-activation-specific quirk where a
+combinational always block's very first evaluation, if its RHS is an
+ambiguous self-determined-1-bit value, writes the WHOLE destination as x
+instead of correctly zero-extending — every subsequent (re-)evaluation of
+the identical block, and every continuous-assign equivalent, is
+deterministic and matches the zero-extension rule this codebase already
+implements. This is not a documented IEEE requirement (extension rules
+are expression-level, independent of assignment kind or activation
+count), Verilator cannot be used to cross-check it (it does not model x
+as a true third state), and reproducing it would require our engines to
+track "has this specific always block's specific destination reg ever
+been driven by a fully-defined value before" as extra hidden per-signal
+state purely to match a one-off Icarus artifact — actively wrong, not a
+fix. **Do not attempt to make this match Icarus.** Our current zero-
+extension behavior (shared, engine-independent, and already validated by
+the differential fuzzer across thousands of cases) is treated as correct.
 
 ### Compiled engine: 64-bit signal width limit
 
