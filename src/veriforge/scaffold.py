@@ -31,6 +31,8 @@ Usage::
 
 from __future__ import annotations
 
+import difflib
+import json
 import logging
 from pathlib import Path
 
@@ -116,6 +118,8 @@ def generate_python_testbench_skeleton(  # noqa: PLR0913  # cm:f3d2c6
     strict: bool = True,
     engine: str = "reference",
     cosim: bool = False,
+    emit_plan: bool = False,
+    force_plan: bool = False,
 ) -> str | Path:
     """Generate a Python testbench skeleton for a module in a parsed Design.
 
@@ -138,11 +142,34 @@ def generate_python_testbench_skeleton(  # noqa: PLR0913  # cm:f3d2c6
             ``validate_with_icarus()`` helper that compares all simulator
             engines against Icarus Verilog.  Requires ``iverilog`` and
             ``vvp`` on ``PATH``.  Default: ``False``.
+        emit_plan: When ``True``, also write a ``<name>_plan.json`` sidecar
+            (the inferred :class:`TestbenchPlan`, serialized via
+            :meth:`TestbenchPlan.to_dict`) next to ``output_path``. Only
+            valid with ``style="bench"`` and a non-``None`` ``output_path``
+            (raises :class:`ValueError` otherwise — there is no plan, or
+            no file to place the sidecar next to). On a first generation
+            the sidecar is written outright; on regeneration, if the
+            sidecar already exists and differs from a fresh inference, a
+            unified diff is printed and the existing sidecar is left
+            untouched (pass ``force_plan=True`` to overwrite it) — this
+            makes "regenerate after an RTL change" a reviewable merge
+            instead of a silent rewrite. Default: ``False``.
+        force_plan: When ``True`` (with ``emit_plan=True``), always
+            overwrite the sidecar with the freshly inferred plan instead
+            of diffing against an existing one. Default: ``False``.
 
     Returns:
         Generated Python source text, or the written output path if ``output_path`` is provided.
     """
     from .sim.bench.skeleton import generate_python_testbench
+
+    if emit_plan:
+        if output_path is None:
+            msg = "emit_plan=True requires output_path (there is no file to place the sidecar next to)"
+            raise ValueError(msg)
+        if style != "bench":
+            msg = "emit_plan=True is only meaningful with style='bench' (legacy skeletons have no TestbenchPlan)"
+            raise ValueError(msg)
 
     if module_name is None:
         tops = design.get_top_modules()
@@ -181,7 +208,48 @@ def generate_python_testbench_skeleton(  # noqa: PLR0913  # cm:f3d2c6
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding="utf-8")
+
+    if emit_plan:
+        plan = build_testbench_plan(design, top=module.name, overrides=overrides, strict=strict)
+        _write_plan_sidecar(output, plan, force=force_plan)
+
     return output
+
+
+def _write_plan_sidecar(output_path: Path, plan: object, *, force: bool) -> None:
+    """Write, or diff-and-keep, the ``<name>_plan.json`` sidecar next to a generated skeleton.
+
+    On first generation (or ``force=True``), writes the freshly inferred
+    plan outright. On regeneration, if a sidecar already exists and
+    differs from fresh inference, prints a unified diff and leaves the
+    existing sidecar untouched — the user's file (possibly hand-edited
+    after a prior generation) is never silently overwritten. This turns
+    "regenerate after an RTL change" into a merge the user reviews,
+    rather than a rewrite.
+    """
+    from .sim.bench.plan import TestbenchPlan
+
+    assert isinstance(plan, TestbenchPlan)
+    sidecar_path = output_path.with_name(f"{output_path.stem}_plan.json")
+    fresh_text = json.dumps(plan.to_dict(), indent=2, sort_keys=True)
+
+    if sidecar_path.exists() and not force:
+        existing_plan = TestbenchPlan.from_dict(json.loads(sidecar_path.read_text(encoding="utf-8")))
+        if existing_plan == plan:
+            return  # already up to date
+        existing_text = json.dumps(existing_plan.to_dict(), indent=2, sort_keys=True)
+        diff = difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            fresh_text.splitlines(keepends=True),
+            fromfile=str(sidecar_path),
+            tofile="freshly inferred",
+        )
+        print(f"Plan sidecar {sidecar_path} differs from fresh inference (kept as-is; pass --force-plan to overwrite):")
+        print("".join(diff))
+        return
+
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(fresh_text + "\n", encoding="utf-8")
 
 
 def build_testbench_plan(

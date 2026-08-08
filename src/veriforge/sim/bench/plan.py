@@ -18,7 +18,7 @@ safely shareable across threads and engines.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 
 class PlanValidationError(ValueError):
@@ -65,6 +65,10 @@ class ClockSpec:  # cm:9d6c3f
 
     def to_dict(self) -> dict[str, object]:
         return {"name": self.name, "edge": self.edge, "period_hint": self.period_hint}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ClockSpec:
+        return cls(name=d["name"], edge=d["edge"], period_hint=d["period_hint"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,10 @@ class ResetSpec:  # cm:2a8b7e
             "edge": self.edge,
         }
 
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ResetSpec:
+        return cls(name=d["name"], active_low=d["active_low"], style=d["style"], edge=d["edge"])
+
 
 # ---------------------------------------------------------------------------
 # Domain and interface binding
@@ -151,6 +159,15 @@ class ClockDomain:  # cm:7e9f8c
             "clock": self.clock.to_dict(),
             "reset": self.reset.to_dict() if self.reset is not None else None,
         }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> ClockDomain:
+        reset_d = d["reset"]
+        return cls(
+            name=d["name"],
+            clock=ClockSpec.from_dict(d["clock"]),
+            reset=ResetSpec.from_dict(reset_d) if reset_d is not None else None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +220,17 @@ class InterfaceBinding:  # cm:c4f5d1
             "signals": dict(self.signals),
             "confidence": self.confidence,
         }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> InterfaceBinding:
+        return cls(
+            prefix=d["prefix"],
+            protocol=d["protocol"],
+            role=d["role"],
+            domain_name=d["domain_name"],
+            signals=d["signals"],
+            confidence=d["confidence"],
+        )
 
 
 class _FrozenSignals(Mapping[str, str]):
@@ -343,6 +371,22 @@ class TestbenchPlan:  # cm:5b4a9e
             "warnings": list(self.warnings),
             "overrides_applied": list(self.overrides_applied),
         }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> TestbenchPlan:
+        """Deserialize from :meth:`to_dict`'s output (e.g. a JSON sidecar).
+
+        Round-trips exactly: ``plan == TestbenchPlan.from_dict(plan.to_dict())``
+        for any :class:`TestbenchPlan`, since these are frozen dataclasses
+        with structural equality.
+        """
+        return cls(
+            top=d["top"],
+            domains=tuple(ClockDomain.from_dict(x) for x in d["domains"]),
+            interfaces=tuple(InterfaceBinding.from_dict(x) for x in d["interfaces"]),
+            warnings=tuple(d["warnings"]),
+            overrides_applied=tuple(d["overrides_applied"]),
+        )
 
     def summary(self) -> str:
         """Return a multi-line human-readable summary for docstrings / CLI."""

@@ -826,7 +826,15 @@ def _native_build_bench_lines(
     axi_lite_slaves = [b for b in bindings if b.protocol == "axi_lite" and b.role == "slave"]
     axi_lite_masters = [b for b in bindings if b.protocol == "axi_lite" and b.role == "master"]
     axi4_masters = [b for b in bindings if b.protocol == "axi4" and b.role == "master"]
-    iface_domains = {b.prefix: b.domain_name for b in bindings}
+    # Only bake a binding's domain into the generated overrides when the
+    # planner genuinely needed one to reach that decision (confidence
+    # "override") -- "sole-domain"/"structural"/"naming" confidences are
+    # all reproducible from the DUT/plan alone on a fresh run, so
+    # re-supplying them here is a redundant duplicate of the inference
+    # that would drift the moment the design changes (work plan item
+    # 4.3 / functionality_review_2026-07.md §3's "duplicated inference"
+    # concern).
+    iface_domains = {b.prefix: b.domain_name for b in bindings if b.confidence == "override"}
 
     lines: list[str] = [
         "",
@@ -1796,7 +1804,10 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         )
 
     # ── build_bench(): apply iface_domains + iface_layouts ─────
-    iface_domains: dict[str, str] = {b.prefix: b.domain_name for b in bindings}
+    # Only bake a binding's domain when the planner genuinely needed an
+    # override to reach it -- see the identical comment in
+    # _native_build_bench_lines above for the full rationale.
+    iface_domains: dict[str, str] = {b.prefix: b.domain_name for b in bindings if b.confidence == "override"}
     iface_layouts: dict[str, dict[str, object]] = {}
     for b in bindings:
         if b.protocol != "axi_stream":

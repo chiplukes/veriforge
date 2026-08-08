@@ -289,7 +289,7 @@ bench.run(my_test)
 | Import | Purpose |
 | --- | --- |
 | `build_plan` | Infer `TestbenchPlan` from a `Module` (clocks, resets, interfaces, domains). |
-| `TestbenchPlan` | Dataclass: clock domains, reset specs, interface bindings, summary(). |
+| `TestbenchPlan` | Dataclass: clock domains, reset specs, interface bindings, summary(), to_dict()/from_dict() round-trip (used by `generate-python-testbench --emit-plan`'s JSON sidecar). |
 | `PlannerOverrides` | Explicit overrides for clock/reset/interface inference. |
 
 ### Engine-native lowering

@@ -368,6 +368,8 @@ The generated file is a runnable pytest module with:
 | `--style legacy` | Emit raw `Simulator` + `step_drive` code — simple designs or low-level work |
 | `--auto-deps` | Scan sibling `.v`/`.sv` files to find child modules and embed them in `DEPS` |
 | `--explain-plan` | Print the inferred plan and exit without generating code |
+| `--emit-plan` | Write a `<output>_plan.json` sidecar alongside the scaffold (requires `--style bench` + `--output`) |
+| `--force-plan` | With `--emit-plan`, overwrite the sidecar with fresh inference instead of diffing it |
 | `--engine vm\|compiled` | Emit a `compile_native()` scaffold for engine-speed simulation |
 | `--no-strict` | Pick the first candidate domain when inference is ambiguous (instead of failing) |
 | `--json` | Machine-readable output envelope |
@@ -380,6 +382,38 @@ The generated file is a runnable pytest module with:
 | `--reset-override NAME=POLARITY` | `--reset-override aresetn=active_low` | Force reset polarity |
 | `--iface-domain PREFIX=DOMAIN` | `--iface-domain s_axi=aclk` | Pin interface to a clock domain |
 | `--domain-alias CLOCK=ALIAS` | `--domain-alias aclk=axis_domain` | Rename a clock's domain label |
+
+### Regenerating after RTL changes
+
+Regenerating a scaffold normally overwrites the whole file — fine before
+you've touched it, destructive once you've filled in real stimulus.
+`--emit-plan` persists the *inferred plan*, not just the generated code,
+as a `<output>_plan.json` sidecar next to it:
+
+```bash
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --enhanced --style=bench \
+    --output tb/test_my_dut.py --emit-plan
+```
+
+The first run writes `tb/test_my_dut_plan.json` outright. After an RTL
+port change, regenerate the same way: if fresh inference now differs
+from the sidecar, a unified diff prints to stdout and the **sidecar is
+left untouched** — the tool never silently rewrites a plan you may have
+relied on. Once you've reviewed the diff and confirmed the new inference
+is right, rerun with `--force-plan` to accept it:
+
+```bash
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --enhanced --style=bench \
+    --output tb/test_my_dut.py --emit-plan --force-plan
+```
+
+(The generated `.py` skeleton is always (re)written either way —
+`--emit-plan`/`--force-plan` only gate the sidecar's overwrite, not the
+code itself. Regenerating the code and reconciling your hand-written
+stimulus is still on you; the sidecar just tells you *when* the DUT's
+shape changed enough to be worth looking at.)
 
 ### Multi-file project
 

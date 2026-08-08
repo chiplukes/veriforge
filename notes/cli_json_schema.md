@@ -169,6 +169,8 @@ Key input flags (full list via `--help`):
 | `--dut-source-path PATH` | Path embedded as `DUT_PATH` in `--style=bench` scaffold (defaults to `-f/--file`) |
 | `--cosim` | Append a `validate_with_icarus()` helper; requires `iverilog`/`vvp` on PATH |
 | `--explain-plan` | Print the inferred plan and exit (no code generated) |
+| `--emit-plan` | Write a `<output>_plan.json` sidecar next to the generated skeleton (requires `--style bench` and `--output`). On regeneration, diffs the sidecar against fresh inference instead of overwriting it |
+| `--force-plan` | With `--emit-plan`, overwrite the sidecar with fresh inference instead of diffing (requires `--emit-plan`) |
 | `--engine reference\|vm\|vm-fast\|compiled` | Target engine; `vm-fast` uses the Cython-accelerated VM; `compiled` emits `compile_native()` when lowerable |
 | `--clock-override NAME=PERIOD` | Override inferred clock period |
 | `--reset-override NAME=POLARITY` | Override inferred reset polarity (`active_high`\|`active_low`) |
@@ -208,6 +210,24 @@ When `--explain-plan` is used:
   }
 }
 ```
+
+**`--emit-plan` sidecar workflow.** `TestbenchPlan.to_dict()`/`from_dict()`
+(`sim/bench/plan.py`) round-trip the inferred plan through
+`<output>_plan.json`, sitting next to the generated `.py` skeleton (e.g.
+`tb_top.py` → `tb_top_plan.json`). First run writes the sidecar outright.
+On every later run:
+
+- If the sidecar doesn't exist, or matches fresh inference: written /
+  left alone silently.
+- If it exists and differs (e.g. the DUT's ports changed since it was
+  generated), a unified diff is printed to stdout and the **existing
+  sidecar is left untouched** — regeneration never silently clobbers a
+  plan you may have hand-edited. Pass `--force-plan` to accept the fresh
+  inference and overwrite it.
+
+Only valid with `--style bench` (the `legacy` style has no
+`TestbenchPlan`) and `--output` (there's nothing to place the sidecar
+next to when printing to stdout).
 
 ### `lint`
 

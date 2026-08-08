@@ -67,6 +67,11 @@ class TestClockSpec:
             "period_hint": 8,
         }
 
+    def test_from_dict_roundtrips(self) -> None:
+        c = ClockSpec(name="clk", edge="negedge", period_hint=8)
+        assert ClockSpec.from_dict(c.to_dict()) == c
+        assert ClockSpec.from_dict(json.loads(json.dumps(c.to_dict()))) == c
+
 
 # ---------------------------------------------------------------------------
 # ResetSpec
@@ -115,6 +120,12 @@ class TestResetSpec:
             "edge": "negedge",
         }
 
+    def test_from_dict_roundtrips(self) -> None:
+        r = ResetSpec(name="aresetn", active_low=True, style="async", edge="negedge")
+        assert ResetSpec.from_dict(r.to_dict()) == r
+        r_sync = ResetSpec(name="rst", active_low=False, style="sync")
+        assert ResetSpec.from_dict(r_sync.to_dict()) == r_sync
+
 
 # ---------------------------------------------------------------------------
 # ClockDomain
@@ -142,6 +153,18 @@ class TestClockDomain:
     def test_to_dict_includes_reset_none(self) -> None:
         d = ClockDomain(name="clk", clock=ClockSpec(name="clk"))
         assert d.to_dict()["reset"] is None
+
+    def test_from_dict_roundtrips_without_reset(self) -> None:
+        d = ClockDomain(name="clk", clock=ClockSpec(name="clk", period_hint=10))
+        assert ClockDomain.from_dict(d.to_dict()) == d
+
+    def test_from_dict_roundtrips_with_reset(self) -> None:
+        d = ClockDomain(
+            name="axi",
+            clock=ClockSpec(name="aclk", period_hint=10),
+            reset=ResetSpec(name="aresetn", active_low=True, style="sync"),
+        )
+        assert ClockDomain.from_dict(d.to_dict()) == d
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +261,18 @@ class TestInterfaceBinding:
         assert d["prefix"] == "m_axis"
         assert d["confidence"] == "structural"
         assert d["signals"] == _signals()
+
+    def test_from_dict_roundtrips(self) -> None:
+        b = InterfaceBinding(
+            prefix="m_axis",
+            protocol="axi_stream",
+            role="master",
+            domain_name="aclk",
+            signals=_signals(),
+            confidence="structural",
+        )
+        assert InterfaceBinding.from_dict(b.to_dict()) == b
+        assert InterfaceBinding.from_dict(json.loads(json.dumps(b.to_dict()))) == b
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +384,32 @@ class TestTestbenchPlan:
         assert {i["prefix"] for i in decoded["interfaces"]} == {"m_axis", "s_axis"}
         assert decoded["warnings"] == ["ambiguity on s_axis"]
         assert decoded["overrides_applied"] == ["s_axis.clock"]
+
+    def test_from_dict_roundtrips(self) -> None:
+        p = TestbenchPlan(
+            top="dut",
+            domains=(_domain("clk"), _domain("aclk", with_reset=False)),
+            interfaces=(_binding("m_axis", "aclk"), _binding("s_axis", "clk")),
+            warnings=("ambiguity on s_axis",),
+            overrides_applied=("s_axis.clock",),
+        )
+        assert TestbenchPlan.from_dict(p.to_dict()) == p
+
+    def test_from_dict_roundtrips_through_json(self) -> None:
+        """The realistic sidecar path: to_dict -> json.dumps -> json.loads -> from_dict."""
+        p = TestbenchPlan(
+            top="dut",
+            domains=(_domain("clk"), _domain("aclk", with_reset=False)),
+            interfaces=(_binding("m_axis", "aclk"), _binding("s_axis", "clk")),
+            warnings=("ambiguity on s_axis",),
+            overrides_applied=("s_axis.clock",),
+        )
+        reloaded = TestbenchPlan.from_dict(json.loads(json.dumps(p.to_dict())))
+        assert reloaded == p
+
+    def test_from_dict_roundtrips_minimal(self) -> None:
+        p = TestbenchPlan(top="dut")
+        assert TestbenchPlan.from_dict(p.to_dict()) == p
 
     def test_summary_mentions_key_facts(self) -> None:
         p = TestbenchPlan(

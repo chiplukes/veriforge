@@ -248,6 +248,23 @@ def _add_generation_options(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Print the inferred TestbenchPlan summary and exit without generating code.",
     )
+    parser.add_argument(
+        "--emit-plan",
+        action="store_true",
+        default=False,
+        help=(
+            "Write a <output>_plan.json sidecar next to the generated skeleton (requires "
+            "--style bench and --output). On regeneration, if the sidecar already exists and "
+            "differs from fresh inference, prints a unified diff and leaves it untouched "
+            "instead of overwriting it -- pass --force-plan to overwrite."
+        ),
+    )
+    parser.add_argument(
+        "--force-plan",
+        action="store_true",
+        default=False,
+        help="With --emit-plan, always overwrite the plan sidecar instead of diffing against an existing one.",
+    )
 
 
 def _add_summary_output_option(parser: argparse.ArgumentParser) -> None:
@@ -912,6 +929,12 @@ def _run_generate_python_testbench(args: argparse.Namespace) -> None:  # noqa: P
     # bench style requires plan inference — promote enhanced automatically
     effective_enhanced = args.enhanced or (style == "bench")
 
+    _emit_plan = getattr(args, "emit_plan", False)
+    _force_plan = getattr(args, "force_plan", False)
+    if _force_plan and not _emit_plan:
+        msg = "--force-plan requires --emit-plan"
+        raise ValueError(msg)
+
     _cosim = getattr(args, "cosim", False)
     _dut_source_path = (
         str(
@@ -933,6 +956,8 @@ def _run_generate_python_testbench(args: argparse.Namespace) -> None:  # noqa: P
         overrides=overrides,
         strict=args.strict,
         engine=getattr(args, "engine", "reference"),
+        emit_plan=_emit_plan,
+        force_plan=_force_plan,
     )
     if args.json:
         payload: dict[str, object] = {

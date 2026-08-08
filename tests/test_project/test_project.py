@@ -363,6 +363,109 @@ class TestGeneratePythonTestbenchSkeleton:
         assert output.read_text(encoding="utf-8").startswith('"""Auto-generated Python testbench skeleton.')
 
 
+class TestEmitPlanSidecar:
+    """`--emit-plan`'s JSON sidecar: write-once, then diff-and-keep on regeneration."""
+
+    @pytest.fixture()
+    def counter_design(self, tmp_path):
+        (tmp_path / "counter.v").write_text(COUNTER_V, encoding="utf-8")
+        return parse_directory(tmp_path)
+
+    def _sidecar_for(self, output: Path) -> Path:
+        return output.with_name(f"{output.stem}_plan.json")
+
+    def test_emit_plan_without_output_path_raises(self, counter_design):
+        with pytest.raises(ValueError, match="emit_plan=True requires output_path"):
+            generate_python_testbench_skeleton(counter_design, module_name="counter", style="bench", emit_plan=True)
+
+    def test_emit_plan_with_legacy_style_raises(self, counter_design, tmp_path):
+        with pytest.raises(ValueError, match="only meaningful with style='bench'"):
+            generate_python_testbench_skeleton(
+                counter_design,
+                module_name="counter",
+                style="legacy",
+                output_path=tmp_path / "tb.py",
+                emit_plan=True,
+            )
+
+    def test_first_generation_writes_sidecar(self, counter_design, tmp_path):
+        output = tmp_path / "tb_counter.py"
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        sidecar = self._sidecar_for(output)
+        assert sidecar.exists()
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert data["top"] == "counter"
+        assert {d["name"] for d in data["domains"]} == {"clk"}
+
+    def test_regeneration_unchanged_leaves_sidecar_untouched(self, counter_design, tmp_path):
+        output = tmp_path / "tb_counter.py"
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        sidecar = self._sidecar_for(output)
+        before = sidecar.read_text(encoding="utf-8")
+
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        assert sidecar.read_text(encoding="utf-8") == before
+
+    def test_stale_sidecar_diffed_and_kept(self, counter_design, tmp_path, capsys):
+        output = tmp_path / "tb_counter.py"
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        sidecar = self._sidecar_for(output)
+        edited = json.loads(sidecar.read_text(encoding="utf-8"))
+        edited["top"] = "hand_edited_name"
+        sidecar.write_text(json.dumps(edited), encoding="utf-8")
+
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+
+        # Sidecar is untouched (still the hand-edited value)...
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["top"] == "hand_edited_name"
+        # ...but a diff was printed so the user can see what changed.
+        captured = capsys.readouterr()
+        assert "differs from fresh inference" in captured.out
+        assert "hand_edited_name" in captured.out
+        assert "counter" in captured.out
+
+    def test_force_plan_overwrites_stale_sidecar(self, counter_design, tmp_path):
+        output = tmp_path / "tb_counter.py"
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        sidecar = self._sidecar_for(output)
+        edited = json.loads(sidecar.read_text(encoding="utf-8"))
+        edited["top"] = "hand_edited_name"
+        sidecar.write_text(json.dumps(edited), encoding="utf-8")
+
+        generate_python_testbench_skeleton(
+            counter_design,
+            module_name="counter",
+            style="bench",
+            output_path=output,
+            emit_plan=True,
+            force_plan=True,
+        )
+
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["top"] == "counter"
+
+    def test_sidecar_roundtrips_through_testbench_plan(self, counter_design, tmp_path):
+        output = tmp_path / "tb_counter.py"
+        generate_python_testbench_skeleton(
+            counter_design, module_name="counter", style="bench", output_path=output, emit_plan=True
+        )
+        sidecar = self._sidecar_for(output)
+        fresh_plan = build_testbench_plan(counter_design, top="counter")
+        loaded_plan = TestbenchPlan.from_dict(json.loads(sidecar.read_text(encoding="utf-8")))
+        assert loaded_plan == fresh_plan
+
+
 class TestBuildTestbenchPlan:
     def test_returns_plan_for_selected_top(self, tmp_path):
         (tmp_path / "two_domain.v").write_text(TWO_DOMAIN_TOP_V, encoding="utf-8")
