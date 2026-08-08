@@ -105,21 +105,27 @@ directly (bypass the fuzzer entirely once isolated).
 
 ### Fresh fuzzer mismatches (August 2026 survey, `random-verilog-gen` branch) — first-pass triage only
 
-**Status**: Mostly root-caused, one large fix still pending. Of the
+**Status**: All ten seeds triaged; one large fix still pending. Of the
 original 10 mismatched seeds: 4 are confirmed genuine Icarus-specific
 bugs (2166, 2208, 2219, 2261), 1 is fully explained as a downstream
-propagation of an already-known Icarus artifact (2154), 1 was a genuine
-bug in THIS codebase's own engines, found and FIXED across all four
+propagation of an already-known Icarus artifact (2154), 2 were genuine
+bugs in THIS codebase's own engines, found and FIXED across all four
 engines (2197 — `$signed`/`$unsigned` ignoring an enclosing ternary's own
-combined signedness), 2 (2182, 2102) plus part of a third (2262's `o9`)
-are now root-caused to a SECOND genuine bug in this codebase's own
+combined signedness; 2243 — a bitwise op's `op_width` floor was folded
+into BOTH operands unconditionally instead of only a `~`/unary-`-`
+operand, letting a nested operand's individual signedness leak past the
+enclosing operator's own combined-signedness decision — see the
+op_width/combined-signedness writeup further down in this file for the
+full mechanism and the `FunctionDecl.signed` parser gap it exposed along
+the way), 2 (2182, 2102) plus part of a third (2262's `o9`)
+are root-caused to a THIRD genuine bug in this codebase's own
 engines — `_is_fixed_self_determined()`'s special-casing of `~`/unary
 `-` for comparison/reduction/`&&`/`||`/`!` operands appears to be
 backwards (see seed 2182's entry below for the full truth-table
 characterization) — but this one is NOT YET FIXED, deliberately, given
 its size (a large, multi-engine, heavily-cited piece of prior work with
-follow-on fixes built on top of it). That leaves 2243 genuinely
-unexamined. Separately, a genuine bug was found and fixed in the
+follow-on fixes built on top of it). This is now the only remaining
+open item from this batch. Separately, a genuine bug was found and fixed in the
 fuzzer's own test harness (x-contaminated stimulus was silently sent to
 Icarus as `z` instead of `x` — see below) — a real, confirmed fix on its
 own merits, but it does not explain any of the 10 seeds: every case
@@ -362,13 +368,13 @@ compiled/` suite (783 passed, only the 1 known pre-existing
 outcome). Seed 2197 itself needs no further work; it's fully fixed and
 verified.
 
-**Two remaining unexamined cases** (2243, 2262's `o8`/`o10` — already
-separately attributed to the first-activation artifact; re-verified
-directly against Icarus, with exact `Value` comparison, both before and
-after the x/z harness fix above; neither is explained by that bug —
-both mismatch identically either way; module source + Icarus's raw
-`$display` output only, deliberately not annotated with a guessed root
-cause beyond what's noted):
+**Remaining cases** (2243, now RESOLVED — see its entry below; 2262's
+`o8`/`o10` — already separately attributed to the first-activation
+artifact; re-verified directly against Icarus, with exact `Value`
+comparison, both before and after the x/z harness fix above; neither is
+explained by that bug — both mismatch identically either way; module
+source + Icarus's raw `$display` output only, deliberately not
+annotated with a guessed root cause beyond what's noted):
 
 - **Seed 2102 — root-caused, same bug as seed 2182 below, NOT YET
   FIXED.** Clocked feedback (`r3 <= ~(r3 && ~|o6);`) where Icarus
@@ -434,23 +440,41 @@ cause beyond what's noted):
   correcting something this broadly depended-upon. This is also almost
   certainly the same root cause as seed 2102 (`r3 <= ~(r3 && ~|o6);`,
   identical bare-`~`-of-`&&` shape) and seed 2262's `o9` sub-case.
-- **Seed 2243** — clocked, `o10 = (i5 ^ r8[32'd4]) & i4;` (continuous,
-  reads a clocked reg `r8`, itself fed back from `o10[32'd0]` among other
+- **Seed 2243 — RESOLVED, genuine bug in this codebase, FIXED across all
+  four engines.** `o10 = (i5 ^ r8[32'd4]) & i4;` (continuous, reads a
+  clocked reg `r8`, itself fed back from `o10[32'd0]` among other
   things). The original "one missing/extra high bit, sign-extension"
-  guess doesn't hold up: comparing all 11 vectors' raw Icarus output
-  against the reference engine directly (not just the one
-  `mismatches.txt` line), 6 of 11 vectors match exactly and 5 don't, with
-  no consistent single-bit-position pattern — some mismatching vectors
-  have our engine's value as a strict superset of extra high 1-bits, but
-  not at a fixed bit offset each time. Since `r8` is itself computed from
-  a self-referential expression involving `o10`'s own previous value,
-  this looks more likely to be an accumulating divergence in `r8`'s own
-  state from an earlier cycle than a direct bug in `o10`'s own
-  combinational expression — not yet isolated to a single statement the
-  way 2166/2208/2219 were. This module's fuzzer-generated stimulus
-  includes literal x-contaminated bits, which raised (and ruled out) the
-  x/z harness bug above as a candidate explanation — the mismatch is
-  byte-for-byte identical before and after that fix. Not root-caused.
+  guess didn't hold up from the raw fuzzer dump alone (6/11 vectors
+  matched, 5 didn't, no fixed bit-offset pattern) — but isolating the
+  shape down to a minimal synthetic repro (`(i5 ^ r8bit) & i4`, `i5`/`i4`
+  signed, `r8bit` an unsigned bit-select, unsigned destination) found the
+  real cause: the bitwise-op `op_width` floor (from the earlier `o5 | ~i3
+  [6:3]` fix) was being folded into BOTH operands' evaluation width
+  unconditionally, instead of only an operand that's itself `~`/unary-
+  `-`. That let the nested `i5 ^ r8bit` XOR's own individually-signed
+  operand (`i5`) sign-extend straight to the outer destination width
+  using its OWN signedness, before the enclosing `&`'s correctly-
+  unsigned COMBINED signedness (not both `i5^r8bit` and `i4` are signed)
+  ever got a chance to govern the extension. Fixed in
+  `sim/evaluator.py`, `sim/vm/compiler.py`,
+  `sim/compiled/_expr_emitter.py`, and `sim/compiled/_wide_emitter.py`
+  by restricting the width-floor widening to `~`/unary-`-` operands only,
+  and by computing the operand-alignment step's signedness from the
+  operator's own combined decision rather than each operand's individual
+  type (see the "op_width/combined-signedness" writeup further down in
+  this file for the full mechanism, Icarus-confirmed repro, and the
+  `FunctionDecl.signed` parser gap this fix incidentally exposed and also
+  fixed). Verified against Icarus on the isolated repro, confirmed to
+  preserve the earlier `o5 | ~i3[6:3]` fix, and passed a full `-n 8`
+  regression sweep (7928 passed, only the 2 pre-existing baseline
+  failures) with no new regressions. Also separately re-checked a related
+  nested-arithmetic-inside-bitwise-op shape (`(a4-a0)|other`, an
+  arithmetic sub-expression as a bitwise operand rather than a `~`) that
+  had briefly looked like a distinct unresolved gap mid-session — it now
+  matches Icarus exactly across several swept variants (different
+  operators/widths/operand ordering) as a side effect of this fix
+  combined with the already-existing `+`/`-`/`*` combined-signedness fix
+  below; it was never a separate bug needing its own fix.
 - **Seed 2262** — two `always @(*)` blocks reading a mutually-undriven
   internal reg (`r6`, never assigned anywhere) through `w4 = {3{i2}} &&
   ~&r6[1];` and `o9 = ~(r6[9:0] || w4);`. Re-checked with `_compare`
@@ -475,10 +499,10 @@ cause beyond what's noted):
   may not even share the exact same root cause as 2182 — do not assume
   it does until 2182's own rule is actually pinned down.
 
-**If this batch is picked up**: of the ten originally-mismatched seeds,
-only **2243** is genuinely unexamined beyond a raw Icarus dump — every
-other seed is either confirmed-Icarus, confirmed-and-fixed, or
-root-caused-but-not-yet-fixed:
+**If this batch is picked up**: all ten originally-mismatched seeds have
+now been triaged to a conclusion — every seed is either confirmed-Icarus,
+confirmed-and-fixed, or root-caused-but-not-yet-fixed. Only the last
+category (2182/2102/2262's `o9`) remains open:
 - 2166/2208/2219/2261: confirmed genuine Icarus bugs (three distinct
   mechanisms — division re-evaluation, compound-expression constant
   folding, and sequential-feedback freezing — but all in the same family
@@ -486,10 +510,13 @@ root-caused-but-not-yet-fixed:
 - 2154: fully explained as a downstream propagation of the already-known
   first-activation artifact (itself already filtered by the fuzzer
   harness).
-- 2197: a genuine, now-FIXED bug in all four of THIS codebase's own
-  engines (`$signed`/`$unsigned` ignoring an enclosing ternary's own
-  combined signedness — see its entry above).
-- 2182, 2102, and 2262's `o9` sub-case: a SECOND genuine bug in this
+- 2197 and 2243: two genuine, now-FIXED bugs in all four of THIS
+  codebase's own engines (2197 — `$signed`/`$unsigned` ignoring an
+  enclosing ternary's own combined signedness; 2243 — a bitwise op's
+  `op_width` floor leaking into a nested operand's own signedness ahead
+  of the enclosing operator's combined decision — see their entries
+  above).
+- 2182, 2102, and 2262's `o9` sub-case: a THIRD genuine bug in this
   codebase's own engines, root-caused via a systematic truth-table sweep
   but deliberately **NOT YET FIXED** given its size (see seed 2182's
   entry above for the full characterization and exact fix locations to
