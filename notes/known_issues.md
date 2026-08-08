@@ -107,3 +107,36 @@ across thousands of cases) is treated as correct. The fuzzer harness's own
 `_is_icarus_first_activation_artifact` filter (`src/veriforge/fuzz/
 _runner.py`) auto-detects and filters this pattern so it doesn't keep
 resurfacing as a fresh-looking mismatch in future fuzzer surveys.
+
+**Broader family, confirmed again (August 2026 fresh survey, seeds
+3000-3400, `reference`/`vm`/`vm-fast` + Icarus, 400 modules, 5
+mismatches — zero of them a genuine bug in this codebase)**: the same
+underlying weakness — Icarus mishandling x-propagation on a
+combinational block's first activation — also shows up in a
+**cross-signal** form the original filter doesn't need to catch (the
+filter's own heuristic is specifically about a signal reading its own
+prior value; these don't). Rigorously derived from first principles for
+`mismatch_03212` (kept as the clearest repro; see
+`notes/known_issues_archive.md` if this needs revisiting): `o4 = {i1[1],
+o5, i2};` reads `o5` — a sibling signal in the SAME always block that
+hasn't been assigned yet this activation (still X, first-ever
+evaluation) — and our engines correctly propagate that into a
+partially-ambiguous `o4` (mask exactly matching `o5`'s own bit
+positions in the concat); Icarus instead resolves the whole thing to a
+clean, fully-defined `0`. The other four mismatches from the same
+survey (`mismatch_03056`, `_03251`, `_03379`, `_03392`) all share the
+same general shape (self-referential or cross-signal procedural reads
+feeding an x-sensitive expression, discrepancy appears on specific
+vectors/first-activation only, our three engines always agree with each
+other) and were pattern-matched against this confirmed case rather than
+each independently re-derived from scratch — reasonable given the
+survey's overall signal (zero mismatches pointed at anything other than
+this family) but worth a fully independent derivation for any of the
+other four if picked up again specifically. **Possible future
+improvement, not attempted**: `_is_icarus_first_activation_artifact`
+could likely be extended to also catch this cross-signal variant
+(any signal read before its own first assignment within the same
+activation of the same process, not just the destination's own prior
+value), which would reduce noise in future surveys — scope this as its
+own small work item if the false-positive rate becomes annoying rather
+than doing it speculatively now.
