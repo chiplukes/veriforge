@@ -67,6 +67,7 @@ class _FunctionContext:
     is_automatic: bool = False
     return_range: Range | None = None
     return_kind: str | None = None
+    signed: bool = False
     ports: list[Port] = field(default_factory=list)
     local_vars: list[Variable] = field(default_factory=list)
     body_statements: list[Statement] = field(default_factory=list)
@@ -116,6 +117,7 @@ def _extract_function_declaration(
         name=ctx.name,
         return_range=ctx.return_range,
         return_kind=ctx.return_kind,
+        signed=ctx.signed,
         is_automatic=ctx.is_automatic,
         ports=ctx.ports,
         local_vars=ctx.local_vars,
@@ -133,7 +135,7 @@ def _update_function_context(
     callbacks: _FunctionTaskCallbacks,
 ) -> None:
     if child.data == "function_range_or_type":
-        ctx.return_range, ctx.return_kind = _extract_function_range_or_type(child, source_file, callbacks)
+        ctx.return_range, ctx.return_kind, ctx.signed = _extract_function_range_or_type(child, source_file, callbacks)
     elif child.data == "function_port_list":
         ctx.ports.extend(_extract_tf_ports(child, source_file, callbacks))
     elif child.data == "function_item_declaration":
@@ -184,18 +186,35 @@ def _extract_function_range_or_type(
     tree: Tree,
     source_file: str | None,
     callbacks: _FunctionTaskCallbacks,
-) -> tuple[Range | None, str | None]:
-    """Extract return range and/or kind from function_range_or_type."""
+) -> tuple[Range | None, str | None, bool]:
+    """Extract return range, kind, and signedness from function_range_or_type.
+
+    Grammar: ``function_range_or_type: KW_SIGNED? range?`` -- the optional
+    leading `KW_SIGNED` token was previously parsed but discarded, so a
+    function's own declared `signed` return type (e.g. ``function signed
+    [15:0] fn_sub16s(...)``) was never captured anywhere in the model,
+    silently defaulting every user function call to unsigned for any
+    caller consulting its return type's signedness (only its return
+    *width* was ever tracked). Harmless in isolation, but became a real
+    bug once `_expr_signed`'s FunctionCall handling started being
+    consulted to build a bitwise op's own combined signedness decision
+    from BOTH its operands -- confirmed against Icarus for
+    `(fn_sub16s(a2[11:10], a7) | $signed(a3))` with `a3` entirely x.
+    """
     return_range: Range | None = None
     return_kind: str | None = None
+    signed = False
 
     for child in tree.children:
-        if isinstance(child, Token) and child.type in _TASK_PORT_TYPE_TOKENS:
-            return_kind = _TASK_PORT_TYPE_TOKENS[child.type]
+        if isinstance(child, Token):
+            if child.type in _TASK_PORT_TYPE_TOKENS:
+                return_kind = _TASK_PORT_TYPE_TOKENS[child.type]
+            elif child.type == "KW_SIGNED":
+                signed = True
         elif isinstance(child, Tree) and child.data == "range":
             return_range = callbacks.build_range(child, source_file)
 
-    return return_range, return_kind
+    return return_range, return_kind, signed
 
 
 def _extract_block_item_variables(

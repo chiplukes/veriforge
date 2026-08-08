@@ -1456,7 +1456,32 @@ class _ExprEmitterMixin:
         # zero-extended the already-complemented result to `00001111`.
         # Mirrors the identical fix in `sim/evaluator.py`/`sim/vm/
         # compiler.py`.
-        bitwise_op_width = max(op_width, width or 0) if expr.op in ("&", "|", "^", "~^", "^~") else op_width
+        #
+        # CORRECTION (August 2026, mirrors the identical correction in
+        # `sim/evaluator.py`/`sim/vm/compiler.py`): folding `width` in
+        # UNCONDITIONALLY -- even when NEITHER operand is a `~`/unary-`-`
+        # that actually needs it -- lets a NESTED bitwise op (itself
+        # `_emit_expr`'d at this now-inflated shared width) fold the SAME
+        # outer `width` into ITS OWN `bitwise_op_width` too, cascading
+        # arbitrarily deep and letting a plain signed operand several
+        # levels down get emitted at (and therefore sign-extended to) the
+        # full outer destination width, bypassing every intermediate
+        # operator's own combined-signedness decision. Only widen when at
+        # least one of the two DIRECT operands is itself `~`/unary `-`
+        # (the only shapes that don't commute with extension and so
+        # genuinely need to see the wider context before running) --
+        # confirmed against Icarus for `(i5 ^ r8bit) & i4` (root cause of
+        # seed 2243 of the `random-verilog-gen` fuzzer batch): the outer
+        # `&`'s width was cascading into the inner `i5 ^ r8bit`'s own
+        # `bitwise_op_width`, sign-extending `i5` (a plain signed
+        # Identifier, not a `~`/`-`) to the full 106-bit destination width
+        # before the outer `&`'s own (correctly unsigned) combined
+        # decision ever got a chance to matter.
+        needs_wide_operand_context = expr.op in ("&", "|", "^", "~^", "^~") and (
+            (isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-"))
+            or (isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-"))
+        )
+        bitwise_op_width = max(op_width, width or 0) if needs_wide_operand_context else op_width
 
         # `>>` is ALWAYS a logical (unsigned/zero-fill) shift in Verilog
         # regardless of the left operand's own declared signedness -- only
@@ -1529,26 +1554,32 @@ class _ExprEmitterMixin:
             # unlike `<<`/`>>`/`<<<`/`>>>` (the other operators reaching
             # the generic `else` below), which genuinely need an outer
             # decision to reach into their left operand's own extension --
-            # see the ">>"-specific comment a few lines down. Forwarding
-            # the incoming `signed_override` here (as the generic `else`
-            # used to do for every remaining op, bitwise included) would
-            # leak an unrelated outer decision (e.g. a `%`'s divisor-
-            # widening override) into a NESTED, structurally-unrelated
-            # operand's own independent signed/unsigned computation --
-            # exactly the bug shape already fixed in `sim/evaluator.py`'s
-            # mirror-image branch and `_wide_emitter.py`'s equivalent
-            # `combined_override` computation (see either docstring for
-            # the concrete Icarus-confirmed repro, `(|a3[45]) %
-            # (($signed(a4[23]) - a0) | 1)`). `None` lets each operand
-            # widen to `op_width` using its own self-determined
-            # signedness (the same fallback `_emit_expr` already applies
-            # whenever no override is passed) instead of the outer
-            # decision; the RESULT-level extension further below (`if
-            # width and width > op_width`) still correctly consults the
-            # ORIGINAL `signed_override` parameter (not `combined_override`)
-            # for how this bitwise op's own already-computed result should
-            # be read by whatever outer context requested it.
-            combined_override = None
+            # see the ">>"-specific comment a few lines down. The
+            # INCOMING `signed_override` parameter (e.g. a `%`'s divisor-
+            # widening override) must still never reach this op's own
+            # operands -- exactly the bug shape already fixed in
+            # `sim/evaluator.py`'s mirror-image branch and
+            # `_wide_emitter.py`'s equivalent `combined_override`
+            # computation (see either docstring for the concrete
+            # Icarus-confirmed repro, `(|a3[45]) % (($signed(a4[23]) -
+            # a0) | 1)`).
+            #
+            # CORRECTION (August 2026, mirrors the identical correction in
+            # `sim/evaluator.py`/`sim/vm/compiler.py`): using `None` here
+            # went one step further than that and ALSO discarded this
+            # bitwise op's OWN freshly-computed combined signedness (from
+            # its own two direct operands), leaving each operand to align
+            # to `bitwise_op_width` using its own INDIVIDUAL signedness
+            # instead -- a different bug from the one the citation above
+            # actually demonstrates (which is about an OUTER, unrelated
+            # override, not this op's own decision). IEEE 1364-2005
+            # SS5.5.2's combining rule ("if any operand is unsigned, the
+            # result is unsigned") governs this alignment, not each
+            # operand's own individual type. Confirmed against Icarus for
+            # `(i5 ^ r8bit) & i4` (root cause of seed 2243 of the
+            # `random-verilog-gen` fuzzer batch) -- see `sim/evaluator.py`
+            # for the full repro and additional confirmed cases.
+            combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
         else:
             combined_override = signed_override
         # `>>` forcing unsigned is a property of how the shift reads its
@@ -3052,7 +3083,19 @@ class _ExprEmitterMixin:
             result = False
 
         elif etype is FunctionCall:
-            result = expr.name.lower() == "$signed"
+            name = expr.name.lower()
+            if name == "$signed":
+                result = True
+            elif name == "$unsigned":
+                result = False
+            else:
+                # A user function call's own signedness is its declared
+                # return type's signedness, NOT unconditionally False --
+                # mirrors the identical fix in `sim/evaluator.py`'s
+                # `_expr_signed` (see its docstring for the concrete
+                # Icarus-confirmed repro).
+                func = self._function_map.get(expr.name)
+                result = func is not None and func.signed
 
         else:
             result = False

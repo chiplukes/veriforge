@@ -825,8 +825,8 @@ def _extract_function_declaration(tree: Tree, source_file: str | None) -> Functi
 def _extract_function_range_or_type(
     tree: Tree,
     source_file: str | None,
-) -> tuple[Range | None, str | None]:
-    """Extract return range and/or kind from function_range_or_type.
+) -> tuple[Range | None, str | None, bool]:
+    """Extract return range, kind, and signedness from function_range_or_type.
 
     function_range_or_type: KW_SIGNED? range?
         | KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME

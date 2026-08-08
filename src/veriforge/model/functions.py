@@ -34,7 +34,7 @@ from .variables import Variable
 class FunctionDecl(VerilogNode):
     """A Verilog function declaration."""
 
-    __slots__ = ("body", "is_automatic", "locals", "name", "ports", "return_kind", "return_range")
+    __slots__ = ("body", "is_automatic", "locals", "name", "ports", "return_kind", "return_range", "signed")
 
     def __init__(  # noqa: PLR0913
         self,
@@ -42,6 +42,7 @@ class FunctionDecl(VerilogNode):
         *,
         return_range: Range | None = None,
         return_kind: str | None = None,
+        signed: bool = False,
         is_automatic: bool = False,
         ports: list[Port] | None = None,
         local_vars: list[Variable] | None = None,
@@ -52,6 +53,7 @@ class FunctionDecl(VerilogNode):
         self.name = name
         self.return_range = return_range
         self.return_kind = return_kind
+        self.signed = signed
         self.is_automatic = is_automatic
         self.ports = ports or []
         self.locals = local_vars or []
@@ -61,6 +63,8 @@ class FunctionDecl(VerilogNode):
         parts = [f"FunctionDecl({self.name!r}"]
         if self.is_automatic:
             parts.append("automatic")
+        if self.signed:
+            parts.append("signed")
         if self.return_kind:
             parts.append(f"kind={self.return_kind!r}")
         if self.return_range:
@@ -85,6 +89,8 @@ class FunctionDecl(VerilogNode):
         d["type"] = "FunctionDecl"
         d["name"] = self.name
         d["is_automatic"] = self.is_automatic
+        if self.signed:
+            d["signed"] = self.signed
         if self.return_kind:
             d["return_kind"] = self.return_kind
         if self.return_range:

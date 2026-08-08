@@ -970,25 +970,57 @@ class Compiler:  # cm:8c1e4a
                 # doesn't widen it at all. Mirrors the identical fix in
                 # `sim/evaluator.py` (see its docstring for the concrete
                 # Icarus-confirmed repro, `o5 | ~i3[6:3]`).
-                op_width = max(self._expr_width(expr.left), self._expr_width(expr.right), width or 0)
-                self._compile_expr(expr.left, program, op_width)
-                left_eff_signed = self._expr_signed(expr.left)
-                if left_eff_signed:
-                    program.append(instr(Op.SIGN_EXT, op_width, 0))
-                else:
-                    program.append(instr(Op.RESIZE, op_width))
-                self._compile_expr(expr.right, program, op_width)
-                right_eff_signed = self._expr_signed(expr.right)
-                if right_eff_signed:
-                    program.append(instr(Op.SIGN_EXT, op_width, 0))
-                else:
-                    program.append(instr(Op.RESIZE, op_width))
+                #
+                # CORRECTION (August 2026, two parts, both mirrored exactly
+                # in `sim/evaluator.py` -- see its own docstring for the
+                # full writeup and Icarus repros): (1) folding `width` into
+                # `op_width` UNCONDITIONALLY (for both operands, not just
+                # one that actually needs it) let a plain/nested operand
+                # (not a `~`/unary-`-`) get compiled at the outer width too,
+                # so ITS OWN individual signedness could sign-extend it
+                # past what this operator's combined signedness intends --
+                # only widen a SPECIFIC operand's own compile width when
+                # that operand is itself `~`/unary `-`. (2) the alignment
+                # step (extending the narrower operand up to `op_width`)
+                # must use the OPERATOR's own COMBINED signedness
+                # (`both_signed`, also forced as the compiled-in
+                # `signed_override` for each operand's own recursive
+                # compilation -- mirrors the comparison-operator fix
+                # earlier in this file), not each operand's own individual
+                # signedness -- IEEE 1364-2005 SS5.5.2's combining rule
+                # ("if any operand is unsigned, the result is unsigned")
+                # governs this alignment too, not just the final
+                # RESULT-to-`width` extension.
+                natural_op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                left_compile_width = (
+                    max(natural_op_width, width or 0)
+                    if isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-")
+                    else natural_op_width
+                )
+                right_compile_width = (
+                    max(natural_op_width, width or 0)
+                    if isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-")
+                    else natural_op_width
+                )
+                # `op_width` is fully static (derived only from the AST,
+                # not from anything computed at compile time), so it can
+                # -- and must -- be computed once up front, THEN used to
+                # align both operands, exactly like the original
+                # unconditional-SIGN_EXT/RESIZE-after-each-operand
+                # structure below (the VM's own SIGN_EXT/RESIZE opcodes are
+                # no-ops when the value is already at the target width).
+                op_width = max(natural_op_width, left_compile_width, right_compile_width)
+                self._compile_expr(expr.left, program, left_compile_width, both_signed)
+                program.append(instr(Op.SIGN_EXT if both_signed else Op.RESIZE, op_width, 0))
+                self._compile_expr(expr.right, program, right_compile_width, both_signed)
+                program.append(instr(Op.SIGN_EXT if both_signed else Op.RESIZE, op_width, 0))
                 op = _BINARY_OP_MAP.get(expr.op)
                 if op is None:
                     raise ValueError(f"Unknown binary operator: {expr.op!r}")
                 program.append(instr(op))
                 if width and width != op_width:
-                    result_eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    result_eff_signed = signed_override if signed_override is not None else both_signed
                     if result_eff_signed:
                         program.append(instr(Op.SIGN_EXT, width, 0))
                     else:
@@ -2499,7 +2531,19 @@ class Compiler:  # cm:8c1e4a
             result = False
 
         elif etype is FunctionCall:
-            result = expr.name.lower() == "$signed"
+            name = expr.name.lower()
+            if name == "$signed":
+                result = True
+            elif name == "$unsigned":
+                result = False
+            else:
+                # A user function call's own signedness is its declared
+                # return type's signedness, NOT unconditionally False --
+                # mirrors the identical fix in `sim/evaluator.py`'s
+                # `_expr_signed` (see its docstring for the concrete
+                # Icarus-confirmed repro).
+                func = self._function_map.get(expr.name)
+                result = func is not None and func.signed
 
         else:
             result = False

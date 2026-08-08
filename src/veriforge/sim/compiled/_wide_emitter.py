@@ -4074,7 +4074,28 @@ class _WideEmitterMixin:
                 # signal, even though the assignment's own destination
                 # (`o6`, 59 bits) and the natural op_width (41 bits) are
                 # both <=64 bits.
-                bitwise_op_width = max(op_width, dst_width) if op in ("&", "|", "^", "~^", "^~") else op_width
+                # CORRECTION (August 2026, mirrors the identical
+                # correction in `sim/evaluator.py`/`sim/vm/compiler.py`/
+                # `_expr_emitter.py`'s narrow `_emit_binary`): folding
+                # `dst_width` in UNCONDITIONALLY -- even when NEITHER
+                # operand is a `~`/unary-`-` that actually needs it --
+                # lets a NESTED bitwise op (itself emitted at this now-
+                # inflated shared width) fold the SAME outer width into
+                # ITS OWN `bitwise_op_width` too, cascading arbitrarily
+                # deep and letting a plain signed operand several levels
+                # down get sign-extended to the full outer destination
+                # width, bypassing every intermediate operator's own
+                # combined-signedness decision. Only widen when at least
+                # one of the two DIRECT operands is itself `~`/unary `-`.
+                # Confirmed against Icarus for `(i5 ^ r8bit) & i4` (root
+                # cause of seed 2243 of the `random-verilog-gen` fuzzer
+                # batch, reached here because the 106-bit destination
+                # exceeds a native register).
+                needs_wide_operand_context = op in ("&", "|", "^", "~^", "^~") and (
+                    (isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-"))
+                    or (isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-"))
+                )
+                bitwise_op_width = max(op_width, dst_width) if needs_wide_operand_context else op_width
                 # Division/modulus is NOT "residue-safe" like +/-/* (whose
                 # modular arithmetic is invariant to whether each operand
                 # was individually sign- or zero-extended, as long as each
@@ -4141,7 +4162,19 @@ class _WideEmitterMixin:
                 # bitwise op's OWN already-computed result should be read
                 # by whatever outer context requested it.
                 if op in ("&", "|", "^", "~^", "^~"):
-                    combined_override = None
+                    # CORRECTION (August 2026, mirrors the identical
+                    # correction in `sim/evaluator.py`/`sim/vm/
+                    # compiler.py`/`_expr_emitter.py`'s narrow
+                    # `_emit_binary`): `None` went one step further than
+                    # blocking the INCOMING (outer) `signed_override` and
+                    # ALSO discarded this bitwise op's OWN freshly-
+                    # computed combined signedness (from its own two
+                    # direct operands), leaving each operand to align
+                    # using its own INDIVIDUAL signedness instead. IEEE
+                    # 1364-2005 SS5.5.2's combining rule governs this
+                    # alignment, not each operand's own individual type.
+                    # Confirmed against Icarus for `(i5 ^ r8bit) & i4`.
+                    combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
                 elif signed_override is not None:
                     combined_override = signed_override
                 else:

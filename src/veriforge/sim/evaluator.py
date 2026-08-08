@@ -510,18 +510,79 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # complemented); the old op_width=4 computed `~i3[6:3]`
                 # at 4 bits first (`1111`), then zero-extended the already-
                 # complemented result to `00001111`.
-                op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx), width or 0)
-                left = self.eval(expr.left, ctx, op_width)
-                right = self.eval(expr.right, ctx, op_width)
+                #
+                # CORRECTION (August 2026): folding `width` into `op_width`
+                # UNCONDITIONALLY (for both operands, not just one that
+                # actually needs it) went too far -- it also widens the
+                # RECURSIVE `eval()` call for a plain operand (a signal, or
+                # a NESTED bitwise op) that has no such need, letting THAT
+                # operand's own individual signedness sign-extend it
+                # straight to the outer destination width, bypassing the
+                # OUTER operator's own combined signedness (the `eff_signed`
+                # tail below), which is supposed to govern that final
+                # extension instead. A nested bitwise op does NOT need this
+                # widening -- its own recursive structure already extends
+                # its RESULT to whatever width it's asked for using ITS OWN
+                # combined signedness (this exact tail step, one level
+                # down), so passing it a wider `width` only pollutes ITS
+                # operands' evaluation too, cascading the bug arbitrarily
+                # deep. Confirmed against Icarus for `(i5 ^ r8bit) & i4`
+                # (`i5`/`i4` signed, `r8bit` an unsigned bit-select,
+                # destination unsigned 106 bits): the combined expression
+                # is unsigned overall (not both `i5^r8bit` and `i4` are
+                # signed), so it must zero-extend, but folding the outer
+                # 106-bit width into the INNER `i5^r8bit` XOR's own
+                # `op_width` let `i5`'s own (individually signed) extension
+                # sign-fill the whole result before the outer `&`'s
+                # (correctly unsigned) combined decision ever got a chance
+                # to matter. Only widen a specific operand's own evaluation
+                # width when that operand is itself `~`/unary `-` (the only
+                # shapes that don't commute with extension, per the 2166
+                # fix's own reasoning above) -- every other operand shape
+                # only needs this operator's OWN natural (un-widened)
+                # combined width.
+                # CORRECTION 2 (August 2026): the operand-alignment step
+                # (extending the narrower operand up to `op_width` before
+                # combining) also used to consult each operand's OWN
+                # individual signedness -- but IEEE 1364-2005 SS5.5.2's
+                # combining rule ("if any operand is unsigned, the result
+                # is unsigned") means BOTH operands must align to the
+                # OPERATOR's own COMBINED signedness here, not their own
+                # individual types, exactly like the already-established
+                # comparison-operator fix above (`both_signed`, forced as
+                # `signed_override` into both operands' own recursive
+                # evaluation too). Confirmed against Icarus for
+                # `a_signed & b_unsigned` (`a_signed` narrower and
+                # individually signed, `b_unsigned` wider and unsigned,
+                # making the AND's own combined type unsigned): with
+                # `a_signed = 8'h80` (MSB set), Icarus zero-extends it to
+                # `16'h0080` before ANDing, not sign-extends to `16'hFF80`
+                # -- `a_signed`'s own individual signedness never gets a
+                # say once the operator's combined type is unsigned.
+                natural_op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
+                left_eval_width = (
+                    max(natural_op_width, width or 0)
+                    if isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-")
+                    else natural_op_width
+                )
+                right_eval_width = (
+                    max(natural_op_width, width or 0)
+                    if isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-")
+                    else natural_op_width
+                )
+                left = self.eval(expr.left, ctx, left_eval_width, both_signed)
+                right = self.eval(expr.right, ctx, right_eval_width, both_signed)
+                op_width = max(natural_op_width, left.width, right.width)
                 if left.width != op_width:
-                    eff_signed = _expr_signed(expr.left, ctx)
-                    left = left.sign_extend(op_width) if eff_signed else left.resize(op_width)
+                    left = left.sign_extend(op_width) if both_signed else left.resize(op_width)
                 if right.width != op_width:
-                    eff_signed = _expr_signed(expr.right, ctx)
-                    right = right.sign_extend(op_width) if eff_signed else right.resize(op_width)
+                    right = right.sign_extend(op_width) if both_signed else right.resize(op_width)
                 result = _eval_binary_op(op, left, right)
                 if width and result.width != width:
-                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                    # `_expr_signed(expr, ctx)` for this node type computes
+                    # exactly `both_signed` above -- reuse it directly.
+                    eff_signed = signed_override if signed_override is not None else both_signed
                     result = result.sign_extend(width) if eff_signed else result.resize(width)
                 return result
             else:
@@ -1600,9 +1661,26 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             cache[id(expr)] = False
         return False
 
-    # -- FunctionCall: $signed → True, $unsigned → False, else False -------
+    # -- FunctionCall: $signed → True, a user function → its own declared
+    # return signedness, else False -------------------------------------
     if etype is FunctionCall:
-        result = expr.name.lower() == "$signed"
+        name = expr.name.lower()
+        if name == "$signed":
+            result = True
+        elif name == "$unsigned":
+            result = False
+        else:
+            func = ctx._functions.get(expr.name)
+            # A user function call's own signedness is its declared return
+            # type's signedness (e.g. `function signed [15:0] fn(...)`),
+            # NOT unconditionally False -- confirmed against Icarus for
+            # `(fn_sub16s(a2[11:10], a7) | $signed(a3))` with `fn_sub16s`
+            # declared `function signed [15:0] fn_sub16s(...)`: treating
+            # the call as unsigned corrupted the `|`'s own combined-
+            # signedness decision (both operands are genuinely signed
+            # here), in turn wrongly forcing `$signed(a3)` to zero- rather
+            # than sign-extend an entirely-x `a3`.
+            result = func is not None and func.signed
         if cache is not None:
             cache[id(expr)] = result
         return result

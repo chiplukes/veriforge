@@ -105,26 +105,32 @@ directly (bypass the fuzzer entirely once isolated).
 
 ### Fresh fuzzer mismatches (August 2026 survey, `random-verilog-gen` branch) — first-pass triage only
 
-**Status**: Mostly resolved. Of the original 10 mismatched seeds: 4 are
-confirmed genuine Icarus-specific bugs (2166, 2208, 2219, 2261), 1 is
-fully explained as a downstream propagation of an already-known Icarus
-artifact (2154), 1 was a genuine bug in THIS codebase's own engines,
-found and FIXED across all four engines (2197 — `$signed`/`$unsigned`
-ignoring an enclosing ternary's own combined signedness), 1 pair (plus a
-third case sharing its shape) was investigated in depth and left
-genuinely unresolved (needs a dedicated re-derivation, see seed 2182
-below), and 3 remain unconfirmed (2102, 2243, 2262's `o8`/`o10` already
-attributed separately). Separately, a genuine bug was found and fixed in
-the fuzzer's own test harness (x-contaminated stimulus was silently sent
-to Icarus as `z` instead of `x` — see below) — a real, confirmed fix on
-its own merits, but it does not explain any of the 10 seeds: every case
+**Status**: Mostly root-caused, one large fix still pending. Of the
+original 10 mismatched seeds: 4 are confirmed genuine Icarus-specific
+bugs (2166, 2208, 2219, 2261), 1 is fully explained as a downstream
+propagation of an already-known Icarus artifact (2154), 1 was a genuine
+bug in THIS codebase's own engines, found and FIXED across all four
+engines (2197 — `$signed`/`$unsigned` ignoring an enclosing ternary's own
+combined signedness), 2 (2182, 2102) plus part of a third (2262's `o9`)
+are now root-caused to a SECOND genuine bug in this codebase's own
+engines — `_is_fixed_self_determined()`'s special-casing of `~`/unary
+`-` for comparison/reduction/`&&`/`||`/`!` operands appears to be
+backwards (see seed 2182's entry below for the full truth-table
+characterization) — but this one is NOT YET FIXED, deliberately, given
+its size (a large, multi-engine, heavily-cited piece of prior work with
+follow-on fixes built on top of it). That leaves 2243 genuinely
+unexamined. Separately, a genuine bug was found and fixed in the
+fuzzer's own test harness (x-contaminated stimulus was silently sent to
+Icarus as `z` instead of `x` — see below) — a real, confirmed fix on its
+own merits, but it does not explain any of the 10 seeds: every case
 re-verified after the fix still mismatched identically. Do not assume a
-direction of fault (our engine vs. Icarus) for any of the unconfirmed
-ones without redoing the same careful, Icarus-verified methodology as
-work plan item 2.7's multi-wave campaign — and see the "if this batch is
-picked up" note at the end of this section for a hard-won caution about
-re-verifying prior "confirmed against Icarus" citations from scratch
-before trusting them.
+direction of fault (our engine vs. Icarus) without redoing the same
+careful, Icarus-verified methodology as work plan item 2.7's multi-wave
+campaign — and see the "if this batch is picked up" note at the end of
+this section for a hard-won caution about re-verifying prior "confirmed
+against Icarus" citations from scratch before trusting them (this
+happened TWICE in this session alone: once for seed 2197's fix, once for
+seed 2182's root cause).
 
 **Source**: a 400-module survey (`reference`+`vm` engines, seeds
 2000-2400, `--engines reference vm`) run to validate the new
@@ -356,72 +362,78 @@ compiled/` suite (783 passed, only the 1 known pre-existing
 outcome). Seed 2197 itself needs no further work; it's fully fixed and
 verified.
 
-**Three remaining unconfirmed cases** (2102, 2243, 2262 — re-verified
+**Two remaining unexamined cases** (2243, 2262's `o8`/`o10` — already
+separately attributed to the first-activation artifact; re-verified
 directly against Icarus, with exact `Value` comparison, both before and
-after the x/z harness fix above; none of these three are explained by
-that bug — all three mismatch identically either way; module source +
-Icarus's raw `$display` output only, deliberately not annotated with a
-guessed root cause):
+after the x/z harness fix above; neither is explained by that bug —
+both mismatch identically either way; module source + Icarus's raw
+`$display` output only, deliberately not annotated with a guessed root
+cause beyond what's noted):
 
-- **Seed 2102** — clocked feedback (`r3 <= ~(r3 && ~|o6);`) where Icarus
+- **Seed 2102 — root-caused, same bug as seed 2182 below, NOT YET
+  FIXED.** Clocked feedback (`r3 <= ~(r3 && ~|o6);`) where Icarus
   stabilizes `o7` (`r3[36:28]`, truncated into a 2-bit port) to `2'b11`
-  from the first vector onward; our reference gives `2'b00`. Plausible
-  factors: `&&`'s x/short-circuit precision interacting with a `~`
-  applied to a *non-fixed-self-determined* operand (`r3 && ~|o6` itself,
-  not a bare reduction/comparison), or a sequential-scheduling timing
-  difference in when `r3` is sampled relative to the first clock edge.
-- **Seed 2182 — investigated in depth, inconclusive, needs a dedicated
-  re-derivation before any code change.** `o8 = ~(|$unsigned(r6[32'd2]));`,
-  feedback via `r6 <= o8;`, `o8`/destination UNSIGNED, no `$signed()`
-  wrapper anywhere. Traced cycle-by-cycle (`dut.r6` via hierarchical
-  reference): at time 0, `r6` is `X` (default), so `r6[2]` is a genuinely
-  AMBIGUOUS 1 bit; Icarus resolves the resulting `o8` such that, after
-  one clock edge, `r6` becomes `9'b11111111x` — i.e. Icarus's `~` of the
-  reduction's ambiguous 1-bit result behaves as "zero-extend the operand
-  to context width FIRST (bit0=x, rest definite 0), THEN complement the
-  WHOLE extended value (bit0 stays x, rest flips to 1)" — the *opposite*
-  of the `_is_fixed_self_determined()` model this codebase ships
-  ("complement at the fixed 1-bit width first, THEN zero-extend the
-  RESULT"), which would instead predict `r6` settling toward mostly-0s,
-  not mostly-1s.
+  from the first vector onward; our reference gives `2'b00`. This is
+  `~` applied directly to `r3 && ~|o6` (a plain `&&`, fixed-self-
+  determined, no `$signed` wrapper, no ternary) — exactly the bare-`~`-
+  of-`&&` shape the seed 2182 truth-table sweep below characterizes.
+  Not independently re-verified with the full sweep methodology (the
+  2182 sweep used simpler synthetic modules), but the shape match is
+  strong enough that this is very likely the same root cause, not a
+  fourth one — treat as such rather than re-diagnosing from scratch.
+- **Seed 2182 — RESOLVED via systematic truth-table sweep (root cause
+  found, fix NOT yet applied — see below for why).** Follow-up
+  investigation (triggered by the seed 2197 fix above) explains the
+  earlier "contradictory evidence": the fifth-wave fix's own citation
+  (`$signed(~({a0, a6, a0} && a7))`) is degenerate for a DIFFERENT reason
+  than first suspected. `$signed(...)`'s argument is always evaluated at
+  its OWN self-determined width (per the established, correct,
+  independent "casts are self-determined" rule) — and `~`'s own
+  self-determined width, when its operand is itself fixed-1-bit
+  (`&&`/reduction/comparison/`!`), is ALSO exactly 1 bit. So inside a
+  `$signed(...)`/`$unsigned(...)` wrapper, `~` is asked to extend to
+  a width (1 bit) that already equals its operand's own width — there is
+  NO extension to do either way, so `_is_fixed_self_determined()`'s
+  special case is never actually exercised there, regardless of whether
+  it's right or wrong. The fix's own motivating example could not have
+  caught a bug in either direction.
 
-  This looked like a direct contradiction of that fix's own cited,
-  already-Icarus-verified test case
-  (`$signed(~({a0, a6, a0} && a7))`, `a0` 1-bit signed, `a6` 80-bit
-  signed, `a7` 1-bit unsigned — widths/signs from
-  `tests/test_sim/test_differential.py`'s `FIXED_SIGNALS`), so that exact
-  case was re-run directly against Icarus with **fully-defined** (no x)
-  inputs chosen so `{a0,a6,a0} && a7` evaluates to a definite `0`
-  (expecting `~0` (1 bit) = `1`, then extended to a 96-bit destination).
-  Three destination/cast variants were compared side by side —
-  `assign result = ~(...)` into an **unsigned** 96-bit net, into a
-  **signed** 96-bit net, and `assign result = $signed(~(...))` into an
-  unsigned net — and **all three gave all-1s (96 bits)**, including the
-  plain-unsigned-no-cast variant, where a naive "zero-extend a definite
-  1-bit unsigned value" model predicts just bit 0 set (`96'h1`), not all
-  96 bits. This doesn't match the `_is_fixed_self_determined()` model
-  (which predicts `96'h1` here), nor does it match the "extend-operand-
-  first" model inferred from the seed 2182 trace above in any way that's
-  been reconciled — every hypothesis tried so far explains some of the
-  observed data and contradicts the rest.
+  A systematic sweep (no `$signed`/`$unsigned` anywhere — bare
+  assignments, a signed-but-uncast destination, and a ternary branch)
+  across SIX different fixed-self-determined operators (`&&`, `||`, `!`,
+  `==`, reduction-AND) and BOTH affected unary operators (`~`, unary `-`)
+  found EVERY case matches "zero-extend the operand to context width
+  FIRST (using the operand's own signedness, always unsigned per IEEE
+  1364-2005 Table 5-22 for these operators), THEN apply `~`/`-` to the
+  WHOLE extended value" — the exact opposite of what
+  `_is_fixed_self_determined()` implements ("apply the operator at the
+  operand's own fixed width, THEN extend the result"). Destination
+  signedness does not affect this (a signed-declared-but-uncast
+  destination gave the identical answer to an unsigned one in every
+  test), and the ternary-branch position is affected identically to a
+  bare top-level assignment (`sel ? ~(a && b) : unsigned_other` gives
+  `16'hFFFE` for `a=b=1`, not the `16'h0000` the current fix predicts).
 
-  **Do not attempt a quick re-fix from this note alone.** Resolving this
-  needs the same systematic, one-variable-at-a-time methodology as the
-  original multi-wave campaign: vary destination signedness, presence/
-  absence of an explicit `$signed()`/`$unsigned()` cast, ambiguous vs.
-  fully-defined operands, and the specific fixed-self-determined operator
-  (`&&` vs. reduction `|`/`&` vs. `!` vs. comparisons) independently, and
-  re-derive the actual rule Icarus implements from a full truth table
-  before touching `_is_fixed_self_determined()` or any of its three call
-  sites — the existing fix may have a real gap, or may be entirely
-  correct for the narrower case it was actually tested against, with
-  seed 2182 hitting a genuinely different (undetermined) factor.
-- **Seed 2197** — large clocked shift-register-like module; Icarus's
-  `o7` is all-x on vector 0 then flips to all-`0`, while ours never
-  shows x for `o7` at all (`mask=0x7fff...fff` i.e. our own engine
-  reports the *opposite*: fully ambiguous throughout, where Icarus
-  reports mostly-defined `0`). Not yet reconciled with the seed 2182
-  case's opposite-direction pattern.
+  **Conclusion**: `_is_fixed_self_determined()`'s entire special-casing
+  for `~`/unary `-` (added in the "eleventh"/"fifth" wave, see its
+  original entry above) appears to be actively wrong, and its own
+  verification was structurally incapable of detecting this because every
+  cited confirmation happened to be wrapped in a `$signed`/`$unsigned`
+  cast, which neutralizes the special case's effect. The simpler,
+  original (pre-fifth-wave) behavior — treating `~`/`-` as ordinary
+  context-determined operators with no special case for a
+  fixed-self-determined operand — appears to be correct after all.
+  **Not yet fixed**: this touches a large, heavily-cited, multi-engine
+  piece of prior work (present in `sim/evaluator.py`, `sim/vm/
+  compiler.py`, `sim/compiled/_expr_emitter.py`, `_wide_emitter.py`, plus
+  several MASK-side call sites that reference the same helper — e.g. the
+  eighteenth-wave entries above), with follow-on fixes built on top of it
+  across multiple later waves; per explicit user direction, this was
+  investigated to full characterization but deliberately NOT fixed in
+  this session, pending a decision on how to approach reverting/
+  correcting something this broadly depended-upon. This is also almost
+  certainly the same root cause as seed 2102 (`r3 <= ~(r3 && ~|o6);`,
+  identical bare-`~`-of-`&&` shape) and seed 2262's `o9` sub-case.
 - **Seed 2243** — clocked, `o10 = (i5 ^ r8[32'd4]) & i4;` (continuous,
   reads a clocked reg `r8`, itself fed back from `o10[32'd0]` among other
   things). The original "one missing/extra high bit, sign-extension"
@@ -464,57 +476,77 @@ guessed root cause):
   it does until 2182's own rule is actually pinned down.
 
 **If this batch is picked up**: of the ten originally-mismatched seeds,
-2166/2208/2219/2261 are confirmed genuine Icarus bugs (three distinct
-mechanisms — division re-evaluation, compound-expression constant
-folding, and sequential-feedback freezing — but all in the same family of
-"computes correctly once, then never revisits it"); 2154 is fully
-explained as a downstream propagation of the already-known first-
-activation artifact; 2197 was a genuine, now-FIXED bug in all four of
-THIS codebase's own engines (`$signed`/`$unsigned` ignoring an enclosing
-ternary's own combined signedness — see its entry above); and 2182/2381/
-(2262's `o9` sub-case) are a probable-single family investigated in depth
-but NOT resolved (see 2182's entry for the contradictory-evidence
-writeup — needs a full truth table across destination signedness /
-explicit casts / ambiguous vs. defined operands / operator type before
-any code change to `_is_fixed_self_determined()` or its call sites). The
-fuzzer's own x/z harness bug (see above) was found and fixed along the
-way but turned out to explain NONE of the ten seeds — don't assume it's
-the cause of a mismatch just because a module happens to use
-x-contaminated stimulus. That leaves 2102, 2243, (2262's `o8`/`o10`,
-already attributed to the first-activation artifact) genuinely unexamined
-beyond the raw Icarus dump recorded above (2102's own shape, `~(r3 &&
-~|o6)`, looks structurally like the same still-unresolved 2182 family --
-worth checking that connection before a fresh investigation). Four
-techniques proved essential during this pass and should be used again:
-(1) always split a suspicious compound expression into separately-
-assigned intermediate wires (`%b`, not `%h`) and compare against the
-original literal expression before assuming *our* engine is at fault —
-this is what confirmed both 2166 and 2208; (2) when checking whether a
-`Value` matches, always use `FuzzRunner._compare()` or exact
+only **2243** is genuinely unexamined beyond a raw Icarus dump — every
+other seed is either confirmed-Icarus, confirmed-and-fixed, or
+root-caused-but-not-yet-fixed:
+- 2166/2208/2219/2261: confirmed genuine Icarus bugs (three distinct
+  mechanisms — division re-evaluation, compound-expression constant
+  folding, and sequential-feedback freezing — but all in the same family
+  of "computes correctly once, then never revisits it").
+- 2154: fully explained as a downstream propagation of the already-known
+  first-activation artifact (itself already filtered by the fuzzer
+  harness).
+- 2197: a genuine, now-FIXED bug in all four of THIS codebase's own
+  engines (`$signed`/`$unsigned` ignoring an enclosing ternary's own
+  combined signedness — see its entry above).
+- 2182, 2102, and 2262's `o9` sub-case: a SECOND genuine bug in this
+  codebase's own engines, root-caused via a systematic truth-table sweep
+  but deliberately **NOT YET FIXED** given its size (see seed 2182's
+  entry above for the full characterization and exact fix locations to
+  touch — `_is_fixed_self_determined()`'s special-casing of `~`/unary
+  `-` in `sim/evaluator.py`, `sim/vm/compiler.py`,
+  `sim/compiled/_expr_emitter.py`, `_wide_emitter.py`, and the MASK-side
+  call sites that reference the same helper). **This is the natural next
+  thing to pick up** if continuing this batch: the root cause is solid
+  (a clean, multi-operator, multi-position truth table, not a guess), the
+  fix shape is simple to describe (remove the special case, let `~`/`-`
+  behave like any other context-determined operator), but it needs the
+  SAME careful one-engine-at-a-time-plus-full-regression discipline as
+  item 2.6/2.7's own waves, given how much later work cites/builds on
+  the mechanism being changed.
+- 2262's `o8`/`o10`: already attributed to the first-activation artifact
+  (auto-filtered by the fuzzer harness).
+
+The fuzzer's own x/z harness bug (see above) was found and fixed along
+the way but turned out to explain NONE of the ten seeds — don't assume
+it's the cause of a mismatch just because a module happens to use
+x-contaminated stimulus.
+
+Five techniques proved essential during this pass and should be used
+again: (1) always split a suspicious compound expression into
+separately-assigned intermediate wires (`%b`, not `%h`) and compare
+against the original literal expression before assuming *our* engine is
+at fault — this is what confirmed both 2166 and 2208; (2) when checking
+whether a `Value` matches, always use `FuzzRunner._compare()` or exact
 `Value.__eq__` — never a hand-rolled string/substring comparison, which
 can silently produce false negatives when two mismatching values share a
 long common prefix or suffix (as happened once already during this
 session's own triage, on seed 2243); (3) when a mismatching signal's
-value stays suspiciously constant across many vectors despite other state
-changing, trace every reg in its dependency chain via hierarchical
+value stays suspiciously constant across many vectors despite other
+state changing, trace every reg in its dependency chain via hierarchical
 reference (`dut.<reg>`) across several clock edges directly in Icarus —
 this is what confirmed seed 2261 was a frozen-feedback-register bug
 (`r5`) rather than a downstream artifact of the already-confirmed
-division bug (`r4`, which does change every cycle, ruling that theory out
-before it led anywhere), and what confirmed seed 2154's `o11` (fully
-ambiguous in Icarus, exactly the known artifact) as the true cause of the
-`o10` mismatch that was actually reported; (4) when re-testing a cited
-"confirmed against Icarus" claim from prior work, rebuild the EXACT
-signal declarations the original test used (real width/signedness table,
-not an approximation) before trusting or overturning the citation — two
-separate previously-"confirmed" verifications in this codebase (the
-`_is_fixed_self_determined()` citation for seed 2182's family, and the
-`$signed`-always-wins citation that seed 2197's fix corrected) turned out
-to rest on a test setup that didn't actually match its own real signal
-declarations. A fresh full fuzzer survey (this session only re-checked
-the specific already-known seeds against the x/z fix) would still be
-worth running to see whether the aggregate mismatch rate changes for
-seeds not individually examined here.
+division bug (`r4`, which does change every cycle, ruling that theory
+out before it led anywhere), and what confirmed seed 2154's `o11` (fully
+ambiguous in Icarus, exactly the known artifact) as the true cause of
+the `o10` mismatch that was actually reported; (4) when re-testing a
+cited "confirmed against Icarus" claim from prior work, rebuild the
+EXACT signal declarations the original test used (real width/signedness
+table, not an approximation) before trusting or overturning the
+citation — two separate previously-"confirmed" verifications in this
+codebase (the `_is_fixed_self_determined()` citation for seed 2182's
+family, and the `$signed`-always-wins citation that seed 2197's fix
+corrected) turned out to rest on a test setup that didn't actually match
+its own real signal declarations; (5) when a citation's test expression
+is wrapped in `$signed(...)`/`$unsigned(...)`, check whether that
+wrapper's own "argument is always self-determined" rule makes the
+citation degenerate for what it's actually trying to prove — this is
+what explained seed 2182's remaining contradiction after technique (4)
+alone wasn't enough. A fresh full fuzzer survey (this session only
+re-checked the specific already-known seeds against the x/z fix) would
+still be worth running to see whether the aggregate mismatch rate
+changes for seeds not individually examined here.
 
 ### Cython VM interpreter drift (vm-fast engine)
 
