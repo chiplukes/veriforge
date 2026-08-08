@@ -1445,24 +1445,32 @@ class Compiler:  # cm:8c1e4a
                 # caller covers for it there). Nested one level deeper --
                 # e.g. a ternary branch -- that top-level cover doesn't
                 # reach, and the cast's own argument never gets extended
-                # to the ternary's combined width at all (mirrors the
-                # identical fix in `sim/evaluator.py`; confirmed wrong
-                # against Icarus for `{3{(a0 ? $signed(a4[4:2]) : a3)}}`).
-                # $signed/$unsigned ALWAYS force their own decision here,
-                # discarding whatever signed_override was passed in from
-                # further out.
+                # to the ternary's combined width at all.
                 #
-                # Directly-nested casts (`$unsigned($signed(x))`) are the
-                # ONE exception: the OUTERMOST cast governs -- unwrap the
-                # chain here rather than letting this branch recurse and
-                # re-trigger on the inner cast, which would otherwise
-                # re-force its own (now-overridden) decision. Mirrors the
-                # identical fix in `sim/evaluator.py`; found via
-                # statement-level differential fuzzing
-                # (`test_differential_statements.py`, phase 1):
-                # `$unsigned($signed((a < b)))` assigned into a wide
-                # destination must zero-extend (the outer $unsigned
-                # wins), confirmed against Icarus.
+                # CORRECTION (August 2026): the `{3{(a0 ? $signed(a4[4:2])
+                # : a3)}}` citation this comment used to cite was
+                # re-verified directly against Icarus and found to have
+                # been checked with `a3` mistakenly declared `signed` (a
+                # degenerate case where the ternary's own combined
+                # signedness and the cast's own decision happen to agree,
+                # so it can't distinguish the two rules). With `a3`
+                # correctly `unsigned` (its real declaration), Icarus
+                # zero-extends -- the ternary's own combined UNSIGNED
+                # signedness wins, `$signed` does NOT force its own
+                # decision. Mirrors the identical correction in
+                # `sim/evaluator.py`; found while root-causing seed 2197
+                # of the `random-verilog-gen` fuzzer batch. Only fall back
+                # to the cast's own decision when NO override is active
+                # (`signed_override is None`).
+                #
+                # Directly-nested casts (`$unsigned($signed(x))`) are still
+                # unwrapped here so the OUTERMOST cast's OWN decision (not
+                # the inner one) is what falls back to when no override is
+                # active -- unchanged by this correction, still confirmed
+                # via `test_differential_statements.py` phase 1's
+                # `$unsigned($signed((a < b)))` case (no enclosing ternary
+                # there, so `signed_override` was already `None` and this
+                # distinction never mattered for that specific citation).
                 inner = expr.arguments[0]
                 while (
                     isinstance(inner, FunctionCall)
@@ -1486,7 +1494,8 @@ class Compiler:  # cm:8c1e4a
                 inner_w = self._expr_width(inner)
                 self._compile_expr(inner, program, inner_w, None)
                 if width and inner_w != width:
-                    program.append(instr(Op.SIGN_EXT if fname == "$signed" else Op.RESIZE, width, 0))
+                    eff_signed = signed_override if signed_override is not None else (fname == "$signed")
+                    program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
                 return
             self._compile_function_call(expr, program)
             return

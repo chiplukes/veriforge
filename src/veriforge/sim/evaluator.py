@@ -1062,29 +1062,40 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # `cond ? $signed(a4[4:2]) : a3` -- that top-level cover
                 # doesn't reach, and the cast's own argument never gets
                 # extended to the ternary's combined width at all.
-                # Confirmed wrong against Icarus for
-                # `{3{(a0 ? $signed(a4[4:2]) : a3)}}`. `$signed`/
-                # `$unsigned` ALWAYS force their own decision here,
-                # discarding whatever signed_override was passed in from
-                # further out (mirrors the compiled engine's
-                # `_wide_emitter.py` FunctionCall case).
+                # CORRECTION (August 2026): the `{3{(a0 ? $signed(a4[4:2])
+                # : a3)}}` citation below was re-verified directly against
+                # Icarus and found to have been checked with `a3`
+                # mistakenly declared `signed` (a degenerate case where the
+                # ternary's own combined signedness and the cast's own
+                # decision happen to agree, so it can't actually
+                # distinguish the two rules). With `a3` correctly
+                # `unsigned` (its real declaration, from
+                # `test_differential.py`'s `FIXED_SIGNALS`), Icarus
+                # zero-extends -- the ternary's own combined UNSIGNED
+                # signedness wins, `$signed` does NOT force its own
+                # decision. This matches `eval()`'s own documented
+                # contract (see its docstring): `signed_override`, when
+                # provided, replaces `_expr_signed()` for every extension
+                # decision, with no stated exception for `$signed`/
+                # `$unsigned`. Found while root-causing seed 2197 of the
+                # `random-verilog-gen` fuzzer batch (`o8 <= {...} ?
+                # $signed($unsigned(clk)) : r5[13:12];`, `r5` unsigned --
+                # our engine sign-extended, Icarus zero-extended,
+                # confirmed both directly against Icarus and via a minimal
+                # isolated reference-engine repro before this fix). Only
+                # fall back to the cast's own decision when NO override is
+                # active (`signed_override is None`) -- e.g. `$signed(...)`
+                # as an assignment's own top-level RHS, or as an operand of
+                # a binary op that hasn't yet established its own override.
                 #
-                # Directly-nested casts (`$unsigned($signed(x))`) are the
-                # ONE exception: the OUTERMOST cast is what should govern
-                # -- unwrapping the chain here (rather than letting this
-                # branch recurse and re-trigger on the inner cast) means
-                # the inner cast never gets a chance to re-force its OWN
-                # (now-overridden) decision. Found via statement-level
-                # differential fuzzing (`test_differential_statements.py`,
-                # phase 1): `$unsigned($signed((a < b)))` assigned into a
-                # wide destination -- Icarus zero-extends (the outer
-                # $unsigned wins), but this code previously recursed into
-                # the inner $signed's own branch, which force-set
-                # signed_override=True and sign-extended instead. Every
-                # prior confirmation of "the cast always forces its own
-                # decision" involved exactly one cast layer (a ternary or
-                # bitwise-op supplying the override, never another
-                # $signed/$unsigned) -- that rule is unaffected here.
+                # Directly-nested casts (`$unsigned($signed(x))`) are still
+                # unwrapped here so the OUTERMOST cast's OWN decision (not
+                # the inner one) is what falls back to when no override is
+                # active -- unchanged by this correction, still confirmed
+                # via `test_differential_statements.py` phase 1's
+                # `$unsigned($signed((a < b)))` case (no enclosing ternary
+                # there, so `signed_override` was already `None` and this
+                # distinction never mattered for that specific citation).
                 inner = expr.arguments[0]
                 while (
                     isinstance(inner, FunctionCall)
@@ -1116,7 +1127,8 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # propagated) width.
                 result = self.eval(inner, ctx, _expr_self_width(inner, ctx))
                 if width and result.width != width:
-                    return result.sign_extend(width) if fname == "$signed" else result.resize(width)
+                    eff_signed = signed_override if signed_override is not None else (fname == "$signed")
+                    return result.sign_extend(width) if eff_signed else result.resize(width)
                 return result
             return self._eval_function_call(expr, ctx)
 

@@ -626,7 +626,7 @@ class _ExprEmitterMixin:
             return result
 
         if etype is FunctionCall:
-            return self._emit_func_call(expr, width)
+            return self._emit_func_call(expr, width, signed_override)
 
         if etype is StringLiteral:
             val = 0
@@ -850,28 +850,41 @@ class _ExprEmitterMixin:
 
             true_mask_w = width if _mask_needs_outer_width(expr.true_expr) else tw
             false_mask_w = width if _mask_needs_outer_width(expr.false_expr) else fw
-            true_mask = self._emit_mask_expr(expr.true_expr, true_mask_w)
-            false_mask = self._emit_mask_expr(expr.false_expr, false_mask_w)
-            # `_emit_mask_expr` has no `signed_override` parameter (unlike
-            # `_emit_expr`), so `true_mask`/`false_mask` above are computed
-            # at each branch's own self-width `tw`/`fw` ONLY -- they never
-            # see the ternary's `own_signed` sign-extension that
-            # `true_expr`/`false_expr` just received via `_emit_expr`'s
-            # own internal `_sign_ext` call. When `own_signed` and the
-            # branch is narrower than `width`, an ambiguous (masked) sign
-            # bit's unknown-ness must propagate into every newly-filled
-            # upper bit too, exactly like `_emit_mask_expr`'s dedicated
-            # `$signed(...)` case above -- sign-extend the mask here to
-            # match. (When NOT `own_signed`, the value was zero-extended,
-            # and the mask's own upper bits are already correctly 0 by
-            # the same "unsigned values keep upper native-register bits
-            # zero" invariant used throughout this file -- no action
-            # needed.) Confirmed wrong (cross-engine, against the
-            # reference oracle) for `(a2 ? a0 : a4)` with `a0` a signed
-            # 1-bit register value x and `a2` selecting it: the selected
-            # branch's mask stayed 1-bit x instead of being sign-extended
-            # to x across the full 64-bit ternary width, so the ambiguity
-            # was silently dropped from the newly-filled upper bits.
+            # `_emit_mask_expr` DOES accept `signed_override` (as of the
+            # August 2026 correction to its own FunctionCall/$signed
+            # handling) -- pass the same `t_signed_override`/
+            # `f_signed_override` the VALUE side above received, so a
+            # `$signed(...)`/`$unsigned(...)` branch's mask gets the
+            # ternary's own combined signedness decision directly, not
+            # just the cast's own hardcoded one.
+            true_mask = self._emit_mask_expr(expr.true_expr, true_mask_w, t_signed_override)
+            false_mask = self._emit_mask_expr(expr.false_expr, false_mask_w, f_signed_override)
+            # The post-hoc sign-extension below remains needed as a
+            # general safety net for branch shapes `_emit_mask_expr`
+            # doesn't thread `signed_override` through internally
+            # (Identifier, BinaryOp, etc.) -- `true_mask`/`false_mask` for
+            # those are computed at each branch's own self-width `tw`/`fw`
+            # ONLY, never seeing the ternary's `own_signed` sign-extension
+            # that `true_expr`/`false_expr` just received via `_emit_expr`.
+            # When `own_signed` and the branch is narrower than `width`,
+            # an ambiguous (masked) sign bit's unknown-ness must propagate
+            # into every newly-filled upper bit too -- sign-extend the
+            # mask here to match. (When NOT `own_signed`, the value was
+            # zero-extended, and the mask's own upper bits are already
+            # correctly 0 by the same "unsigned values keep upper native-
+            # register bits zero" invariant used throughout this file --
+            # no action needed.) For a FunctionCall branch specifically,
+            # this is now a safe no-op on top of the just-passed
+            # `signed_override` above (re-sign-extending an already
+            # correctly-extended value doesn't change it) -- kept as a
+            # single shared safety net rather than special-casing which
+            # branch shapes still need it. Confirmed wrong (cross-engine,
+            # against the reference oracle) for `(a2 ? a0 : a4)` with `a0`
+            # a signed 1-bit register value x and `a2` selecting it: the
+            # selected branch's mask stayed 1-bit x instead of being
+            # sign-extended to x across the full 64-bit ternary width, so
+            # the ambiguity was silently dropped from the newly-filled
+            # upper bits.
             if own_signed:
                 if width > tw:
                     true_mask = f"_sign_ext({true_mask}, {tw})"
@@ -2731,12 +2744,40 @@ class _ExprEmitterMixin:
 
         return "0"
 
-    def _emit_func_call(self, call: FunctionCall, width: int) -> str:  # noqa: PLR0911
+    def _emit_func_call(self, call: FunctionCall, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911
         name = call.name.lower()
-        if name == "$unsigned":
+        if name in ("$signed", "$unsigned"):
             if call.arguments:
                 arg_w = self._expr_width(call.arguments[0])
                 arg = self._emit_expr(call.arguments[0], arg_w)
+                # CORRECTION (August 2026): this used to hardcode the
+                # sign/zero-extension decision purely from `name`
+                # ($signed always sign-extends, $unsigned always zero-
+                # extends), discarding any incoming `signed_override` --
+                # matching `eval()`/`_compile_expr()`'s OLD (also wrong)
+                # behavior in `sim/evaluator.py`/`sim/vm/compiler.py`
+                # before their own August 2026 correction (see those
+                # files for the full writeup). When an ENCLOSING
+                # TernaryOp has already established its own combined
+                # signedness via `signed_override` (e.g. `cond ?
+                # $signed(x) : unsigned_y`, where the ternary's own
+                # combined signedness is unsigned since not BOTH branches
+                # are signed), that override must win over the cast's own
+                # decision -- confirmed against Icarus for seed 2197 of
+                # the `random-verilog-gen` fuzzer batch (`o8 <= {...} ?
+                # $signed($unsigned(clk)) : r5[13:12];`: zero-extends,
+                # not sign-extends). Only fall back to the cast's own
+                # decision when no override is active.
+                eff_signed = signed_override if signed_override is not None else (name == "$signed")
+                if eff_signed:
+                    # A plain leaf/self-determined argument's raw C `long
+                    # long` value is already meaningfully bounded to
+                    # `arg_w` bits (upper bits 0 by the codebase-wide
+                    # "value string is only meaningful within its own
+                    # self-width" convention -- see `_emit_reduction`'s
+                    # docstring), so `_sign_ext` correctly fills the
+                    # extension bits from `arg`'s own top bit.
+                    return f"_sign_ext({arg}, {arg_w})"
                 # A plain leaf/self-determined argument's raw C `long
                 # long` value is already meaningfully bounded to `arg_w`
                 # bits (upper bits 0 by the codebase-wide "value string
@@ -2760,12 +2801,6 @@ class _ExprEmitterMixin:
                 # `-3` leaked through unchanged, then read as a huge
                 # unsigned magnitude at the wider destination.
                 return f"(({arg}) & wmask({arg_w}))"
-            return "0"
-        if name == "$signed":
-            if call.arguments:
-                arg_w = self._expr_width(call.arguments[0])
-                arg = self._emit_expr(call.arguments[0], arg_w)
-                return f"_sign_ext({arg}, {arg_w})"
             return "0"
         if name == "$clog2":
             if call.arguments:
@@ -3927,9 +3962,16 @@ class _ExprEmitterMixin:
                 # selection) from ambiguous to spuriously true.
                 arg_w = self._expr_width(expr.arguments[0])
                 arg_mask = self._emit_mask_expr(expr.arguments[0], arg_w)
-                if fname == "$signed":
+                # CORRECTION (August 2026): mirrors the identical
+                # `signed_override`-respecting correction in
+                # `_emit_func_call` (the VALUE side, see its own comment
+                # for the full writeup) -- an incoming `signed_override`
+                # from an enclosing TernaryOp's own combined signedness
+                # must win over the cast's own decision.
+                eff_signed = signed_override if signed_override is not None else (fname == "$signed")
+                if eff_signed:
                     return f"_sign_ext({arg_mask}, {arg_w})"
-                # `$unsigned`: mirrors `_emit_func_call`'s identical
+                # `$unsigned` (or an override forcing unsigned): mirrors `_emit_func_call`'s identical
                 # VALUE-side mask (`& wmask(arg_w)`) -- `arg_mask` is only
                 # guaranteed clean up to `arg_w` bits for a plain leaf/
                 # self-determined argument; a NESTED `$signed(...)`

@@ -5076,7 +5076,17 @@ class _WideEmitterMixin:
                 lines = self._emit_wide_expr_to_scratch(inner, slot, n_words, inner_w, indent)
                 if lines is None:
                     return None
-                if dst_width > inner_w and fname == "$signed":
+                # CORRECTION (August 2026): `fname == "$signed"` alone
+                # discarded any incoming `signed_override` -- mirrors the
+                # identical correction in `_expr_emitter.py`'s
+                # `_emit_func_call`/`_emit_mask_expr` (see those for the
+                # full writeup) and `sim/evaluator.py`/`sim/vm/
+                # compiler.py`. An enclosing TernaryOp's own combined
+                # signedness (`signed_override`, already in scope here --
+                # see its use for Replication just above) must win over
+                # the cast's own decision when active.
+                eff_signed = signed_override if signed_override is not None else (fname == "$signed")
+                if dst_width > inner_w and eff_signed:
                     lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(inner_w), indent))
                 return lines
             # User-defined function: `_user_func_XXX` always returns a

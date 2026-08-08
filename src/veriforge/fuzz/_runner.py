@@ -538,10 +538,16 @@ class FuzzRunner:
             bits = []
             for i in range(w - 1, -1, -1):
                 if (value.mask >> i) & 1:
-                    if (value.val >> i) & 1:
-                        bits.append("x")
-                    else:
-                        bits.append("z")
+                    # `Value.__init__` always zeroes `val` wherever `mask` is
+                    # set (`val & ~mask`), so a val-bit-dependent x-vs-z
+                    # choice here can never actually select 'x' -- this
+                    # simulator's own Value model has no z state distinct
+                    # from x (see notes/known_issues.md, "x and z share one
+                    # representation"), so a masked bit always means x and
+                    # must always be emitted as 'x', not 'z' (Icarus DOES
+                    # distinguish the two, so emitting 'z' drives a
+                    # different, genuinely tri-state scenario than intended).
+                    bits.append("x")
                 else:
                     bits.append("1" if (value.val >> i) & 1 else "0")
             return f"{w}'b{''.join(bits)}"
