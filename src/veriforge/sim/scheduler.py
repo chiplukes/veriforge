@@ -200,6 +200,7 @@ class Scheduler:  # cm:9a7f2c
 
     __slots__ = (
         "_always_procs",
+        "_combo_bootstrapped",
         "_combo_procs",
         "_continuous_procs",
         "_event_waiting",
@@ -261,6 +262,11 @@ class Scheduler:  # cm:9a7f2c
         # Signal state captured just before the first pending drive — used by
         # settle() as the "previous" snapshot for edge detection.
         self._settle_snapshot: dict[str, Value] = {}
+
+        # True once settle() has run its one-time combinational-always
+        # bootstrap (see settle()'s own comment for why this can't just
+        # happen unconditionally in elaborate()/__init__).
+        self._combo_bootstrapped = False
 
         # Optional callback fired after each time step completes
         # (all delta cycles resolved).  Signature: callback(scheduler)
@@ -1051,6 +1057,64 @@ class Scheduler:  # cm:9a7f2c
         when you want to observe combinational outputs immediately after driving
         inputs.
         """
+        # One-time bootstrap: run every combinational always block once, on
+        # the FIRST settle() call only (not in elaborate()/__init__ -- see
+        # `notes` in git history for why an earlier attempt at construction
+        # time was reverted: it ran designs with a genuinely infinite
+        # combinational loop before the caller had a chance to construct
+        # successfully and trigger it later, and ran designs reading
+        # not-yet-driven operands before the caller had a chance to drive
+        # real stimulus first). `run()` already does the equivalent
+        # unconditionally on every call; a caller that only ever calls
+        # settle() (never run()) never reached it: settle()'s own trigger
+        # logic (`_collect_triggered`) only wakes a combinational block
+        # whose sensitivity overlaps what's actually been driven, so a
+        # block entirely "downstream" of signals that are never externally
+        # driven (e.g. depending only on another always-block's output reg
+        # that nothing else ever drives) never ran even once, leaving it
+        # stuck at its default x initial value forever -- while a real
+        # event-driven simulator (confirmed against Icarus) always
+        # evaluates every combinational process at least once at
+        # simulation start. Deferring to the first settle() call (rather
+        # than construction) means any real stimulus the caller already
+        # drove via drive_signal() beforehand is already reflected in
+        # ctx -- exactly the normal `drive(...); drive(...); settle()`
+        # usage pattern -- so a combinational block that genuinely depends
+        # on real inputs sees their real values here, not undriven x.
+        #
+        # A single flat pass over `self._combo_procs` is not enough: it
+        # runs each block exactly once in list order with no re-trigger,
+        # so an inter-combo dependency (B reads A's output, but B appears
+        # before A in the list) leaves B computed from A's stale/x value.
+        # `run()` gets away with a single pass here because its own event
+        # loop keeps going afterward and later re-triggers B for real; a
+        # settle()-only caller has no such follow-up. So drive the
+        # bootstrap's own output through the same trigger/re-run
+        # convergence loop used below for real drives (confirmed necessary
+        # by `test_axi_lite_regs_typed_cross_engine[reference]`, which has
+        # exactly this kind of inter-combo dependency and hung/timed out
+        # under a single-pass bootstrap).
+        if not self._combo_bootstrapped:
+            self._combo_bootstrapped = True
+            if self._combo_procs:
+                active_dirty = self._run_active_region(list(self._combo_procs))
+                delta = 0
+                while active_dirty or self.executor.nba_queue:
+                    delta += 1
+                    if delta > self.delta_limit:
+                        raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded during settle() bootstrap")
+                    nba_dirty = self.executor.apply_nba(self.ctx)
+                    if nba_dirty:
+                        for _ in range(self.delta_limit):
+                            if not self._run_dirty_continuous_assigns(nba_dirty):
+                                break
+                    combined = active_dirty | nba_dirty
+                    rerun = self._collect_triggered(combined)
+                    if rerun or nba_dirty:
+                        active_dirty = self._run_active_region(rerun)
+                    else:
+                        active_dirty = set()
+
         if not self._pending_drives:
             return
 

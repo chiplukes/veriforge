@@ -1108,7 +1108,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.extend(self._initial_lines)
             lines.append("        self._raise_runtime_error()")
 
-        # NOTE: a matching "bootstrap combinational always blocks once at
+        # NOTE: a "bootstrap combinational always blocks once at
         # construction" fix (mirroring `sim/scheduler.py`'s and `sim/vm/
         # vm_scheduler.py`'s `elaborate()`) was attempted here and
         # REVERTED -- calling `delta_loop()` unconditionally in `__init__`
@@ -1122,16 +1122,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # and caused native crashes in division-heavy designs (dividing
         # against genuinely undriven/uninitialized operands at
         # construction time hit undefined behavior in the generated C,
-        # not just a wrong Verilog x-result). This needs a more careful,
-        # narrower fix than "run everything unconditionally" -- e.g. only
-        # bootstrapping combinational processes that are provably
-        # unreachable from any input port (rather than every one), or
-        # deferring the bootstrap to the first settle()/step() call
-        # instead of `__init__` -- not attempted here. The compiled
-        # engine therefore still has the underlying gap this note
-        # describes (a combinational block entirely downstream of a
-        # signal nothing ever drives stays stuck at its default x value
-        # under settle()-only usage), while reference/vm/vm-fast do not.
+        # not just a wrong Verilog x-result). The actual fix -- deferring
+        # the bootstrap to the first settle() call instead of `__init__`
+        # -- lives in `CompiledScheduler.settle()` (compiled_scheduler.py),
+        # using the `mark_all_dirty()` method below to force every signal's
+        # dirty flag on the first settle() call only, letting the existing
+        # delta_loop() trigger machinery run every combinational/continuous
+        # process once from there. `CompiledScheduler.run()` never needed
+        # this: it already calls `self._sim.step()` unconditionally on
+        # every call, and delta_loop()'s own "it == 0 and not changed"
+        # fallback (see `_gen_delta_loop`) bootstraps everything on the
+        # first such call for free, before anything has been marked dirty.
 
         # drive method
         lines.extend(
@@ -1142,6 +1143,16 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "            self.ctx.val[sid] = v",
                 "            self.ctx.mask[sid] = m",
                 "            self.ctx.dirty[sid] = 1",
+            ]
+        )
+
+        lines.extend(
+            [
+                "",
+                "    cpdef void mark_all_dirty(self):",
+                "        cdef int i",
+                "        for i in range(N_SIGS):",
+                "            self.ctx.dirty[i] = 1",
             ]
         )
 

@@ -286,6 +286,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         "_always_timing_sync_names",
         "_bootstrapped",
         "_codegen",
+        "_combo_bootstrapped",
         "_compiler",
         "_event_queue",
         "_event_seq",
@@ -345,6 +346,11 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
         # Track whether a snapshot has been taken before external drives
         self._has_drive_snapshot: bool = False
+
+        # True once settle() has run its one-time combinational-always
+        # bootstrap (see settle()'s own comment for why this can't just
+        # happen unconditionally in __init__).
+        self._combo_bootstrapped: bool = False
 
         # Stop flag ($finish)
         self._stopped: bool = False
@@ -675,7 +681,30 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic at the current time."""
-        if not self._has_drive_snapshot:
+        # One-time bootstrap: force every signal's dirty flag on the FIRST
+        # settle() call only (not in __init__ -- see the NOTE in
+        # `_gen_sections.py`'s `_gen_compiled_sim` for why an earlier
+        # attempt at construction time was reverted: it ran designs with a
+        # genuinely infinite combinational loop before the caller had a
+        # chance to construct successfully and trigger it later, and ran
+        # designs reading not-yet-driven operands before the caller had a
+        # chance to drive real stimulus first, which crashed native
+        # division on garbage operands). `run()` never needed this fix: it
+        # calls `self._sim.step()` unconditionally every call, and
+        # delta_loop()'s own "nothing at all is dirty" fallback bootstraps
+        # everything for free on that first call. `settle()` only runs
+        # `step()` when something has actually been driven, so a
+        # combinational block entirely downstream of a signal nothing ever
+        # drives never got its dirty bit set and stayed stuck at its
+        # default x value forever. Marking every signal dirty here (rather
+        # than just the ones a caller happened to drive()) forces exactly
+        # one full pass through every combinational/continuous process,
+        # matching reference/vm's "run every combo proc once" bootstrap.
+        first_settle = not self._combo_bootstrapped
+        if first_settle:
+            self._combo_bootstrapped = True
+            self._sim.mark_all_dirty()
+        if not self._has_drive_snapshot and not first_settle:
             return
         # Refresh the data snapshot so non-clock signals driven before the clock
         # edge (e.g. rst=0, i_sum=160 driven before clk=1) are visible in sv[]

@@ -88,6 +88,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
     __slots__ = (
         "_always_timing_coroutines",
         "_bootstrapped",
+        "_combo_bootstrapped",
         "_combo_procs",
         "_const_c_mask",
         "_const_c_val",
@@ -186,6 +187,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Guard: prevent re-executing initial blocks on subsequent run() calls
         self._bootstrapped: bool = False
+        # Guard: run settle()'s one-time combinational-always bootstrap
+        # (see settle()'s own comment) only once.
+        self._combo_bootstrapped: bool = False
 
     # ── Elaboration ──────────────────────────────────────────────
 
@@ -1413,6 +1417,80 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic at the current time."""
+        # One-time bootstrap: directly execute every combinational always
+        # block once, on the FIRST settle() call only -- not in elaborate()
+        # (an earlier attempt at construction time was reverted: it ran
+        # designs with a genuinely infinite combinational loop before the
+        # caller had a chance to construct successfully and trigger it
+        # later, and ran designs reading not-yet-driven operands before the
+        # caller had a chance to drive real stimulus first). `run()`
+        # already does the equivalent unconditionally on every call (see
+        # its own `_run_process_list(self._combo_procs)` call above); a
+        # caller that only ever calls settle() (never run()) never reached
+        # it: settle()'s own trigger logic only wakes a combinational block
+        # whose sensitivity overlaps what's actually been driven, so a
+        # block entirely "downstream" of signals that are never externally
+        # driven (e.g. depending only on another always-block's output reg
+        # that nothing else ever drives) never ran even once, leaving it
+        # stuck at its default x initial value forever -- while a real
+        # event-driven simulator (confirmed against Icarus) always
+        # evaluates every combinational process at least once at
+        # simulation start. This must call `_run_process_list` directly
+        # rather than merely seeding `_pending_drives` with each proc's own
+        # sensitivity: a combinational block that itself has EMPTY
+        # sensitivity (e.g. `always @(*) o9 = 1'b1;`, a pure-constant
+        # assign with no reads) or that only reads other never-externally-
+        # driven signals can never be woken by the ordinary dirty-signal
+        # trigger machinery no matter what gets marked dirty -- it has to
+        # be run unconditionally, exactly like `run()`'s own bootstrap.
+        # Deferring to the first settle() call (rather than construction)
+        # means any real stimulus the caller already drove via
+        # drive_signal() beforehand is already reflected in signal storage
+        # -- exactly the normal `drive(...); drive(...); settle()` usage
+        # pattern -- so a combinational block that genuinely depends on
+        # real inputs sees their real values here, not undriven x. Mirrors
+        # the identical fix in `sim/scheduler.py`'s `settle()`.
+        #
+        # A single flat pass over `self._combo_procs` is not enough: it
+        # runs each block exactly once with no re-trigger, so an
+        # inter-combo dependency (B reads A's output, but B is executed
+        # before A produces it) leaves B computed from A's stale/x value.
+        # `run()` gets away with a single pass here because its own event
+        # loop keeps going afterward and later re-triggers B for real; a
+        # settle()-only caller has no such follow-up. This reuses `run()`'s
+        # own bootstrap pattern verbatim (repeatedly re-run continuous
+        # assigns + all combo procs until a signal-snapshot fixed point,
+        # bounded by delta_limit) rather than routing through
+        # `_collect_triggered`/`_edge_fired`: those rely on `_prev_sig_val`/
+        # the cy_ctx snapshot, which are normally seeded lazily on the
+        # first `drive_signal()` call or the first real event-loop step,
+        # and are sized/valid only once `_cy_ctx._procs_setup` has settled
+        # -- calling them straight from settle() before that ever happened
+        # hit a stale/undersized `_prev_sig_val` and raised IndexError
+        # (found via `test_axi_lite_regs_typed_cross_engine[vm-fast]`,
+        # which also needed the inter-combo convergence above).
+        if not self._combo_bootstrapped:
+            self._combo_bootstrapped = True
+            if self._combo_procs:
+                for _ in range(self.delta_limit):
+                    if self._cy_ctx is not None:
+                        snap = self._cy_ctx.snapshot_signals()
+                    else:
+                        snap = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
+                    if self.interpreter:
+                        self.interpreter.dirty.clear()
+                    self._run_continuous_assigns()
+                    ca_dirty = bool(self.interpreter and self.interpreter.dirty)
+                    self._run_process_list(self._combo_procs)
+                    if self._cy_ctx is not None:
+                        cur = self._cy_ctx.snapshot_signals()
+                    else:
+                        cur = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
+                    if cur == snap and not (self.interpreter and self.interpreter.dirty) and not ca_dirty:
+                        break
+                if self.interpreter:
+                    self.interpreter.dirty.clear()
+
         if not self._pending_drives:
             return
         changed = set(self._pending_drives)
