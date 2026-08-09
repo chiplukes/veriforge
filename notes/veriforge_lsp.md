@@ -25,11 +25,14 @@ veriforge_lsp/
   workspace.py         # Workspace: Verible + veriforge parser/model orchestration
   index.py             # LocationIndex: position→node and node→refs lookups
   protocol.py          # Type conversion helpers (LSP ↔ Lark SourceLocation)
+  payloads.py          # Typed request/response dataclasses for the verilog/* commands
   handlers/
     text_sync.py       # didOpen/Change/Save/Close
     navigation.py      # definition, references, hover
     symbols.py         # documentSymbol, workspaceSymbol
-    extended.py        # verilog/* custom commands + hierarchy push
+    extended.py        # register() aggregator + dispatcher for verilog/* custom commands
+    hierarchy.py       # hierarchy tree/graph + signal-trace payload builders
+    refactor.py        # collapse/extract/pull-up/push-down/boundary-move payload builders
 ```
 
 ## Standard LSP Features
@@ -42,12 +45,17 @@ veriforge_lsp/
 
 ## Custom Extensions
 
-All custom features are implemented as `workspace/executeCommand` commands:
+All custom features are implemented as `workspace/executeCommand` commands.
+The tables below are a quick-reference summary; `veriforge_lsp/payloads.py`
+is the authoritative typed definition of every request/response envelope
+(one dataclass pair per command, with `from_dict`/`to_dict`) — reach for it
+directly when integrating a client instead of hand-parsing the JSON shapes
+described here.
 
 | Command | Parameters | Returns |
 |---|---|---|
 | `verilog/setTopModule` | `{"moduleName": str \| null}` | `{"ok": bool, "hierarchyTree": {...}}` |
-| `verilog/hierarchyGraph` | `{"top": str?, "maxDepth": int?, "format": "json" \| "text" \| "dot" \| "mermaid"?}` | `{"ok": bool, "hierarchyGraph": {...}, "visualization": str?}` |
+| `verilog/hierarchyGraph` | `{"top": str?, "maxDepth": int?, "format": "json" \| "text" \| "dot" \| "mermaid"?}` | `{"ok": bool, "hierarchyGraph": {...}, "visualization": str?, "format": str?}` |
 | `verilog/resolveHierarchyChildren` | `{"moduleName": str, "instancePath": str?}` | `{"children": [...]}` |
 | `verilog/traceSignal` | `{"textDocument": {...}, "position": {...}}` | `{"signal": {...}, "drivers": [...], "loads": [...]}` |
 | `verilog/previewHierarchyBoundaryMove` | `{"direction": "pull_up" \| "push_down" \| "collapse" \| "extract", "selection": {...}, "targetParentPath": str?, "newModuleName": str?, "newInstanceName": str?, "extractedModuleName": str?}` | `{"ok": bool, "preview": {..., "engineKind": "boundary" \| "extract" \| "collapse"}, "details": {...}?, "edit": WorkspaceEdit?, "review": {"files": [...]}?}` |

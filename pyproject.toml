@@ -186,3 +186,9 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = ["veriforge_lsp.*"]
 ignore_errors = true
+
+# payloads.py holds real, checkable dataclasses (unlike the rest of
+# veriforge_lsp, which leans on untyped pygls internals) -- un-ignore it.
+[[tool.mypy.overrides]]
+module = ["veriforge_lsp.payloads"]
+ignore_errors = false
