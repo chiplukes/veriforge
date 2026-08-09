@@ -217,6 +217,15 @@ src/veriforge/
 │       ├── axi.py        # axi4_lite() interface (all 5 channels, 19 signals)
 │       ├── dsp.py        # mac(), pipelined_mult(), fir_filter() — DSP inference
 │       └── xilinx.py     # shift_register_srl(), lutram() — Xilinx inference
+└── fuzz/                 # Grammar-driven randomized differential-testing fuzzer
+    ├── __init__.py       # Public API exports
+    ├── __main__.py       # CLI entry point (python -m veriforge.fuzz)
+    ├── _grammar_guide.py # Grammar guide for random rule selection
+    ├── _signal_context.py # Tracks available signals during module generation
+    ├── _expression_gen.py # Expression generator — random Expression model objects
+    ├── _statement_gen.py # Statement generator — random Statement model objects
+    ├── _module_gen.py    # Module generation strategies + top-level ModuleGenerator
+    └── _runner.py        # Long-running loop: generate → simulate (all engines) → compare → log
 ```
 
 The top-level `veriforge_lsp/` package (language server: `server.py`, `workspace.py`,
