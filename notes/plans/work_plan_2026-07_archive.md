@@ -2453,7 +2453,7 @@ mypy, check_overview) and the affected test suites (`test_analysis/`,
 `test_import_layering.py`, `test_sim/test_scheduler.py`) green; item 4.2 is
 complete — all phases (A-G) landed.
 
-### 4.3 Testbench generator: thin skeletons + plan sidecar (M)
+### 4.3 Testbench generator: thin skeletons + plan sidecar (M) ✅
 
 **Goal**: functionality review §3.1–3.2.
 **Steps**:
@@ -2478,7 +2478,19 @@ complete — all phases (A-G) landed.
 plus the scaffold-specific tests — locate with
 `grep -rln "generate_python_testbench" tests/`); new round-trip and diff tests.
 
-### 4.4 LSP: typed payloads, then split (M/L)
+**Result** (August 2026): Done as specified. `TestbenchPlan.to_dict()`/
+`from_dict()` round-trip landed in `sim/bench/plan.py`; `skeleton.py`'s
+redundant-override thinning only bakes a binding's domain into generated
+`PlannerOverrides(iface_domains=...)` code when `confidence == "override"`,
+since the other confidences are reproducible from the DUT alone. The
+`--emit-plan`/`--force-plan` sidecar workflow writes `<output>_plan.json`
+once, then diffs-and-keeps on regeneration rather than silently
+overwriting a possibly hand-edited file. CLI flags wired through
+`__main__.py generate-python-testbench`; documented in
+`notes/cli_json_schema.md`, `notes/getting_started.md`, and
+`notes/public_api.md`.
+
+### 4.4 LSP: typed payloads, then split (M/L) ✅
 
 **Goal**: functionality review §4.1–4.2.
 **Steps**:
@@ -2503,7 +2515,25 @@ plus the scaffold-specific tests — locate with
 **Accept**: `uv run pytest tests/test_lsp/ -q` green throughout; mypy green on
 `payloads.py`; docs updated.
 
-### 4.5 Pull-up engine de-triplication (L)
+**Result** (August 2026): Done as specified, with the full 12 commands
+typed (including all 6 deprecated legacy shims, per explicit direction to
+cover the fuller scope). `veriforge_lsp/payloads.py` holds `ErrorPayload`,
+`SelectionRequest`, and one Request/Response dataclass pair per command.
+The mypy override for `veriforge_lsp.payloads` was narrowed out of the
+package-wide `ignore_errors = true` block. `extended.py` (1832 lines) was
+split into `handlers/hierarchy.py` (tree/graph/trace) and
+`handlers/refactor.py` (collapse/extract/pull-up/push-down/boundary-move),
+with `extended.py` left as the `register()`/dispatcher aggregator that
+re-exports what `tests/test_lsp/test_trace.py` and `server.py` still
+import from it. `notes/veriforge_lsp.md`'s existing "Custom Extensions"
+table already covered the wire format in detail, so step 5 became a
+pointer to `payloads.py` plus a small accuracy fix (the `hierarchyGraph`
+response doc was missing its optional `format` key) rather than a
+rewrite. `tests/test_lsp/` (82 tests) stayed green after every single
+command conversion; full `-n 8` regression suite unchanged outside
+`test_lsp/`.
+
+### 4.5 Pull-up engine de-triplication (L) ✅
 
 **Goal**: architecture review item 5. Only start after 4.2 is done (it
 removes one source of churn in the same files).
@@ -2530,6 +2560,38 @@ removes one source of churn in the same files).
    if it is still >150 lines.
 **Accept**: refactor + LSP suites green; file shrinks meaningfully (expect
 roughly 3300 → ~2000 lines); roadmap's "unified core API" item updated.
+
+**Result** (August 2026): Done as specified, with the design collapsing
+further than step 2's outline once the live source was read directly: a
+`_PullUpKindStrategy` `Protocol` (mirroring `sim/bench/lowering.py`'s
+`InterfaceLowering` precedent — the only prior use of this pattern in the
+codebase) plus three `@dataclass` implementations
+(`_AssignsPullUp`/`_ProceduralPullUp`/`_StructuralPullUp`), each holding
+its own selected nodes so every shared pipeline function calls the same
+method names with the same arguments regardless of kind. Migrated
+assigns → procedural → structural in that order (smallest/simplest
+first), running the 57-test pull-up fixture suite
+(`tests/test_refactor/test_hierarchy_graph.py tests/test_lsp/test_trace.py -k pull_up`)
+after each kind — green throughout, zero behavior change. The three
+kinds' 12 triplicated functions (Families A-D) were fully replaced by 4
+shared pipeline functions; `_preview_pull_up_child_range`'s three
+near-identical dispatch branches also collapsed into one (construct the
+matching strategy, then one shared tail), bringing it from ~243 to ~139
+lines without a separate decomposition pass. File went from 3323 to 3027
+lines — short of the ~2000 estimate (the 3 new strategy classes add back
+~330 lines of necessary per-kind code the original estimate didn't
+account for), but the actual goal — no duplicated validate → build-child →
+rewrite-parent → edit-plan logic — is met. One planning assumption
+turned out to be wrong and was corrected before implementation: initial
+investigation (via exploration agents) suggested Family D's procedural
+variant lacked Family C's net/variable declaration split for lifted
+signals; reading the live source directly showed both families implement
+the same split identically, so no behavioral asymmetry exists and no
+`known_issues.md` entry was needed. `roadmap.md`'s "Unified core API for
+push-down" item was updated to point at this pattern as a template for
+push-down's own extract/push-down engine split, and its "oversized
+functions" backlog entry for `_preview_pull_up_child_range` was removed
+since the function is no longer oversized.
 
 ---
 

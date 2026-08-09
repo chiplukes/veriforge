@@ -45,7 +45,12 @@ for new refactor work are documented in `notes/developer_guide.md`.
 1. **Unified core API for push-down** — range push-down routes through the
    extract engine; module/instance/subtree push-down routes through the push-down
    engine. Factor a common core for shared boundary validation, collision
-   detection, and review payload construction.
+   detection, and review payload construction. The design-wide **pull-up**
+   side of this same problem (`refactor/_pull_up_engine.py`'s
+   procedural/assigns/structural triplication) is now solved via a
+   `_PullUpKindStrategy` `Protocol` (one small dataclass per selection kind)
+   plus four shared pipeline functions — see that file for the pattern this
+   item could reuse for push-down's extract/push-down engine split.
 2. **Cross-tree moves (sibling parents)** — pull-up currently requires the
    target to be a strict ancestor. Moving logic to a sibling parent needs a
    copy-and-rewire strategy with cross-file awareness.
@@ -149,8 +154,6 @@ cross-engine conformance testing, CI sim coverage, cycle removal).
   - `sim/compiled/_stmt_emitters.py:_emit_concat_lhs` (~657 lines)
   - `sim/compiled/_process_compiler.py:_compile_concat_cont_assign` (~533 lines)
     — per-lane emission helper seam
-  - `refactor/_pull_up_engine.py:_preview_pull_up_child_range` (~243 lines)
-    — validation / plan-build / diff phases
 
 ## PULP / common_cells examples
 

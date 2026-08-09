@@ -5,7 +5,9 @@ from __future__ import annotations
 import copy
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from ..codegen import emit_module
 from ..model.assignments import ContinuousAssign
@@ -360,128 +362,23 @@ def _preview_pull_up_child_range(  # noqa: PLR0911
         "parentModules": sorted({parent.name for parent, _inst in sites}),
         "sitePaths": [f"{parent.name}/{inst.instance_name}" for parent, inst in sites],
     }
+    strategy: _PullUpKindStrategy
     if selected_instances:
-        selected_logic_ids = {id(assign) for assign in selected_assigns} | {id(inst) for inst in selected_instances}
-        boundary = _compute_mixed_structural_boundary(
-            design,
-            child_module,
-            selected_assigns,
-            selected_instances,
-            selected_declarations,
-        )
-        boundary = _augment_structural_boundary_for_complex_outputs(child_module, selected_logic_ids, boundary)
-        _store_boundary_in_metadata(metadata, boundary)
-        diagnostics = [
-            *_selection_diagnostics(child_module, selected_assigns),
-            *_instance_selection_diagnostics(
-                design,
-                child_module,
-                selected_instances,
-                selected_declarations,
-                selected_logic_ids=selected_logic_ids,
-                selection_label="selected child structural logic",
-            ),
-            *_mixed_structural_driver_diagnostics(design, selected_assigns, selected_instances),
-            *_selected_declaration_diagnostics(
-                child_module,
-                selected_declarations,
-                boundary,
-                selected_logic_ids=selected_logic_ids,
-                allow_local_functions=True,
-            ),
-            *_child_range_pull_up_diagnostics(child_module, [*selected_assigns, *selected_instances], boundary, sites),
-        ]
-        blocked = _maybe_blocked_on_errors(diagnostics, request, source, metadata)
-        if blocked is not None:
-            return blocked
-        rewrite = _build_design_wide_pull_up_from_child_structural(
-            design,
-            child_module,
-            selected_assigns,
-            selected_instances,
-            selected_declarations,
-            boundary,
-            sites=sites,
-        )
-        return _pull_up_child_range_preview_from_rewrite(
-            request,
-            source,
-            child_module,
-            rewrite,
-            metadata,
-        )
-    if selected_assigns:
-        boundary = _compute_boundary(child_module, selected_assigns, selected_declarations)
-        _store_boundary_in_metadata(metadata, boundary)
-        diagnostics = [
-            *_selection_diagnostics(child_module, selected_assigns),
-            *_selected_declaration_diagnostics(
-                child_module,
-                selected_declarations,
-                boundary,
-                selected_logic_ids={id(assign) for assign in selected_assigns},
-                allow_local_functions=True,
-            ),
-            *_child_range_pull_up_diagnostics(child_module, selected_assigns, boundary, sites),
-        ]
-        blocked = _maybe_blocked_on_errors(diagnostics, request, source, metadata)
-        if blocked is not None:
-            return blocked
-        rewrite = _build_design_wide_pull_up_from_child_assigns(
-            design,
-            child_module,
-            selected_assigns,
-            selected_declarations,
-            boundary,
-            sites=sites,
-        )
-        return _pull_up_child_range_preview_from_rewrite(
-            request,
-            source,
-            child_module,
-            rewrite,
-            metadata,
-        )
+        strategy = _StructuralPullUp(selected_assigns=selected_assigns, selected_instances=selected_instances)
+    elif selected_assigns:
+        strategy = _AssignsPullUp(selected_assigns=selected_assigns)
+    else:
+        block_kind = "always" if selected_always else "initial"
+        strategy = _ProceduralPullUp(selected_blocks=selected_blocks, block_kind=block_kind)
 
-    block_kind = "always" if selected_always else "initial"
-    boundary = _compute_procedural_boundary(child_module, selected_blocks, selected_declarations)
+    boundary = strategy.compute_boundary(design, child_module, selected_declarations)
     _store_boundary_in_metadata(metadata, boundary)
-    diagnostics = [
-        *_procedural_selection_diagnostics(
-            child_module,
-            selected_blocks,
-            block_label=f"{block_kind}-block",
-            allow_local_functions=True,
-        ),
-        *_selected_declaration_diagnostics(
-            child_module,
-            selected_declarations,
-            boundary,
-            selected_logic_ids={id(block) for block in selected_blocks},
-            allow_local_functions=True,
-        ),
-        *_child_range_pull_up_diagnostics(child_module, selected_blocks, boundary, sites),
-    ]
+    diagnostics = strategy.diagnostics(design, child_module, boundary, sites, selected_declarations)
     blocked = _maybe_blocked_on_errors(diagnostics, request, source, metadata)
     if blocked is not None:
         return blocked
-
-    rewrite = _build_design_wide_pull_up_from_child_procedural(
-        design,
-        child_module,
-        selected_blocks,
-        selected_declarations,
-        boundary,
-        block_kind=block_kind,
-        sites=sites,
-    )
-    return _pull_up_child_range_preview_from_rewrite(
-        request,
-        source,
-        child_module,
-        rewrite,
-        metadata,
-    )
+    rewrite = _build_design_wide_pull_up(child_module, strategy, selected_declarations, boundary, sites=sites)
+    return _pull_up_child_range_preview_from_rewrite(request, source, child_module, rewrite, metadata)
 
 
 def _pull_up_child_range_preview_from_rewrite(
@@ -690,649 +587,626 @@ def _collect_generate_module_instance_sites(design: Design, module_name: str) ->
     return sites
 
 
-def _build_design_wide_pull_up_from_child_procedural(  # noqa: PLR0913
-    design: Design,
-    child_module: Module,
-    selected_blocks: list,
-    selected_declarations,
-    boundary,
-    *,
-    block_kind: str,
-    sites: list[tuple[Module, Instance]],
-) -> tuple[TextEditPlan, ...] | RefactorDiagnostic:
-    transformed_child = _build_child_module_for_pulled_up_procedural(
-        child_module,
-        selected_blocks,
-        selected_declarations,
-        boundary,
-        block_kind=block_kind,
-    )
-    child_edits = _design_wide_child_module_edits(
-        child_module,
-        transformed_child,
-        selected_declarations,
-        selected_blocks,
-    )
-    if isinstance(child_edits, RefactorDiagnostic):
-        return child_edits
-    if child_edits is None:
-        child_edit = _module_replacement_edit(child_module, transformed_child)
-        if isinstance(child_edit, RefactorDiagnostic):
-            return child_edit
-        child_edits = (child_edit,)
-
-    grouped_sites: dict[str, tuple[Module, list[Instance]]] = {}
-    for parent, inst in sites:
-        grouped = grouped_sites.setdefault(parent.name, (parent, []))
-        grouped[1].append(inst)
-
-    edits: list[TextEditPlan] = [*child_edits]
-    for parent_name in sorted(grouped_sites):
-        parent_module, parent_instances = grouped_sites[parent_name]
-        transformed_parent = _build_parent_module_for_pulled_up_child_logic(
-            parent_module,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_blocks,
-            selected_declarations,
-            boundary,
-            block_kind=block_kind,
-        )
-        if isinstance(transformed_parent, RefactorDiagnostic):
-            return transformed_parent
-        parent_edits = _design_wide_parent_procedural_edits(
-            parent_module,
-            transformed_parent,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_blocks,
-            selected_declarations,
-            boundary,
-            block_kind=block_kind,
-        )
-        if isinstance(parent_edits, RefactorDiagnostic):
-            return parent_edits
-        if parent_edits is None:
-            parent_edit = _module_replacement_edit(parent_module, transformed_parent)
-            if isinstance(parent_edit, RefactorDiagnostic):
-                return parent_edit
-            parent_edits = (parent_edit,)
-        edits.extend(parent_edits)
-    return tuple(edits)
+# ---------------------------------------------------------------------------
+# Design-wide pull-up: shared pipeline + per-selection-kind strategy
+# ---------------------------------------------------------------------------
+#
+# `_preview_pull_up_child_range` classifies a selection into one of three
+# kinds (structural / assigns / procedural) and, for each, walks the same
+# four stages: build the rewritten child module, group parent instance
+# sites, build a rewritten parent module per site, then try a surgical
+# per-instance text edit (falling back to whole-module replacement). The
+# stages themselves are shared; only a handful of steps within them vary
+# per kind. `_PullUpKindStrategy` isolates exactly those steps; the four
+# `_build_*`/`_design_wide_parent_edits` functions below are the shared
+# pipeline, called once per kind with the matching strategy instance.
 
 
-def _build_design_wide_pull_up_from_child_assigns(  # noqa: PLR0913
-    design: Design,
-    child_module: Module,
-    selected_assigns: list,
-    selected_declarations,
-    boundary,
-    *,
-    sites: list[tuple[Module, Instance]],
-) -> tuple[TextEditPlan, ...] | RefactorDiagnostic:
-    transformed_child = _build_child_module_for_pulled_up_assigns(
-        child_module,
-        selected_assigns,
-        selected_declarations,
-        boundary,
-    )
-    child_edits = _design_wide_child_module_edits(
-        child_module,
-        transformed_child,
-        selected_declarations,
-        selected_assigns,
-    )
-    if isinstance(child_edits, RefactorDiagnostic):
-        return child_edits
-    if child_edits is None:
-        child_edit = _module_replacement_edit(child_module, transformed_child)
-        if isinstance(child_edit, RefactorDiagnostic):
-            return child_edit
-        child_edits = (child_edit,)
+@dataclass(frozen=True)
+class _LiftedNames:
+    """Boundary signal names lifted into a parent instance site, bucketed
+    identically for every pull-up kind (only how they get *declared* varies
+    by kind and by rewrite style -- see `declare_in_module`/`declare_as_nodes`)."""
 
-    grouped_sites: dict[str, tuple[Module, list[Instance]]] = {}
-    for parent, inst in sites:
-        grouped = grouped_sites.setdefault(parent.name, (parent, []))
-        grouped[1].append(inst)
+    readback: tuple[str, ...]
+    child_input: tuple[str, ...]
+    internal: tuple[str, ...]
 
-    edits: list[TextEditPlan] = [*child_edits]
-    for parent_name in sorted(grouped_sites):
-        parent_module, parent_instances = grouped_sites[parent_name]
-        transformed_parent = _build_parent_module_for_pulled_up_child_assigns(
-            parent_module,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_assigns,
-            selected_declarations,
-            boundary,
-        )
-        if isinstance(transformed_parent, RefactorDiagnostic):
-            return transformed_parent
-        parent_edits = _design_wide_parent_assign_edits(
-            parent_module,
-            transformed_parent,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_assigns,
-            selected_declarations,
-            boundary,
-        )
-        if isinstance(parent_edits, RefactorDiagnostic):
-            return parent_edits
-        if parent_edits is None:
-            parent_edit = _module_replacement_edit(parent_module, transformed_parent)
-            if isinstance(parent_edit, RefactorDiagnostic):
-                return parent_edit
-            parent_edits = (parent_edit,)
-        edits.extend(parent_edits)
-    return tuple(edits)
+    @property
+    def all(self) -> tuple[str, ...]:
+        return (*self.readback, *self.child_input, *self.internal)
 
 
-def _build_design_wide_pull_up_from_child_structural(  # noqa: PLR0913
-    design: Design,
-    child_module: Module,
-    selected_assigns: list,
-    selected_instances: list[Instance],
-    selected_declarations,
-    boundary,
-    *,
-    sites: list[tuple[Module, Instance]],
-) -> tuple[TextEditPlan, ...] | RefactorDiagnostic:
-    transformed_child = _build_child_module_for_pulled_up_structural(
-        child_module,
-        selected_assigns,
-        selected_instances,
-        selected_declarations,
-        boundary,
-    )
-    child_edits = _design_wide_child_module_edits(
-        child_module,
-        transformed_child,
-        selected_declarations,
-        selected_assigns,
-        selected_instances,
-    )
-    if isinstance(child_edits, RefactorDiagnostic):
-        return child_edits
-    if child_edits is None:
-        child_edit = _module_replacement_edit(child_module, transformed_child)
-        if isinstance(child_edit, RefactorDiagnostic):
-            return child_edit
-        child_edits = (child_edit,)
+def _lifted_names_for_boundary(child_module: Module, boundary: _Boundary) -> tuple[_LiftedNames, list[str]]:
+    """Shared preamble of Family C/D: bucket boundary names by whether they
+    already exist as child ports, and separately report boundary outputs
+    that are already child ports (needed for output-port promotion)."""
 
-    grouped_sites: dict[str, tuple[Module, list[Instance]]] = {}
-    for parent, inst in sites:
-        grouped = grouped_sites.setdefault(parent.name, (parent, []))
-        grouped[1].append(inst)
-
-    edits: list[TextEditPlan] = [*child_edits]
-    for parent_name in sorted(grouped_sites):
-        parent_module, parent_instances = grouped_sites[parent_name]
-        transformed_parent = _build_parent_module_for_pulled_up_child_structural(
-            parent_module,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_assigns,
-            selected_instances,
-            selected_declarations,
-            boundary,
-        )
-        if isinstance(transformed_parent, RefactorDiagnostic):
-            return transformed_parent
-        parent_edits = _design_wide_parent_structural_edits(
-            parent_module,
-            transformed_parent,
-            child_module,
-            transformed_child,
-            parent_instances,
-            selected_assigns,
-            selected_instances,
-            selected_declarations,
-            boundary,
-        )
-        if isinstance(parent_edits, RefactorDiagnostic):
-            return parent_edits
-        if parent_edits is None:
-            parent_edit = _module_replacement_edit(parent_module, transformed_parent)
-            if isinstance(parent_edit, RefactorDiagnostic):
-                return parent_edit
-            parent_edits = (parent_edit,)
-        edits.extend(parent_edits)
-    return tuple(edits)
-
-
-def _build_child_module_for_pulled_up_procedural(
-    child_module: Module,
-    selected_blocks: list,
-    selected_declarations,
-    boundary,
-    *,
-    block_kind: str,
-) -> Module:
-    selected_ids = {id(block) for block in selected_blocks}
-    selected_generate_ids = _selected_generate_item_ids(selected_declarations, selected_blocks)
-    transformed = copy.deepcopy(child_module)
-    _remove_selected_child_localparams(transformed, selected_declarations)
-    transformed.generate_blocks = _copied_remaining_generate_constructs(
-        child_module.generate_blocks, selected_generate_ids
-    )
-    if block_kind == "always":
-        transformed.always_blocks = [
-            copy.deepcopy(block) for block in child_module.always_blocks if id(block) not in selected_ids
-        ]
-    else:
-        transformed.initial_blocks = [
-            copy.deepcopy(block) for block in child_module.initial_blocks if id(block) not in selected_ids
-        ]
-
-    existing_port_names = {port.name for port in child_module.ports}
-    existing_output_port_names = [name for name in boundary.outputs if name in existing_port_names]
-    new_output_ports = [name for name in boundary.inputs if name not in existing_port_names]
-    new_input_ports = [name for name in boundary.outputs if name not in existing_port_names]
-    port_promoted_names = set(new_output_ports) | set(new_input_ports) | set(existing_output_port_names)
-    removable_signal_names = set(boundary.internals) | port_promoted_names
-    transformed.nets = [net for net in transformed.nets if net.name not in removable_signal_names]
-    transformed.variables = [
-        variable for variable in transformed.variables if variable.name not in removable_signal_names
-    ]
-
-    for port in transformed.ports:
-        if port.name in boundary.outputs:
-            port.direction = PortDirection.INPUT
-            port.data_type = None
-            port.default_value = None
-    for name in new_output_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.OUTPUT))
-    for name in new_input_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.INPUT))
-    return transformed
-
-
-def _build_child_module_for_pulled_up_assigns(
-    child_module: Module,
-    selected_assigns: list,
-    selected_declarations,
-    boundary,
-) -> Module:
-    selected_ids = {id(assign) for assign in selected_assigns}
-    selected_generate_ids = _selected_generate_item_ids(selected_declarations, selected_assigns)
-    transformed = copy.deepcopy(child_module)
-    _remove_selected_child_localparams(transformed, selected_declarations)
-    transformed.generate_blocks = _copied_remaining_generate_constructs(
-        child_module.generate_blocks, selected_generate_ids
-    )
-    transformed.continuous_assigns = [
-        copy.deepcopy(assign) for assign in child_module.continuous_assigns if id(assign) not in selected_ids
-    ]
-
-    existing_port_names = {port.name for port in child_module.ports}
-    existing_output_port_names = [name for name in boundary.outputs if name in existing_port_names]
-    new_output_ports = [name for name in boundary.inputs if name not in existing_port_names]
-    new_input_ports = [name for name in boundary.outputs if name not in existing_port_names]
-    port_promoted_names = set(new_output_ports) | set(new_input_ports) | set(existing_output_port_names)
-    removable_signal_names = set(boundary.internals) | port_promoted_names
-    transformed.nets = [net for net in transformed.nets if net.name not in removable_signal_names]
-    transformed.variables = [
-        variable for variable in transformed.variables if variable.name not in removable_signal_names
-    ]
-
-    for port in transformed.ports:
-        if port.name in boundary.outputs:
-            port.direction = PortDirection.INPUT
-            port.data_type = None
-            port.default_value = None
-    for name in new_output_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.OUTPUT))
-    for name in new_input_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.INPUT))
-    return transformed
-
-
-def _build_child_module_for_pulled_up_structural(
-    child_module: Module,
-    selected_assigns: list,
-    selected_instances: list[Instance],
-    selected_declarations,
-    boundary,
-) -> Module:
-    selected_assign_ids = {id(assign) for assign in selected_assigns}
-    selected_instance_ids = {id(inst) for inst in selected_instances}
-    selected_generate_ids = _selected_generate_item_ids(selected_declarations, selected_assigns, selected_instances)
-    transformed = copy.deepcopy(child_module)
-    _remove_selected_child_localparams(transformed, selected_declarations)
-    transformed.generate_blocks = _copied_remaining_generate_constructs(
-        child_module.generate_blocks, selected_generate_ids
-    )
-    transformed.continuous_assigns = [
-        copy.deepcopy(assign) for assign in child_module.continuous_assigns if id(assign) not in selected_assign_ids
-    ]
-    transformed.instances = [
-        copy.deepcopy(inst) for inst in child_module.instances if id(inst) not in selected_instance_ids
-    ]
-
-    existing_port_names = {port.name for port in child_module.ports}
-    existing_output_port_names = [name for name in boundary.outputs if name in existing_port_names]
-    new_output_ports = [name for name in boundary.inputs if name not in existing_port_names]
-    new_input_ports = [name for name in boundary.outputs if name not in existing_port_names]
-    port_promoted_names = set(new_output_ports) | set(new_input_ports) | set(existing_output_port_names)
-    removable_signal_names = set(boundary.internals) | port_promoted_names
-    transformed.nets = [net for net in transformed.nets if net.name not in removable_signal_names]
-    transformed.variables = [
-        variable for variable in transformed.variables if variable.name not in removable_signal_names
-    ]
-
-    for port in transformed.ports:
-        if port.name in boundary.outputs:
-            port.direction = PortDirection.INPUT
-            port.data_type = None
-            port.default_value = None
-    for name in new_output_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.OUTPUT))
-    for name in new_input_ports:
-        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.INPUT))
-    return transformed
-
-
-def _build_parent_module_for_pulled_up_child_logic(  # noqa: PLR0911, PLR0913
-    parent_module: Module,
-    child_module: Module,
-    transformed_child: Module,
-    parent_instances: list[Instance],
-    selected_blocks: list,
-    selected_declarations,
-    boundary,
-    *,
-    block_kind: str,
-) -> Module | RefactorDiagnostic:
-    transformed_parent = copy.deepcopy(parent_module)
-    existing_names = _module_declared_names(transformed_parent)
     child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
+    readback_names = tuple(name for name in boundary.inputs if name not in child_port_names)
+    child_input_names = tuple(name for name in boundary.outputs if name not in child_port_names)
     existing_child_output_names = [name for name in boundary.outputs if name in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
+    lifted_internal_names = tuple(boundary.internals)
+    return _LiftedNames(readback_names, child_input_names, lifted_internal_names), existing_child_output_names
 
-    for parent_instance in parent_instances:
-        site = _find_transformed_instance_site(transformed_parent, parent_module, parent_instance)
-        if isinstance(site, RefactorDiagnostic):
-            return site
-        transformed_instance, transformed_site_block, transformed_site_index = site
-        raw_param_map = _parameter_expression_map(child_module, parent_instance)
-        if isinstance(raw_param_map, RefactorDiagnostic):
-            return raw_param_map
-        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
-        if isinstance(raw_port_map, RefactorDiagnostic):
-            return raw_port_map
-        constant_env = _child_constant_expression_map(child_module, raw_param_map)
-        if isinstance(constant_env, RefactorDiagnostic):
-            return constant_env
 
-        rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
+class _PullUpKindStrategy(Protocol):
+    """One implementation per pull-up selection kind (procedural / assigns /
+    structural). Holds its own selected top-level nodes; every method below
+    takes only genuinely kind-independent state (modules, boundary, expr
+    maps), so the shared pipeline functions call the same methods with the
+    same arguments regardless of which kind is active."""
+
+    def compute_boundary(self, design: Design, child_module: Module, selected_declarations) -> _Boundary:
+        """Compute the extraction boundary for this kind's selection."""
+        ...
+
+    def diagnostics(
+        self,
+        design: Design,
+        child_module: Module,
+        boundary: _Boundary,
+        sites: list[tuple[Module, Instance]],
+        selected_declarations,
+    ) -> list[RefactorDiagnostic]:
+        """Kind-specific selection/boundary diagnostics, in addition to the
+        shared `_child_range_pull_up_diagnostics` every kind also runs."""
+        ...
+
+    def selected_groups(self) -> tuple[list, ...]:
+        """The kind's selected node lists, kept separate (1 list for
+        procedural/assigns, 2 for structural) -- matches the `*selected_groups`
+        varargs shape of `_selected_generate_item_ids`/`_design_wide_child_module_edits`."""
+        ...
+
+    def own_selected_nodes(self) -> list:
+        """The kind's selected node lists, merged into one -- used to build
+        the reference set passed to `_copy_referenced_child_functions`."""
+        ...
+
+    def is_fully_top_level(self, child_module: Module) -> bool:
+        """False if any selected node is nested (e.g. inside a generate
+        block) -- signals the surgical per-instance edit path (Family D)
+        must bail out to a whole-module-replacement fallback."""
+        ...
+
+    def remove_from_child(self, transformed: Module, child_module: Module) -> None:
+        """Mutate the deep-copied child module in place: reassign the
+        container(s) holding the selected nodes, filtered out and
+        freshly deep-copied from the original `child_module`."""
+        ...
+
+    def instance_name_map(self, parent_instance: Instance, existing_names: set[str]) -> dict[str, str]:
+        """Rename map for copied top-level instances (structural only;
+        empty for the other two kinds)."""
+        ...
+
+    def promote_outputs(
+        self,
+        transformed_parent: Module,
+        child_module: Module,
+        existing_child_output_names: list[str],
+        raw_port_map: dict[str, Expression],
+        expr_map: dict[str, Expression],
+    ) -> RefactorDiagnostic | None:
+        """Family C only: promote or convert child-driven output
+        connections in the parent. Procedural can fail with a diagnostic;
+        assigns/structural cannot (they call the existing
+        `_convert_child_driven_outputs_to_parent_nets` helper instead)."""
+        ...
+
+    def declare_in_module(
+        self,
+        transformed_parent: Module,
+        child_module: Module,
+        names: _LiftedNames,
+        rename_map: dict[str, str],
+        expr_map: dict[str, Expression],
+    ) -> None:
+        """Family C only: append net/variable declarations directly onto
+        `transformed_parent` for the lifted signal names."""
+        ...
+
+    def declare_as_nodes(
+        self,
+        child_module: Module,
+        names: _LiftedNames,
+        rename_map: dict[str, str],
+        expr_map: dict[str, Expression],
+    ) -> list:
+        """Family D only: the same declarations as `declare_in_module`, but
+        returned as a node list for text emission instead of mutating a
+        module (Family D never touches `transformed_parent` per-instance)."""
+        ...
+
+    def copied_nodes(
+        self,
+        child_module: Module,
+        expr_map: dict[str, Expression],
+        instance_name_map: dict[str, str],
+        function_name_map: dict[str, str],
+    ) -> list:
+        """The selected nodes, deep-copied, expression-rewritten, and
+        function-call-renamed -- ready to insert at a parent site. Shared
+        by Family C and Family D."""
+        ...
+
+    def insert_into_module(
+        self,
+        transformed_parent: Module,
+        site_block: object | None,
+        site_index: int | None,
+        insertion_nodes: list,
+        copied_nodes: list,
+        copied_generate_constructs: list,
+    ) -> None:
+        """Family C only: insert `insertion_nodes` (copied nodes + copied
+        generate constructs, already source-ordered) at the found site, or
+        -- if no site block was found -- append `copied_nodes` and
+        `copied_generate_constructs` to the right module-level containers."""
+        ...
+
+
+@dataclass
+class _AssignsPullUp:
+    """Pull-up strategy for continuous-assign selections."""
+
+    selected_assigns: list
+
+    def compute_boundary(self, design: Design, child_module: Module, selected_declarations) -> _Boundary:
+        return _compute_boundary(child_module, self.selected_assigns, selected_declarations)
+
+    def diagnostics(self, design, child_module, boundary, sites, selected_declarations) -> list[RefactorDiagnostic]:
+        return [
+            *_selection_diagnostics(child_module, self.selected_assigns),
+            *_selected_declaration_diagnostics(
+                child_module,
+                selected_declarations,
+                boundary,
+                selected_logic_ids={id(assign) for assign in self.selected_assigns},
+                allow_local_functions=True,
+            ),
+            *_child_range_pull_up_diagnostics(child_module, self.selected_assigns, boundary, sites),
+        ]
+
+    def selected_groups(self) -> tuple[list, ...]:
+        return (self.selected_assigns,)
+
+    def own_selected_nodes(self) -> list:
+        return list(self.selected_assigns)
+
+    def is_fully_top_level(self, child_module: Module) -> bool:
+        top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
+        return all(id(assign) in top_level_assign_ids for assign in self.selected_assigns)
+
+    def remove_from_child(self, transformed: Module, child_module: Module) -> None:
+        selected_ids = {id(assign) for assign in self.selected_assigns}
+        transformed.continuous_assigns = [
+            copy.deepcopy(assign) for assign in child_module.continuous_assigns if id(assign) not in selected_ids
+        ]
+
+    def instance_name_map(self, parent_instance: Instance, existing_names: set[str]) -> dict[str, str]:
+        return {}
+
+    def promote_outputs(
+        self, transformed_parent, child_module, existing_child_output_names, raw_port_map, expr_map
+    ) -> RefactorDiagnostic | None:
+        connected_output_names = {
+            signal_name
+            for signal_name in (_simple_identifier_name(raw_port_map.get(name)) for name in existing_child_output_names)
+            if signal_name is not None
         }
-        expr_map: dict[str, Expression] = {
-            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
-            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
-            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
-        }
+        _convert_child_driven_outputs_to_parent_nets(transformed_parent, connected_output_names)
+        return None
 
-        promotion = _promote_selected_child_output_ports(
+    def declare_in_module(self, transformed_parent, child_module, names, rename_map, expr_map) -> None:
+        for name in names.all:
+            decl = _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
+            transformed_parent.nets.append(decl)
+
+    def declare_as_nodes(self, child_module, names, rename_map, expr_map) -> list:
+        return [_parent_net_for_child_output(child_module, name, rename_map[name], expr_map) for name in names.all]
+
+    def copied_nodes(self, child_module, expr_map, instance_name_map, function_name_map) -> list:
+        top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
+        copied_assigns = _copied_nodes(
+            [assign for assign in self.selected_assigns if id(assign) in top_level_assign_ids], expr_map
+        )
+        _rewrite_function_call_names(copied_assigns, function_name_map)
+        return copied_assigns
+
+    def insert_into_module(
+        self, transformed_parent, site_block, site_index, insertion_nodes, copied_nodes, copied_generate_constructs
+    ) -> None:
+        if site_block is not None and site_index is not None:
+            site_block.items[site_index:site_index] = insertion_nodes
+        else:
+            transformed_parent.continuous_assigns.extend(copied_nodes)
+            transformed_parent.generate_blocks.extend(copied_generate_constructs)
+
+
+@dataclass
+class _ProceduralPullUp:
+    """Pull-up strategy for procedural (always/initial block) selections."""
+
+    selected_blocks: list
+    block_kind: str  # "always" or "initial"
+
+    def compute_boundary(self, design: Design, child_module: Module, selected_declarations) -> _Boundary:
+        return _compute_procedural_boundary(child_module, self.selected_blocks, selected_declarations)
+
+    def diagnostics(self, design, child_module, boundary, sites, selected_declarations) -> list[RefactorDiagnostic]:
+        return [
+            *_procedural_selection_diagnostics(
+                child_module,
+                self.selected_blocks,
+                block_label=f"{self.block_kind}-block",
+                allow_local_functions=True,
+            ),
+            *_selected_declaration_diagnostics(
+                child_module,
+                selected_declarations,
+                boundary,
+                selected_logic_ids={id(block) for block in self.selected_blocks},
+                allow_local_functions=True,
+            ),
+            *_child_range_pull_up_diagnostics(child_module, self.selected_blocks, boundary, sites),
+        ]
+
+    def selected_groups(self) -> tuple[list, ...]:
+        return (self.selected_blocks,)
+
+    def own_selected_nodes(self) -> list:
+        return list(self.selected_blocks)
+
+    def is_fully_top_level(self, child_module: Module) -> bool:
+        top_level_ids = {id(block) for block in getattr(child_module, f"{self.block_kind}_blocks")}
+        return all(id(block) in top_level_ids for block in self.selected_blocks)
+
+    def remove_from_child(self, transformed: Module, child_module: Module) -> None:
+        selected_ids = {id(block) for block in self.selected_blocks}
+        if self.block_kind == "always":
+            transformed.always_blocks = [
+                copy.deepcopy(block) for block in child_module.always_blocks if id(block) not in selected_ids
+            ]
+        else:
+            transformed.initial_blocks = [
+                copy.deepcopy(block) for block in child_module.initial_blocks if id(block) not in selected_ids
+            ]
+
+    def instance_name_map(self, parent_instance: Instance, existing_names: set[str]) -> dict[str, str]:
+        return {}
+
+    def promote_outputs(
+        self, transformed_parent, child_module, existing_child_output_names, raw_port_map, expr_map
+    ) -> RefactorDiagnostic | None:
+        return _promote_selected_child_output_ports(
             transformed_parent,
             child_module,
             existing_child_output_names,
             raw_port_map,
             expr_map,
         )
-        if promotion is not None:
-            return promotion
 
-        for name in readback_names:
+    def declare_in_module(self, transformed_parent, child_module, names, rename_map, expr_map) -> None:
+        for name in names.readback:
             decl = _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
             transformed_parent.nets.append(decl)
-        for name in [*child_input_names, *lifted_internal_names]:
+        for name in (*names.child_input, *names.internal):
             decl = _parent_variable_for_lifted_signal(child_module, name, rename_map[name], expr_map)
             transformed_parent.variables.append(decl)
 
-        copied_functions, function_name_map = _copy_referenced_child_functions(
-            child_module,
-            [*selected_declarations.parameters, *selected_blocks, *constant_env.values()],
-            existing_names,
-            name_prefix=parent_instance.instance_name,
-            expr_map=expr_map,
-        )
-        if isinstance(copied_functions, RefactorDiagnostic):
-            return copied_functions
-        transformed_parent.functions.extend(copied_functions)
+    def declare_as_nodes(self, child_module, names, rename_map, expr_map) -> list:
+        return [
+            *(_parent_net_for_child_output(child_module, name, rename_map[name], expr_map) for name in names.readback),
+            *(
+                _parent_variable_for_lifted_signal(child_module, name, rename_map[name], expr_map)
+                for name in (*names.child_input, *names.internal)
+            ),
+        ]
 
-        top_level_selected_ids = {id(block) for block in getattr(child_module, f"{block_kind}_blocks")}
+    def copied_nodes(self, child_module, expr_map, instance_name_map, function_name_map) -> list:
+        top_level_selected_ids = {id(block) for block in getattr(child_module, f"{self.block_kind}_blocks")}
         copied_blocks = _copied_nodes(
-            [block for block in selected_blocks if id(block) in top_level_selected_ids], expr_map
-        )
-        copied_generate_constructs = _copied_selected_generate_constructs(
-            child_module.generate_blocks,
-            _selected_generate_item_ids(selected_declarations, selected_blocks),
-            expr_map,
-            function_name_map=function_name_map,
+            [block for block in self.selected_blocks if id(block) in top_level_selected_ids], expr_map
         )
         _rewrite_function_call_names(copied_blocks, function_name_map)
-        insertion_nodes = _nodes_by_source_order([*copied_generate_constructs, *copied_blocks])
-        if transformed_site_block is not None and transformed_site_index is not None:
-            transformed_site_block.items[transformed_site_index:transformed_site_index] = insertion_nodes
-        elif block_kind == "always":
-            transformed_parent.always_blocks.extend(copied_blocks)
+        return copied_blocks
+
+    def insert_into_module(
+        self, transformed_parent, site_block, site_index, insertion_nodes, copied_nodes, copied_generate_constructs
+    ) -> None:
+        if site_block is not None and site_index is not None:
+            site_block.items[site_index:site_index] = insertion_nodes
+        elif self.block_kind == "always":
+            transformed_parent.always_blocks.extend(copied_nodes)
             transformed_parent.generate_blocks.extend(copied_generate_constructs)
         else:
-            transformed_parent.initial_blocks.extend(copied_blocks)
+            transformed_parent.initial_blocks.extend(copied_nodes)
             transformed_parent.generate_blocks.extend(copied_generate_constructs)
 
-        transformed_instance.port_connections = _named_child_site_connections(
-            transformed_child,
-            raw_port_map,
-            rename_map,
+
+@dataclass
+class _StructuralPullUp:
+    """Pull-up strategy for structural (continuous-assign + instance)
+    selections -- the only kind that can select two node groups at once."""
+
+    selected_assigns: list
+    selected_instances: list[Instance]
+
+    def _selected_logic_ids(self) -> set[int]:
+        return {id(assign) for assign in self.selected_assigns} | {id(inst) for inst in self.selected_instances}
+
+    def compute_boundary(self, design: Design, child_module: Module, selected_declarations) -> _Boundary:
+        boundary = _compute_mixed_structural_boundary(
+            design, child_module, self.selected_assigns, self.selected_instances, selected_declarations
         )
-        transformed_instance.has_parameter_override = bool(parent_instance.parameter_bindings)
-        transformed_instance.parameter_bindings = copy.deepcopy(parent_instance.parameter_bindings)
+        return _augment_structural_boundary_for_complex_outputs(child_module, self._selected_logic_ids(), boundary)
 
-    return transformed_parent
+    def diagnostics(self, design, child_module, boundary, sites, selected_declarations) -> list[RefactorDiagnostic]:
+        selected_logic_ids = self._selected_logic_ids()
+        return [
+            *_selection_diagnostics(child_module, self.selected_assigns),
+            *_instance_selection_diagnostics(
+                design,
+                child_module,
+                self.selected_instances,
+                selected_declarations,
+                selected_logic_ids=selected_logic_ids,
+                selection_label="selected child structural logic",
+            ),
+            *_mixed_structural_driver_diagnostics(design, self.selected_assigns, self.selected_instances),
+            *_selected_declaration_diagnostics(
+                child_module,
+                selected_declarations,
+                boundary,
+                selected_logic_ids=selected_logic_ids,
+                allow_local_functions=True,
+            ),
+            *_child_range_pull_up_diagnostics(
+                child_module, [*self.selected_assigns, *self.selected_instances], boundary, sites
+            ),
+        ]
 
+    def selected_groups(self) -> tuple[list, ...]:
+        return (self.selected_assigns, self.selected_instances)
 
-def _build_parent_module_for_pulled_up_child_assigns(  # noqa: PLR0913
-    parent_module: Module,
-    child_module: Module,
-    transformed_child: Module,
-    parent_instances: list[Instance],
-    selected_assigns: list,
-    selected_declarations,
-    boundary,
-) -> Module | RefactorDiagnostic:
-    transformed_parent = copy.deepcopy(parent_module)
-    existing_names = _module_declared_names(transformed_parent)
-    child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
-    existing_child_output_names = [name for name in boundary.outputs if name in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
+    def own_selected_nodes(self) -> list:
+        return [*self.selected_assigns, *self.selected_instances]
 
-    for parent_instance in parent_instances:
-        site = _find_transformed_instance_site(transformed_parent, parent_module, parent_instance)
-        if isinstance(site, RefactorDiagnostic):
-            return site
-        transformed_instance, transformed_site_block, transformed_site_index = site
-        raw_param_map = _parameter_expression_map(child_module, parent_instance)
-        if isinstance(raw_param_map, RefactorDiagnostic):
-            return raw_param_map
-        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
-        if isinstance(raw_port_map, RefactorDiagnostic):
-            return raw_port_map
-        constant_env = _child_constant_expression_map(child_module, raw_param_map)
-        if isinstance(constant_env, RefactorDiagnostic):
-            return constant_env
-
-        rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
-        }
-        expr_map: dict[str, Expression] = {
-            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
-            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
-            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
-        }
-
-        connected_output_names = {
-            signal_name
-            for signal_name in (_simple_identifier_name(raw_port_map.get(name)) for name in existing_child_output_names)
-            if signal_name is not None
-        }
-        _convert_child_driven_outputs_to_parent_nets(transformed_parent, connected_output_names)
-
-        for name in [*readback_names, *child_input_names, *lifted_internal_names]:
-            decl = _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
-            transformed_parent.nets.append(decl)
-
-        copied_functions, function_name_map = _copy_referenced_child_functions(
-            child_module,
-            [*selected_declarations.parameters, *selected_assigns, *constant_env.values()],
-            existing_names,
-            name_prefix=parent_instance.instance_name,
-            expr_map=expr_map,
-        )
-        if isinstance(copied_functions, RefactorDiagnostic):
-            return copied_functions
-        transformed_parent.functions.extend(copied_functions)
-
+    def is_fully_top_level(self, child_module: Module) -> bool:
         top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
-        copied_assigns = _copied_nodes(
-            [assign for assign in selected_assigns if id(assign) in top_level_assign_ids], expr_map
+        top_level_instance_ids = {id(inst) for inst in child_module.instances}
+        return all(id(assign) in top_level_assign_ids for assign in self.selected_assigns) and all(
+            id(inst) in top_level_instance_ids for inst in self.selected_instances
         )
-        copied_generate_constructs = _copied_selected_generate_constructs(
-            child_module.generate_blocks,
-            _selected_generate_item_ids(selected_declarations, selected_assigns),
-            expr_map,
-            function_name_map=function_name_map,
-        )
-        _rewrite_function_call_names(copied_assigns, function_name_map)
-        insertion_nodes = _nodes_by_source_order([*copied_generate_constructs, *copied_assigns])
-        if transformed_site_block is not None and transformed_site_index is not None:
-            transformed_site_block.items[transformed_site_index:transformed_site_index] = insertion_nodes
-        else:
-            transformed_parent.continuous_assigns.extend(copied_assigns)
-            transformed_parent.generate_blocks.extend(copied_generate_constructs)
 
-        transformed_instance.port_connections = _named_child_site_connections(
-            transformed_child,
-            raw_port_map,
-            rename_map,
-        )
-        transformed_instance.has_parameter_override = bool(parent_instance.parameter_bindings)
-        transformed_instance.parameter_bindings = copy.deepcopy(parent_instance.parameter_bindings)
+    def remove_from_child(self, transformed: Module, child_module: Module) -> None:
+        selected_assign_ids = {id(assign) for assign in self.selected_assigns}
+        selected_instance_ids = {id(inst) for inst in self.selected_instances}
+        transformed.continuous_assigns = [
+            copy.deepcopy(assign) for assign in child_module.continuous_assigns if id(assign) not in selected_assign_ids
+        ]
+        transformed.instances = [
+            copy.deepcopy(inst) for inst in child_module.instances if id(inst) not in selected_instance_ids
+        ]
 
-    return transformed_parent
-
-
-def _build_parent_module_for_pulled_up_child_structural(  # noqa: PLR0913
-    parent_module: Module,
-    child_module: Module,
-    transformed_child: Module,
-    parent_instances: list[Instance],
-    selected_assigns: list,
-    selected_instances: list[Instance],
-    selected_declarations,
-    boundary,
-) -> Module | RefactorDiagnostic:
-    transformed_parent = copy.deepcopy(parent_module)
-    existing_names = _module_declared_names(transformed_parent)
-    child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
-    existing_child_output_names = [name for name in boundary.outputs if name in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
-
-    for parent_instance in parent_instances:
-        site = _find_transformed_instance_site(transformed_parent, parent_module, parent_instance)
-        if isinstance(site, RefactorDiagnostic):
-            return site
-        transformed_instance, transformed_site_block, transformed_site_index = site
-        raw_param_map = _parameter_expression_map(child_module, parent_instance)
-        if isinstance(raw_param_map, RefactorDiagnostic):
-            return raw_param_map
-        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
-        if isinstance(raw_port_map, RefactorDiagnostic):
-            return raw_port_map
-        constant_env = _child_constant_expression_map(child_module, raw_param_map)
-        if isinstance(constant_env, RefactorDiagnostic):
-            return constant_env
-
-        rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
-        }
-        selected_instance_name_map = {
+    def instance_name_map(self, parent_instance: Instance, existing_names: set[str]) -> dict[str, str]:
+        return {
             inst.instance_name: _unique_name(f"{parent_instance.instance_name}__{inst.instance_name}", existing_names)
-            for inst in selected_instances
-        }
-        expr_map: dict[str, Expression] = {
-            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
-            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
-            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
+            for inst in self.selected_instances
         }
 
+    def promote_outputs(
+        self, transformed_parent, child_module, existing_child_output_names, raw_port_map, expr_map
+    ) -> RefactorDiagnostic | None:
         connected_output_names = {
             signal_name
             for signal_name in (_simple_identifier_name(raw_port_map.get(name)) for name in existing_child_output_names)
             if signal_name is not None
         }
         _convert_child_driven_outputs_to_parent_nets(transformed_parent, connected_output_names)
+        return None
 
-        for name in [*readback_names, *child_input_names, *lifted_internal_names]:
+    def declare_in_module(self, transformed_parent, child_module, names, rename_map, expr_map) -> None:
+        for name in names.all:
             decl = _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
             transformed_parent.nets.append(decl)
 
-        copied_functions, function_name_map = _copy_referenced_child_functions(
-            child_module,
-            [*selected_declarations.parameters, *selected_assigns, *selected_instances, *constant_env.values()],
-            existing_names,
-            name_prefix=parent_instance.instance_name,
-            expr_map=expr_map,
-        )
-        if isinstance(copied_functions, RefactorDiagnostic):
-            return copied_functions
-        transformed_parent.functions.extend(copied_functions)
+    def declare_as_nodes(self, child_module, names, rename_map, expr_map) -> list:
+        return [_parent_net_for_child_output(child_module, name, rename_map[name], expr_map) for name in names.all]
 
+    def copied_nodes(self, child_module, expr_map, instance_name_map, function_name_map) -> list:
         top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
         top_level_instance_ids = {id(inst) for inst in child_module.instances}
         copied_assigns = _copied_nodes(
-            [assign for assign in selected_assigns if id(assign) in top_level_assign_ids], expr_map
+            [assign for assign in self.selected_assigns if id(assign) in top_level_assign_ids], expr_map
         )
         copied_instances = _copied_selected_instances(
-            [inst for inst in selected_instances if id(inst) in top_level_instance_ids],
-            selected_instance_name_map,
+            [inst for inst in self.selected_instances if id(inst) in top_level_instance_ids],
+            instance_name_map,
             expr_map,
-        )
-        copied_generate_constructs = _copied_selected_generate_constructs(
-            child_module.generate_blocks,
-            _selected_generate_item_ids(selected_declarations, selected_assigns, selected_instances),
-            expr_map,
-            function_name_map=function_name_map,
-            selected_instance_name_map=selected_instance_name_map,
         )
         _rewrite_function_call_names(copied_assigns, function_name_map)
         _rewrite_function_call_names(copied_instances, function_name_map)
-        insertion_nodes = _nodes_by_source_order([*copied_generate_constructs, *copied_assigns, *copied_instances])
-        if transformed_site_block is not None and transformed_site_index is not None:
-            transformed_site_block.items[transformed_site_index:transformed_site_index] = insertion_nodes
+        return [*copied_assigns, *copied_instances]
+
+    def insert_into_module(
+        self, transformed_parent, site_block, site_index, insertion_nodes, copied_nodes, copied_generate_constructs
+    ) -> None:
+        if site_block is not None and site_index is not None:
+            site_block.items[site_index:site_index] = insertion_nodes
         else:
-            transformed_parent.continuous_assigns.extend(copied_assigns)
-            transformed_parent.instances.extend(copied_instances)
+            for node in copied_nodes:
+                if isinstance(node, Instance):
+                    transformed_parent.instances.append(node)
+                else:
+                    transformed_parent.continuous_assigns.append(node)
             transformed_parent.generate_blocks.extend(copied_generate_constructs)
+
+
+def _build_design_wide_pull_up(
+    child_module: Module,
+    strategy: _PullUpKindStrategy,
+    selected_declarations,
+    boundary: _Boundary,
+    *,
+    sites: list[tuple[Module, Instance]],
+) -> tuple[TextEditPlan, ...] | RefactorDiagnostic:
+    transformed_child = _build_child_module_for_pulled_up(child_module, strategy, selected_declarations, boundary)
+    child_edits = _design_wide_child_module_edits(
+        child_module, transformed_child, selected_declarations, *strategy.selected_groups()
+    )
+    if isinstance(child_edits, RefactorDiagnostic):
+        return child_edits
+    if child_edits is None:
+        child_edit = _module_replacement_edit(child_module, transformed_child)
+        if isinstance(child_edit, RefactorDiagnostic):
+            return child_edit
+        child_edits = (child_edit,)
+
+    grouped_sites: dict[str, tuple[Module, list[Instance]]] = {}
+    for parent, inst in sites:
+        grouped = grouped_sites.setdefault(parent.name, (parent, []))
+        grouped[1].append(inst)
+
+    edits: list[TextEditPlan] = [*child_edits]
+    for parent_name in sorted(grouped_sites):
+        parent_module, parent_instances = grouped_sites[parent_name]
+        transformed_parent = _build_parent_module_for_pulled_up_child(
+            parent_module, child_module, transformed_child, parent_instances, strategy, selected_declarations, boundary
+        )
+        if isinstance(transformed_parent, RefactorDiagnostic):
+            return transformed_parent
+        parent_edits = _design_wide_parent_edits(
+            parent_module,
+            transformed_parent,
+            child_module,
+            transformed_child,
+            parent_instances,
+            strategy,
+            selected_declarations,
+            boundary,
+        )
+        if isinstance(parent_edits, RefactorDiagnostic):
+            return parent_edits
+        if parent_edits is None:
+            parent_edit = _module_replacement_edit(parent_module, transformed_parent)
+            if isinstance(parent_edit, RefactorDiagnostic):
+                return parent_edit
+            parent_edits = (parent_edit,)
+        edits.extend(parent_edits)
+    return tuple(edits)
+
+
+def _build_child_module_for_pulled_up(
+    child_module: Module, strategy: _PullUpKindStrategy, selected_declarations, boundary: _Boundary
+) -> Module:
+    selected_generate_ids = _selected_generate_item_ids(selected_declarations, *strategy.selected_groups())
+    transformed = copy.deepcopy(child_module)
+    _remove_selected_child_localparams(transformed, selected_declarations)
+    transformed.generate_blocks = _copied_remaining_generate_constructs(
+        child_module.generate_blocks, selected_generate_ids
+    )
+    strategy.remove_from_child(transformed, child_module)
+
+    existing_port_names = {port.name for port in child_module.ports}
+    existing_output_port_names = [name for name in boundary.outputs if name in existing_port_names]
+    new_output_ports = [name for name in boundary.inputs if name not in existing_port_names]
+    new_input_ports = [name for name in boundary.outputs if name not in existing_port_names]
+    port_promoted_names = set(new_output_ports) | set(new_input_ports) | set(existing_output_port_names)
+    removable_signal_names = set(boundary.internals) | port_promoted_names
+    transformed.nets = [net for net in transformed.nets if net.name not in removable_signal_names]
+    transformed.variables = [
+        variable for variable in transformed.variables if variable.name not in removable_signal_names
+    ]
+
+    for port in transformed.ports:
+        if port.name in boundary.outputs:
+            port.direction = PortDirection.INPUT
+            port.data_type = None
+            port.default_value = None
+    for name in new_output_ports:
+        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.OUTPUT))
+    for name in new_input_ports:
+        transformed.ports.append(_port_for_child_signal(child_module, name, PortDirection.INPUT))
+    return transformed
+
+
+def _build_parent_module_for_pulled_up_child(
+    parent_module: Module,
+    child_module: Module,
+    transformed_child: Module,
+    parent_instances: list[Instance],
+    strategy: _PullUpKindStrategy,
+    selected_declarations,
+    boundary: _Boundary,
+) -> Module | RefactorDiagnostic:
+    transformed_parent = copy.deepcopy(parent_module)
+    existing_names = _module_declared_names(transformed_parent)
+    names, existing_child_output_names = _lifted_names_for_boundary(child_module, boundary)
+
+    for parent_instance in parent_instances:
+        site = _find_transformed_instance_site(transformed_parent, parent_module, parent_instance)
+        if isinstance(site, RefactorDiagnostic):
+            return site
+        transformed_instance, transformed_site_block, transformed_site_index = site
+        raw_param_map = _parameter_expression_map(child_module, parent_instance)
+        if isinstance(raw_param_map, RefactorDiagnostic):
+            return raw_param_map
+        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
+        if isinstance(raw_port_map, RefactorDiagnostic):
+            return raw_port_map
+        constant_env = _child_constant_expression_map(child_module, raw_param_map)
+        if isinstance(constant_env, RefactorDiagnostic):
+            return constant_env
+
+        rename_map = {
+            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names) for name in names.all
+        }
+        instance_name_map = strategy.instance_name_map(parent_instance, existing_names)
+        expr_map: dict[str, Expression] = {
+            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
+            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
+            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
+        }
+
+        promotion = strategy.promote_outputs(
+            transformed_parent, child_module, existing_child_output_names, raw_port_map, expr_map
+        )
+        if promotion is not None:
+            return promotion
+
+        strategy.declare_in_module(transformed_parent, child_module, names, rename_map, expr_map)
+
+        copied_functions, function_name_map = _copy_referenced_child_functions(
+            child_module,
+            [*selected_declarations.parameters, *strategy.own_selected_nodes(), *constant_env.values()],
+            existing_names,
+            name_prefix=parent_instance.instance_name,
+            expr_map=expr_map,
+        )
+        if isinstance(copied_functions, RefactorDiagnostic):
+            return copied_functions
+        transformed_parent.functions.extend(copied_functions)
+
+        copied_nodes = strategy.copied_nodes(child_module, expr_map, instance_name_map, function_name_map)
+        copied_generate_constructs = _copied_selected_generate_constructs(
+            child_module.generate_blocks,
+            _selected_generate_item_ids(selected_declarations, *strategy.selected_groups()),
+            expr_map,
+            function_name_map=function_name_map,
+            selected_instance_name_map=instance_name_map or None,
+        )
+        insertion_nodes = _nodes_by_source_order([*copied_generate_constructs, *copied_nodes])
+        strategy.insert_into_module(
+            transformed_parent,
+            transformed_site_block,
+            transformed_site_index,
+            insertion_nodes,
+            copied_nodes,
+            copied_generate_constructs,
+        )
 
         transformed_instance.port_connections = _named_child_site_connections(
             transformed_child,
@@ -1345,20 +1219,17 @@ def _build_parent_module_for_pulled_up_child_structural(  # noqa: PLR0913
     return transformed_parent
 
 
-def _design_wide_parent_procedural_edits(  # noqa: PLR0911, PLR0913
+def _design_wide_parent_edits(
     parent_module: Module,
     transformed_parent: Module,
     child_module: Module,
     transformed_child: Module,
     parent_instances: list[Instance],
-    selected_blocks: list,
+    strategy: _PullUpKindStrategy,
     selected_declarations,
-    boundary,
-    *,
-    block_kind: str,
+    boundary: _Boundary,
 ) -> tuple[TextEditPlan, ...] | RefactorDiagnostic | None:
-    top_level_selected_ids = {id(block) for block in getattr(child_module, f"{block_kind}_blocks")}
-    if any(id(block) not in top_level_selected_ids for block in selected_blocks):
+    if not strategy.is_fully_top_level(child_module):
         return None
 
     header_and_decl_edits = _design_wide_parent_header_and_declaration_edits(parent_module, transformed_parent)
@@ -1366,11 +1237,7 @@ def _design_wide_parent_procedural_edits(  # noqa: PLR0911, PLR0913
         return header_and_decl_edits
 
     existing_names = _module_declared_names(parent_module)
-    child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
+    names, _existing_child_output_names = _lifted_names_for_boundary(child_module, boundary)
 
     site_edits: list[TextEditPlan] = []
     for parent_instance in parent_instances:
@@ -1391,35 +1258,26 @@ def _design_wide_parent_procedural_edits(  # noqa: PLR0911, PLR0913
             return constant_env
 
         rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
+            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names) for name in names.all
         }
+        instance_name_map = strategy.instance_name_map(parent_instance, existing_names)
         expr_map: dict[str, Expression] = {
             **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
             **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
             **{name: Identifier(new_name) for name, new_name in rename_map.items()},
         }
 
-        declarations = [
-            *(_parent_net_for_child_output(child_module, name, rename_map[name], expr_map) for name in readback_names),
-            *(
-                _parent_variable_for_lifted_signal(child_module, name, rename_map[name], expr_map)
-                for name in [*child_input_names, *lifted_internal_names]
-            ),
-        ]
+        declarations = strategy.declare_as_nodes(child_module, names, rename_map, expr_map)
         copied_functions, function_name_map = _copy_referenced_child_functions(
             child_module,
-            [*selected_declarations.parameters, *selected_blocks, *constant_env.values()],
+            [*selected_declarations.parameters, *strategy.own_selected_nodes(), *constant_env.values()],
             existing_names,
             name_prefix=parent_instance.instance_name,
             expr_map=expr_map,
         )
         if isinstance(copied_functions, RefactorDiagnostic):
             return copied_functions
-        copied_blocks = _copied_nodes(
-            [block for block in selected_blocks if id(block) in top_level_selected_ids], expr_map
-        )
-        _rewrite_function_call_names(copied_blocks, function_name_map)
+        copied_nodes = strategy.copied_nodes(child_module, expr_map, instance_name_map, function_name_map)
 
         rewritten_instance = copy.deepcopy(parent_instance)
         rewritten_instance.port_connections = _named_child_site_connections(
@@ -1430,217 +1288,7 @@ def _design_wide_parent_procedural_edits(  # noqa: PLR0911, PLR0913
         rewritten_instance.has_parameter_override = bool(parent_instance.parameter_bindings)
         rewritten_instance.parameter_bindings = copy.deepcopy(parent_instance.parameter_bindings)
 
-        replacement = _emit_module_items_text(
-            _nodes_by_source_order([*declarations, *copied_functions, *copied_blocks])
-        )
-        replacement += _emit_module_item_text(rewritten_instance)
-        site_edits.append(
-            TextEditPlan(
-                file=parent_instance.loc.file if parent_instance.loc and parent_instance.loc.file else "",
-                range=instance_range,
-                original=instance_source,
-                replacement=replacement,
-            )
-        )
-    return (*header_and_decl_edits, *site_edits)
-
-
-def _design_wide_parent_assign_edits(  # noqa: PLR0911, PLR0913
-    parent_module: Module,
-    transformed_parent: Module,
-    child_module: Module,
-    transformed_child: Module,
-    parent_instances: list[Instance],
-    selected_assigns: list,
-    selected_declarations,
-    boundary,
-) -> tuple[TextEditPlan, ...] | RefactorDiagnostic | None:
-    top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
-    if any(id(assign) not in top_level_assign_ids for assign in selected_assigns):
-        return None
-
-    header_and_decl_edits = _design_wide_parent_header_and_declaration_edits(parent_module, transformed_parent)
-    if isinstance(header_and_decl_edits, RefactorDiagnostic):
-        return header_and_decl_edits
-
-    existing_names = _module_declared_names(parent_module)
-    child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
-
-    site_edits: list[TextEditPlan] = []
-    for parent_instance in parent_instances:
-        instance_source, instance_range = _top_level_parent_instance_source_and_range(parent_module, parent_instance)
-        if instance_source is None and instance_range is None:
-            return None
-        if isinstance(instance_source, RefactorDiagnostic):
-            return instance_source
-
-        raw_param_map = _parameter_expression_map(child_module, parent_instance)
-        if isinstance(raw_param_map, RefactorDiagnostic):
-            return raw_param_map
-        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
-        if isinstance(raw_port_map, RefactorDiagnostic):
-            return raw_port_map
-        constant_env = _child_constant_expression_map(child_module, raw_param_map)
-        if isinstance(constant_env, RefactorDiagnostic):
-            return constant_env
-
-        rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
-        }
-        expr_map: dict[str, Expression] = {
-            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
-            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
-            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
-        }
-
-        declarations = [
-            *(
-                _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
-                for name in [*readback_names, *child_input_names, *lifted_internal_names]
-            )
-        ]
-        copied_functions, function_name_map = _copy_referenced_child_functions(
-            child_module,
-            [*selected_declarations.parameters, *selected_assigns, *constant_env.values()],
-            existing_names,
-            name_prefix=parent_instance.instance_name,
-            expr_map=expr_map,
-        )
-        if isinstance(copied_functions, RefactorDiagnostic):
-            return copied_functions
-        copied_assigns = _copied_nodes(
-            [assign for assign in selected_assigns if id(assign) in top_level_assign_ids], expr_map
-        )
-        _rewrite_function_call_names(copied_assigns, function_name_map)
-
-        rewritten_instance = copy.deepcopy(parent_instance)
-        rewritten_instance.port_connections = _named_child_site_connections(
-            transformed_child,
-            raw_port_map,
-            rename_map,
-        )
-        rewritten_instance.has_parameter_override = bool(parent_instance.parameter_bindings)
-        rewritten_instance.parameter_bindings = copy.deepcopy(parent_instance.parameter_bindings)
-
-        replacement = _emit_module_items_text(
-            _nodes_by_source_order([*declarations, *copied_functions, *copied_assigns])
-        )
-        replacement += _emit_module_item_text(rewritten_instance)
-        site_edits.append(
-            TextEditPlan(
-                file=parent_instance.loc.file if parent_instance.loc and parent_instance.loc.file else "",
-                range=instance_range,
-                original=instance_source,
-                replacement=replacement,
-            )
-        )
-    return (*header_and_decl_edits, *site_edits)
-
-
-def _design_wide_parent_structural_edits(  # noqa: PLR0911, PLR0913
-    parent_module: Module,
-    transformed_parent: Module,
-    child_module: Module,
-    transformed_child: Module,
-    parent_instances: list[Instance],
-    selected_assigns: list,
-    selected_instances: list[Instance],
-    selected_declarations,
-    boundary,
-) -> tuple[TextEditPlan, ...] | RefactorDiagnostic | None:
-    top_level_assign_ids = {id(assign) for assign in child_module.continuous_assigns}
-    top_level_instance_ids = {id(instance) for instance in child_module.instances}
-    if any(id(assign) not in top_level_assign_ids for assign in selected_assigns):
-        return None
-    if any(id(instance) not in top_level_instance_ids for instance in selected_instances):
-        return None
-
-    header_and_decl_edits = _design_wide_parent_header_and_declaration_edits(parent_module, transformed_parent)
-    if isinstance(header_and_decl_edits, RefactorDiagnostic):
-        return header_and_decl_edits
-
-    existing_names = _module_declared_names(parent_module)
-    child_port_names = {port.name for port in child_module.ports}
-    readback_names = [name for name in boundary.inputs if name not in child_port_names]
-    child_input_names = [name for name in boundary.outputs if name not in child_port_names]
-    lifted_internal_names = list(boundary.internals)
-    lifted_signal_names = [*readback_names, *child_input_names, *lifted_internal_names]
-
-    site_edits: list[TextEditPlan] = []
-    for parent_instance in parent_instances:
-        instance_source, instance_range = _top_level_parent_instance_source_and_range(parent_module, parent_instance)
-        if instance_source is None and instance_range is None:
-            return None
-        if isinstance(instance_source, RefactorDiagnostic):
-            return instance_source
-
-        raw_param_map = _parameter_expression_map(child_module, parent_instance)
-        if isinstance(raw_param_map, RefactorDiagnostic):
-            return raw_param_map
-        raw_port_map = _port_expression_map(child_module, parent_instance, require_all_ports=False)
-        if isinstance(raw_port_map, RefactorDiagnostic):
-            return raw_port_map
-        constant_env = _child_constant_expression_map(child_module, raw_param_map)
-        if isinstance(constant_env, RefactorDiagnostic):
-            return constant_env
-
-        rename_map = {
-            name: _unique_name(f"{parent_instance.instance_name}__{name}", existing_names)
-            for name in lifted_signal_names
-        }
-        selected_instance_name_map = {
-            inst.instance_name: _unique_name(f"{parent_instance.instance_name}__{inst.instance_name}", existing_names)
-            for inst in selected_instances
-        }
-        expr_map: dict[str, Expression] = {
-            **{name: copy.deepcopy(expr) for name, expr in constant_env.items()},
-            **{name: copy.deepcopy(expr) for name, expr in raw_port_map.items()},
-            **{name: Identifier(new_name) for name, new_name in rename_map.items()},
-        }
-
-        declarations = [
-            *(
-                _parent_net_for_child_output(child_module, name, rename_map[name], expr_map)
-                for name in [*readback_names, *child_input_names, *lifted_internal_names]
-            )
-        ]
-        copied_functions, function_name_map = _copy_referenced_child_functions(
-            child_module,
-            [*selected_declarations.parameters, *selected_assigns, *selected_instances, *constant_env.values()],
-            existing_names,
-            name_prefix=parent_instance.instance_name,
-            expr_map=expr_map,
-        )
-        if isinstance(copied_functions, RefactorDiagnostic):
-            return copied_functions
-        copied_assigns = _copied_nodes(
-            [assign for assign in selected_assigns if id(assign) in top_level_assign_ids], expr_map
-        )
-        copied_instances = _copied_selected_instances(
-            [instance for instance in selected_instances if id(instance) in top_level_instance_ids],
-            selected_instance_name_map,
-            expr_map,
-        )
-        _rewrite_function_call_names(copied_assigns, function_name_map)
-        _rewrite_function_call_names(copied_instances, function_name_map)
-
-        rewritten_instance = copy.deepcopy(parent_instance)
-        rewritten_instance.port_connections = _named_child_site_connections(
-            transformed_child,
-            raw_port_map,
-            rename_map,
-        )
-        rewritten_instance.has_parameter_override = bool(parent_instance.parameter_bindings)
-        rewritten_instance.parameter_bindings = copy.deepcopy(parent_instance.parameter_bindings)
-
-        replacement = _emit_module_items_text(
-            _nodes_by_source_order([*declarations, *copied_functions, *copied_assigns, *copied_instances])
-        )
+        replacement = _emit_module_items_text(_nodes_by_source_order([*declarations, *copied_functions, *copied_nodes]))
         replacement += _emit_module_item_text(rewritten_instance)
         site_edits.append(
             TextEditPlan(

@@ -44,8 +44,6 @@ from ._boundary_selection import (
     _source_text_for_range_payload,
 )
 from ._pull_up_engine import (
-    _build_child_module_for_pulled_up_procedural,
-    _build_design_wide_pull_up_from_child_procedural,
     _build_pull_up_edit,
     _build_pull_up_edit_from_chain,
     _collect_all_module_instance_sites,
