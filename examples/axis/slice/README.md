@@ -28,6 +28,8 @@ here so it's tested independently of that project and reusable elsewhere.
 | `axi_stream_slice_declarative.py` | The same module again, rebuilt in the **declarative** `ModuleSpec` style (`In()`/`OutReg()`/`Reg()`/`Wire()` class attributes) -- see "Declarative (ModuleSpec) variant" below. |
 | `axi_stream_slice_declarative_iface.py` | Declarative `ModuleSpec` **and** interface-bound buses combined -- see "Declarative + interface-bound variant" below. |
 | `test_axi_stream_slice.py` | Testbench-framework test suite (this is the "thoroughly tested" part). |
+| `axis_streamify.py` | A decorator that wraps a plain ce-gated pipeline as a full `s_axis`/`m_axis` module, instantiating `axi_stream_slice` on the front and back -- see "The `axis_streamify` decorator" below. |
+| `test_axis_streamify.py` | A 3-stage demo pipeline decorated with `@axis_streamify`, tested the same way as the slice itself (including under heavy back-pressure). |
 
 Four builder styles along two independent axes -- imperative vs. declarative,
 and raw ports vs. an interface-bound bus:
@@ -178,6 +180,61 @@ includes `tlast` (no `has_tlast=False` here), and `s_axis_tready`'s
 power-on default comes from the reset branch rather than an explicit
 `= 1`. `emit_module()` output is byte-for-byte identical to
 `axi_stream_slice_iface.py`.
+
+## The `axis_streamify` decorator
+
+The four variants above all demonstrate the same module written different
+ways. `axis_streamify.py` demonstrates something Verilog has no equivalent
+of at all: a module definition as a Python value, passed into a function
+that builds a bigger module around it.
+
+```python
+@axis_streamify(data_width=16)
+def build_my_pipeline(m, clk, rst, ce, tdata, tvalid, tlast):
+    # ordinary if (ce) begin ... end register stages -- no AXI-Stream here
+    ...
+    return final_tdata, final_tvalid, final_tlast
+
+top, design = build_my_pipeline(name="my_pipeline_streamified")
+```
+
+The decorated function is a plain pipeline -- exactly `notes/hdl_guide.md`
+§3's "AXI-Stream at the edges, plain pipeline inside" shape, written with
+zero knowledge that AXI-Stream exists: no `tready`, no slices, no
+backpressure, just registers gated by `ce`. `axis_streamify` builds a
+wrapper module around it that:
+
+1. Instantiates `axi_stream_slice` (this directory's own component --
+   reused as a real sub-module instance, not reimplemented) on the input,
+   isolating the pipeline from the upstream producer's timing.
+2. Calls the decorated function to fill in the pipeline body, wired to the
+   input slice's registered output.
+3. Instantiates a second `axi_stream_slice` on the output, and derives `ce`
+   from *that* slice's own registered `s_axis_tready` -- notes/hdl_guide.md
+   §3.3, "the key trick": a single clean flop fanned out to the whole
+   pipeline, decoupling its internal timing from the downstream consumer.
+
+Because this produces a real multi-module hierarchy (the wrapper, plus one
+`axi_stream_slice` module instantiated twice), `build(...)` returns
+`(top, design)` -- a `veriforge.model.design.Design` bundling both modules.
+Pass `design=design` to `Testbench`/`Simulator` for simulation, or emit
+`design.modules` for synthesizable Verilog output.
+
+```bash
+uv run python examples/axis/slice/test_axis_streamify.py
+```
+
+`test_axis_streamify.py`'s pipeline computes `y = ((x + 1) ^ 0x0F0F) + 5`
+over three register stages and is tested exactly like the slice itself:
+`test_basic` (no stalls) and `test_backpressure` (heavy `PauseGenerator`
+stalls on both `s_axis` and `m_axis` at once) -- the point being that the
+pipeline body has no backpressure logic of its own at all; both slices
+absorb it, for free, just from the decorator.
+
+Deliberately kept simple rather than fully general: fixed `has_tlast=True`,
+no `tuser` support, and the pipeline is assumed fixed-latency (`tvalid`
+rides along under `ce`, no per-stage stalling). See the module docstring in
+`axis_streamify.py` for the exact contract.
 
 ## Using this component from another project
 
