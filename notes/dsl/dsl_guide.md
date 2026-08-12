@@ -98,12 +98,18 @@ Two assignment types exist:
 | `signal.next = expr` | `signal <= expr;` | Non-blocking (property form, MyHDL-style) |
 | `signal @= expr` | `signal = expr;` | Blocking (combinational `always` blocks) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous assignment (outside always) |
+| `signal.assign = expr` | `assign signal = expr;` | Continuous assignment (property form) |
 | `m.assign_nb(lhs, rhs)` | `lhs <= rhs;` | Non-blocking (method form) |
 | `m.assign_b(lhs, rhs)` | `lhs = rhs;` | Blocking (method form) |
 
 `signal.next = expr` and `signal <<= expr` are interchangeable; `.next` also
 works on selects (`data[i].next = x`). Reading `.next` raises — it is an
 assignment target only.
+
+`signal.assign = expr` is the property-form equivalent of `m.assign(signal,
+expr)` — same rules apply (outside any `always`/`initial` block, not onto an
+input port, not onto a reg-type signal). Reading `.assign` raises, same as
+`.next`.
 
 > **Note:** `signal.set(expr)` is a deprecated alias for `signal @= expr` and still works.
 > `m.assign_nonblocking` / `m.assign_blocking` are long-form aliases for `m.assign_nb` / `m.assign_b`.

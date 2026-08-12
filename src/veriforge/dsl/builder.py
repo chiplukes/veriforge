@@ -489,6 +489,26 @@ class Expr:
         stmt = NonblockingAssign(self._as_expr(), _to_expr_node(other))
         self._builder._append_stmt(stmt)
 
+    @property
+    def assign(self) -> Expr:
+        """Reading ``.assign`` is not meaningful — it exists only as an assignment target."""
+        raise TypeError(
+            "'.assign' is write-only: use `sig.assign = expr` for a continuous assignment. "
+            "To read the signal's current value, use the signal itself."
+        )
+
+    @assign.setter
+    def assign(self, other: object) -> None:
+        """Continuous assignment: ``signal.assign = expr`` (property form of ``m.assign(signal, expr)``).
+
+        Delegates to :meth:`Module.assign`, so it carries the same rules:
+        only outside an always/initial block, not onto an input port, and
+        not onto a reg-type signal (use procedural assignment for those).
+        """
+        if self._builder is None:
+            raise RuntimeError("'.assign =' requires a signal bound to a Module builder")
+        self._builder.assign(self, other)
+
     # --- Internal ---
 
     def _binop(self, op: str, other: object) -> Expr:

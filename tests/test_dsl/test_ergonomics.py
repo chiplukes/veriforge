@@ -10,6 +10,7 @@ import pytest
 
 from veriforge.codegen.verilog_emitter import emit_expression, emit_module
 from veriforge.dsl import Module, cat, mux, posedge, select, when
+from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.behavioral import SensitivityType
 from veriforge.model.statements import IfStatement, NonblockingAssign
 from veriforge.sim import Simulator
@@ -163,6 +164,59 @@ class TestNextProperty:
             q = m.output_reg("q", 8)
             with pytest.raises(TypeError, match="write-only"):
                 _ = q.next
+
+
+# ---------------------------------------------------------------------------
+# Signal.assign
+# ---------------------------------------------------------------------------
+
+
+class TestAssignProperty:
+    def test_assign_creates_continuous_assign(self):
+        with Module("t") as m:
+            a = m.input("a")
+            y = m.output("y")
+            y.assign = ~a
+        mod = m.build()
+        assert isinstance(mod.continuous_assigns[0], ContinuousAssign)
+        assert "assign y = ~a;" in emit_module(mod)
+
+    def test_assign_matches_m_assign(self):
+        with Module("t") as m:
+            a = m.input("a")
+            y = m.output("y")
+            y.assign = ~a
+        with Module("t") as m2:
+            a2 = m2.input("a")
+            y2 = m2.output("y")
+            m2.assign(y2, ~a2)
+        assert emit_module(m.build()) == emit_module(m2.build())
+
+    def test_assign_inside_block_raises(self):
+        with Module("t") as m:
+            clk = m.input("clk")
+            q = m.output_reg("q", 8)
+            with pytest.raises(RuntimeError, match="cannot be used inside an always/initial block"):
+                with m.always(posedge(clk)):
+                    q.assign = 1
+
+    def test_assign_read_raises(self):
+        with Module("t") as m:
+            y = m.output("y")
+            with pytest.raises(TypeError, match="write-only"):
+                _ = y.assign
+
+    def test_assign_to_input_port_raises(self):
+        with Module("t") as m:
+            a = m.input("a")
+            with pytest.raises(ValueError, match="Cannot assign to input port"):
+                a.assign = 1
+
+    def test_assign_to_reg_raises(self):
+        with Module("t") as m:
+            r = m.reg("r", 8)
+            with pytest.raises(ValueError, match="Cannot continuous-assign to reg"):
+                r.assign = 1
 
 
 # ---------------------------------------------------------------------------
