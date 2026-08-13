@@ -24,9 +24,19 @@ declaration. Functionally identical once out of reset -- see
 knowing before reaching for ``m.interface()`` on a module that must also
 behave sanely for the handful of cycles *before* reset is first applied.
 
+Also supports ``tid_width``/``tdest_width`` (in addition to ``tuser_width``)
+-- the raw-port ``axi_stream_slice.py`` does not, and adding them there
+would mean tripling every ``if tuser_width:`` guard by hand. Here, since
+every optional sideband field is handled through ``axi_stream()`` and
+``BoundInterface`` uniformly, they're just three entries in one list (see
+``_SIDEBAND`` below) that a loop iterates over -- this is exactly the kind
+of variable-width bus expansion `notes/dsl/dsl_guide.md` gives as a reason
+to prefer this style.
+
 Use whichever style reads more naturally for a given module: raw ports when
 the exact declaration text matters (custom widths per field, conditional
-ports), ``m.interface()`` when you just want a standard bus wired up fast.
+ports), ``m.interface()`` when you just want a standard bus wired up fast
+-- more so the more optional sideband fields are in play.
 """
 
 from veriforge.dsl import Module, Signal, posedge
@@ -34,7 +44,7 @@ from veriforge.dsl.lib.axi_stream import axi_stream
 
 
 def _nb(sig: Signal | None, val: object) -> None:
-    """Non-blocking assign, skipped when `sig` is an omitted optional signal (r_tuser only, here).
+    """Non-blocking assign, skipped when `sig` is an omitted optional sideband signal.
 
     See axi_stream_slice.py's `_nb` docstring for why `.next =` is used
     instead of `<<=` -- `<<=` rebinds the local variable to its
@@ -45,19 +55,24 @@ def _nb(sig: Signal | None, val: object) -> None:
         sig.next = val
 
 
-def build_axi_stream_slice_iface(data_width=32, tuser_width=0, name="axi_stream_slice_iface"):
-    intf = axi_stream(data_width, tuser_width=tuser_width)
+def build_axi_stream_slice_iface(
+    data_width=32, tuser_width=0, tid_width=0, tdest_width=0, name="axi_stream_slice_iface"
+):
+    intf = axi_stream(data_width, tuser_width=tuser_width, tid_width=tid_width, tdest_width=tdest_width)
+    # (field name, width) for every optional sideband field -- present on
+    # s/out only when width > 0, per axi_stream()'s own convention.
+    _SIDEBAND = [("tuser", tuser_width), ("tid", tid_width), ("tdest", tdest_width)]
 
     m = Module(name)
     clk = m.input("clk")
     rst = m.input("rst")
 
     s = m.interface("s_axis", intf, role="slave", reg=True)  # s.tready is output_reg
-    out = m.interface("m_axis", intf, role="master", reg=True)  # out.tvalid/tdata/tuser/tlast are output_reg
+    out = m.interface("m_axis", intf, role="master", reg=True)  # out.tvalid/tdata/tuser/tid/tdest/tlast are output_reg
 
     r_tdata = m.reg("r_tdata", width=data_width, init=0)
-    r_tuser = m.reg("r_tuser", width=tuser_width, init=0) if tuser_width else None
     r_tlast = m.reg("r_tlast", init=0)
+    r_side = {name: (m.reg(f"r_{name}", width=width, init=0) if width else None) for name, width in _SIDEBAND}
 
     r_tvalid_w = m.wire("r_tvalid_w")
     r_tvalid_w.assign = ~s.tready
@@ -67,11 +82,13 @@ def build_axi_stream_slice_iface(data_width=32, tuser_width=0, name="axi_stream_
             out.tvalid <<= 0
             s.tready <<= 1
             r_tdata <<= 0
-            _nb(r_tuser, 0)
+            for field, _width in _SIDEBAND:
+                _nb(r_side[field], 0)
             r_tlast <<= 0
             out.tdata <<= 0
-            if tuser_width:
-                out.tuser <<= 0
+            for field, width in _SIDEBAND:
+                if width:
+                    getattr(out, field).next = 0
             out.tlast <<= 0
 
         with m.else_():
@@ -85,19 +102,22 @@ def build_axi_stream_slice_iface(data_width=32, tuser_width=0, name="axi_stream_
 
             with m.if_(s.tready):
                 r_tdata <<= s.tdata
-                _nb(r_tuser, s.tuser)
+                for field, width in _SIDEBAND:
+                    _nb(r_side[field], getattr(s, field) if width else None)
                 r_tlast <<= s.tlast
 
             with m.if_(out.tready | ~out.tvalid):
                 with m.if_(r_tvalid_w):
                     out.tdata <<= r_tdata
-                    if tuser_width:
-                        out.tuser <<= r_tuser
+                    for field, width in _SIDEBAND:
+                        if width:
+                            getattr(out, field).next = r_side[field]
                     out.tlast <<= r_tlast
                 with m.elif_(s.tvalid & s.tready):
                     out.tdata <<= s.tdata
-                    if tuser_width:
-                        out.tuser <<= s.tuser
+                    for field, width in _SIDEBAND:
+                        if width:
+                            getattr(out, field).next = getattr(s, field)
                     out.tlast <<= s.tlast
 
     return m.build()

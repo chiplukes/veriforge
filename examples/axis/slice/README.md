@@ -24,7 +24,7 @@ here so it's tested independently of that project and reusable elsewhere.
 | File | What it is |
 |---|---|
 | `axi_stream_slice.py` | The component: `build_axi_stream_slice(data_width, tuser_width, has_tlast, name)`, raw-port **imperative** DSL builder. |
-| `axi_stream_slice_iface.py` | The same module rebuilt with `m.interface()` / `axi_stream()` instead of individual `m.input()`/`m.output_reg()` calls -- see "Interface-based variant" below. |
+| `axi_stream_slice_iface.py` | The same module rebuilt with `m.interface()` / `axi_stream()` instead of individual `m.input()`/`m.output_reg()` calls -- see "Interface-based variant" below. Also the only variant supporting `tid_width`/`tdest_width` alongside `tuser_width`. |
 | `axi_stream_slice_declarative.py` | The same module again, rebuilt in the **declarative** `ModuleSpec` style (`In()`/`OutReg()`/`Reg()`/`Wire()` class attributes) -- see "Declarative (ModuleSpec) variant" below. |
 | `axi_stream_slice_declarative_iface.py` | Declarative `ModuleSpec` **and** interface-bound buses combined -- see "Declarative + interface-bound variant" below. |
 | `test_axi_stream_slice.py` | Testbench-framework test suite (this is the "thoroughly tested" part). |
@@ -116,6 +116,13 @@ registered-both-directions shape a full slice needs, in two calls instead
 of nine. See that file's module docstring for the (minor) trade-offs versus
 the raw-port version.
 
+It also takes `tid_width`/`tdest_width` alongside `tuser_width` (the
+raw-port version only has the latter) -- since every optional sideband
+field is handled through `axi_stream()`/`BoundInterface` uniformly, adding
+two more is a `_SIDEBAND` list and a loop, not tripling every
+`if tuser_width:` guard by hand. `axis_streamify.py`'s decorator uses this
+variant specifically for that reason.
+
 ## Declarative (ModuleSpec) variant
 
 `axi_stream_slice_declarative.py` builds the identical module again, this time in
@@ -189,11 +196,11 @@ of at all: a module definition as a Python value, passed into a function
 that builds a bigger module around it.
 
 ```python
-@axis_streamify(data_width=16)
-def build_my_pipeline(m, clk, rst, ce, tdata, tvalid, tlast):
+@axis_streamify(data_width=16, tuser_width=4, sof_tuser_bit=0)
+def build_my_pipeline(m, clk, rst, ce, tdata, tvalid, tlast, sideband, sof):
     # ordinary if (ce) begin ... end register stages -- no AXI-Stream here
     ...
-    return final_tdata, final_tvalid, final_tlast
+    return final_tdata, final_tvalid, final_tlast, final_sideband
 
 top, design = build_my_pipeline(name="my_pipeline_streamified")
 ```
@@ -204,37 +211,86 @@ zero knowledge that AXI-Stream exists: no `tready`, no slices, no
 backpressure, just registers gated by `ce`. `axis_streamify` builds a
 wrapper module around it that:
 
-1. Instantiates `axi_stream_slice` (this directory's own component --
-   reused as a real sub-module instance, not reimplemented) on the input,
+1. Instantiates `axi_stream_slice_iface` (this directory's own interface-
+   bound component -- reused as a real sub-module instance, not
+   reimplemented; interface-bound specifically because it's the one that
+   supports an arbitrary combination of `tuser`/`tid`/`tdest`) on the input,
    isolating the pipeline from the upstream producer's timing.
 2. Calls the decorated function to fill in the pipeline body, wired to the
    input slice's registered output.
-3. Instantiates a second `axi_stream_slice` on the output, and derives `ce`
-   from *that* slice's own registered `s_axis_tready` -- notes/hdl_guide.md
-   §3.3, "the key trick": a single clean flop fanned out to the whole
-   pipeline, decoupling its internal timing from the downstream consumer.
+3. Instantiates a second `axi_stream_slice_iface` on the output, and
+   derives `ce` from *that* slice's own registered `s_axis_tready` --
+   notes/hdl_guide.md §3.3, "the key trick": a single clean flop fanned out
+   to the whole pipeline, decoupling its internal timing from the
+   downstream consumer.
 
 Because this produces a real multi-module hierarchy (the wrapper, plus one
-`axi_stream_slice` module instantiated twice), `build(...)` returns
+`axi_stream_slice_iface` module instantiated twice), `build(...)` returns
 `(top, design)` -- a `veriforge.model.design.Design` bundling both modules.
 Pass `design=design` to `Testbench`/`Simulator` for simulation, or emit
 `design.modules` for synthesizable Verilog output.
+
+### Sideband propagation (`tuser`/`tid`/`tdest`)
+
+Pass e.g. `tuser_width=4` and the decorated function additionally receives
+a `sideband` dict (`{"tuser": Signal, ...}`, keyed only by whichever of
+`tuser`/`tid`/`tdest` have width > 0 -- empty if none do) holding that
+beat's registered value, and must return a matching dict of its own
+final-stage signals. The decorator doesn't interpret these values at all,
+just wires them into and out of the pipeline alongside `tdata`/`tvalid`/
+`tlast`.
+
+### Start-of-frame-driven local reset (`sof_tuser_bit`)
+
+gfwx-fpga's own AGENTS.md convention: "prefer local, implicit resets from
+the pixel stream itself -- deassert on tuser == 1 (SOF) with tvalid",
+rather than relying solely on the global synchronous `rst` for per-frame
+pipeline state (running sums, line buffers, anything that must restart
+every frame). Set `sof_tuser_bit=N` and the decorated function additionally
+receives `sof` -- 1-bit, true when the beat currently presented to the
+pipeline has bit `N` of `tuser` set. Typical use:
+`with m.if_(rst | sof): accumulator <<= 0`. When `sof_tuser_bit` is not
+given, `sof` is just the Python literal `0`, so a decorated function can
+always reference it unconditionally.
+
+**A pitfall this feature makes easy to hit, worth knowing before writing a
+stateful pipeline stage**: `ce` means "the pipeline may advance if it has a
+beat," *not* "there is a beat this cycle" -- it's derived from the output
+slice's own readiness, unrelated to whether the input side currently has
+valid data. Under source-side back-pressure, `ce` is frequently high on a
+cycle where `tvalid` is low (a bubble). A stateless per-beat transform
+doesn't care -- garbage computed on a bubble is discarded once `tvalid_pN`
+correctly propagates to 0. A *stateful* stage (an accumulator, in
+particular) does care: update on a bubble and its state is now corrupted
+by an accepted-looking operation on stale/held data, corruption that
+carries into every subsequent real beat. Gate stateful updates on
+`tvalid` in addition to `ce` -- `test_sideband_and_sof_backpressure` in
+`test_axis_streamify.py` exists specifically because this bug slipped
+through on the first pass, undetected until tested under back-pressure;
+see `build_running_sum_pipeline`'s docstring there for the concrete fix.
 
 ```bash
 uv run python examples/axis/slice/test_axis_streamify.py
 ```
 
-`test_axis_streamify.py`'s pipeline computes `y = ((x + 1) ^ 0x0F0F) + 5`
-over three register stages and is tested exactly like the slice itself:
-`test_basic` (no stalls) and `test_backpressure` (heavy `PauseGenerator`
-stalls on both `s_axis` and `m_axis` at once) -- the point being that the
-pipeline body has no backpressure logic of its own at all; both slices
-absorb it, for free, just from the decorator.
+`test_axis_streamify.py` has two decorated demo pipelines, each tested
+under both no-stall and heavy-`PauseGenerator`-on-both-sides conditions:
 
-Deliberately kept simple rather than fully general: fixed `has_tlast=True`,
-no `tuser` support, and the pipeline is assumed fixed-latency (`tvalid`
-rides along under `ce`, no per-stage stalling). See the module docstring in
-`axis_streamify.py` for the exact contract.
+- `build_demo_pipeline` -- `y = ((x + 1) ^ 0x0F0F) + 5` over three plain
+  register stages, no sideband/sof. The point of `test_basic`/
+  `test_backpressure`: the pipeline body has zero backpressure logic of
+  its own; both slices absorb it, for free, just from the decorator.
+- `build_running_sum_pipeline` -- a per-frame running sum (`tuser_width=3`,
+  `sof_tuser_bit=0`), with a "channel" tag riding through unchanged in the
+  other two `tuser` bits. `test_sideband_and_sof`/
+  `test_sideband_and_sof_backpressure` verify the accumulator restarts at
+  each frame boundary (driven by `sof`, not `tlast`) and `tuser` arrives at
+  `m_axis` byte-for-byte identical to what was sent.
+
+Limitation kept deliberately simple rather than fully general: the
+pipeline is assumed fixed-latency (`tvalid`/`tlast`/sideband all ride along
+under the same `ce`, no per-stage stalling, no variable latency). See the
+module docstring in `axis_streamify.py` for the exact contract.
 
 ## Using this component from another project
 
