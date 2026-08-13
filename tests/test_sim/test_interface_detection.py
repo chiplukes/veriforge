@@ -335,6 +335,23 @@ def test_relaxed_axis_without_tlast() -> None:
     assert "tlast" not in relaxed[0].signals
 
 
+def test_relaxed_axis_without_tready() -> None:
+    """With tready relaxed, a tready-less (fixed-latency, no-flow-control) AXIS bundle is detected."""
+    mod = _make_model_module(
+        [
+            ("s_tvalid", PortDirection.INPUT),
+            ("s_tdata", PortDirection.INPUT),
+            ("s_tlast", PortDirection.INPUT),
+        ]
+    )
+    relaxed = detect_relaxed_interfaces(mod, relaxed_signals={"axi_stream": ["tready"]})
+    assert len(relaxed) == 1
+    assert relaxed[0].protocol == "axi_stream"
+    assert relaxed[0].prefix == "s"
+    assert relaxed[0].role == "slave"
+    assert "tready" not in relaxed[0].signals
+
+
 def test_relaxed_axis_needs_core_signals() -> None:
     """Relaxing tlast doesn't help when core signals (tvalid/tready/tdata) are missing."""
     mod = _make_model_module(

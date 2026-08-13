@@ -9,9 +9,11 @@ wants):
   * ``test_backpressure()``     -- PauseGenerator stalls on both sides at once.
   * ``test_parameter_variants()`` -- tuser_width=0 and a wider data/tuser
     combination, each run through the same stress pattern.
-  * ``test_no_tlast_variant_lowlevel()`` -- has_tlast=False, driven directly
-    through ``veriforge.sim.Simulator`` since the high-level
-    ``bench.iface()`` proxies currently require a ``tlast`` port.
+  * ``test_no_tlast_variant()`` -- has_tlast=False, driven through the same
+    high-level ``bench.iface()`` API as every other test here, via
+    ``relaxed_iface_signals``. ``AXIStreamSource``/``AXIStreamSink`` used to
+    hard-require ``tlast``; both now treat it as optional (every accepted
+    beat becomes its own one-beat frame when it's absent).
   * ``test_iface_variant_matches_raw()`` -- the ``m.interface()``-built
     module (axi_stream_slice_iface.py) behaves identically to the raw-port
     one for the same stimulus.
@@ -38,7 +40,6 @@ from axi_stream_slice_iface import build_axi_stream_slice_iface
 from axi_stream_slice_declarative import build_axi_stream_slice_declarative
 from axi_stream_slice_declarative_iface import build_axi_stream_slice_declarative_iface
 
-from veriforge.sim import Simulator
 from veriforge.sim.bench import Testbench
 from veriforge.sim.endpoints import PauseGenerator
 
@@ -171,69 +172,37 @@ def test_parameter_variants() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 4b: has_tlast=False, driven through the low-level Simulator directly
+# Step 4b: has_tlast=False, via the same high-level bench.iface() API
 # ---------------------------------------------------------------------------
 
 
-def test_no_tlast_variant_lowlevel() -> None:
-    """Cover has_tlast=False by driving the DUT with Simulator directly.
+def test_no_tlast_variant() -> None:
+    """has_tlast=False, driven through the same high-level bench.iface() API as everything else.
 
-    bench.iface() can't drive this variant (see test_parameter_variants'
-    docstring), so this drops to the same drive/settle/posedge level the
-    high-level proxies are themselves built on, to still validate the
-    module's tlast-less mode.
+    Needs relaxed_iface_signals since tlast is a required signal for
+    strict AXI-Stream auto-detection; the DUT itself is otherwise a normal
+    module. With no tlast, AXIStreamSink treats every accepted beat as its
+    own one-beat frame (see axis_sink.py's docstring), so this drains with
+    n_beats individual get() calls rather than one multi-beat expect().
     """
-    import random
-
-    def posedge(sim):
-        sim.drive("clk", 1)
-        sim.settle()
-        sim.drive("clk", 0)
-        sim.settle()
-
-    rng = random.Random(99)  # noqa: S311
     n_beats = 60
-    dut = build_axi_stream_slice(data_width=8, tuser_width=0, has_tlast=False, name="slice_no_tlast_lowlevel")
-    sim = Simulator(dut)
+    dut = build_axi_stream_slice(data_width=8, tuser_width=0, has_tlast=False, name="slice_no_tlast")
+    bench = Testbench(dut, overrides={"relaxed_iface_signals": {"axi_stream": ["tlast"]}})
 
-    sim.drive("clk", 0)
-    sim.drive("rst", 1)
-    sim.drive("s_axis_tvalid", 0)
-    sim.drive("s_axis_tdata", 0)
-    sim.drive("m_axis_tready", 0)
-    sim.settle()
-    posedge(sim)
-    posedge(sim)
-    sim.drive("rst", 0)
-    sim.settle()
+    with bench.run():
+        bench.reset_all()
+        s_axis = bench.iface("s_axis")
+        m_axis = bench.iface("m_axis")
+        s_axis.pause = PauseGenerator(2, 5, seed=99)
+        m_axis.pause = PauseGenerator(2, 5, seed=41)
 
-    received: list[int] = []
-    sent = 0
-    offering = False
-    for _ in range(n_beats * 40 + 200):
-        sim.drive("m_axis_tready", 1 if rng.random() < 0.6 else 0)
-        if sent < n_beats:
-            if not offering:
-                offering = rng.random() < 0.6
-            sim.drive("s_axis_tvalid", 1 if offering else 0)
-            sim.drive("s_axis_tdata", sent & 0xFF)
-        else:
-            sim.drive("s_axis_tvalid", 0)
-        sim.settle()
-        s_acc = int(sim.read("s_axis_tvalid")) and int(sim.read("s_axis_tready"))
-        if int(sim.read("m_axis_tvalid")) and int(sim.read("m_axis_tready")):
-            received.append(int(sim.read("m_axis_tdata")))
-        posedge(sim)
-        if s_acc:
-            sent += 1
-            offering = False
-        if len(received) >= n_beats:
-            break
+        data = list(range(n_beats))
+        s_axis.put(data)
+        received = [m_axis.get(timeout=200).data[0] for _ in range(n_beats)]
 
-    expected = list(range(n_beats))
-    assert received == expected, f"has_tlast=False mismatch: got {received}, expected {expected}"
+    assert received == data, f"has_tlast=False mismatch: got {received}, expected {data}"
     print(f"  received {len(received)} beats, has_tlast=False, no mismatches")
-    print("test_no_tlast_variant_lowlevel: PASSED\n")
+    print("test_no_tlast_variant: PASSED\n")
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +312,7 @@ def main() -> None:
     test_basic(vcd=args.vcd)
     test_backpressure(vcd=args.vcd)
     test_parameter_variants()
-    test_no_tlast_variant_lowlevel()
+    test_no_tlast_variant()
     test_iface_variant_matches_raw()
     test_declarative_variant_matches_raw()
     test_declarative_iface_variant_matches_raw()

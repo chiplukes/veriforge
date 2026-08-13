@@ -82,9 +82,8 @@ What's covered:
   register is still full and undrained.
 - **`test_parameter_variants`** -- `tuser_width=0` and a wider
   data/tuser combination, same stress pattern.
-- **`test_no_tlast_variant_lowlevel`** -- `has_tlast=False`, driven through
-  `veriforge.sim.Simulator` directly rather than `bench.iface()` (see
-  below).
+- **`test_no_tlast_variant`** -- `has_tlast=False`, driven through the same
+  high-level `bench.iface()` API as every other test here (see below).
 - **`test_iface_variant_matches_raw`** -- `axi_stream_slice_iface.py`
   produces identical behavior to the raw-port module for the same stimulus.
 - **`test_declarative_variant_matches_raw`** -- `axi_stream_slice_declarative.py`
@@ -92,17 +91,25 @@ What's covered:
 - **`test_declarative_iface_variant_matches_raw`** -- `axi_stream_slice_declarative_iface.py`
   produces identical behavior to the raw-port module for the same stimulus.
 
-### A framework limitation found along the way
+### A framework limitation found along the way (now fixed upstream)
 
 `has_tlast=False` is a real, working mode of this module, but veriforge's
-high-level `AXIStreamProxy` / `AXIStreamSource` endpoints currently
-hard-require a `tlast` port on the DUT, even though the *planner* already
-supports relaxed ("tlast-less AXIS") detection via `relaxed_iface_signals`.
-So that variant is tested by dropping to `Simulator.drive()/settle()`
-directly instead of `bench.iface()`. If tlast-less streams need first-class
-high-level testbench support, that's a follow-up in
-`src/veriforge/sim/endpoints/axis_source.py` (and the matching sink), not
-something to fix in this example.
+high-level `AXIStreamSource`/`AXIStreamSink` endpoints used to hard-require
+a `tlast` port on the DUT, even though the *planner* already supported
+relaxed ("tlast-less AXIS") detection via `relaxed_iface_signals` -- so this
+variant originally had to be tested by dropping to
+`Simulator.drive()/settle()` directly instead of `bench.iface()`.
+
+That's fixed now in `src/veriforge/sim/endpoints/axis_source.py`/
+`axis_sink.py`: `tlast` (like `tready`, `tkeep`, `tdest`, `tid`, `tuser`) is
+optional. With no `tlast` at all, there's no wire that could ever signal a
+frame boundary, so the sink treats **every accepted beat as its own
+one-beat frame** -- `test_no_tlast_variant` drains with `n_beats`
+individual `get()` calls rather than one multi-beat `expect()`, per that
+behavior. `tready` is optional too, for the same reason (a fixed-latency
+pipeline with no flow control at all) -- see
+`tests/test_sim/test_axis_endpoints.py` for the endpoint-level tests
+covering both, independently and combined.
 
 ## Interface-based variant
 

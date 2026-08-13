@@ -15,6 +15,22 @@ class AXIStreamSource:  # cm:8b7f1d
 
     The endpoint drives a source interface such as ``s_axis_*`` or ``m_axis_*``
     through the existing Simulator API.
+
+    ``tready`` is optional: some DUTs (fixed-latency pipelines with no
+    internal buffering, e.g. a combinational or fully-pipelined LUT chain)
+    expose ``tvalid``/``tdata``/``tlast`` with no flow control at all. When
+    ``tready`` is absent, every beat presented is treated as accepted the
+    same cycle it's driven -- there is no other signal that could indicate
+    otherwise. ``pause`` still works in this mode (it controls whether the
+    source *offers* a beat at all, a producer-side decision independent of
+    any consumer acknowledgement).
+
+    ``tlast`` is also optional. Frames still queue and split into beats
+    exactly as normal on the Python side (via :meth:`send`) -- ``tlast``
+    just isn't driven onto a wire that doesn't exist, so a DUT with no
+    ``tlast`` port simply never observes frame boundaries on this
+    interface, same as it would for any other absent optional signal
+    (``tkeep``/``tdest``/``tid``/``tuser``).
     """
 
     def __init__(self, sim, prefix: str):
@@ -28,9 +44,9 @@ class AXIStreamSource:  # cm:8b7f1d
         self._sampled_handshake = False
 
         self.tvalid = self._required_signal("tvalid")
-        self.tready = self._required_signal("tready")
+        self.tready = self._optional_signal("tready")
         self.tdata = self._required_signal("tdata")
-        self.tlast = self._required_signal("tlast")
+        self.tlast = self._optional_signal("tlast")
         self.tkeep = self._optional_signal("tkeep")
         self.tdest = self._optional_signal("tdest")
         self.tid = self._optional_signal("tid")
@@ -64,7 +80,8 @@ class AXIStreamSource:  # cm:8b7f1d
     def _drive_idle(self) -> None:
         step_drive(self.sim, self.sim._engine, self.tvalid.name, 0)
         step_drive(self.sim, self.sim._engine, self.tdata.name, 0)
-        step_drive(self.sim, self.sim._engine, self.tlast.name, 0)
+        if self.tlast is not None:
+            step_drive(self.sim, self.sim._engine, self.tlast.name, 0)
         if self.tkeep is not None:
             step_drive(self.sim, self.sim._engine, self.tkeep.name, 0)
         if self.tdest is not None:
@@ -122,7 +139,8 @@ class AXIStreamSource:  # cm:8b7f1d
         tdata, tkeep, tdest, tuser, tid, tlast = self._current_beat
         step_drive(self.sim, self.sim._engine, self.tvalid.name, 1)
         step_drive(self.sim, self.sim._engine, self.tdata.name, tdata)
-        step_drive(self.sim, self.sim._engine, self.tlast.name, tlast)
+        if self.tlast is not None:
+            step_drive(self.sim, self.sim._engine, self.tlast.name, tlast)
         if self.tkeep is not None:
             step_drive(self.sim, self.sim._engine, self.tkeep.name, tkeep)
         if self.tdest is not None:
@@ -136,7 +154,9 @@ class AXIStreamSource:  # cm:8b7f1d
         self._sampled_handshake = False
         if self._paused_this_cycle or self._current_beat is None:
             return
-        self._sampled_handshake = int(self.tready.value) == 1
+        # No tready at all: nothing can defer acceptance, so every beat
+        # offered is accepted the same cycle it's presented.
+        self._sampled_handshake = True if self.tready is None else int(self.tready.value) == 1
 
     def tick_post(self) -> None:
         if self._paused_this_cycle or self._current_beat is None:
