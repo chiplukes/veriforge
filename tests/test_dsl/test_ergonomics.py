@@ -12,7 +12,7 @@ from veriforge.codegen.verilog_emitter import emit_expression, emit_module
 from veriforge.dsl import Module, cat, mux, posedge, select, when
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.behavioral import SensitivityType
-from veriforge.model.statements import IfStatement, NonblockingAssign
+from veriforge.model.statements import BlockingAssign, IfStatement, NonblockingAssign
 from veriforge.sim import Simulator
 
 
@@ -164,6 +164,58 @@ class TestNextProperty:
             q = m.output_reg("q", 8)
             with pytest.raises(TypeError, match="write-only"):
                 _ = q.next
+
+
+# ---------------------------------------------------------------------------
+# Signal.now
+# ---------------------------------------------------------------------------
+
+
+class TestNowProperty:
+    def test_now_creates_blocking_assign(self):
+        with Module("t") as m:
+            a = m.input("a", 8)
+            q = m.output_reg("q", 8)
+            with m.comb():
+                q.now = a + 1
+        mod = m.build()
+        stmt = mod.always_blocks[0].body
+        assert isinstance(stmt, BlockingAssign)
+        assert "q = a + 1;" in emit_module(mod)
+
+    def test_now_matches_imatmul(self):
+        with Module("t") as m:
+            a = m.input("a", 8)
+            q = m.output_reg("q", 8)
+            with m.comb():
+                q.now = a + 1
+        with Module("t") as m2:
+            a2 = m2.input("a", 8)
+            q2 = m2.output_reg("q", 8)
+            with m2.comb():
+                q2 @= a2 + 1
+        assert emit_module(m.build()) == emit_module(m2.build())
+
+    def test_now_on_subscript(self):
+        with Module("t") as m:
+            a = m.input("a", 8)
+            data = m.reg("data", 8)
+            i = m.input("i", 3)
+            with m.comb():
+                data[i].now = a[0]
+        assert "data[i] = a[0];" in emit_module(m.build())
+
+    def test_now_outside_block_raises(self):
+        with Module("t") as m:
+            q = m.output_reg("q", 8)
+            with pytest.raises(RuntimeError, match="always or initial"):
+                q.now = 1
+
+    def test_now_read_raises(self):
+        with Module("t") as m:
+            q = m.output_reg("q", 8)
+            with pytest.raises(TypeError, match="write-only"):
+                _ = q.now
 
 
 # ---------------------------------------------------------------------------

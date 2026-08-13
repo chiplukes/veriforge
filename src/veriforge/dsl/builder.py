@@ -490,6 +490,28 @@ class Expr:
         self._builder._append_stmt(stmt)
 
     @property
+    def now(self) -> Expr:
+        """Reading ``.now`` is not meaningful — it exists only as an assignment target."""
+        raise TypeError(
+            "'.now' is write-only: use `sig.now = expr` for a blocking assignment. "
+            "To read the signal's current value, use the signal itself."
+        )
+
+    @now.setter
+    def now(self, other: object) -> None:
+        """Blocking assignment: ``signal.now = expr`` (alias for ``signal @= expr``).
+
+        Pairs with ``.next`` as its temporal opposite: ``.next`` takes
+        effect on the next clock edge, ``.now`` takes effect immediately
+        (within the current evaluation) — exactly Verilog's non-blocking
+        vs. blocking distinction.
+        """
+        if self._builder is None or not self._builder._block_stack:
+            raise RuntimeError("Blocking assignment (.now =) must be inside an always or initial block")
+        stmt = BlockingAssign(self._as_expr(), _to_expr_node(other))
+        self._builder._append_stmt(stmt)
+
+    @property
     def assign(self) -> Expr:
         """Reading ``.assign`` is not meaningful — it exists only as an assignment target."""
         raise TypeError(

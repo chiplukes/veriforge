@@ -90,13 +90,14 @@ result = (a + b) & 0xFF   # Expr wrapping BinaryOp("&", BinaryOp("+", ...), Lite
 
 ### Assignments
 
-Two assignment types exist:
+Three assignment types exist (non-blocking, blocking, continuous), each with an operator and a property-setter form (plus method forms for use inside generated/loop-driven code):
 
 | Syntax | Verilog Equivalent | Use Case |
 |--------|-------------------|----------|
 | `signal <<= expr` | `signal <= expr;` | Non-blocking (sequential `always` blocks) |
 | `signal.next = expr` | `signal <= expr;` | Non-blocking (property form, MyHDL-style) |
 | `signal @= expr` | `signal = expr;` | Blocking (combinational `always` blocks) |
+| `signal.now = expr` | `signal = expr;` | Blocking (property form) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous assignment (outside always) |
 | `signal.assign = expr` | `assign signal = expr;` | Continuous assignment (property form) |
 | `m.assign_nb(lhs, rhs)` | `lhs <= rhs;` | Non-blocking (method form) |
@@ -106,12 +107,19 @@ Two assignment types exist:
 works on selects (`data[i].next = x`). Reading `.next` raises — it is an
 assignment target only.
 
+`signal.now = expr` and `signal @= expr` are interchangeable, same relationship
+as `.next`/`<<=` — `.now` pairs with `.next` as its temporal opposite
+(effective immediately vs. on the next clock edge), and is the property-form
+counterpart `.set()` never quite was (`.set()` is still a method call, not an
+assignment target, which is why it's deprecated in `.now`'s favor). Reading
+`.now` raises, same as `.next`.
+
 `signal.assign = expr` is the property-form equivalent of `m.assign(signal,
 expr)` — same rules apply (outside any `always`/`initial` block, not onto an
 input port, not onto a reg-type signal). Reading `.assign` raises, same as
 `.next`.
 
-> **Note:** `signal.set(expr)` is a deprecated alias for `signal @= expr` and still works.
+> **Note:** `signal.set(expr)` is a deprecated alias for `signal @= expr` (prefer `signal.now = expr`) and still works.
 > `m.assign_nonblocking` / `m.assign_blocking` are long-form aliases for `m.assign_nb` / `m.assign_b`.
 
 ## Port and Signal Declarations
