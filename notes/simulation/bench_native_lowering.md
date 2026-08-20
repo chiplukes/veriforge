@@ -386,6 +386,15 @@ port. Supports INCR bursts of arbitrary length, WSTRB byte-merge writes,
 and always responds OKAY (`2'b00`). Each memory cell is exposed as a wrapper
 output port for easy inspection after the simulation.
 
+Reads and writes are served by **independent** state machines — AR
+acceptance is never blocked by an in-flight write, and vice versa. Up to
+`max_outstanding` read bursts (and `max_outstanding` completed-but-unacked
+write responses) can be queued at once, modeling a pipelined DDR/HBM-style
+controller: the first beat returned to an idle read (write) pipeline pays a
+randomized `rd_latency_cycles`/`wr_latency_cycles` delay, while further
+queued bursts are throttled to sustain `max_bw_percent` of the theoretical
+peak instead of re-paying that latency.
+
 ```python
 AXI4SlaveLowering(
     memory_depth=16,            # number of words (each word = data_width bits)
@@ -396,28 +405,42 @@ AXI4SlaveLowering(
         0: 0xAAAA0000,
         1: 0xAAAA0001,
     },
+    max_outstanding=4,          # read-burst / write-response queue depth
+    rd_latency_cycles=1,        # <=1 means "respond as soon as possible"
+    wr_latency_cycles=1,        # same, for the first B after an idle pipeline
+    max_bw_percent=100,         # 100 (default) never throttles
+    wr_max_bw_percent=None,     # defaults to max_bw_percent when not given
+    latency_seed=0,             # base seed for the latency/bandwidth/pause LFSRs
+    ar_pause=None,              # (prng_bits, pause_threshold) or None
+    # aw_pause / w_pause / b_pause / r_pause follow the same shape
 )
 ```
 
 **Word addressing**: the byte address is right-shifted by `log2(data_width/8)`.
 For `data_width=32`, address `0x10` → word index 4.
 
+**Per-channel pause**: `aw_pause`, `w_pause`, `ar_pause` gate their
+respective ready signal on a per-cycle random duty cycle (pause probability
+is `pause_threshold / 2**prng_bits`); `b_pause`/`r_pause` delay *starting* a
+new response only — a burst already in flight is never interrupted. All
+five default to `None` (never paused).
+
 **Capture output ports** (one per word):
 
 | Port | Width | Description |
 |------|-------|-------------|
 | `<prefix>_slv_mem_<i>` | `data_width` | Memory word at index *i* after simulation |
-| `<prefix>_slv_aw_count` | 8 | Number of AW transactions accepted |
-| `<prefix>_slv_w_count` | 8 | Number of W beats accepted |
-| `<prefix>_slv_ar_count` | 8 | Number of AR transactions accepted |
+| `<prefix>_slv_aw_count` | 16 | Number of AW transactions accepted |
+| `<prefix>_slv_w_count` | 16 | Number of W beats accepted |
+| `<prefix>_slv_ar_count` | 16 | Number of AR transactions accepted |
 
 **DUT port role**: DUT is a `master` (the bench acts as a slave responder).
 
 **Limitations:**
-- Single outstanding transaction (AW handshake blocks AR until B completes).
 - FIXED bursts still increment address per beat (use INCR only).
 - WRAP bursts not modeled.
 - No exclusive access.
+- Always responds OKAY — no error-response injection.
 
 ---
 
@@ -848,6 +871,11 @@ first-compile time.
 For large memories where you only need to inspect a few locations,
 read `u_dut.<signal_name>` directly instead of relying on the wrapper
 output ports, or use `engine="vm"` (no compilation step).
+
+`max_outstanding` on `AXI4SlaveLowering` also scales generated register
+count (each slot needs its own address/length/ID registers) but far more
+modestly than `memory_depth` — keep it in the single digits unless you
+specifically need deep read/write pipelining.
 
 ---
 

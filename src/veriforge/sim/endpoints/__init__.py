@@ -9,7 +9,7 @@ from .axi_lite_response_driver import AXILiteResponseDriver
 from .axi_lite_responder import AXILiteResponder, AXILiteProtocolError
 from .axi_lite_master import AXILiteMaster, AXILiteResponseError
 from .axi4_master import AXI4Master, AXI4ResponseError
-from .axi4_responder import AXI4Responder
+from .axi4_responder import AXI4Responder, AXI4ProtocolError
 from .axis_sink import AXIStreamSink
 from .axis_source import AXIStreamSource
 from .detect import (
@@ -36,6 +36,7 @@ from .stream_source import StreamSource
 
 __all__ = [
     "AXI4Master",
+    "AXI4ProtocolError",
     "AXI4Responder",
     "AXI4ResponseError",
     "AXILiteMaster",

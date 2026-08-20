@@ -100,6 +100,55 @@ _AXI_LITE_MASTER_OUTPUTS = {
     "rready",
 }
 _AXI_LITE_SLAVE_OUTPUTS = set(AXI_LITE_REQUIRED_SIGNALS) - _AXI_LITE_MASTER_OUTPUTS
+# Partition of AXI4_REQUIRED_SIGNALS into its write (AW/W/B) and read
+# (AR/R) halves, used to auto-detect whole-channel-optional AXI4
+# interfaces (e.g. a read-only DMA engine that has no AW/W/B ports at
+# all). See `_detect_protocol()`'s read-only/write-only fallback.
+AXI4_WRITE_CHANNEL_SIGNALS = (
+    "awaddr",
+    "awlen",
+    "awsize",
+    "awburst",
+    "awvalid",
+    "awready",
+    "wdata",
+    "wstrb",
+    "wlast",
+    "wvalid",
+    "wready",
+    "bresp",
+    "bvalid",
+    "bready",
+)
+AXI4_READ_CHANNEL_SIGNALS = (
+    "araddr",
+    "arlen",
+    "arsize",
+    "arburst",
+    "arvalid",
+    "arready",
+    "rdata",
+    "rresp",
+    "rlast",
+    "rvalid",
+    "rready",
+)
+assert set(AXI4_WRITE_CHANNEL_SIGNALS) | set(AXI4_READ_CHANNEL_SIGNALS) == set(AXI4_REQUIRED_SIGNALS)
+_AXI4_WRITE_CHANNEL_OPTIONAL = (
+    "awid",
+    "awlock",
+    "awcache",
+    "awprot",
+    "awqos",
+    "awregion",
+    "awuser",
+    "wuser",
+    "bid",
+    "buser",
+)
+_AXI4_READ_CHANNEL_OPTIONAL = ("arid", "arlock", "arcache", "arprot", "arqos", "arregion", "aruser", "rid", "ruser")
+assert set(_AXI4_WRITE_CHANNEL_OPTIONAL) | set(_AXI4_READ_CHANNEL_OPTIONAL) == set(AXI4_OPTIONAL_SIGNALS)
+
 _AXI4_MASTER_OUTPUTS = {
     # AW
     "awid",
@@ -220,6 +269,13 @@ class DetectedInterface:  # cm:5a4c7e
         from .axi4_master import AXI4Master
 
         return AXI4Master(sim, self.prefix, **kwargs)
+
+    def make_axi4_responder(self, sim, **kwargs):
+        if self.protocol != "axi4" or self.role != "master":
+            raise ValueError("AXI4 responder requires a detected master-side DUT bundle")
+        from .axi4_responder import AXI4Responder
+
+        return AXI4Responder(sim, self.prefix, **kwargs)
 
     def make_stream_source(self, sim):
         if self.protocol != "stream" or self.role != "slave":
@@ -369,6 +425,41 @@ def _detect_protocol(prefix: str, signals: dict[str, Port]) -> DetectedInterface
             protocol="axi_stream",
             role=role,
             signals={name: signals[name] for name in axis_names},
+        )
+
+    # Whole-channel-optional AXI4: some real interfaces (e.g. a read-only
+    # DMA engine) genuinely have no AW/W/B ports, or no AR/R ports, at all —
+    # not just a missing sideband signal. Try each half on its own once the
+    # full-AXI4 match above has failed. Require the *other* half's signals
+    # to be completely absent (not just incomplete) to avoid misclassifying
+    # a near-complete bidirectional interface that's simply missing one
+    # required signal — that case is better served by near-miss reporting.
+    if set(AXI4_READ_CHANNEL_SIGNALS).issubset(signal_names) and not (set(AXI4_WRITE_CHANNEL_SIGNALS) & signal_names):
+        present = [name for name in (*AXI4_READ_CHANNEL_SIGNALS, *_AXI4_READ_CHANNEL_OPTIONAL) if name in signals]
+        role = _infer_role(
+            {name: signals[name] for name in present},
+            master_outputs=_AXI4_MASTER_OUTPUTS,
+            slave_outputs=_AXI4_SLAVE_OUTPUTS,
+        )
+        return DetectedInterface(
+            prefix=prefix,
+            protocol="axi4",
+            role=role,
+            signals={name: signals[name] for name in present},
+        )
+
+    if set(AXI4_WRITE_CHANNEL_SIGNALS).issubset(signal_names) and not (set(AXI4_READ_CHANNEL_SIGNALS) & signal_names):
+        present = [name for name in (*AXI4_WRITE_CHANNEL_SIGNALS, *_AXI4_WRITE_CHANNEL_OPTIONAL) if name in signals]
+        role = _infer_role(
+            {name: signals[name] for name in present},
+            master_outputs=_AXI4_MASTER_OUTPUTS,
+            slave_outputs=_AXI4_SLAVE_OUTPUTS,
+        )
+        return DetectedInterface(
+            prefix=prefix,
+            protocol="axi4",
+            role=role,
+            signals={name: signals[name] for name in present},
         )
 
     return None

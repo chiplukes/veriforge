@@ -856,6 +856,21 @@ class AXI4SlaveLowering:  # cm:c9a1e6
     Word addressing: the byte address is shifted by ``log2(data_width/8)``
     to index the memory array.
 
+    Reads and writes are served by independent state machines, so AR
+    acceptance is never blocked by an in-flight write (and vice versa).
+    Up to ``max_outstanding`` read bursts — and ``max_outstanding``
+    completed-but-unacked write responses — may be queued at once,
+    modeling a pipelined DDR/HBM-style controller: the first beat
+    returned to an idle read (write) pipeline pays a randomized
+    ``rd_latency_cycles``/``wr_latency_cycles`` delay, while further
+    queued bursts are throttled to sustain ``max_bw_percent`` of the
+    theoretical peak instead of re-paying that latency. Optional
+    per-channel PAUSE (``aw_pause``/``w_pause``/``ar_pause``/``b_pause``/
+    ``r_pause``, each an ``(prng_bits, pause_threshold)`` tuple — pause
+    probability is ``pause_threshold / 2**prng_bits``) can randomly
+    withhold readiness on AW/W/AR, or delay *starting* a new B/R response,
+    on each channel independently.
+
     Args:
         memory_depth: Number of words in the backing memory. Each word
             becomes a wrapper output port; keep this small (≤ 256) to
@@ -865,14 +880,34 @@ class AXI4SlaveLowering:  # cm:c9a1e6
         id_width: Width of *ID signals (set 0 to disable; use the
             DUT's actual ID width when present).
         initial_memory: Optional dict of word_index -> initial value.
+        max_outstanding: Depth of the read-burst queue and the
+            completed-write-awaiting-B queue. Even at 1, reads are never
+            blocked by an in-flight write.
+        rd_latency_cycles: Mean extra-cycle latency before the first beat
+            returned to an idle read pipeline. <= 1 means "respond as
+            soon as possible" (no extra latency — the default, and the
+            only value that reproduces the pre-latency-model timing).
+        wr_latency_cycles: Same, for the first B response after an idle
+            write pipeline.
+        max_bw_percent: Percentage of cycles a primed read pipeline may
+            start a new burst on. 100 (default) never throttles.
+        wr_max_bw_percent: Same, for B responses. Defaults to
+            ``max_bw_percent`` when not given.
+        latency_seed: Base seed for the latency-jitter/bandwidth-throttle/
+            pause LFSRs (each purpose derives its own seed from this).
+        aw_pause, w_pause, ar_pause, b_pause, r_pause: Optional
+            ``(prng_bits, pause_threshold)`` tuples enabling a per-cycle
+            random pause on that channel (``None`` = never paused).
+            ``b_pause``/``r_pause`` only delay *starting* a new response
+            (a burst already in flight is never interrupted).
 
     Limitations:
 
     * FIXED bursts degenerate to single-beat correctness (still increments
       address per beat — caller should not use FIXED).
     * WRAP bursts are not modeled.
-    * Single outstanding transaction; AW handshake blocks AR until B.
     * No exclusive access modeling.
+    * Always responds OKAY — no error-response injection.
     """
 
     memory_depth: int = 16
@@ -880,6 +915,17 @@ class AXI4SlaveLowering:  # cm:c9a1e6
     addr_width: int = 32
     id_width: int = 0
     initial_memory: Mapping[int, int] | None = None
+    max_outstanding: int = 4
+    rd_latency_cycles: int = 1
+    wr_latency_cycles: int = 1
+    max_bw_percent: int = 100
+    wr_max_bw_percent: int | None = None
+    latency_seed: int = 0
+    aw_pause: tuple[int, int] | None = None
+    w_pause: tuple[int, int] | None = None
+    ar_pause: tuple[int, int] | None = None
+    b_pause: tuple[int, int] | None = None
+    r_pause: tuple[int, int] | None = None
     protocol: str = "axi4"
     role: str = "master"  # DUT side; lowering is a *slave*
 
@@ -904,6 +950,8 @@ class AXI4SlaveLowering:  # cm:c9a1e6
             raise LoweringError(f"AXI4SlaveLowering[{binding.prefix}]: data_width must be a multiple of 8")
         if self.id_width < 0:
             raise LoweringError(f"AXI4SlaveLowering[{binding.prefix}]: id_width must be >= 0")
+        if self.max_outstanding <= 0:
+            raise LoweringError(f"AXI4SlaveLowering[{binding.prefix}]: max_outstanding must be positive")
 
         from veriforge.dsl import cat, mux
 
@@ -914,27 +962,42 @@ class AXI4SlaveLowering:  # cm:c9a1e6
         word_addr_shift = (n_bytes - 1).bit_length()  # log2(n_bytes), 0 for 1 byte
         addr_index_width = _bit_width_for(depth + 1)
         len_width = 8  # AXI4 awlen/arlen are 8 bits
+        n_out = self.max_outstanding
+        count_width = _bit_width_for(n_out + 1)
+        wr_max_bw = self.max_bw_percent if self.wr_max_bw_percent is None else self.wr_max_bw_percent
+        rd_needs_latency = self.rd_latency_cycles > 1
+        rd_needs_bw = self.max_bw_percent < 100
+        wr_needs_latency = self.wr_latency_cycles > 1
+        wr_needs_bw = wr_max_bw < 100
 
-        # State encoding: IDLE=0, W_BURST=1, B_RESP=2, R_BURST=3
-        S_IDLE = 0
-        S_W_BURST = 1
-        S_B_RESP = 2
-        S_R_BURST = 3
+        def _and_all(terms: list[object]) -> object:
+            expr: object | None = None
+            for t in terms:
+                expr = t if expr is None else (expr & t)
+            return 1 if expr is None else expr
 
-        state = wrapper.reg(f"{prefix}_slv_state", width=2)
-        burst_addr = wrapper.reg(f"{prefix}_slv_burst_addr", width=addr_index_width)
-        burst_len = wrapper.reg(f"{prefix}_slv_burst_len", width=len_width)
-        burst_id = wrapper.reg(f"{prefix}_slv_burst_id", width=self.id_width) if self.id_width > 0 else None
+        def _jittered_wait_expr(mean_cycles: int, lfsr_wire: object) -> object:
+            """Extra wait cycles (beyond the state transition itself) centered
+            on mean_cycles, jittered from the low bits of a free-running LFSR."""
+            half = max(1, mean_cycles // 2)
+            lo = max(1, mean_cycles - half)
+            hi = mean_cycles + half
+            jitter_bits = _bit_width_for(hi - lo)
+            base = lo - 1
+            return base if jitter_bits == 0 else base + lfsr_wire[jitter_bits - 1 : 0]
 
-        # Memory cells (one output_reg per word so test code can inspect).
+        rst_cond = _reset_condition(rst, domain)
+        sens: list[object] = [posedge(clk)]
+        if rst is not None and domain.reset is not None and domain.reset.style == "async":
+            sens.append(negedge(rst) if domain.reset.active_low else posedge(rst))
+
+        # ------------------------------------------------------------ memory + counters
         mem_cells = [wrapper.output_reg(f"{prefix}_slv_mem_{i}", width=self.data_width) for i in range(depth)]
-
-        # Counters (output ports for diagnostics).
         aw_count = wrapper.output_reg(f"{prefix}_slv_aw_count", width=16)
         w_count = wrapper.output_reg(f"{prefix}_slv_w_count", width=16)
         ar_count = wrapper.output_reg(f"{prefix}_slv_ar_count", width=16)
 
-        # Channel signals.
+        # ------------------------------------------------------------ channel signals
         awvalid = wrapper.wire(f"{prefix}_slv_awvalid")
         awready = wrapper.wire(f"{prefix}_slv_awready")
         awaddr = wrapper.wire(f"{prefix}_slv_awaddr", width=self.addr_width)
@@ -963,37 +1026,122 @@ class AXI4SlaveLowering:  # cm:c9a1e6
         bid_w = wrapper.wire(f"{prefix}_slv_bid", width=self.id_width) if self.id_width > 0 else None
         rid_w = wrapper.wire(f"{prefix}_slv_rid", width=self.id_width) if self.id_width > 0 else None
 
-        # Combinational outputs.
-        wrapper.assign(awready, state == S_IDLE)
-        # AR is accepted only when no AW pending (simple priority).
-        wrapper.assign(arready, (state == S_IDLE) & ~awvalid)
-        wrapper.assign(wready, state == S_W_BURST)
-        wrapper.assign(bvalid, state == S_B_RESP)
-        wrapper.assign(bresp, 0)
-        wrapper.assign(rvalid, state == S_R_BURST)
-        wrapper.assign(rresp, 0)
-        wrapper.assign(rlast, (state == S_R_BURST) & (burst_len == 0))
-        if bid_w is not None and burst_id is not None:
-            wrapper.assign(bid_w, burst_id)
-        if rid_w is not None and burst_id is not None:
-            wrapper.assign(rid_w, burst_id)
+        # ------------------------------------------------------------ per-channel pause
+        def _pause_wire(cfg: "tuple[int, int] | None", name: str, seed_offset: int) -> "object | None":
+            if cfg is None:
+                return None
+            bits, threshold = cfg
+            return _build_lfsr_pause(
+                wrapper, f"{prefix}_slv_{name}", bits, threshold, self.latency_seed + seed_offset, rst_cond, sens
+            )
 
-        # Memory read mux for rdata.
+        awp_w = _pause_wire(self.aw_pause, "awpause", 10)
+        wp_w = _pause_wire(self.w_pause, "wpause", 11)
+        arp_w = _pause_wire(self.ar_pause, "arpause", 12)
+        bp_w = _pause_wire(self.b_pause, "bpause", 13)
+        rp_w = _pause_wire(self.r_pause, "rpause", 14)
+
+        # ------------------------------------------------------------ write-address/data path
+        # W_IDLE=0, W_BURST=1 — decoupled from the read side entirely.
+        W_IDLE, W_BURST = 0, 1
+        w_state = wrapper.reg(f"{prefix}_slv_wstate")
+        w_cur_addr = wrapper.reg(f"{prefix}_slv_w_cur_addr", width=addr_index_width)
+        w_cur_id = wrapper.reg(f"{prefix}_slv_w_cur_id", width=self.id_width) if self.id_width > 0 else None
+
+        # ------------------------------------------------------------ read-burst queue (shift-register FIFO)
+        # Valid entries always pack into slots [0, r_count); "head" is always
+        # slot 0, so no head/tail pointer arithmetic is needed.
+        r_fifo_addr = [wrapper.reg(f"{prefix}_slv_rq_addr_{k}", width=addr_index_width) for k in range(n_out)]
+        r_fifo_len = [wrapper.reg(f"{prefix}_slv_rq_len_{k}", width=len_width) for k in range(n_out)]
+        r_fifo_id = (
+            [wrapper.reg(f"{prefix}_slv_rq_id_{k}", width=self.id_width) for k in range(n_out)]
+            if self.id_width > 0
+            else None
+        )
+        r_count = wrapper.reg(f"{prefix}_slv_rq_count", width=count_width)
+
+        # ------------------------------------------------------------ write-response queue (same FIFO shape)
+        b_fifo_id = (
+            [wrapper.reg(f"{prefix}_slv_bq_id_{k}", width=self.id_width) for k in range(n_out)]
+            if self.id_width > 0
+            else None
+        )
+        b_count = wrapper.reg(f"{prefix}_slv_bq_count", width=count_width)
+
+        # ------------------------------------------------------------ R-serving pipeline
+        R_IDLE, R_WAIT, R_BURST = 0, 1, 2
+        r_state = wrapper.reg(f"{prefix}_slv_r_state", width=2)
+        cur_r_addr = wrapper.reg(f"{prefix}_slv_r_addr", width=addr_index_width)
+        cur_r_len = wrapper.reg(f"{prefix}_slv_r_len", width=len_width)
+        cur_r_id = wrapper.reg(f"{prefix}_slv_r_id", width=self.id_width) if self.id_width > 0 else None
+        r_primed = wrapper.reg(f"{prefix}_slv_r_primed") if (rd_needs_latency or rd_needs_bw) else None
+        r_wait_is_latency = wrapper.reg(f"{prefix}_slv_r_wait_lat") if (rd_needs_latency and rd_needs_bw) else None
+        if rd_needs_latency:
+            r_lat_lfsr = _build_lfsr_data(wrapper, f"{prefix}_slv_rlat", 32, self.latency_seed + 1, rst_cond, sens, 1)
+            r_latency_ctr = wrapper.reg(
+                f"{prefix}_slv_r_latctr",
+                width=_bit_width_for(self.rd_latency_cycles + max(1, self.rd_latency_cycles // 2)),
+            )
+        if rd_needs_bw:
+            rd_bw_stall_w = _build_lfsr_pause(
+                wrapper,
+                f"{prefix}_slv_rbw",
+                8,
+                round((100 - self.max_bw_percent) / 100 * 256),
+                self.latency_seed + 2,
+                rst_cond,
+                sens,
+            )
+
+        # ------------------------------------------------------------ B-serving pipeline
+        B_IDLE, B_WAIT, B_ACTIVE = 0, 1, 2
+        b_state = wrapper.reg(f"{prefix}_slv_b_state", width=2)
+        cur_b_id = wrapper.reg(f"{prefix}_slv_b_id", width=self.id_width) if self.id_width > 0 else None
+        b_primed = wrapper.reg(f"{prefix}_slv_b_primed") if (wr_needs_latency or wr_needs_bw) else None
+        b_wait_is_latency = wrapper.reg(f"{prefix}_slv_b_wait_lat") if (wr_needs_latency and wr_needs_bw) else None
+        if wr_needs_latency:
+            b_lat_lfsr = _build_lfsr_data(wrapper, f"{prefix}_slv_blat", 32, self.latency_seed + 3, rst_cond, sens, 1)
+            b_latency_ctr = wrapper.reg(
+                f"{prefix}_slv_b_latctr",
+                width=_bit_width_for(self.wr_latency_cycles + max(1, self.wr_latency_cycles // 2)),
+            )
+        if wr_needs_bw:
+            wr_bw_stall_w = _build_lfsr_pause(
+                wrapper,
+                f"{prefix}_slv_wbw",
+                8,
+                round((100 - wr_max_bw) / 100 * 256),
+                self.latency_seed + 4,
+                rst_cond,
+                sens,
+            )
+
+        # ------------------------------------------------------------ combinational outputs
+        wrapper.assign(
+            awready, _and_all([w_state == W_IDLE, b_count < n_out] + ([~awp_w] if awp_w is not None else []))
+        )
+        wrapper.assign(arready, _and_all([r_count < n_out] + ([~arp_w] if arp_w is not None else [])))
+        wrapper.assign(wready, _and_all([w_state == W_BURST] + ([~wp_w] if wp_w is not None else [])))
+        wrapper.assign(bvalid, b_state == B_ACTIVE)
+        wrapper.assign(bresp, 0)
+        wrapper.assign(rvalid, r_state == R_BURST)
+        wrapper.assign(rresp, 0)
+        wrapper.assign(rlast, (r_state == R_BURST) & (cur_r_len == 0))
+        if bid_w is not None and cur_b_id is not None:
+            wrapper.assign(bid_w, cur_b_id)
+        if rid_w is not None and cur_r_id is not None:
+            wrapper.assign(rid_w, cur_r_id)
+
+        # Memory read mux for rdata, indexed by the R pipeline's current burst address.
         rdata_expr: object = 0
         for i in range(depth - 1, -1, -1):
-            rdata_expr = mux(burst_addr == i, mem_cells[i], rdata_expr)
+            rdata_expr = mux(cur_r_addr == i, mem_cells[i], rdata_expr)
         wrapper.assign(rdata, rdata_expr)
-
-        rst_cond = _reset_condition(rst, domain)
-        sens: list[object] = [posedge(clk)]
-        if rst is not None and domain.reset is not None and domain.reset.style == "async":
-            sens.append(negedge(rst) if domain.reset.active_low else posedge(rst))
 
         # Helper: build the strobe-merged write word for a given memory cell.
         def _merged_word(old_word: object) -> object:
             """Return cat of bytes (MSB first) with WSTRB selecting old vs new."""
             byte_exprs: list[object] = []  # MSB-first for cat()
-            # cat() takes MSB first; we iterate high byte to low byte.
             for byte_i in range(n_bytes - 1, -1, -1):
                 lo = byte_i * 8
                 old_byte = old_word[lo + 7 : lo]
@@ -1001,13 +1149,17 @@ class AXI4SlaveLowering:  # cm:c9a1e6
                 byte_exprs.append(mux(wstrb[byte_i], new_byte, old_byte))
             return cat(*byte_exprs)
 
+        r_enq = arvalid & arready
+        r_deq = (r_state == R_IDLE) & (r_count > 0)
+        b_enq = wvalid & wready & wlast
+        b_deq = (b_state == B_IDLE) & (b_count > 0)
+
         with wrapper.always(*sens):
             with wrapper.if_(rst_cond):
-                state <<= S_IDLE
-                burst_addr <<= 0
-                burst_len <<= 0
-                if burst_id is not None:
-                    burst_id <<= 0
+                w_state <<= W_IDLE
+                w_cur_addr <<= 0
+                if w_cur_id is not None:
+                    w_cur_id <<= 0
                 aw_count <<= 0
                 w_count <<= 0
                 ar_count <<= 0
@@ -1015,55 +1167,210 @@ class AXI4SlaveLowering:  # cm:c9a1e6
                 for i, r in enumerate(mem_cells):
                     val = int(init.get(i, 0)) & ((1 << self.data_width) - 1)
                     r <<= val  # noqa: PLW2901
+                for k in range(n_out):
+                    r_fifo_addr[k] <<= 0  # noqa: PLW2901
+                    r_fifo_len[k] <<= 0  # noqa: PLW2901
+                    if r_fifo_id is not None:
+                        r_fifo_id[k] <<= 0  # noqa: PLW2901
+                    if b_fifo_id is not None:
+                        b_fifo_id[k] <<= 0  # noqa: PLW2901
+                r_count <<= 0
+                b_count <<= 0
+                r_state <<= R_IDLE
+                cur_r_addr <<= 0
+                cur_r_len <<= 0
+                if cur_r_id is not None:
+                    cur_r_id <<= 0
+                if r_primed is not None:
+                    r_primed <<= 0
+                if r_wait_is_latency is not None:
+                    r_wait_is_latency <<= 0
+                if rd_needs_latency:
+                    r_latency_ctr <<= 0
+                b_state <<= B_IDLE
+                if cur_b_id is not None:
+                    cur_b_id <<= 0
+                if b_primed is not None:
+                    b_primed <<= 0
+                if b_wait_is_latency is not None:
+                    b_wait_is_latency <<= 0
+                if wr_needs_latency:
+                    b_latency_ctr <<= 0
             with wrapper.else_():
-                with wrapper.case(state) as c:
-                    with c.when(S_IDLE):
-                        with wrapper.if_(awvalid & awready):
-                            # Latch AW: byte addr -> word addr
-                            if word_addr_shift > 0:
-                                burst_addr <<= awaddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
-                            else:
-                                burst_addr <<= awaddr[addr_index_width - 1 : 0]
-                            burst_len <<= awlen
-                            if burst_id is not None and awid_w is not None:
-                                burst_id <<= awid_w
-                            aw_count <<= aw_count + 1
-                            state <<= S_W_BURST
-                        with wrapper.elif_(arvalid & arready):
-                            if word_addr_shift > 0:
-                                burst_addr <<= araddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
-                            else:
-                                burst_addr <<= araddr[addr_index_width - 1 : 0]
-                            burst_len <<= arlen
-                            if burst_id is not None and arid_w is not None:
-                                burst_id <<= arid_w
-                            ar_count <<= ar_count + 1
-                            state <<= S_R_BURST
-                    with c.when(S_W_BURST):
-                        with wrapper.if_(wvalid & wready):
-                            # Update memory cell at burst_addr with strobe-merged word.
-                            with wrapper.case(burst_addr) as wc:
-                                for i, cell in enumerate(mem_cells):
-                                    with wc.when(i):
-                                        cell <<= _merged_word(cell)  # noqa: PLW2901
-                                with wc.default():
-                                    pass
-                            burst_addr <<= burst_addr + 1
-                            w_count <<= w_count + 1
-                            with wrapper.if_(wlast):
-                                state <<= S_B_RESP
-                    with c.when(S_B_RESP):
-                        with wrapper.if_(bready & bvalid):
-                            state <<= S_IDLE
-                    with c.when(S_R_BURST):
-                        with wrapper.if_(rready & rvalid):
-                            with wrapper.if_(rlast):
-                                state <<= S_IDLE
+                # ---- AW accept: latch the write burst's running address/id ----
+                with wrapper.if_(awvalid & awready):
+                    if word_addr_shift > 0:
+                        w_cur_addr <<= awaddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
+                    else:
+                        w_cur_addr <<= awaddr[addr_index_width - 1 : 0]
+                    if w_cur_id is not None and awid_w is not None:
+                        w_cur_id <<= awid_w
+                    aw_count <<= aw_count + 1
+                    w_state <<= W_BURST
+
+                # ---- W beat accept: strobe-merge into memory, advance, detect WLAST ----
+                with wrapper.if_(wvalid & wready):
+                    with wrapper.case(w_cur_addr) as wc:
+                        for i, cell in enumerate(mem_cells):
+                            with wc.when(i):
+                                cell <<= _merged_word(cell)  # noqa: PLW2901
+                        with wc.default():
+                            pass
+                    w_cur_addr <<= w_cur_addr + 1
+                    w_count <<= w_count + 1
+                    with wrapper.if_(wlast):
+                        w_state <<= W_IDLE
+
+                # ---- AR accept: latch into the diagnostic counter (FIFO write below) ----
+                with wrapper.if_(r_enq):
+                    ar_count <<= ar_count + 1
+
+                # ---- read-burst FIFO: shift-on-dequeue, write-at-tail-on-enqueue ----
+                for i in range(n_out):
+                    with wrapper.if_(r_enq & (mux(r_deq, r_count - 1, r_count) == i)):
+                        if word_addr_shift > 0:
+                            r_fifo_addr[i] <<= araddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]  # noqa: PLW2901
+                        else:
+                            r_fifo_addr[i] <<= araddr[addr_index_width - 1 : 0]  # noqa: PLW2901
+                        r_fifo_len[i] <<= arlen  # noqa: PLW2901
+                        if r_fifo_id is not None and arid_w is not None:
+                            r_fifo_id[i] <<= arid_w  # noqa: PLW2901
+                    if i < n_out - 1:
+                        with wrapper.elif_(r_deq):
+                            r_fifo_addr[i] <<= r_fifo_addr[i + 1]  # noqa: PLW2901
+                            r_fifo_len[i] <<= r_fifo_len[i + 1]  # noqa: PLW2901
+                            if r_fifo_id is not None:
+                                r_fifo_id[i] <<= r_fifo_id[i + 1]  # noqa: PLW2901
+                with wrapper.if_(r_enq & r_deq):
+                    pass
+                with wrapper.elif_(r_enq):
+                    r_count <<= r_count + 1
+                with wrapper.elif_(r_deq):
+                    r_count <<= r_count - 1
+
+                # ---- write-response FIFO: same shift-register shape ----
+                if b_fifo_id is not None:
+                    for i in range(n_out):
+                        with wrapper.if_(b_enq & (mux(b_deq, b_count - 1, b_count) == i)):
+                            if w_cur_id is not None:
+                                b_fifo_id[i] <<= w_cur_id  # noqa: PLW2901
+                        if i < n_out - 1:
+                            with wrapper.elif_(b_deq):
+                                b_fifo_id[i] <<= b_fifo_id[i + 1]  # noqa: PLW2901
+                with wrapper.if_(b_enq & b_deq):
+                    pass
+                with wrapper.elif_(b_enq):
+                    b_count <<= b_count + 1
+                with wrapper.elif_(b_deq):
+                    b_count <<= b_count - 1
+
+                # ---- R_IDLE: dispatch the next queued read burst ----
+                with wrapper.if_(r_state == R_IDLE):
+                    with wrapper.if_((r_count > 0) & (~rp_w if rp_w is not None else 1)):
+                        cur_r_addr <<= r_fifo_addr[0]
+                        cur_r_len <<= r_fifo_len[0]
+                        if cur_r_id is not None and r_fifo_id is not None:
+                            cur_r_id <<= r_fifo_id[0]
+                        if r_primed is None:
+                            r_state <<= R_BURST
+                        else:
+                            with wrapper.if_(~r_primed):
+                                r_primed <<= 1
+                                if rd_needs_latency:
+                                    if r_wait_is_latency is not None:
+                                        r_wait_is_latency <<= 1
+                                    r_latency_ctr <<= _jittered_wait_expr(self.rd_latency_cycles, r_lat_lfsr)
+                                    r_state <<= R_WAIT
+                                else:
+                                    r_state <<= R_BURST
                             with wrapper.else_():
-                                burst_addr <<= burst_addr + 1
-                                burst_len <<= burst_len - 1
-                    with c.default():
-                        pass
+                                if r_wait_is_latency is not None:
+                                    r_wait_is_latency <<= 0
+                                if rd_needs_bw:
+                                    r_state <<= R_WAIT
+                                else:
+                                    r_state <<= R_BURST
+
+                # ---- R_WAIT: pay cold-start latency, or throttle to sustain bandwidth ----
+                if rd_needs_latency or rd_needs_bw:
+                    with wrapper.if_(r_state == R_WAIT):
+                        if rd_needs_latency and rd_needs_bw:
+                            with wrapper.if_(r_wait_is_latency):
+                                with wrapper.if_(r_latency_ctr > 0):
+                                    r_latency_ctr <<= r_latency_ctr - 1
+                                with wrapper.else_():
+                                    r_state <<= R_BURST
+                            with wrapper.else_():
+                                with wrapper.if_(~rd_bw_stall_w):
+                                    r_state <<= R_BURST
+                        elif rd_needs_latency:
+                            with wrapper.if_(r_latency_ctr > 0):
+                                r_latency_ctr <<= r_latency_ctr - 1
+                            with wrapper.else_():
+                                r_state <<= R_BURST
+                        else:
+                            with wrapper.if_(~rd_bw_stall_w):
+                                r_state <<= R_BURST
+
+                # ---- R_BURST: stream beats, retire on RLAST ----
+                with wrapper.if_(r_state == R_BURST):
+                    with wrapper.if_(rready & rvalid):
+                        with wrapper.if_(rlast):
+                            r_state <<= R_IDLE
+                        with wrapper.else_():
+                            cur_r_addr <<= cur_r_addr + 1
+                            cur_r_len <<= cur_r_len - 1
+
+                # ---- B_IDLE: dispatch the next queued write response ----
+                with wrapper.if_(b_state == B_IDLE):
+                    with wrapper.if_((b_count > 0) & (~bp_w if bp_w is not None else 1)):
+                        if cur_b_id is not None and b_fifo_id is not None:
+                            cur_b_id <<= b_fifo_id[0]
+                        if b_primed is None:
+                            b_state <<= B_ACTIVE
+                        else:
+                            with wrapper.if_(~b_primed):
+                                b_primed <<= 1
+                                if wr_needs_latency:
+                                    if b_wait_is_latency is not None:
+                                        b_wait_is_latency <<= 1
+                                    b_latency_ctr <<= _jittered_wait_expr(self.wr_latency_cycles, b_lat_lfsr)
+                                    b_state <<= B_WAIT
+                                else:
+                                    b_state <<= B_ACTIVE
+                            with wrapper.else_():
+                                if b_wait_is_latency is not None:
+                                    b_wait_is_latency <<= 0
+                                if wr_needs_bw:
+                                    b_state <<= B_WAIT
+                                else:
+                                    b_state <<= B_ACTIVE
+
+                # ---- B_WAIT: pay cold-start latency, or throttle to sustain bandwidth ----
+                if wr_needs_latency or wr_needs_bw:
+                    with wrapper.if_(b_state == B_WAIT):
+                        if wr_needs_latency and wr_needs_bw:
+                            with wrapper.if_(b_wait_is_latency):
+                                with wrapper.if_(b_latency_ctr > 0):
+                                    b_latency_ctr <<= b_latency_ctr - 1
+                                with wrapper.else_():
+                                    b_state <<= B_ACTIVE
+                            with wrapper.else_():
+                                with wrapper.if_(~wr_bw_stall_w):
+                                    b_state <<= B_ACTIVE
+                        elif wr_needs_latency:
+                            with wrapper.if_(b_latency_ctr > 0):
+                                b_latency_ctr <<= b_latency_ctr - 1
+                            with wrapper.else_():
+                                b_state <<= B_ACTIVE
+                        else:
+                            with wrapper.if_(~wr_bw_stall_w):
+                                b_state <<= B_ACTIVE
+
+                # ---- B_ACTIVE: hold BVALID until handshake, then return to IDLE ----
+                with wrapper.if_(b_state == B_ACTIVE):
+                    with wrapper.if_(bready & bvalid):
+                        b_state <<= B_IDLE
 
         # Wire DUT ports.
         # DUT drives (we read): aw* valid/addr/len/(id), w* valid/data/strb/last,

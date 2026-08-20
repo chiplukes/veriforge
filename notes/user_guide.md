@@ -1092,7 +1092,7 @@ regardless of how many tick phases run per cycle.
 | `AXIStreamSource` / `StreamSource` | `tvalid` / `valid` held low |
 | `AXIStreamSink` / `StreamSink` | `tready` / `ready` held low |
 | `AXILiteResponder` (always_ready) | `awready` + `wready` + `arready` held low |
-| `AXI4Responder` (always_ready) | `awready` + `wready` + `arready` held low |
+| `AXI4Responder` (always_ready) | `awready` + `wready` + `arready` held low; also settable independently via `.pause_aw`/`.pause_w`/`.pause_ar` (and `.pause_b`/`.pause_r`, which delay *starting* a new response) |
 
 ### PauseGenerator
 
@@ -1170,6 +1170,14 @@ bench.step(200)
 axi_lite.pause = False
 ```
 
+`AXI4Proxy` (role="master") additionally supports independent per-channel
+pause (`.pause_aw`, `.pause_w`, `.pause_ar`, `.pause_b`, `.pause_r`) and a
+DDR/HBM-style latency/bandwidth model (`.rd_latency_cycles`,
+`.wr_latency_cycles`, `.max_bw_percent`, `.wr_max_bw_percent`) instead of
+just the combined `.pause` — see
+[bench_usage.md#axi4proxy](simulation/bench_usage.md#axi4proxy) for the
+full API and examples.
+
 ---
 
 ## 13c. Testbench access levels
@@ -1204,7 +1212,7 @@ Recognized interface types:
 |---|---|---|
 | `<prefix>_tdata`, `_tvalid`, `_tready`, `_tlast` | `AXIStreamProxy` | source / sink |
 | `<prefix>_awaddr`, `_awvalid`, … | `AXILiteProxy` | master / slave |
-| `<prefix>_awaddr`, `_awid`, `_awlen`, … | `AXI4Proxy` | master / slave |
+| `<prefix>_awaddr`, `_awlen`, `_awsize`, `_awburst`, `_wlast`, … (full AW/W/B + AR/R, or just one side for a read-only/write-only DUT) | `AXI4Proxy` | master / slave |
 | `<prefix>_valid`, `<prefix>_ready` (no `_t`-prefix) | `StreamProxy` | plain handshake source / sink |
 | `<prefix>_addr`, `_wen`/`_we`, `_wdata`, `_rdata` | `MemBusProxy` | synchronous SRAM-style master / slave |
 

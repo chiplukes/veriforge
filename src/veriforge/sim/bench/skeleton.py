@@ -1338,6 +1338,13 @@ def _bench_iface_stub_lines(bindings: list[Any]) -> list[str]:
                 f"    iface = bench.iface({b.prefix!r})",
                 "    # TODO: optionally seed memory.",
                 "    # iface.memory[0x0] = 0xDEADBEEF",
+                "    # Optional: model a DDR/HBM-style controller (randomized latency",
+                "    # when idle, sustained bandwidth once the pipeline is full).",
+                "    # iface.rd_latency_cycles = 20",
+                "    # iface.max_bw_percent = 60",
+                "    # Optional: per-channel backpressure/pause (also: pause_w, pause_ar,",
+                "    # pause_b, pause_r — each accepts bool/callable/PauseGenerator).",
+                "    # iface.pause_aw = PauseGenerator(1, 4)",
                 "    _ = iface",
             ]
         )
@@ -1725,7 +1732,9 @@ def _render_bench_testbench(  # noqa: PLR0912, PLR0913, PLR0915
     docstring.extend(f"  {line}" for line in summary_lines)
     docstring.append('"""')
 
-    has_pauseable = any(b.protocol in ("axi_stream", "stream") for b in bindings)
+    has_pauseable = any(
+        b.protocol in ("axi_stream", "stream") or (b.protocol == "axi4" and b.role == "master") for b in bindings
+    )
 
     imports = [
         "from __future__ import annotations",

@@ -3,6 +3,11 @@
 Pure-Python burst-capable AXI4 master. Supports INCR bursts, single-ID
 transactions, optional sideband signals (id/lock/cache/prot/qos/region/
 user). FIXED and WRAP burst modes are not implemented.
+
+Can also be constructed against a DUT that only exposes a write channel
+(AW/W/B) or only a read channel (AR/R) — e.g. a read-only DMA engine.
+``write()``/``read()`` raise a clear ``RuntimeError`` if the corresponding
+channel doesn't exist.
 """
 
 from __future__ import annotations
@@ -29,13 +34,25 @@ class AXI4Master:  # cm:2e8d3b
         self.default_timeout_cycles = default_timeout_cycles
         self.clock = sim.signal(clock_name)
 
+        # A DUT may expose only a write channel (AW/W/B) or only a read
+        # channel (AR/R). Detect whole-group presence up front so the
+        # missing side's signals stay ``None`` instead of raising at
+        # construction; write()/read() raise a clear error if called
+        # against a channel that isn't present.
+        self._has_write_channel = resolve_signal_name(sim, prefix, "awvalid") is not None
+        self._has_read_channel = resolve_signal_name(sim, prefix, "arvalid") is not None
+        if not self._has_write_channel and not self._has_read_channel:
+            raise ValueError(
+                f"AXI4 master: neither a write (AW/W/B) nor a read (AR/R) channel was found on prefix {prefix!r}"
+            )
+
         # AW
-        self.awaddr = self._sig("awaddr")
-        self.awlen = self._sig("awlen")
-        self.awsize = self._sig("awsize")
-        self.awburst = self._sig("awburst")
-        self.awvalid = self._sig("awvalid")
-        self.awready = self._sig("awready")
+        self.awaddr = self._sig("awaddr", required=self._has_write_channel)
+        self.awlen = self._sig("awlen", required=self._has_write_channel)
+        self.awsize = self._sig("awsize", required=self._has_write_channel)
+        self.awburst = self._sig("awburst", required=self._has_write_channel)
+        self.awvalid = self._sig("awvalid", required=self._has_write_channel)
+        self.awready = self._sig("awready", required=self._has_write_channel)
         self.awid = self._sig("awid", required=False)
         self.awlock = self._sig("awlock", required=False)
         self.awcache = self._sig("awcache", required=False)
@@ -45,26 +62,26 @@ class AXI4Master:  # cm:2e8d3b
         self.awuser = self._sig("awuser", required=False)
 
         # W
-        self.wdata = self._sig("wdata")
-        self.wstrb = self._sig("wstrb")
-        self.wlast = self._sig("wlast")
-        self.wvalid = self._sig("wvalid")
-        self.wready = self._sig("wready")
+        self.wdata = self._sig("wdata", required=self._has_write_channel)
+        self.wstrb = self._sig("wstrb", required=self._has_write_channel)
+        self.wlast = self._sig("wlast", required=self._has_write_channel)
+        self.wvalid = self._sig("wvalid", required=self._has_write_channel)
+        self.wready = self._sig("wready", required=self._has_write_channel)
         self.wuser = self._sig("wuser", required=False)
 
         # B
-        self.bresp = self._sig("bresp")
-        self.bvalid = self._sig("bvalid")
-        self.bready = self._sig("bready")
+        self.bresp = self._sig("bresp", required=self._has_write_channel)
+        self.bvalid = self._sig("bvalid", required=self._has_write_channel)
+        self.bready = self._sig("bready", required=self._has_write_channel)
         self.bid = self._sig("bid", required=False)
 
         # AR
-        self.araddr = self._sig("araddr")
-        self.arlen = self._sig("arlen")
-        self.arsize = self._sig("arsize")
-        self.arburst = self._sig("arburst")
-        self.arvalid = self._sig("arvalid")
-        self.arready = self._sig("arready")
+        self.araddr = self._sig("araddr", required=self._has_read_channel)
+        self.arlen = self._sig("arlen", required=self._has_read_channel)
+        self.arsize = self._sig("arsize", required=self._has_read_channel)
+        self.arburst = self._sig("arburst", required=self._has_read_channel)
+        self.arvalid = self._sig("arvalid", required=self._has_read_channel)
+        self.arready = self._sig("arready", required=self._has_read_channel)
         self.arid = self._sig("arid", required=False)
         self.arlock = self._sig("arlock", required=False)
         self.arcache = self._sig("arcache", required=False)
@@ -74,11 +91,11 @@ class AXI4Master:  # cm:2e8d3b
         self.aruser = self._sig("aruser", required=False)
 
         # R
-        self.rdata = self._sig("rdata")
-        self.rresp = self._sig("rresp")
-        self.rlast = self._sig("rlast")
-        self.rvalid = self._sig("rvalid")
-        self.rready = self._sig("rready")
+        self.rdata = self._sig("rdata", required=self._has_read_channel)
+        self.rresp = self._sig("rresp", required=self._has_read_channel)
+        self.rlast = self._sig("rlast", required=self._has_read_channel)
+        self.rvalid = self._sig("rvalid", required=self._has_read_channel)
+        self.rready = self._sig("rready", required=self._has_read_channel)
         self.rid = self._sig("rid", required=False)
 
         self._drive_idle()
@@ -156,7 +173,8 @@ class AXI4Master:  # cm:2e8d3b
                 return
 
     def _data_width_bytes(self) -> int:
-        return self.wdata.width // 8
+        signal = self.wdata if self.wdata is not None else self.rdata
+        return signal.width // 8
 
     def _default_size(self) -> int:
         # log2(beat-bytes); minimum 0
@@ -188,6 +206,8 @@ class AXI4Master:  # cm:2e8d3b
         timeout_cycles: int | None = None,
     ) -> int:
         """Issue an AXI4 INCR burst write of ``len(data)`` beats."""
+        if not self._has_write_channel:
+            raise RuntimeError(f"AXI4 master {self.prefix!r}: no write (AW/W/B) channel on this DUT")
         if not isinstance(data, (list, tuple)):
             data = [data]
         if not data:
@@ -291,6 +311,8 @@ class AXI4Master:  # cm:2e8d3b
         timeout_cycles: int | None = None,
     ) -> list[int]:
         """Issue an AXI4 INCR burst read of ``length`` beats. Returns the data list."""
+        if not self._has_read_channel:
+            raise RuntimeError(f"AXI4 master {self.prefix!r}: no read (AR/R) channel on this DUT")
         if length < 1:
             raise ValueError("read length must be >= 1")
         if size is None:

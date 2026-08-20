@@ -571,6 +571,111 @@ class AXI4Proxy:  # cm:1a5c6e
         if self._responder is not None:
             self._responder.pause = value
 
+    @property
+    def pause_aw(self):
+        """Per-cycle pause for AWREADY only (role='master' only). See :attr:`pause`."""
+        return self._responder.pause_aw if self._responder is not None else False
+
+    @pause_aw.setter
+    def pause_aw(self, value) -> None:
+        if self._responder is not None:
+            self._responder.pause_aw = value
+
+    @property
+    def pause_w(self):
+        """Per-cycle pause for WREADY only (role='master' only). See :attr:`pause`."""
+        return self._responder.pause_w if self._responder is not None else False
+
+    @pause_w.setter
+    def pause_w(self, value) -> None:
+        if self._responder is not None:
+            self._responder.pause_w = value
+
+    @property
+    def pause_ar(self):
+        """Per-cycle pause for ARREADY only (role='master' only). See :attr:`pause`."""
+        return self._responder.pause_ar if self._responder is not None else False
+
+    @pause_ar.setter
+    def pause_ar(self, value) -> None:
+        if self._responder is not None:
+            self._responder.pause_ar = value
+
+    @property
+    def pause_b(self):
+        """Delay *starting* a new B response (role='master' only); an in-flight
+        response is never interrupted."""
+        return self._responder.pause_b if self._responder is not None else False
+
+    @pause_b.setter
+    def pause_b(self, value) -> None:
+        if self._responder is not None:
+            self._responder.pause_b = value
+
+    @property
+    def pause_r(self):
+        """Delay *starting* a new R response (role='master' only); an in-flight
+        response is never interrupted."""
+        return self._responder.pause_r if self._responder is not None else False
+
+    @pause_r.setter
+    def pause_r(self, value) -> None:
+        if self._responder is not None:
+            self._responder.pause_r = value
+
+    @property
+    def rd_latency_cycles(self) -> int:
+        """Mean extra-cycle latency before the first beat of an idle read
+        pipeline (role='master' only). Models DDR/HBM-style row-open latency."""
+        return self._responder.rd_latency_cycles if self._responder is not None else 1
+
+    @rd_latency_cycles.setter
+    def rd_latency_cycles(self, value: int) -> None:
+        if self._responder is not None:
+            self._responder.rd_latency_cycles = value
+
+    @property
+    def wr_latency_cycles(self) -> int:
+        """Mean extra-cycle latency before the first B of an idle write
+        pipeline (role='master' only)."""
+        return self._responder.wr_latency_cycles if self._responder is not None else 1
+
+    @wr_latency_cycles.setter
+    def wr_latency_cycles(self, value: int) -> None:
+        if self._responder is not None:
+            self._responder.wr_latency_cycles = value
+
+    @property
+    def max_bw_percent(self) -> int:
+        """Percentage of theoretical peak throughput a primed read pipeline
+        sustains (role='master' only). 100 (default) never throttles."""
+        return self._responder.max_bw_percent if self._responder is not None else 100
+
+    @max_bw_percent.setter
+    def max_bw_percent(self, value: int) -> None:
+        if self._responder is not None:
+            self._responder.max_bw_percent = value
+
+    @property
+    def wr_max_bw_percent(self) -> int:
+        """Same as :attr:`max_bw_percent`, for B responses."""
+        return self._responder.wr_max_bw_percent if self._responder is not None else 100
+
+    @wr_max_bw_percent.setter
+    def wr_max_bw_percent(self, value: int) -> None:
+        if self._responder is not None:
+            self._responder.wr_max_bw_percent = value
+
+    @property
+    def memory_depth(self) -> int | None:
+        """Optional word-count bound for address validation (role='master' only)."""
+        return self._responder.memory_depth if self._responder is not None else None
+
+    @memory_depth.setter
+    def memory_depth(self, value: int | None) -> None:
+        if self._responder is not None:
+            self._responder.memory_depth = value
+
 
 class StreamProxy:  # cm:4f3e9b
     """High-level proxy for a generic ready/valid stream bundle.

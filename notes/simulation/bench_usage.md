@@ -234,15 +234,51 @@ responder.memory.update({0x00: 0xABCD, 0x04: 0x1234})
 
 ## `AXI4Proxy`
 
+Two roles, matching the DUT-side role (same convention as `AXILiteProxy`):
+
+* `role="slave"` (default, or auto-selected when the DUT is detected as an
+  AXI4 slave): the DUT exposes an AXI4 slave; bench drives burst-capable
+  `.write()` / `.read()` via the underlying `AXI4Master`.
+* `role="master"` (auto-selected when the DUT is detected as an AXI4
+  master, e.g. a DMA engine): bench acts as a memory-backed responder via
+  the underlying `AXI4Responder`.
+
 ```python
-axi4 = bench.iface("s_axi4")   # DUT is AXI4 slave
-axi4.write(addr=0x100, data=b"\xDE\xAD\xBE\xEF")
-data = axi4.read(addr=0x100, length=4)
+axi4 = bench.iface("s_axi4")               # DUT is AXI4 slave
+axi4.write(0x100, [0xDEADBEEF, 0xCAFEF00D])  # 2-beat INCR burst write
+data = axi4.read(0x100, length=2)            # 2-beat INCR burst read
 ```
 
-For burst and ID-tagged transactions, build `AXI4Frame` objects directly or
-use the `queue_write` / `queue_read` methods on the underlying `AXI4Responder`
-(accessible as `axi4._responder`).
+`.write(addr, data, **kwargs)` / `.read(addr, *, length=1, **kwargs)` forward
+directly to `AXI4Master.write()` / `.read()` — `data` is an `int` or a
+`list[int]` (one entry per beat), and `**kwargs` covers `strb`, `size`,
+`burst`, `txn_id`, and the sideband signals (`prot`, `cache`, `lock`, `qos`,
+`region`, `user`). See `AXI4Master` in `notes/public_api.md` for the full
+parameter list.
+
+### DUT-master role: responder + latency/bandwidth/pause
+
+```python
+responder = bench.iface("m_axi")           # DUT is AXI4 master, bench responds
+responder.memory.update({0x00: 0xABCD, 0x04: 0x1234})  # pre-seed
+print(responder.write_log)                 # [(addr, data, strb), ...] per beat
+print(responder.read_log)                  # [addr, ...] per beat
+
+# Model a DDR/HBM-style controller: randomized latency on an idle
+# pipeline, sustained bandwidth once several requests are queued.
+responder.rd_latency_cycles = 20
+responder.max_bw_percent = 60
+
+# Per-channel backpressure — also .pause_w, .pause_ar, .pause_b, .pause_r.
+# Accepts bool / callable / PauseGenerator, same as AXIStreamProxy.pause.
+responder.pause_aw = PauseGenerator(1, 4)
+```
+
+A DUT that only exposes a write channel (AW/W/B) or only a read channel
+(AR/R) — e.g. a read-only DMA engine — is detected and constructed
+correctly too; the missing side's proxy methods/properties are simply
+inert (reads report defaults, writes/reads against the absent channel
+raise a clear error).
 
 ---
 
@@ -298,6 +334,11 @@ The generator is sampled **once per clock cycle** in the pre-tick phase so its
 internal counter always advances at the correct rate regardless of how many
 tick phases run per cycle.
 
+`AXILiteProxy`/`AXI4Proxy` in `role="master"` (DUT-master, bench-responder)
+accept the same generator on `.pause` (legacy: gates AW/W/AR together) or,
+for `AXI4Proxy` only, independently per channel via `.pause_aw`, `.pause_w`,
+`.pause_ar`, `.pause_b`, `.pause_r` — see [`AXI4Proxy`](#axi4proxy) above.
+
 ---
 
 ## Multi-clock domain
@@ -346,6 +387,12 @@ All fields are optional mappings. `iface_domains` forces a specific interface
 to a named clock domain; `relaxed_iface_signals` suppresses strict signal-set
 checks for protocols with optional ports.
 
+A DUT that exposes only an AXI4 write channel (AW/W/B) or only a read
+channel (AR/R) — not just a missing sideband signal, the *whole* other
+channel absent — is auto-detected as `"axi4"` without needing
+`relaxed_iface_signals`; that override is for individually-missing signals
+within an otherwise-complete bundle (e.g. `tlast`-less AXIS).
+
 ---
 
 ## Error handling
@@ -355,6 +402,7 @@ checks for protocols with optional ports.
 | `BenchTimeoutError` | Transaction did not complete within `timeout` cycles |
 | `AXIStreamProtocolError` | TDATA/TKEEP changed while TVALID=1, TREADY=0 (strict mode) |
 | `AXILiteProtocolError` | AWVALID/WVALID/ARVALID deasserted before READY, or address/data changed while unacknowledged (strict mode) |
+| `AXI4ProtocolError` | `AXI4Responder(strict=True)`: WLAST asserted before AWLEN+1 beats, or missing on the final beat |
 | `PlanValidationError` | Planner could not uniquely identify a clock or reset port |
 | `AmbiguousDomainError` | Multiple clock candidates found with no override |
 | `NoDomainError` | No clock candidates found with no override |

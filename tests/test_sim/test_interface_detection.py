@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from veriforge.dsl import Module
 from veriforge.dsl.lib import axi4_lite, axi_stream
 from veriforge.model.ports import Port, PortDirection
@@ -448,3 +450,330 @@ def test_relaxed_empty_when_no_relaxation() -> None:
     )
     relaxed = detect_relaxed_interfaces(mod, relaxed_signals={})
     assert relaxed == []
+
+
+# ---------------------------------------------------------------------------
+# AXI4 (full) detection
+# ---------------------------------------------------------------------------
+
+
+def _add_axi4_write_channel(module: Module, prefix: str) -> None:
+    module.output(f"{prefix}_awaddr", width=8)
+    module.output(f"{prefix}_awlen", width=8)
+    module.output(f"{prefix}_awsize", width=3)
+    module.output(f"{prefix}_awburst", width=2)
+    module.output(f"{prefix}_awvalid")
+    module.input(f"{prefix}_awready")
+    module.output(f"{prefix}_wdata", width=32)
+    module.output(f"{prefix}_wstrb", width=4)
+    module.output(f"{prefix}_wlast")
+    module.output(f"{prefix}_wvalid")
+    module.input(f"{prefix}_wready")
+    module.input(f"{prefix}_bresp", width=2)
+    module.input(f"{prefix}_bvalid")
+    module.output(f"{prefix}_bready")
+
+
+def _add_axi4_read_channel(module: Module, prefix: str) -> None:
+    module.output(f"{prefix}_araddr", width=8)
+    module.output(f"{prefix}_arlen", width=8)
+    module.output(f"{prefix}_arsize", width=3)
+    module.output(f"{prefix}_arburst", width=2)
+    module.output(f"{prefix}_arvalid")
+    module.input(f"{prefix}_arready")
+    module.input(f"{prefix}_rdata", width=32)
+    module.input(f"{prefix}_rresp", width=2)
+    module.input(f"{prefix}_rlast")
+    module.input(f"{prefix}_rvalid")
+    module.output(f"{prefix}_rready")
+
+
+def test_detect_full_axi4_via_awlen_arlen() -> None:
+    """A full AXI4 bundle (AWLEN/ARLEN present) is detected as 'axi4', not 'axi_lite'."""
+    module = Module("dut")
+    _add_axi4_write_channel(module, "m_axi")
+    _add_axi4_read_channel(module, "m_axi")
+    bundle = detect_interfaces(module.build())[0]
+
+    assert bundle.protocol == "axi4"
+    assert bundle.role == "master"  # DUT drives AWVALID/ARVALID etc -> DUT is the master
+    assert "awlen" in bundle.signals and "arlen" in bundle.signals
+
+
+def test_detect_full_axi4_slave_role() -> None:
+    """A DUT that *observes* AW/AR (module inputs) is detected as the AXI4 slave."""
+    module = Module("dut")
+    module.input("s_axi_awaddr", width=8)
+    module.input("s_axi_awlen", width=8)
+    module.input("s_axi_awsize", width=3)
+    module.input("s_axi_awburst", width=2)
+    module.input("s_axi_awvalid")
+    module.output("s_axi_awready")
+    module.input("s_axi_wdata", width=32)
+    module.input("s_axi_wstrb", width=4)
+    module.input("s_axi_wlast")
+    module.input("s_axi_wvalid")
+    module.output("s_axi_wready")
+    module.output("s_axi_bresp", width=2)
+    module.output("s_axi_bvalid")
+    module.input("s_axi_bready")
+    module.input("s_axi_araddr", width=8)
+    module.input("s_axi_arlen", width=8)
+    module.input("s_axi_arsize", width=3)
+    module.input("s_axi_arburst", width=2)
+    module.input("s_axi_arvalid")
+    module.output("s_axi_arready")
+    module.output("s_axi_rdata", width=32)
+    module.output("s_axi_rresp", width=2)
+    module.output("s_axi_rlast")
+    module.output("s_axi_rvalid")
+    module.input("s_axi_rready")
+    bundle = detect_interfaces(module.build())[0]
+
+    assert bundle.protocol == "axi4"
+    assert bundle.role == "slave"
+
+
+def test_near_miss_full_axi4_missing_signals() -> None:
+    """A near-complete AXI4 bundle missing a handful of required signals is
+    reported as a near-miss, not silently dropped."""
+    mod = _make_model_module(
+        [
+            ("m_axi_awaddr", PortDirection.OUTPUT),
+            ("m_axi_awlen", PortDirection.OUTPUT),
+            ("m_axi_awsize", PortDirection.OUTPUT),
+            ("m_axi_awburst", PortDirection.OUTPUT),
+            ("m_axi_awvalid", PortDirection.OUTPUT),
+            ("m_axi_awready", PortDirection.INPUT),
+            ("m_axi_wdata", PortDirection.OUTPUT),
+            ("m_axi_wstrb", PortDirection.OUTPUT),
+            ("m_axi_wvalid", PortDirection.OUTPUT),
+            ("m_axi_wready", PortDirection.INPUT),
+            ("m_axi_bresp", PortDirection.INPUT),
+            ("m_axi_bvalid", PortDirection.INPUT),
+            ("m_axi_bready", PortDirection.OUTPUT),
+            ("m_axi_araddr", PortDirection.OUTPUT),
+            ("m_axi_arlen", PortDirection.OUTPUT),
+            ("m_axi_arsize", PortDirection.OUTPUT),
+            ("m_axi_arburst", PortDirection.OUTPUT),
+            ("m_axi_arvalid", PortDirection.OUTPUT),
+            ("m_axi_arready", PortDirection.INPUT),
+            ("m_axi_rdata", PortDirection.INPUT),
+            ("m_axi_rresp", PortDirection.INPUT),
+            ("m_axi_rlast", PortDirection.INPUT),
+            ("m_axi_rvalid", PortDirection.INPUT),
+            ("m_axi_rready", PortDirection.OUTPUT),
+            # wlast deliberately omitted — the only missing required signal,
+            # so this clearly reads as "almost AXI4" (axi_lite would still be
+            # missing awprot/arprot, a worse match).
+        ]
+    )
+
+    near_misses = detect_near_misses(mod)
+    assert len(near_misses) == 1
+    nm = near_misses[0]
+    assert nm.protocol == "axi4"
+    assert nm.prefix == "m_axi"
+    assert set(nm.missing) == {"wlast"}
+    assert detect_interfaces(mod) == []  # not a full match
+
+
+def test_detect_read_only_axi4() -> None:
+    """A read-only AXI4 interface (no AW/W/B at all, e.g. a DMA read engine)
+    is detected as 'axi4' via the AR/R-only fallback."""
+    module = Module("dut")
+    _add_axi4_read_channel(module, "m_axi")
+    detected = detect_interfaces(module.build())
+
+    assert len(detected) == 1
+    bundle = detected[0]
+    assert bundle.protocol == "axi4"
+    assert bundle.role == "master"
+    assert set(bundle.signal_names()) == {
+        "araddr",
+        "arlen",
+        "arsize",
+        "arburst",
+        "arvalid",
+        "arready",
+        "rdata",
+        "rresp",
+        "rlast",
+        "rvalid",
+        "rready",
+    }
+
+
+def test_detect_write_only_axi4() -> None:
+    """A write-only AXI4 interface (no AR/R at all) is detected as 'axi4' via
+    the AW/W/B-only fallback."""
+    module = Module("dut")
+    _add_axi4_write_channel(module, "m_axi")
+    detected = detect_interfaces(module.build())
+
+    assert len(detected) == 1
+    bundle = detected[0]
+    assert bundle.protocol == "axi4"
+    assert bundle.role == "master"
+    assert set(bundle.signal_names()) == {
+        "awaddr",
+        "awlen",
+        "awsize",
+        "awburst",
+        "awvalid",
+        "awready",
+        "wdata",
+        "wstrb",
+        "wlast",
+        "wvalid",
+        "wready",
+        "bresp",
+        "bvalid",
+        "bready",
+    }
+
+
+def test_read_only_axi4_make_axi4_responder() -> None:
+    """The read-only bundle's role='master' factory is make_axi4_responder,
+    matching a bidirectional bundle's asymmetry (make_axi4_master is only
+    valid for role='slave')."""
+    module = Module("dut")
+    _add_axi4_read_channel(module, "m_axi")
+    bundle = detect_interfaces(module.build())[0]
+
+    with pytest.raises(ValueError, match="slave-side"):
+        bundle.make_axi4_master(sim=None)
+
+
+AXI4_COMBINATIONAL_PASSTHRU_SRC = """
+module axi4_combinational_passthru (
+    input wire clk,
+    input wire rst_n,
+    input  wire        s_axi_awvalid,
+    output wire        s_axi_awready,
+    input  wire [7:0]  s_axi_awaddr,
+    input  wire [7:0]  s_axi_awlen,
+    input  wire [2:0]  s_axi_awsize,
+    input  wire [1:0]  s_axi_awburst,
+    input  wire        s_axi_wvalid,
+    output wire        s_axi_wready,
+    input  wire [31:0] s_axi_wdata,
+    input  wire [3:0]  s_axi_wstrb,
+    input  wire        s_axi_wlast,
+    output wire        s_axi_bvalid,
+    input  wire        s_axi_bready,
+    output wire [1:0]  s_axi_bresp,
+    input  wire        s_axi_arvalid,
+    output wire        s_axi_arready,
+    input  wire [7:0]  s_axi_araddr,
+    input  wire [7:0]  s_axi_arlen,
+    input  wire [2:0]  s_axi_arsize,
+    input  wire [1:0]  s_axi_arburst,
+    output wire        s_axi_rvalid,
+    input  wire        s_axi_rready,
+    output wire [31:0] s_axi_rdata,
+    output wire [1:0]  s_axi_rresp,
+    output wire        s_axi_rlast,
+    output wire        m_axi_awvalid,
+    input  wire        m_axi_awready,
+    output wire [7:0]  m_axi_awaddr,
+    output wire [7:0]  m_axi_awlen,
+    output wire [2:0]  m_axi_awsize,
+    output wire [1:0]  m_axi_awburst,
+    output wire        m_axi_wvalid,
+    input  wire        m_axi_wready,
+    output wire [31:0] m_axi_wdata,
+    output wire [3:0]  m_axi_wstrb,
+    output wire        m_axi_wlast,
+    input  wire        m_axi_bvalid,
+    output wire        m_axi_bready,
+    input  wire [1:0]  m_axi_bresp,
+    output wire        m_axi_arvalid,
+    input  wire        m_axi_arready,
+    output wire [7:0]  m_axi_araddr,
+    output wire [7:0]  m_axi_arlen,
+    output wire [2:0]  m_axi_arsize,
+    output wire [1:0]  m_axi_arburst,
+    input  wire        m_axi_rvalid,
+    output wire        m_axi_rready,
+    input  wire [31:0] m_axi_rdata,
+    input  wire [1:0]  m_axi_rresp,
+    input  wire        m_axi_rlast
+);
+    assign m_axi_awvalid = s_axi_awvalid;
+    assign s_axi_awready = m_axi_awready;
+    assign m_axi_awaddr  = s_axi_awaddr;
+    assign m_axi_awlen   = s_axi_awlen;
+    assign m_axi_awsize  = s_axi_awsize;
+    assign m_axi_awburst = s_axi_awburst;
+    assign m_axi_wvalid = s_axi_wvalid;
+    assign s_axi_wready = m_axi_wready;
+    assign m_axi_wdata  = s_axi_wdata;
+    assign m_axi_wstrb  = s_axi_wstrb;
+    assign m_axi_wlast  = s_axi_wlast;
+    assign s_axi_bvalid = m_axi_bvalid;
+    assign m_axi_bready = s_axi_bready;
+    assign s_axi_bresp  = m_axi_bresp;
+    assign m_axi_arvalid = s_axi_arvalid;
+    assign s_axi_arready = m_axi_arready;
+    assign m_axi_araddr  = s_axi_araddr;
+    assign m_axi_arlen   = s_axi_arlen;
+    assign m_axi_arsize  = s_axi_arsize;
+    assign m_axi_arburst = s_axi_arburst;
+    assign s_axi_rvalid = m_axi_rvalid;
+    assign m_axi_rready = s_axi_rready;
+    assign s_axi_rdata  = m_axi_rdata;
+    assign s_axi_rresp  = m_axi_rresp;
+    assign s_axi_rlast  = m_axi_rlast;
+endmodule
+"""
+
+
+def test_detect_two_axi4_bundles_in_combinational_passthru() -> None:
+    """A pure `assign`-wired slave-to-master passthrough (no registers) is
+    detected as two independent AXI4 bundles with the correct, opposite
+    roles — this is also the fixture used by
+    `test_bench_native.py::test_axi4_master_to_slave_combinational_passthru`
+    (native/batch_run pairing) and `test_axi4_responder.py` (register-slice
+    variant, for the pure-Python pairing)."""
+    mod = _parse_module(AXI4_COMBINATIONAL_PASSTHRU_SRC)
+    bundles = {b.prefix: b for b in detect_interfaces(mod)}
+
+    assert set(bundles) == {"s_axi", "m_axi"}
+    assert bundles["s_axi"].protocol == "axi4"
+    assert bundles["s_axi"].role == "slave"  # DUT observes AW/AR here -> DUT is the slave
+    assert bundles["m_axi"].protocol == "axi4"
+    assert bundles["m_axi"].role == "master"  # DUT drives AW/AR here -> DUT is the master
+
+
+def test_make_axi4_responder_requires_master_role() -> None:
+    module = Module("dut")
+    module.input("s_axi_awaddr", width=8)
+    module.input("s_axi_awlen", width=8)
+    module.input("s_axi_awsize", width=3)
+    module.input("s_axi_awburst", width=2)
+    module.input("s_axi_awvalid")
+    module.output("s_axi_awready")
+    module.input("s_axi_wdata", width=32)
+    module.input("s_axi_wstrb", width=4)
+    module.input("s_axi_wlast")
+    module.input("s_axi_wvalid")
+    module.output("s_axi_wready")
+    module.output("s_axi_bresp", width=2)
+    module.output("s_axi_bvalid")
+    module.input("s_axi_bready")
+    module.input("s_axi_araddr", width=8)
+    module.input("s_axi_arlen", width=8)
+    module.input("s_axi_arsize", width=3)
+    module.input("s_axi_arburst", width=2)
+    module.input("s_axi_arvalid")
+    module.output("s_axi_arready")
+    module.output("s_axi_rdata", width=32)
+    module.output("s_axi_rresp", width=2)
+    module.output("s_axi_rlast")
+    module.output("s_axi_rvalid")
+    module.input("s_axi_rready")
+    bundle = detect_interfaces(module.build())[0]  # role='slave'
+
+    with pytest.raises(ValueError, match="master-side"):
+        bundle.make_axi4_responder(sim=None)

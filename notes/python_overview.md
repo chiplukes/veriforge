@@ -113,8 +113,12 @@ src/veriforge/
 │       ├── axi_lite_responder.py  # AXILiteResponder — responds to DUT AXI-Lite master;
 │       │                          #   auto-ticks via time-step callback; .memory/.write_log/
 │       │                          #   .read_log/.queue_write/.queue_read
-│       ├── axi4_master.py    # AXI4Master — burst read/write to DUT AXI4 slave; INCR-burst only
-│       ├── axi4_responder.py # AXI4Responder — responds to DUT AXI4 master; .memory dict
+│       ├── axi4_master.py    # AXI4Master — burst read/write to DUT AXI4 slave; INCR-burst only;
+│       │                     #   works against write-only or read-only DUTs
+│       ├── axi4_responder.py # AXI4Responder — responds to DUT AXI4 master; .memory dict;
+│       │                     #   rd/wr_latency_cycles + max_bw_percent (DDR/HBM-style model),
+│       │                     #   memory_depth bound-check, per-channel .pause_aw/.pause_w/
+│       │                     #   .pause_ar/.pause_b/.pause_r, write-only/read-only construction
 │       ├── stream_source.py  # StreamSource — ready/valid source (Pulp-style)
 │       ├── stream_sink.py    # StreamSink — ready/valid sink
 │       ├── membus_master.py  # MemBusMaster — synchronous SRAM/BRAM-style master;
@@ -177,7 +181,10 @@ src/veriforge/
 │       │                 #     pending(), expect(expected, timeout=), pause=
 │       │                 #   AXILiteProxy (DUT-slave, supports role="slave" or role="master"):
 │       │                 #     read(addr), write(addr, data), write_then_read(addr, data)
-│       │                 #   AXI4Proxy (DUT-slave): read(addr, length), write(addr, data)
+│       │                 #   AXI4Proxy (role="slave": read(addr, length), write(addr, data);
+│       │                 #     role="master": .memory/.write_log/.read_log,
+│       │                 #     rd_latency_cycles/max_bw_percent, per-channel
+│       │                 #     .pause_aw/.pause_w/.pause_ar/.pause_b/.pause_r)
 │       │                 #   StreamProxy (Pulp ready/valid): put(data), get(timeout=)
 │       ├── runtime.py    # Testbench (orchestrates clocks/resets/MultiDomainRunner) +
 │       │                 #   Domain (one clock + reset + DomainCoordinator) +
@@ -191,7 +198,10 @@ src/veriforge/
 │       │                 #   32-bit Galois LFSR helper (_build_lfsr_pause),
 │       │                 #   AXILiteMasterLowering + AXILiteOp (scripted write/read seq.),
 │       │                 #   AXILiteSlaveLowering (memory-backed responder for DUT master),
-│       │                 #   AXI4SlaveLowering (burst responder for DUT AXI4 master);
+│       │                 #   AXI4SlaveLowering (burst responder for DUT AXI4 master;
+│       │                 #     independent read/write FSMs, max_outstanding read/B-response
+│       │                 #     queues, rd/wr_latency_cycles + max_bw_percent, per-channel
+│       │                 #     aw/w/ar/b/r_pause);
 │       │                 #   LoweredDesign.run(engine, cycles, vcd_path=) and
 │       │                 #   LoweredDesign.batch_run(cycles) return merged dict of
 │       │                 #   capture_signals + done_signals
@@ -281,13 +291,19 @@ tests/
 │   ├── test_axis_endpoints.py     # AXIStreamSource/Sink endpoint tests
 │   ├── test_axis_frame.py         # AXIStreamFrame tests
 │   ├── test_axi_lite_master.py    # AXILiteMaster endpoint tests
-│   ├── test_interface_detection.py # detect_interfaces() tests
+│   ├── test_axi4_responder.py     # AXI4Master (vs. real RTL DUT) + AXI4Responder (raw signal
+│   │                              #   poking) conformance: channel-optional, memory_depth,
+│   │                              #   latency/bandwidth, per-channel pause, strict WLAST mode
+│   ├── test_interface_detection.py # detect_interfaces() tests, incl. full-AXI4 (AWLEN/ARLEN)
+│   │                              #   detection, near-miss reporting, read-only/write-only AXI4
 │   ├── test_stream_protocol.py    # StreamSource/Sink (Pulp ready/valid) tests
 │   ├── test_bench_plan.py         # TestbenchPlan dataclass tests
 │   ├── test_bench_planner.py      # build_plan() inference tests
 │   ├── test_bench_runtime.py      # Testbench/Domain/proxy runtime tests
 │   ├── test_bench_native.py       # compile_native + all lowerings: AXIS source/sink,
-│   │                              #   AXILiteMaster, AXILiteSlave, AXI4Slave (46 tests)
+│   │                              #   AXILiteMaster, AXILiteSlave, AXI4Slave (incl.
+│   │                              #   concurrency/latency/bandwidth/pause/id_width),
+│   │                              #   AXI4Master, MemBus (119 tests)
 │   ├── test_multi_domain_runner.py # MultiDomainRunner tests
 │   ├── test_planner_naming_fallback.py # Planner port-name fallback (clk_i/rst_ni etc.)
 │   ├── test_pulp_axi_examples.py  # Pulp AXI integration tests

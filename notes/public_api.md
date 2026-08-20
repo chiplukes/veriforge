@@ -212,7 +212,7 @@ Use `veriforge.sim.endpoints` for low-level protocol drivers and monitors.
 from veriforge.sim.endpoints import (
     AXIStreamSource, AXIStreamSink, AXIStreamFrame,
     AXILiteMaster, AXILiteResponder,
-    AXI4Master, AXI4Responder,
+    AXI4Master, AXI4Responder, AXI4ProtocolError,
     MemBusMaster, MemBusResponder,
     StreamSource, StreamSink,
     EndpointCoordinator, DomainCoordinator, MultiDomainRunner,
@@ -228,8 +228,9 @@ from veriforge.sim.endpoints import (
 | `AXIStreamFrame` | Multi-beat AXIS frame container. |
 | `AXILiteMaster` | Drives AXI-Lite AW/W/B/AR/R to a DUT slave port. |
 | `AXILiteResponder` | Responds to a DUT AXI-Lite master; auto-ticks. |
-| `AXI4Master` | Burst read/write to a DUT AXI4 slave (INCR). |
-| `AXI4Responder` | Responds to a DUT AXI4 master; `.memory` dict. |
+| `AXI4Master` | Burst read/write to a DUT AXI4 slave (INCR). Works against a write-only or read-only DUT (missing channel raises a clear error on use). |
+| `AXI4Responder` | Responds to a DUT AXI4 master; `.memory` dict. Supports a DDR/HBM-style latency/bandwidth model (`rd_latency_cycles`, `wr_latency_cycles`, `max_bw_percent`, `wr_max_bw_percent`), `memory_depth` bound-checking, per-channel `.pause_aw/.pause_w/.pause_ar/.pause_b/.pause_r`, and construction against a write-only or read-only DUT. |
+| `AXI4ProtocolError` | Raised by `AXI4Responder(strict=True)` on WLAST-alignment violations. |
 | `MemBusMaster` | SRAM/BRAM-style master; `.write()`, `.read()`. |
 | `MemBusResponder` | SRAM/BRAM-style responder; auto-ticks; `.memory` dict. |
 | `StreamSource` / `StreamSink` | Ready/valid stream (Pulp-style). |
@@ -280,7 +281,7 @@ bench.run(my_test)
 | --- | --- |
 | `AXIStreamProxy` | High-level AXIS proxy; `.put(data)`, `.get(timeout=)`, `.expect()`, `.pause=`. |
 | `AXILiteProxy` | AXI-Lite proxy; `.read(addr)`, `.write(addr, data)`. Supports `role="slave"` or `role="master"`. |
-| `AXI4Proxy` | AXI4 proxy (DUT-slave); `.read(addr, length)`, `.write(addr, data)`. |
+| `AXI4Proxy` | AXI4 proxy. `role="slave"` (default): DUT is AXI4 slave, `.read(addr, length)` / `.write(addr, data)`. `role="master"`: DUT is AXI4 master, bench is a memory-backed responder — `.memory`, `.write_log`/`.read_log`, latency/bandwidth (`.rd_latency_cycles`, `.max_bw_percent`, ...) and per-channel pause (`.pause_aw`, `.pause_r`, ...) properties forward to the underlying `AXI4Responder`. |
 | `MemBusProxy` | SRAM/BRAM-style proxy; `.read(addr)`, `.write(addr, data)`. |
 | `StreamProxy` | Ready/valid stream proxy; `.put(data)`, `.get(timeout=)`. |
 
