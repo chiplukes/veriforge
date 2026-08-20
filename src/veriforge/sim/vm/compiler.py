@@ -2364,7 +2364,15 @@ class Compiler:  # cm:8c1e4a
             lsb_val = _const_int(expr.lsb, self._param_env)
             if msb_val is not None and lsb_val is not None:
                 return msb_val - lsb_val + 1
-            return 1
+            # Dynamic (runtime-only) msb/lsb: the true extracted width
+            # isn't known at compile time. Falling back to a bare `1` here
+            # used to feed a truncating RESIZE after the (correctly
+            # runtime-sized) RANGE_SELECT opcode, silently destroying the
+            # real value. A range-select can never be wider than the thing
+            # it's slicing, so that width is a safe *upper* bound: at worst
+            # this makes the post-hoc resize a widen (or no-op), never a
+            # truncation of an already-correct value.
+            return self._expr_width(expr.target)
 
         if etype is PartSelect:
             if isinstance(expr.width, Literal):
@@ -2372,7 +2380,8 @@ class Compiler:  # cm:8c1e4a
             w_val = _const_int(expr.width, self._param_env)
             if w_val is not None:
                 return w_val
-            return 1
+            # Same reasoning as the RangeSelect fallback above.
+            return self._expr_width(expr.target)
 
         if etype is Concatenation:
             return sum(self._expr_width(p) for p in expr.parts)

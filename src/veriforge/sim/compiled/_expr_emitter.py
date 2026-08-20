@@ -2886,14 +2886,21 @@ class _ExprEmitterMixin:
             lsb_val = _const_int(expr.lsb, self._param_env)
             if msb_val is not None and lsb_val is not None:
                 return msb_val - lsb_val + 1
-            return 1
+            # Dynamic (runtime-only) msb/lsb: mirrors the identical fix in
+            # `sim/vm/compiler.py`'s `_expr_width` -- a range-select can
+            # never be wider than the thing it's slicing, so that width is
+            # a safe upper bound, unlike the previous bare `1` (which risks
+            # a truncating resize of an already-correct wider value in any
+            # codegen path that trusts this estimate).
+            return self._expr_width(expr.target)
         if etype is PartSelect:
             if isinstance(expr.width, Literal):
                 return int(expr.width.value)
             w_val = _const_int(expr.width, self._param_env)
             if w_val is not None:
                 return w_val
-            return 1
+            # Same reasoning as the RangeSelect fallback above.
+            return self._expr_width(expr.target)
         if etype is Concatenation:
             return sum(self._expr_width(p) for p in expr.parts)
         if etype is Replication:

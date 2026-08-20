@@ -407,14 +407,29 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     left = left.sign_extend(target) if both_signed else left.resize(target)
                 if right.width < target:
                     right = right.sign_extend(target) if both_signed else right.resize(target)
-            # Shift operators: only LEFT operand is context-determined
+            # Shift operators: only LEFT operand is context-determined.
+            # `target` must be computed and passed into the recursive
+            # `eval()` call BEFORE it runs, not after: if `expr.left` is
+            # itself a context-determined operator (`+ - * / % & | ^` etc),
+            # calling it with the raw (possibly too-small) outer `width`
+            # makes IT truncate its own full-precision result down to
+            # `width` before returning -- losing real high bits (carry/
+            # borrow/product bits, or misplacing an X value's zero-fill)
+            # that the shift needed to see. Passing `target` up front (the
+            # same "only ever widen, defend against `_expr_self_width`
+            # underestimating" pattern already used by the comparison and
+            # bitwise branches above) avoids that premature truncation.
+            # Confirmed wrong (cross-engine, vm/compiled agree and are
+            # correct; reference was the outlier) for e.g. `(a - b) >> N`
+            # with `a`/`b` 129-bit: the subtraction's borrow-out was lost
+            # before the shift ever ran.
             elif op in ("<<", ">>", "<<<", ">>>"):
-                left = self.eval(expr.left, ctx, width, signed_override)
-                right = self.eval(expr.right, ctx)  # self-determined
-                if width and left.width != width:
-                    target = max(width, _expr_self_width(expr.left, ctx))
-                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                target = max(width, _expr_self_width(expr.left, ctx)) if width else _expr_self_width(expr.left, ctx)
+                eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                left = self.eval(expr.left, ctx, target, eff_signed)
+                if left.width < target:
                     left = left.sign_extend(target) if eff_signed else left.resize(target)
+                right = self.eval(expr.right, ctx)  # self-determined
             # Power operator: grouped with the SHIFT row in IEEE 1364-2005
             # Table 5-22 (`>> << ** >>> <<<` -> `L(i)`), not the generic
             # `max(L(i),L(j))` arithmetic row `+ - * / %` etc. share --
@@ -431,10 +446,10 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # fixed for every other self-determined position this
             # session). Confirmed against Icarus.
             elif op == "**":
-                left = self.eval(expr.left, ctx, width, signed_override)
-                if width and left.width != width:
-                    target = max(width, _expr_self_width(expr.left, ctx))
-                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                target = max(width, _expr_self_width(expr.left, ctx)) if width else _expr_self_width(expr.left, ctx)
+                eff_signed = signed_override if signed_override is not None else _expr_signed(expr.left, ctx)
+                left = self.eval(expr.left, ctx, target, eff_signed)
+                if left.width < target:
                     left = left.sign_extend(target) if eff_signed else left.resize(target)
                 right = self.eval(expr.right, ctx, _expr_self_width(expr.right, ctx))
             # Bitwise ops: combine at the OPERATOR's own natural width
