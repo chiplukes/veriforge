@@ -1073,3 +1073,63 @@ class TestSignedWideShiftNarrow:
         # w = 0x...CAFEBABE_00000000 — bits [63:32] should be in result
         w = 0xCAFEBABE << 32
         self._run_cross(32, w, 0xCAFEBABE)
+
+
+class TestWideConcatPairNarrowIntermediateRegression:
+    """Regression for a Cython compile error when every *declared* signal is
+    narrow (<=64 bits) but a concatenation's *intermediate* result is wide.
+
+    `{hi, lo}` with hi=33 bits, lo=32 bits produces a 65-bit intermediate
+    even though it's immediately truncated into a 32-bit destination -- no
+    signal in the module is ever individually wide. Previously,
+    `_module_has_wide_state()`/`N_WIDE_WORDS` were only made correct by
+    Stage-2 text emission (`_gen_process_functions`), which runs *after*
+    `_gen_wide_primitives`/`_gen_wide_adapters`/`_gen_constants` -- so the
+    `wide_*` helpers this shape needs were never emitted, and the emitted
+    call to them failed to compile ("Converting to Python object not
+    allowed without gil"). See `CythonCodegen._scan_wide_intermediates`.
+    """
+
+    HI_WIDTH = 33
+    LO_WIDTH = 32
+    DST_WIDTH = 32
+    HI_VALUE = Value(1, width=33, mask=1 << 5)
+    LO_VALUE = 0x89ABCDEF
+
+    def test_combo_blocking_concat_pair_compiles_and_matches_reference(self):
+        results = {}
+        for eng in ["reference", "vm", "compiled"]:
+            sim = Simulator(_make_wide_combo_concat_pair(self.HI_WIDTH, self.LO_WIDTH, self.DST_WIDTH), engine=eng)
+            sim.drive("hi", self.HI_VALUE)
+            sim.drive("lo", Value(self.LO_VALUE, width=self.LO_WIDTH))
+            sim.run(max_time=0)
+            results[eng] = sim.read("y")
+
+        ref = results["reference"]
+        for eng in ["vm", "compiled"]:
+            assert results[eng] == ref, f"{eng}: {results[eng]} != {ref}"
+
+    def test_seq_nba_concat_pair_compiles_and_matches_vm(self):
+        results = {}
+        for eng in ["vm", "compiled"]:
+            sim = Simulator(_make_wide_seq_concat_pair(self.HI_WIDTH, self.LO_WIDTH, self.DST_WIDTH), engine=eng)
+            sim.drive("hi", self.HI_VALUE)
+            sim.drive("lo", Value(self.LO_VALUE, width=self.LO_WIDTH))
+            sim.drive("q", Value(0, width=self.DST_WIDTH))
+            clk = Clock(sim.signal("clk"), period=10)
+            sim.fork(clk)
+            sim._schedule_clock_events(clk, 40)
+            for _ in range(2):
+                sim.run_step()
+            results[eng] = sim.read("q")
+
+        assert results["compiled"] == results["vm"], f"compiled: {results['compiled']} != {results['vm']}"
+
+    def test_scan_wide_intermediates_marks_narrow_signal_module_as_wide(self):
+        """Direct unit check on the new pre-scan: no signal is individually
+        wide, but the codegen should still report wide state after the scan
+        runs during `generate()`."""
+        cg = CythonCodegen()
+        cg.generate(_make_wide_combo_concat_pair(self.HI_WIDTH, self.LO_WIDTH, self.DST_WIDTH))
+        assert cg._module_has_wide_state()
+        assert cg._module_max_wide_words() >= 2  # 65-bit intermediate needs ceil(65/64) = 2 words

@@ -1404,6 +1404,138 @@ class CythonCodegen(
         for task in module.tasks:
             self._validate_wide_transport_stmt(task.body, f"task '{task.name}'")
 
+    def _note_wide_intermediate(self, expr: Expression | None) -> None:
+        """Record wide-scratch requirements for *expr* ahead of Stage-2 emission.
+
+        `_expr_max_internal_width` (in `_wide_emitter.py`) already recurses
+        into every operand of an expression tree and returns the true peak
+        internal width needed to evaluate it -- the same helper the Stage-2
+        emitters (`_rhs_needs_wide_eval`/`_emit_wide_lhs_write_new`) trust for
+        this. When that peak exceeds one machine word, this module needs the
+        `wide_*` helper functions emitted and its wide scratch buffers sized
+        accordingly -- but `_needs_wide_helpers`/`_dynamic_max_wide_words` are
+        otherwise only ever set as a side effect of Stage-2 text emission,
+        which runs *after* `_gen_wide_primitives`/`_gen_wide_adapters`/
+        `_gen_constants` have already been emitted. This pre-scan makes both
+        flags correct before any of those sections are generated, even for a
+        module where every *declared* signal/memory is narrow and only a
+        computed intermediate (e.g. a concatenation truncated on write) is
+        wide.
+        """
+        if expr is None:
+            return
+        width = self._expr_max_internal_width(expr)
+        if width > _WORD_BITS:
+            self._needs_wide_helpers = True
+            self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, (width + _WORD_BITS - 1) // _WORD_BITS)
+
+    def _scan_wide_intermediates_stmt(self, stmt: Statement | None) -> None:  # noqa: PLR0911, PLR0912
+        """Mirror `_validate_wide_transport_stmt`'s dispatch, noting wide roots.
+
+        Same statement-shape traversal as the transport-only validator, but
+        every expression location it would validate is instead handed to
+        `_note_wide_intermediate` -- unconditionally, regardless of the
+        `COMPILED_WIDE_TRANSPORT_ONLY` gate that method uses.
+        """
+        if stmt is None:
+            return
+
+        stype = type(stmt)
+        if stype in {BlockingAssign, NonblockingAssign}:
+            self._note_wide_intermediate(stmt.lhs)
+            self._note_wide_intermediate(stmt.rhs)
+            return
+
+        if stype in {SeqBlock, ParBlock}:
+            for child in stmt.statements:
+                self._scan_wide_intermediates_stmt(child)
+            return
+
+        if stype is IfStatement:
+            self._note_wide_intermediate(stmt.condition)
+            self._scan_wide_intermediates_stmt(stmt.then_body)
+            self._scan_wide_intermediates_stmt(stmt.else_body)
+            return
+
+        if stype is CaseStatement:
+            self._note_wide_intermediate(stmt.expression)
+            for item in stmt.items:
+                for value_expr in item.values:
+                    self._note_wide_intermediate(value_expr)
+                self._scan_wide_intermediates_stmt(item.body)
+            return
+
+        if stype is ForLoop:
+            self._scan_wide_intermediates_stmt(stmt.init)
+            self._note_wide_intermediate(stmt.condition)
+            self._scan_wide_intermediates_stmt(stmt.update)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is WhileLoop:
+            self._note_wide_intermediate(stmt.condition)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is RepeatLoop:
+            self._note_wide_intermediate(stmt.count)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is ForeverLoop:
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is WaitStatement:
+            self._note_wide_intermediate(stmt.condition)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is DelayControl:
+            self._note_wide_intermediate(stmt.delay)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype is EventControl:
+            for event in stmt.events:
+                self._note_wide_intermediate(event.signal)
+            self._scan_wide_intermediates_stmt(stmt.body)
+            return
+
+        if stype in {TaskEnable, SystemTaskCall}:
+            for arg in stmt.arguments:
+                self._note_wide_intermediate(arg)
+            return
+
+    def _scan_wide_intermediates(self, module: Module) -> None:
+        """Pre-scan *module* so wide-intermediate expressions are known early.
+
+        Runs unconditionally (unlike `_validate_wide_transport_only`, which
+        is opt-in and gated on `_module_has_wide_state()` already being
+        true) -- this is what makes `_module_has_wide_state()` and
+        `_dynamic_max_wide_words` correct in the first place, ahead of the
+        Stage-2 sections (`_gen_wide_primitives`, `_gen_wide_adapters`,
+        `_gen_constants`) that read them.
+        """
+        for assign in module.continuous_assigns:
+            self._note_wide_intermediate(assign.lhs)
+            self._note_wide_intermediate(assign.rhs)
+
+        for block in module.always_blocks:
+            for edge in block.sensitivity_list:
+                if isinstance(edge, SensitivityEdge):
+                    self._note_wide_intermediate(edge.signal)
+            self._scan_wide_intermediates_stmt(block.body)
+
+        for block in module.initial_blocks:
+            self._scan_wide_intermediates_stmt(block.body)
+
+        for func in module.functions:
+            self._scan_wide_intermediates_stmt(func.body)
+
+        for task in module.tasks:
+            self._scan_wide_intermediates_stmt(task.body)
+
     def generate(self, module: Module, *, delta_limit: int = 10_000) -> str:
         """Generate a complete .pyx source string for *module*."""
         self._module = module
@@ -1430,6 +1562,7 @@ class CythonCodegen(
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
+        self._scan_wide_intermediates(module)
         self._timing_diagnostics = self._collect_timing_diagnostics(module)
 
         sections = [
@@ -1483,6 +1616,7 @@ class CythonCodegen(
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
+        self._scan_wide_intermediates(module)
         self._timing_diagnostics = self._collect_timing_diagnostics(module)
 
         hasher = hashlib.sha256()
