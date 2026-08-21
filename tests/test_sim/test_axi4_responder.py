@@ -487,6 +487,121 @@ def test_axi4_responder_rd_latency_delays_first_read(engine: str) -> None:
     responder.close()
 
 
+AXI4_READ_MASTER_FSM_SRC = """
+module axi4_read_master_fsm (
+    input  wire        clk,
+    input  wire        rst_n,
+    output reg  [7:0]  m_axi_araddr,
+    output reg  [7:0]  m_axi_arlen,
+    output reg  [2:0]  m_axi_arsize,
+    output reg  [1:0]  m_axi_arburst,
+    output reg         m_axi_arvalid,
+    input  wire        m_axi_arready,
+    input  wire [31:0] m_axi_rdata,
+    input  wire [1:0]  m_axi_rresp,
+    input  wire        m_axi_rvalid,
+    input  wire        m_axi_rlast,
+    output reg         m_axi_rready,
+    output reg  [31:0] beat0,
+    output reg  [31:0] beat1,
+    output reg  [31:0] beat2,
+    output reg  [31:0] beat3,
+    output reg  [2:0]  beat_count,
+    output reg         done
+);
+    localparam IDLE = 0, ISSUE = 1, WAIT = 2, DONE_ST = 3;
+    reg [1:0] state;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= IDLE;
+            m_axi_arvalid <= 0;
+            m_axi_rready <= 0;
+            beat_count <= 0;
+            done <= 0;
+        end else begin
+            case (state)
+                IDLE: begin
+                    m_axi_araddr <= 0;
+                    m_axi_arlen <= 3;
+                    m_axi_arsize <= 2;
+                    m_axi_arburst <= 1;
+                    m_axi_arvalid <= 1;
+                    state <= ISSUE;
+                end
+                ISSUE: begin
+                    if (m_axi_arvalid && m_axi_arready) begin
+                        m_axi_arvalid <= 0;
+                        m_axi_rready <= 1;
+                        state <= WAIT;
+                    end
+                end
+                WAIT: begin
+                    if (m_axi_rvalid) begin
+                        case (beat_count)
+                            0: beat0 <= m_axi_rdata;
+                            1: beat1 <= m_axi_rdata;
+                            2: beat2 <= m_axi_rdata;
+                            default: beat3 <= m_axi_rdata;
+                        endcase
+                        beat_count <= beat_count + 1;
+                        if (m_axi_rlast) begin
+                            m_axi_rready <= 0;
+                            done <= 1;
+                            state <= DONE_ST;
+                        end
+                    end
+                end
+                default: begin
+                end
+            endcase
+        end
+    end
+endmodule
+"""
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_axi4_responder_rd_latency_one_no_dropped_or_shifted_beat(engine: str) -> None:
+    """Regression: with the default `rd_latency_cycles=1` ("respond ASAP"),
+    a real RTL read-master FSM against `AXI4Responder` (not `AXI4Master` —
+    see below) must see every beat of a multi-beat burst exactly once, in
+    the right order.
+
+    Previously, the R-channel retire check read RREADY *live* at the same
+    posedge such a master's own clocked process asserts it for the first
+    time (as part of the same state transition that recognizes its AR was
+    accepted). Recognizing a nonblocking assignment takes a full edge, so
+    a live read here observes a value one edge "ahead" of what any
+    properly-scheduled synchronous reader could ever see — retiring beat 0
+    before the master had any chance to look at RVALID at all, silently
+    losing it and shifting every subsequent beat's captured value back by
+    one position, with the final beat never presented. Not reproducible
+    via pure-Python `AXI4Master` (see the module docstring) — it polls
+    settled signal values in an ordinary Python loop rather than sampling
+    synchronously the way a real clocked RTL process does, so it never
+    exercised this; this test uses a small real RTL FSM instead, closing
+    exactly the gap the module docstring calls out as genuinely untested.
+    """
+    values = [0xA0000000 | i for i in range(4)]
+    initial_memory = {i * 4: values[i] for i in range(4)}
+    sim = Simulator(_parse(AXI4_READ_MASTER_FSM_SRC), engine=engine)
+    sim.run(max_time=0)
+    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 4000)
+    step_run_until(sim, 12)
+    step_drive(sim, engine, "rst_n", 0)
+    step_run_until(sim, 32)
+    step_drive(sim, engine, "rst_n", 1)
+
+    responder = AXI4Responder(sim, "m_axi", initial_memory=initial_memory, rd_latency_cycles=1, latency_seed=1)
+
+    step_run_until(sim, sim.time + 2000)
+    assert int(sim.signal("done").value) == 1, "read master FSM never completed"
+    beats = [int(sim.signal(f"beat{i}").value) for i in range(4)]
+    assert beats == values, f"expected {[hex(v) for v in values]}, got {[hex(v) for v in beats]}"
+    responder.close()
+
+
 # ---------------------------------------------------------------------------
 # AXI4Responder strict mode — WLAST alignment (AXI4ProtocolError)
 # ---------------------------------------------------------------------------
