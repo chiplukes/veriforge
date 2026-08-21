@@ -1696,6 +1696,25 @@ class TestMemoryArrays:
         assert "reg [7:0] mem [0:255];" in v
         assert "mem[addr] <= data;" in v
 
+    def test_reg_memory_with_init_omits_illegal_inline_initializer(self):
+        """reg with both depth= and init= must not emit an inline `= 0` on
+        the array declaration -- array/memory regs can't be initialized
+        that way in Verilog, only scalar/vector regs can."""
+        m = Module("test")
+        m.reg("mem", width=8, depth=16, init=0)
+        v = emit_module(m.build())
+        assert "reg [7:0] mem [0:15];" in v
+        assert "= 0" not in v
+
+    def test_wire_memory_with_init_omits_illegal_inline_initializer(self):
+        """wire with both depth= and init= must not emit an inline `= 0` on
+        the array declaration, for the same reason as the reg case above."""
+        m = Module("test")
+        m.wire("bus_array", width=16, depth=4, init=0)
+        v = emit_module(m.build())
+        assert "wire [15:0] bus_array [0:3];" in v
+        assert "= 0" not in v
+
 
 class TestNetInitialValues:
     """Test net initial value support."""

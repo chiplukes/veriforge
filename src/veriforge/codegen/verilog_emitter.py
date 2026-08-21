@@ -597,7 +597,11 @@ def _emit_net(net: Net, indent: str) -> str:
     if net.dimensions:
         for dim in net.dimensions:
             parts.append(_emit_range(dim))
-    if net.initial_value:
+    if net.initial_value and not net.dimensions:
+        # Array/memory nets can't take an inline initializer in Verilog --
+        # only scalar/vector nets can. Any runtime default for an array is
+        # established elsewhere (e.g. synchronous reset logic); silently
+        # drop it here rather than emit illegal `wire ... [0:N-1] = 0;`.
         parts.append("=")
         parts.append(emit_expression(net.initial_value))
     return " ".join(parts) + ";"
@@ -617,7 +621,11 @@ def _emit_variable(var: Variable, indent: str) -> str:
     if var.dimensions:
         for dim in var.dimensions:
             parts.append(_emit_range(dim))
-    if var.initial_value:
+    if var.initial_value and not var.dimensions:
+        # Array/memory regs can't take an inline initializer in Verilog --
+        # only scalar/vector regs can. Any runtime default for an array is
+        # established elsewhere (e.g. synchronous reset logic); silently
+        # drop it here rather than emit illegal `reg ... [0:N-1] = 0;`.
         parts.append("=")
         parts.append(emit_expression(var.initial_value))
     return " ".join(parts) + ";"

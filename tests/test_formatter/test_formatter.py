@@ -714,3 +714,27 @@ class TestEdgeCases:
         always_indent = len(always_line) - len(always_line.lstrip())
         begin_indent = len(begin_line) - len(begin_line.lstrip())
         assert begin_indent > always_indent
+
+
+class TestMemoryArrayInitializers:
+    """A reg/wire with both depth= (array) and init= must not emit an
+    inline `= 0` on the array declaration -- only scalar/vector variables
+    can be initialized that way in Verilog."""
+
+    def test_reg_memory_with_init_omits_illegal_inline_initializer(self):
+        from veriforge.dsl.builder import Module
+
+        m = Module("test")
+        m.reg("mem", width=8, depth=16, init=0)
+        v = format_module(m.build())
+        assert "reg [7:0] mem [0:15];" in v
+        assert "= 0" not in v
+
+    def test_wire_memory_with_init_omits_illegal_inline_initializer(self):
+        from veriforge.dsl.builder import Module
+
+        m = Module("test")
+        m.wire("bus_array", width=16, depth=4, init=0)
+        v = format_module(m.build())
+        assert "wire [15:0] bus_array [0:3];" in v
+        assert "= 0" not in v
