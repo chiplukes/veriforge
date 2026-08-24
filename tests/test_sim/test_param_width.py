@@ -574,3 +574,123 @@ class TestStructThroughParamPort:
         sim.run(max_time=15)  # One full clock cycle + setup
 
         assert sim.read("csr_out") == Value(0x40000003, width=32)
+
+
+# ── Signed relational comparison against a localparam, through hierarchy ──
+# Regression: `_apply_param_overrides` (in elaborate.py) rebuilt a flattened
+# child instance's Parameter nodes without carrying over `signed`/`width`,
+# so a `signed=True` localparam silently became unsigned once its owning
+# module was instantiated as a child of a composed Design. Per IEEE
+# 1364-2005 Table 5-22, a comparison is only evaluated as signed when BOTH
+# operands are signed -- one unsigned operand forces the whole comparison
+# unsigned, which flips a negative register's two's-complement bit pattern
+# into a huge unsigned value. `==`/`!=` don't care about signedness (bit
+# patterns compare equal either way), so only `>`/`<`/`>=` were affected.
+
+
+def _build_signed_cmp_leaf_dsl(name: str, op: str):
+    """acc is an 18-bit signed reg that free-runs `acc <= acc - 5` from 0, so
+    it only ever goes negative. BOUND is a signed 32-bit localparam of
+    32767. `ovf = acc <op> BOUND` must therefore be constant across every
+    cycle: always false for `>`/`>=`, always true for `<`."""
+    from veriforge.dsl import Module as DslModule, mux, posedge  # noqa: PLC0415
+
+    m = DslModule(name)
+    clk = m.input("clk")
+    rst = m.input("rst")
+    o_val = m.output_reg("o_val", width=16, signed=True)
+    acc = m.reg("acc", width=18, signed=True, init=0)
+    bound = m.localparam("BOUND", value=32767, width=32, signed=True)
+
+    ovf = m.wire("ovf")
+    if op == ">":
+        ovf.assign = acc > bound
+    elif op == "<":
+        ovf.assign = acc < bound
+    else:
+        ovf.assign = acc >= bound
+
+    with m.always(posedge(clk)):
+        with m.if_(rst):
+            acc <<= 0
+            o_val <<= 0
+        with m.else_():
+            acc <<= acc - 5
+            o_val <<= mux(ovf, 111, acc[15:0])
+
+    return m.build()
+
+
+def _build_signed_cmp_wrapper_dsl(name: str, leaf_name: str):
+    """Trivial pass-through parent: instantiates `leaf_name`, no logic of its own."""
+    from veriforge.dsl import Module as DslModule  # noqa: PLC0415
+
+    m = DslModule(name)
+    clk = m.input("clk")
+    rst = m.input("rst")
+    o_val = m.wire("o_val", width=16, signed=True)
+    o_val_out = m.output("o_val_out", width=16, signed=True)
+    o_val_out.assign = o_val
+    m.instance(leaf_name, "u_leaf", ports={"clk": clk, "rst": rst, "o_val": o_val})
+    return m.build()
+
+
+def _run_signed_cmp(sim, out_name: str, n: int = 8) -> list[int]:
+    """Reset, then step `n` clock cycles, returning `out_name` as signed 16-bit ints."""
+
+    def s16(v: Value) -> int:
+        raw = int(v) & 0xFFFF
+        return raw - 65536 if raw >= 32768 else raw
+
+    def step():
+        sim.drive("clk", 1)
+        sim.settle()
+        sim.drive("clk", 0)
+        sim.settle()
+
+    sim.drive("clk", 0)
+    sim.drive("rst", 1)
+    step()
+    sim.drive("rst", 0)
+
+    vals = []
+    for _ in range(n):
+        step()
+        vals.append(s16(sim.read(out_name)))
+    return vals
+
+
+class TestSignedComparisonThroughHierarchy:
+    """`>`/`<`/`>=` against a signed localparam must agree standalone vs. as
+    a Design child -- see the module-level comment above for the bug this
+    guards against."""
+
+    @pytest.mark.parametrize("op", [">", "<", ">="])
+    @pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+    def test_signed_localparam_compare_standalone_matches_flattened(self, engine, op):
+        if engine == "compiled" and not _has_compiler:
+            pytest.skip("No C compiler available")
+        tag = {">": "gt", "<": "lt", ">=": "ge"}[op]
+
+        leaf = _build_signed_cmp_leaf_dsl(f"leaf_{tag}_{engine}", op)
+        sim_standalone = Simulator(leaf, engine=engine)
+        standalone = _run_signed_cmp(sim_standalone, "o_val")
+
+        leaf_c = _build_signed_cmp_leaf_dsl(f"leaf_{tag}_{engine}_c", op)
+        wrapper = _build_signed_cmp_wrapper_dsl(f"wrapper_{tag}_{engine}", f"leaf_{tag}_{engine}_c")
+        design = Design(modules=[wrapper, leaf_c])
+        sim_composed = Simulator(wrapper, engine=engine, design=design)
+        composed = _run_signed_cmp(sim_composed, "o_val_out")
+
+        # acc only ever decreases from 0, so the comparison's outcome must
+        # be constant across every cycle: never the 111 sentinel for `>`/
+        # `>=`, always the sentinel for `<`.
+        expected_always_true = op == "<"
+        for label, vals in (("standalone", standalone), ("composed", composed)):
+            for cycle, v in enumerate(vals):
+                is_sentinel = v == 111
+                assert is_sentinel == expected_always_true, (
+                    f"[{engine}, op={op}, {label}] cycle {cycle}: got {v}, "
+                    f"expected {'111 (sentinel)' if expected_always_true else 'acc passthrough'}"
+                )
+        assert standalone == composed, f"[{engine}, op={op}] standalone={standalone} != composed={composed}"

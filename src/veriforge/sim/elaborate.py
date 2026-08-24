@@ -906,6 +906,9 @@ def _apply_param_overrides(flat: Module, inst: Instance, sub: Module, prefix: st
                 pass
         p = Parameter(
             f"{prefix}.{param.name}",
+            param_type=param.param_type,
+            width=copy.deepcopy(param.width) if param.width is not None else None,
+            signed=param.signed,
             default_value=copy.deepcopy(value) if value else None,
             is_local=param.is_local,
         )
