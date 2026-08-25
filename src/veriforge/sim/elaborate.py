@@ -124,6 +124,63 @@ def is_synthesized_local_name(name: str) -> bool:
     return name.startswith((SYNTH_LOCAL_LOOP_PREFIX, SYNTH_LOCAL_BLOCK_PREFIX))
 
 
+def expand_array_concat_operands(module: Module) -> None:
+    """Expand any bare unpacked-array identifier used as a `Concatenation`
+    part into that array's individual elements, ascending index order.
+
+    Plain `{}` concatenation syntactically forbids unpacked-array operands
+    in real SystemVerilog; the only way to concatenate one is the
+    streaming concatenation operator (`{>>{a, b}}`, IEEE 1800-2017
+    SS11.4.14.1), which streams each unpacked-array operand out
+    element-by-element before concatenating. Since `{>>{...}}` with no
+    slice size is otherwise identical to plain concatenation, it's parsed
+    straight into an ordinary `Concatenation` node (see
+    `_build_streaming_concatenation` in transforms/_expressions.py) --
+    this pass performs the one piece of semantic work that couldn't
+    happen at parse time (each operand's *type* -- whether it's even an
+    array -- isn't known until the signal table exists).
+
+    Runs unconditionally (mirrors `materialize_process_locals`'s call
+    site in `Simulator.__init__`), engine-agnostic: by the time any
+    engine registers signals, every `Concatenation.parts` list is already
+    fully scalar, so no engine needs its own array-operand handling.
+    """
+    array_bounds: dict[str, tuple[int, int]] = {}  # name -> (lo, hi), lo <= hi
+    param_env = _build_param_env(module)
+    for collection in (module.nets, module.variables, module.ports):
+        for sig in collection:
+            dims = getattr(sig, "dimensions", None)
+            if not dims:
+                continue
+            dim = dims[0]
+            try:
+                a = _eval_const_expr(dim.msb, param_env)
+                b = _eval_const_expr(dim.lsb, param_env)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(a, int) and isinstance(b, int):
+                array_bounds[sig.name] = (min(a, b), max(a, b))
+
+    if not array_bounds:
+        return
+
+    for concat in module.find(Concatenation):
+        new_parts: list[Expression] = []
+        changed = False
+        for part in concat.parts:
+            bounds = array_bounds.get(part.name) if isinstance(part, Identifier) and part.hierarchy is None else None
+            if bounds is not None:
+                lo, hi = bounds
+                new_parts.extend(
+                    BitSelect(target=Identifier(part.name), index=Literal(idx)) for idx in range(lo, hi + 1)
+                )
+                changed = True
+            else:
+                new_parts.append(part)
+        if changed:
+            concat.parts = new_parts
+
+
 def materialize_process_locals(module: Module) -> Module:
     """Create unique module-level temporaries for declared process-local loop vars.
 

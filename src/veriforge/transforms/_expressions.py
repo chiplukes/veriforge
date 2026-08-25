@@ -826,6 +826,8 @@ def _build_expression_special(
         result = _build_assignment_pattern(tree, source_file, callbacks)
     elif tree.data in ("multiple_concatenation", "constant_multiple_concatenation"):
         result = _build_multiple_concatenation(tree, source_file, callbacks)
+    elif tree.data == "streaming_concatenation":
+        result = _build_streaming_concatenation(tree, source_file, callbacks)
     elif tree.data == "conditional_expression":
         result = _build_conditional_expression(tree, source_file, callbacks)
     elif tree.data == "constant_primary":
@@ -1028,6 +1030,8 @@ def _build_primary_special(
         result = _build_assignment_pattern(first, source_file, callbacks)
     elif first.data in ("multiple_concatenation", "constant_multiple_concatenation"):
         result = _build_multiple_concatenation(first, source_file, callbacks)
+    elif first.data == "streaming_concatenation":
+        result = _build_streaming_concatenation(first, source_file, callbacks)
     elif first.data == "expression":
         result = _build_expr_inner(first, source_file, callbacks)
     elif first.data == "mintypmax_expression":
@@ -1131,6 +1135,46 @@ def _build_concatenation(tree: Tree, source_file: str | None, callbacks: _Expres
     """Build a Concatenation from a concatenation-like tree node."""
     parts: list[Expression] = []
     for child in tree.children:
+        if isinstance(child, Tree) and child.data == "expression":
+            parts.append(callbacks.build_expr_inner(child, source_file))
+        elif isinstance(child, Tree):
+            parts.append(callbacks.build_expression(child, source_file))
+    loc = _loc_from_tree(tree, source_file)
+    return Concatenation(parts=parts, loc=loc)
+
+
+def _build_streaming_concatenation(
+    tree: Tree,
+    source_file: str | None,
+    callbacks: _ExpressionCallbacks,
+) -> Concatenation:
+    """Build the no-slice-size streaming concatenation `{>>{a, b, ...}}` /
+    `{<<{a, b, ...}}` (IEEE 1800-2017 SS11.4.14.1) as a `Concatenation`.
+
+    With no slice size, `{>>{...}}` (the "right"/big-endian stream) is
+    defined by the standard to be identical to plain concatenation
+    `{...}` -- the only reason SV requires the streaming syntax at all
+    here is that plain `{}` concatenation syntactically forbids unpacked-
+    array operands, while the streaming form accepts them (each unpacked-
+    array operand streams out element-by-element, ascending index order,
+    before being concatenated with the rest). That per-operand expansion
+    happens later, during evaluation/codegen, once each operand's type
+    (and therefore whether it's an unpacked array at all) is known --
+    here it's just desugared straight to an ordinary `Concatenation`.
+
+    `{<<{...}}` (the "left" stream) is a genuinely different operation
+    (bit-level reversal, not just element reordering) that isn't
+    implemented -- raised here as a clear error rather than silently
+    mishandled or left to fail opaquely deeper in the pipeline.
+    """
+    parts: list[Expression] = []
+    for child in tree.children:
+        if isinstance(child, Token) and child.type == "OP_BINARY_LOGIC_SHIFTL":
+            raise NotImplementedError(
+                "Streaming concatenation `{<<{...}}` (bit-level reversal) is not supported; "
+                "only the no-slice-size `{>>{...}}` form (equivalent to plain concatenation, "
+                "but also accepting unpacked-array operands) is implemented."
+            )
         if isinstance(child, Tree) and child.data == "expression":
             parts.append(callbacks.build_expr_inner(child, source_file))
         elif isinstance(child, Tree):

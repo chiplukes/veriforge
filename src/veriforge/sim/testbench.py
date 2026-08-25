@@ -15,6 +15,7 @@ from veriforge.model.design import Design, Module
 from .elaborate import (
     check_input_port_init,
     check_signed_declarations,
+    expand_array_concat_operands,
     flatten_module,
     materialize_process_locals,
     resolve_sv_imports,
@@ -153,6 +154,7 @@ class Simulator:  # cm:a5c8f4
         resolve_sv_imports(module, design)
         _resolve_typedef_widths(module)
         materialize_process_locals(module)
+        expand_array_concat_operands(module)
         check_signed_declarations(module)
         check_input_port_init(module, design)
 
@@ -335,6 +337,7 @@ class Simulator:  # cm:a5c8f4
 
     def _all_signal_names(self) -> set[str]:
         names = set(self._sched.signal_names())
+        names.update(self._runtime_memory_names())
         names.update(self._runtime_memory_element_names())
         names.update(self._struct_field_names(names))
         return names

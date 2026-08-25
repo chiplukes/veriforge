@@ -3626,6 +3626,22 @@ class _WideEmitterMixin:
                     self._free_scratch(mem_slot)
                     return lines
 
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference (2-D packed array read as a single
+                # flat vector, e.g. `assign wide = foo;`): the depth is
+                # known at compile time, so synthesize the equivalent
+                # concatenation of every element (highest Verilog index
+                # first, matching standard packed-array bit layout) and
+                # delegate to the Concatenation case below, reusing its
+                # already-correct codegen rather than duplicating it.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_wide_expr_to_scratch(
+                    synthetic, slot, n_words, dst_width, indent, signed_override=signed_override
+                )
+
             return None  # local var — not yet handled
 
         # ── Literal ─────────────────────────────────────────────────────────
@@ -5276,6 +5292,20 @@ class _WideEmitterMixin:
         if etype is Replication:
             return max(own, self._expr_max_internal_width(expr.value))
         if etype in (RangeSelect, PartSelect, BitSelect):
+            # A select's `.target` being a bare Identifier that names a
+            # memory (`mem[idx]`, `mem[idx][msb:lsb]`, ...) is an ELEMENT
+            # access, never a whole-array reference -- `_expr_width` on
+            # that bare Identifier now correctly reports the *whole*
+            # flattened array's width (depth*elem_width) for genuine
+            # whole-array uses (`assign wide = mem;`), but recursing into
+            # it HERE would wrongly attribute that same whole-array width
+            # to a plain per-element select, flipping ordinary narrow
+            # memory-element access onto the wide (>64-bit) codegen path.
+            # `own` (this select's own already-correct element/slice
+            # width, from `_expr_width(expr)` above) is what actually
+            # matters here; only recurse for a non-memory target.
+            if type(expr.target) is Identifier and self._mem_map.get(self._identifier_name(expr.target)) is not None:
+                return own
             return max(own, self._expr_max_internal_width(expr.target))
         if etype is FunctionCall:
             return max([own, *(self._expr_max_internal_width(a) for a in expr.arguments)])

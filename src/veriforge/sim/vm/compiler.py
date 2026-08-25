@@ -478,6 +478,7 @@ class Compiler:  # cm:8c1e4a
     def _register_signals(self, module: Module) -> None:
         """Register all nets, variables, and ports from the module."""
         from ..elaborate import _build_param_env, parameter_signal_width  # noqa: PLC0415
+        from veriforge.model.ports import PortDirection  # noqa: PLC0415
 
         param_env = _build_param_env(module)
 
@@ -538,7 +539,17 @@ class Compiler:  # cm:8c1e4a
                 else:
                     if lsb != 0:
                         self._signal_bases[port.name] = lsb
-                    self._register_signal(port.name, width, signed=port.signed)
+                    sid = self._register_signal(port.name, width, signed=port.signed)
+                    # ANSI inline initializer (`output reg foo = 1;`) --
+                    # applies to output/inout ports the same way an
+                    # initial_value applies to a net/var above. Input
+                    # ports carrying a default_value are the unrelated
+                    # SV "unconnected instance port" fallback feature,
+                    # which real hardware can't apply to an externally-
+                    # driven signal -- deliberately excluded, matching
+                    # `check_input_port_init`'s warning for that case.
+                    if port.direction != PortDirection.INPUT and port.default_value is not None:
+                        self._apply_initial_value(sid, port.default_value, width)
 
         # Register parameters as constant-valued signals
         self._register_parameters(module)
@@ -772,6 +783,24 @@ class Compiler:  # cm:8c1e4a
                 program.append(instr(Op.LOAD_CONST, msb_cid))
                 program.append(instr(Op.LOAD_CONST, lsb_cid))
                 program.append(instr(Op.RANGE_SELECT))
+                return
+            if self._is_memory(name):
+                # Whole-array reference (2-D packed array read as a single
+                # flat vector, e.g. `assign wide = foo;`) -- the depth is
+                # known at compile time, so synthesize the equivalent
+                # concatenation of every element (highest Verilog index
+                # first, matching standard packed-array bit layout) and
+                # compile that instead, reusing Concatenation's own
+                # (already-correct) codegen rather than duplicating it.
+                mid = self.mem_map[name]
+                _elem_w, depth, _base = self.mem_info[mid]
+                for idx in range(depth - 1, -1, -1):
+                    part = BitSelect(target=Identifier(name), index=Literal(idx))
+                    self._compile_expr(part, program, self._expr_width(part))
+                program.append(instr(Op.CONCAT, depth))
+                if width and width > depth * _elem_w:
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
                 return
             sid = self._get_signal_id(name)
             program.append(instr(Op.LOAD_SIG, sid))
@@ -2345,6 +2374,14 @@ class Compiler:  # cm:8c1e4a
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
                 return struct_info[4]
+            if self._is_memory(name):
+                # Whole-array reference: the flat width is depth*elem_width,
+                # not a fabricated 1-bit phantom signal's width (which used
+                # to truncate the RHS to 1 bit before it ever reached the
+                # whole-array LHS/RHS handling elsewhere in this file).
+                mid = self.mem_map[name]
+                elem_w, depth, _base = self.mem_info[mid]
+                return elem_w * depth
             sid = self._get_signal_id(name)
             return self.sig_width[sid]
 
@@ -2622,6 +2659,31 @@ class Compiler:  # cm:8c1e4a
                     program.append(instr(Op.STORE_RANGE, storage_id))
                 else:
                     program.append(instr(Op.NBA_RANGE, storage_id))
+                return
+            if self._is_memory(name):
+                # Whole-array LHS (2-D packed array assigned as a single
+                # flat vector, e.g. `assign dout = din;`): the depth is
+                # known at compile time, so treat this exactly like a
+                # `{mem[depth-1], ..., mem[0]} = rhs` Concatenation LHS
+                # (see that branch below) -- DUP + RANGE_SELECT the
+                # matching slice for each element, in from-MSB order,
+                # then let the existing BitSelect-targeting-a-memory LHS
+                # path (below) do the actual STORE_MEM/NBA_MEM.
+                mid = self.mem_map[name]
+                elem_w, depth, _base = self.mem_info[mid]
+                program.append(instr(Op.RESIZE, depth * elem_w))
+                offset = 0
+                for idx in range(depth):
+                    program.append(instr(Op.DUP))
+                    msb_cid = self._add_int_const(offset + elem_w - 1, 32)
+                    lsb_cid = self._add_int_const(offset, 32)
+                    program.append(instr(Op.LOAD_CONST, msb_cid))
+                    program.append(instr(Op.LOAD_CONST, lsb_cid))
+                    program.append(instr(Op.RANGE_SELECT))
+                    part = BitSelect(target=Identifier(name), index=Literal(idx))
+                    self._compile_store_lhs(part, program, immediate=immediate, total_width=elem_w)
+                    offset += elem_w
+                program.append(instr(Op.POP))
                 return
             sid = self._get_signal_id(name)
             target_width = self.sig_width[sid]

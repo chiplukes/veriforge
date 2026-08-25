@@ -1414,6 +1414,33 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 self.interpreter.dirty.add(self.compiler.mem_marker_sigs[mid])
             if self._cy_ctx is not None and self.compiler.mem_count > 0:
                 self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
+            return
+        mid = self.compiler.mem_map.get(name)
+        if mid is not None:
+            # Whole-array write (no index, e.g. a 2-D packed array driven
+            # as a single flat vector): split the value back into
+            # per-element slices -- the mirror of the whole-array read in
+            # `read_signal` below.
+            from ..value import _mask_for_width
+
+            ew, depth, base = self.compiler.mem_info[mid]
+            if depth == 0:
+                return
+            if isinstance(value, int):
+                value = Value(value, width=depth * ew)
+            elif value.width != depth * ew:
+                value = value.resize(depth * ew)
+            wmask = _mask_for_width(ew)
+            for k in range(depth):
+                lsb = k * ew
+                elem = value[lsb + ew - 1 : lsb]
+                flat = base + k
+                self.compiler.mem_val[flat] = elem.val & wmask & ~elem.mask
+                self.compiler.mem_mask[flat] = elem.mask & wmask
+            if self.interpreter is not None and mid < len(self.compiler.mem_marker_sigs):
+                self.interpreter.dirty.add(self.compiler.mem_marker_sigs[mid])
+            if self._cy_ctx is not None and self.compiler.mem_count > 0:
+                self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic at the current time."""
@@ -1554,6 +1581,29 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                         v, m = self._cy_ctx.read_mem(mid, idx)
                         return Value(v, width=ew, mask=m)
                     return Value(self.compiler.mem_val[base + idx], width=ew, mask=self.compiler.mem_mask[base + idx])
+        else:
+            # Whole-array reference (no index at all): a 2-D packed array
+            # read as a single flat vector -- the mirror of the
+            # whole-array write in `drive_signal` above.
+            mid = self.compiler.mem_map.get(name)
+            if mid is not None:
+                ew, depth, base = self.compiler.mem_info[mid]
+                if depth == 0:
+                    return Value.x(0)
+                if self._cy_ctx is not None and self.compiler.mem_count > 0:
+                    elems = []
+                    for idx in range(depth):
+                        v, m = self._cy_ctx.read_mem(mid, idx)
+                        elems.append(Value(v, width=ew, mask=m))
+                else:
+                    elems = [
+                        Value(self.compiler.mem_val[base + idx], width=ew, mask=self.compiler.mem_mask[base + idx])
+                        for idx in range(depth)
+                    ]
+                result = elems[-1]
+                for elem in reversed(elems[:-1]):
+                    result = result.concat(elem)
+                return result
         if "." in name and self._ref_ctx is not None and self._ref_evaluator is not None:
             self._sync_ref_ctx()
             return self._ref_evaluator.eval(_identifier_from_name(name), self._ref_ctx)

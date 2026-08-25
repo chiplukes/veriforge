@@ -33,6 +33,7 @@ from veriforge.model.expressions import (
     TernaryOp,
     UnaryOp,
 )
+from veriforge.model.ports import PortDirection
 from veriforge.model.statements import (
     BlockingAssign,
     CaseStatement,
@@ -1813,7 +1814,19 @@ class CythonCodegen(
                 else:
                     if lsb != 0:
                         self._signal_bases[port.name] = lsb
-                    self._register_signal(port.name, w, signed=port.signed)
+                    sid = self._register_signal(port.name, w, signed=port.signed)
+                    # ANSI inline initializer (`output reg foo = 1;`) --
+                    # applies to output/inout ports the same way an
+                    # initial_value applies to a net/var above. Input
+                    # ports carrying a default_value are the unrelated
+                    # SV "unconnected instance port" fallback feature,
+                    # which real hardware can't apply to an externally-
+                    # driven signal -- deliberately excluded, matching
+                    # `check_input_port_init`'s warning for that case.
+                    if port.direction != PortDirection.INPUT and port.default_value is not None:
+                        iv = self._eval_initial_value(port.default_value, w)
+                        if iv is not None:
+                            self._var_init[sid] = iv
 
         # Register parameters as constant-valued signals
         self._register_parameters(module)

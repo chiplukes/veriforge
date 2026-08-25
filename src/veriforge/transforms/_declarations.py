@@ -210,16 +210,38 @@ def _extract_port_identifiers_with_dimensions(
     source_file: str | None,
     build_constant_expression: BuildConstantExpressionFn,
 ) -> list[tuple[str, list[Range], Expression | None]]:
-    """Extract port identifiers, unpacked dimensions, and optional default values."""
+    """Extract port identifiers, unpacked dimensions, and optional default values.
+
+    Handles two distinct grammar shapes that both route through here:
+    ``list_of_port_identifiers`` (each identifier wrapped in its own
+    ``port_id_with_dimensions`` subtree, used for plain ``wire``-style
+    ports) and ``list_of_variable_port_identifiers`` (a flat
+    ``PORT_IDENTIFIER ("=" constant_expression)?`` sequence, used for
+    ``output reg foo = 1;`` ANSI-style variable ports -- the ``=
+    constant_expression`` here is *not* nested under a
+    ``port_id_with_dimensions`` node, so a bare-token match previously
+    always recorded ``None`` for the default value regardless of whether
+    one followed).
+    """
     items: list[tuple[str, list[Range], Expression | None]] = []
 
-    for child in tree.children:
+    children = tree.children
+    i = 0
+    while i < len(children):
+        child = children[i]
         if isinstance(child, Token) and child.type in ("PORT_IDENTIFIER", "NET_IDENTIFIER"):
-            items.append((str(child), [], None))
+            name = str(child)
+            default_value: Expression | None = None
+            if i + 1 < len(children):
+                nxt = children[i + 1]
+                if isinstance(nxt, Tree) and nxt.data in ("constant_expression", "expression"):
+                    default_value = build_constant_expression(nxt, source_file)
+                    i += 1
+            items.append((name, [], default_value))
         elif isinstance(child, Tree) and child.data == "port_id_with_dimensions":
             name = ""
             dims: list[Range] = []
-            default_value: Expression | None = None
+            default_value = None
             for item in child.children:
                 if isinstance(item, Token) and item.type == "PORT_IDENTIFIER":
                     name = str(item)
@@ -231,6 +253,7 @@ def _extract_port_identifiers_with_dimensions(
                     default_value = build_constant_expression(item, source_file)
             if name:
                 items.append((name, dims, default_value))
+        i += 1
 
     return items
 
@@ -800,7 +823,14 @@ def _extract_port_declaration(  # noqa: PLR0912
 
         if child.data in ("input_declaration", "output_declaration", "inout_declaration"):
             direction = _direction_from_rule(child.data)
-            width: Range | None = None
+            # A port can carry more than one packed dimension before the
+            # identifier (`input logic [3:0][17:0] foo` -- 4 lanes of 18
+            # bits each), same as net_declaration's `range+` alternative:
+            # collect every `range` child and split it the same way
+            # _extract_net_declaration does below (last range = element
+            # width, everything before it = extra packed dims), rather
+            # than letting each new `range` silently overwrite the last.
+            packed_ranges: list[Range] = []
             signed = False
             data_type: str | None = None
             declared_dims: list[Range] = []
@@ -819,7 +849,9 @@ def _extract_port_declaration(  # noqa: PLR0912
                         data_type = str(item)
                 elif isinstance(item, Tree):
                     if item.data == "range":
-                        width = _build_range(item, source_file, build_constant_expression)
+                        range_ = _build_range(item, source_file, build_constant_expression)
+                        if range_ is not None:
+                            packed_ranges.append(range_)
                     elif item.data == "dimension":
                         dim = _extract_dimension_range(item, source_file, build_constant_expression)
                         if dim is not None:
@@ -832,6 +864,9 @@ def _extract_port_declaration(  # noqa: PLR0912
                             _extract_port_identifiers_with_dimensions(item, source_file, build_constant_expression)
                         )
 
+            width = packed_ranges[-1] if packed_ranges else None
+            extra_packed_dims = packed_ranges[:-1] if len(packed_ranges) > 1 else []
+
             for name, dims, default_value in port_items:
                 ports.append(
                     Port(
@@ -839,7 +874,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                         direction=direction,
                         data_type=data_type,
                         width=width,
-                        dimensions=[*declared_dims, *dims],
+                        dimensions=[*extra_packed_dims, *declared_dims, *dims],
                         signed=signed,
                         default_value=default_value,
                         loc=loc,

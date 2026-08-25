@@ -2870,6 +2870,14 @@ class _ExprEmitterMixin:
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
                 return struct_info[4]
+            mid = self._mem_map.get(name)
+            if mid is not None:
+                # Whole-array reference: the flat width is depth*elem_width,
+                # not the bare `1` fallback (which used to truncate the
+                # value to 1 bit before it ever reached the whole-array
+                # read/write handling elsewhere).
+                elem_w, depth = self._mem_info[mid]
+                return elem_w * depth
             return 1
         if etype is Literal:
             return expr.width or 32

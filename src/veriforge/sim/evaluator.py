@@ -115,6 +115,14 @@ class EvalContext:  # cm:1f4c6a
                 idx = int(name[bracket + 1 : -1])
                 if 0 <= idx < len(data):
                     return data[idx]
+        else:
+            # Whole-array access (no index at all): a 2-D packed array
+            # (`logic [3:0][17:0] foo`) read as a single flat vector, the
+            # way `assign wide_wire = foo;` or a testbench's own
+            # `sim.signal("foo").value` would. See `_read_whole_memory`.
+            whole = _read_whole_memory(self, name)
+            if whole is not None:
+                return whole
         struct_val = _resolve_struct_field_value(name, self)
         if struct_val is not None:
             return struct_val
@@ -135,6 +143,15 @@ class EvalContext:  # cm:1f4c6a
                     if originals is not None and mem_name not in originals:
                         originals[mem_name] = Value(0)
                     return
+        elif name in self._memories:
+            # Whole-array write (no index): split the flat value back into
+            # per-element slices -- the mirror of the whole-array read
+            # above. See `_write_whole_memory`.
+            if _write_whole_memory(self, name, value):
+                originals = self._originals
+                if originals is not None and name not in originals:
+                    originals[name] = Value(0)
+                return
         old = self._signals.get(name)
         self._signals[name] = value
         # Record the original value (before ANY write in this region)
@@ -145,6 +162,58 @@ class EvalContext:  # cm:1f4c6a
         originals = self._originals
         if originals is not None and name not in originals:
             originals[name] = old
+
+
+def _read_whole_memory(ctx: EvalContext, name: str) -> Value | None:
+    """Assemble a memory array's elements into one flat `Value`.
+
+    A 2-D packed array (`logic [3:0][17:0] foo`, or any net/var/port
+    declared with a `dimensions` array) is represented internally as a
+    memory (a Python list of per-element `Value`s, index 0..depth-1
+    matching the Verilog index directly) so that `foo[i]` indexing works.
+    But it's also a single, ordinary `depth*elem_width`-bit vector from
+    the outside -- `assign wide = foo;` or a testbench reading `foo` as a
+    whole must see it that way. Per standard packed-array bit layout, the
+    highest Verilog index (`depth-1`) is the flat vector's MSB-most
+    slice and index 0 is its LSB-most slice.
+
+    Returns None if *name* isn't a memory at all (not this function's
+    concern -- the caller falls through to its other lookups).
+    """
+    mem = ctx._memories.get(name)
+    if mem is None:
+        return None
+    data, _elem_width = mem
+    if not data:
+        return Value.x(0)
+    result = data[-1]
+    for k in range(len(data) - 2, -1, -1):
+        result = result.concat(data[k])
+    return result
+
+
+def _write_whole_memory(ctx: EvalContext, name: str, value: Value) -> bool:
+    """Split a flat `Value` back into a memory's per-element slices.
+
+    The exact inverse of `_read_whole_memory`: index `depth-1` receives
+    the incoming value's MSB-most `elem_width`-bit slice, index 0 the
+    LSB-most. Returns False if *name* isn't a memory.
+    """
+    mem = ctx._memories.get(name)
+    if mem is None:
+        return False
+    data, elem_width = mem
+    depth = len(data)
+    if depth == 0:
+        return True
+    full_width = depth * elem_width
+    if value.width != full_width:
+        value = value.resize(full_width)
+    for k in range(depth):
+        lsb = k * elem_width
+        msb = lsb + elem_width - 1
+        data[k] = value[msb:lsb]
+    return True
 
 
 def _resolve_memory_index(index_spec: int | str, ctx: EvalContext) -> int | None:
@@ -309,6 +378,16 @@ class ExpressionEvaluator:  # cm:7e8b5d
                         return v.sign_extend(width)
                     return v.resize(width)
                 return v
+            # Whole-array reference (2-D packed array read as a single
+            # flat vector, e.g. `assign wide = foo;`) -- see
+            # `_read_whole_memory`. Falls through to the struct-field/X
+            # fallback below when `name` isn't a memory at all.
+            whole = _read_whole_memory(ctx, name)
+            if whole is not None:
+                if width and whole.width < width:
+                    eff_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
+                    return whole.sign_extend(width) if eff_signed else whole.resize(width)
+                return whole
             # Check for struct field access: "base.field"
             struct_val = _resolve_struct_field_value(name, ctx)
             if struct_val is not None:

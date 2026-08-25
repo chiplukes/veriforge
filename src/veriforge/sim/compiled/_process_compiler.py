@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from veriforge._env import get_env
+from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.expressions import (
     BinaryOp,
     BitSelect,
@@ -132,6 +133,46 @@ class _ProcessCompilerMixin:
 
             if self._compile_struct_field_cont_assign(assign, sensitivity):
                 continue
+
+            # Whole-array LHS (2-D packed array assigned as a single flat
+            # vector, e.g. `assign dout = din;`): `assign.lhs.name` isn't
+            # in `_signal_map` at all (it's a memory), so the plain-
+            # Identifier fallback below used to see `lhs_sid is None` and
+            # silently skip the assignment entirely -- no process was
+            # ever generated for it, leaving the destination stuck at its
+            # default X forever. The depth is known at compile time, so
+            # synthesize the equivalent `{dout[depth-1], ..., dout[0]} =
+            # rhs` (highest Verilog index first, matching standard
+            # packed-array bit layout) and reuse the existing
+            # Concatenation-LHS compiler rather than duplicating it.
+            if isinstance(assign.lhs, Identifier):
+                mem_id = self._mem_map.get(assign.lhs.name)
+                if mem_id is not None:
+                    _elem_w, depth = self._mem_info[mem_id]
+                    lhs_parts = [
+                        BitSelect(target=Identifier(assign.lhs.name), index=Literal(idx))
+                        for idx in range(depth - 1, -1, -1)
+                    ]
+                    rhs = assign.rhs
+                    if isinstance(rhs, Identifier) and self._mem_map.get(rhs.name) is not None:
+                        # RHS is *also* a bare whole-array reference
+                        # (`assign dout = din;`): rewrite it the same way
+                        # too, into a Concatenation of its own elements,
+                        # rather than leaving a raw memory Identifier for
+                        # the per-part slice extraction below to trip
+                        # over (`_emit_expr`'s Identifier case has no
+                        # memory-reference handling -- it silently
+                        # returns "0"). Concatenation expressions are
+                        # already well-supported throughout this file.
+                        rhs = Concatenation(
+                            parts=[
+                                BitSelect(target=Identifier(rhs.name), index=Literal(idx))
+                                for idx in range(depth - 1, -1, -1)
+                            ]
+                        )
+                    synthetic = ContinuousAssign(lhs=Concatenation(parts=lhs_parts), rhs=rhs)
+                    self._compile_concat_cont_assign(synthetic, sensitivity)
+                    continue
 
             lhs_sid = self._signal_map.get(assign.lhs.name) if isinstance(assign.lhs, Identifier) else None
             if lhs_sid is None:

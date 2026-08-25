@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
+from veriforge.model.ports import PortDirection
 from veriforge.model.expressions import (
     AssignmentPattern,
     BinaryOp,
@@ -353,6 +354,26 @@ class Scheduler:  # cm:9a7f2c
                 lsb_val = _const_int(port.width.lsb, senv)
                 if lsb_val is not None:
                     lsb = lsb_val
+            already_registered = port.name in self.ctx._signals or port.name in self.ctx._memories
+            if getattr(port, "dimensions", None) and not already_registered:
+                # 2-D packed-array port (`input logic [3:0][17:0] foo`):
+                # register as a memory the same way a same-shaped net/var
+                # already does above, rather than falling through to
+                # write_signal() below and silently registering it as a
+                # plain `width`-bit (i.e. only the innermost dimension)
+                # scalar -- which made `foo[i]` a *bit* select into that
+                # truncated scalar instead of an element select.
+                dim = port.dimensions[0]
+                lo = _const_int(dim.msb, senv)
+                hi = _const_int(dim.lsb, senv)
+                if lo is not None and hi is not None:
+                    if lsb != 0:
+                        self.ctx._memory_bases[port.name] = lsb
+                    depth = abs(hi - lo) + 1
+                    mem_data = [Value.x(width) for _ in range(depth)]
+                    self.ctx._memories[port.name] = (mem_data, width)
+                    self.ctx._memory_names.add(port.name)
+                    continue
             if getattr(port, "dimensions", None):
                 if lsb != 0:
                     self.ctx._memory_bases[port.name] = lsb
@@ -360,7 +381,20 @@ class Scheduler:  # cm:9a7f2c
                 self.ctx._signal_bases[port.name] = lsb
             # Only create if not already created by net/var
             if port.name not in self.ctx._signals:
-                self.ctx.write_signal(port.name, Value.x(width))
+                # An ANSI-style inline initializer (`output reg foo = 1;`) is
+                # a legitimate Verilog-2001+ initial value for an output/inout
+                # port, equivalent to `initial foo = 1;` -- apply it here, the
+                # same way net/var initial values are applied above. Input
+                # ports carrying a default_value are a *different*, SV-only
+                # feature (the value an unconnected instance port falls back
+                # to) that real hardware can't apply to an externally-driven
+                # signal; `check_input_port_init` already warns about that
+                # case, so it's deliberately excluded here.
+                if port.direction != PortDirection.INPUT and port.default_value is not None:
+                    init = self._eval_initial_value(port.default_value, width)
+                else:
+                    init = Value.x(width)
+                self.ctx.write_signal(port.name, init)
             if port.signed:
                 self.ctx._signal_signed[port.name] = True
 

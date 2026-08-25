@@ -651,7 +651,7 @@ class _StmtEmittersMixin:
                     f"{pad}{helper}(c, {sid}, <int>({lsb_str}), {rhs_source_sid}, <int>({rhs_source_lsb}), {width_expr})"
                 ]
             if rhs_mem_source is not None:
-                rhs_mid, _rhs_idx, _rhs_lsb = rhs_mem_source
+                rhs_mid, rhs_idx, rhs_lsb = rhs_mem_source
                 if self._mem_info[rhs_mid][0] > _WORD_BITS:
                     return self._emit_signal_mem_rhs_source_lines(
                         sid,
@@ -661,6 +661,21 @@ class _StmtEmittersMixin:
                         indent,
                         is_nba=is_nba,
                     )
+                # Narrow-element memory source, dynamic msb/lsb -- same
+                # reasoning as the constant-bounds path in
+                # `_emit_range_write_const_sid`: a single direct
+                # `_whole_assign_insert_word` from the element's own raw
+                # (narrow) storage, masked/shifted at runtime since the
+                # width here isn't a compile-time constant.
+                helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
+                pad = "    " * indent
+                val_expr = (
+                    f"((<unsigned long long>c.mem_{rhs_mid}_val[({rhs_idx})]) >> ({rhs_lsb})) & wmask({width_expr})"
+                )
+                mask_expr = (
+                    f"((<unsigned long long>c.mem_{rhs_mid}_mask[({rhs_idx})]) >> ({rhs_lsb})) & wmask({width_expr})"
+                )
+                return [f"{pad}{helper}(c, {sid}, <int>({lsb_str}), <int>({width_expr}), {val_expr}, {mask_expr})"]
         if isinstance(msb_expr, Literal) and isinstance(lsb_expr, Literal):
             return self._emit_range_write_const_sid(
                 sid,
@@ -773,7 +788,7 @@ class _StmtEmittersMixin:
                 return [f"{pad}{helper}(c, {sid}, {lsb_val}, {rhs_source_sid}, <int>({rhs_source_lsb}), {sel_w})"]
             rhs_mem_source = self._resolve_memory_slice_source(rhs)
             if rhs_mem_source is not None:
-                rhs_mid, _rhs_idx, _rhs_lsb = rhs_mem_source
+                rhs_mid, rhs_idx, rhs_lsb = rhs_mem_source
                 if self._mem_info[rhs_mid][0] > _WORD_BITS:
                     return self._emit_signal_mem_rhs_source_lines(
                         sid,
@@ -783,6 +798,24 @@ class _StmtEmittersMixin:
                         indent,
                         is_nba=is_nba,
                     )
+                # Narrow-element memory (fits in one native word) feeding
+                # a wide (>64-bit) destination signal: falling through to
+                # the plain `_emit_expr`/`c.val[sid]` path below would be
+                # wrong -- `c.val`/`c.mask` are the *narrow* (<=64-bit)
+                # signal storage, not the real storage for a signal this
+                # wide. `_wmem{mid}_extract_val/_extract_mask` (used by
+                # `_emit_signal_mem_rhs_source_lines` above) aren't even
+                # generated for a narrow-element memory, so a single
+                # direct `_whole_assign_insert_word` call from the
+                # element's own raw storage is both correct and simpler
+                # than that chunked path (a narrow element always fits in
+                # one word, no chunking loop needed).
+                helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
+                pad = "    " * indent
+                sel_mask = _cy_hex((1 << sel_w) - 1)
+                val_expr = f"((<unsigned long long>c.mem_{rhs_mid}_val[({rhs_idx})]) >> ({rhs_lsb})) & {sel_mask}"
+                mask_expr = f"((<unsigned long long>c.mem_{rhs_mid}_mask[({rhs_idx})]) >> ({rhs_lsb})) & {sel_mask}"
+                return [f"{pad}{helper}(c, {sid}, {lsb_val}, {sel_w}, {val_expr}, {mask_expr})"]
         rhs_val = self._emit_expr(rhs, sel_w)
         range_mask = _cy_hex(((1 << sel_w) - 1) << lsb_val)
         sel_mask = _cy_hex((1 << sel_w) - 1)

@@ -678,6 +678,33 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                 self._sim.mem_write_wide(mid, idx, int(value.val), int(value.mask))
             else:
                 self._sim.mem_write(mid, idx, _to_i64(value.val), _to_i64(value.mask))
+            return
+        if self._codegen is not None:
+            mid = self._codegen.mem_map.get(name)
+            if mid is not None:
+                # Whole-array write (no index): a 2-D packed array driven
+                # as a single flat vector -- split back into per-element
+                # slices via the existing per-element mem_write(_wide),
+                # the mirror of the whole-array read in `read_signal`
+                # below.
+                ew, depth = self._codegen.mem_info[mid]
+                if depth == 0:
+                    return
+                full_width = depth * ew
+                if isinstance(value, int):
+                    value = Value(value, width=full_width)
+                elif value.width != full_width:
+                    value = value.resize(full_width)
+                if not self._has_drive_snapshot:
+                    self._sim.snapshot()
+                    self._has_drive_snapshot = True
+                for k in range(depth):
+                    lsb = k * ew
+                    elem = value[lsb + ew - 1 : lsb]
+                    if ew > 64:
+                        self._sim.mem_write_wide(mid, k, int(elem.val), int(elem.mask))
+                    else:
+                        self._sim.mem_write(mid, k, _to_i64(elem.val), _to_i64(elem.mask))
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic at the current time."""
@@ -735,6 +762,20 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                 if 0 <= idx < depth:
                     v, m = self._sim.mem_read(mid, idx)
                     return Value(v, width=ew, mask=m)
+        elif self._codegen is not None:
+            # Whole-array reference (no index at all): a 2-D packed array
+            # read as a single flat vector -- the mirror of the
+            # whole-array write in `drive_signal` above.
+            mid = self._codegen.mem_map.get(name)
+            if mid is not None:
+                ew, depth = self._codegen.mem_info[mid]
+                if depth == 0:
+                    return Value.x(0)
+                elems = [self._sim.mem_read(mid, idx) for idx in range(depth)]
+                result = Value(elems[-1][0], width=ew, mask=elems[-1][1])
+                for v, m in reversed(elems[:-1]):
+                    result = result.concat(Value(v, width=ew, mask=m))
+                return result
         if "." in name and self._ref_ctx is not None and self._ref_evaluator is not None:
             self._sync_ref_ctx()
             if self._mem_map:

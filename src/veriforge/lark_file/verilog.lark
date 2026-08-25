@@ -452,7 +452,7 @@ parameter_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
 // SYNTHESIZABLE: YES
 // EXAMPLE: inout wire signed [7:0] data
 // SUPPORT: YES
-inout_declaration: KW_INOUT net_type? KW_SIGNED? range? list_of_port_identifiers
+inout_declaration: KW_INOUT net_type? KW_SIGNED? range* list_of_port_identifiers
     | KW_INOUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INOUT IDENTIFIER dimension* list_of_port_identifiers
 // BNF: input_declaration ::= input [ net_type ] [ signed ] [ range ]
@@ -461,7 +461,7 @@ inout_declaration: KW_INOUT net_type? KW_SIGNED? range? list_of_port_identifiers
 // SYNTHESIZABLE: YES
 // EXAMPLE: input wire signed [7:0] data
 // SUPPORT: YES
-input_declaration: KW_INPUT net_type? KW_SIGNED? range? list_of_port_identifiers
+input_declaration: KW_INPUT net_type? KW_SIGNED? range* list_of_port_identifiers
     | KW_INPUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INPUT IDENTIFIER dimension* list_of_port_identifiers
 // BNF: output_declaration ::=
@@ -477,8 +477,8 @@ input_declaration: KW_INPUT net_type? KW_SIGNED? range? list_of_port_identifiers
 // EXAMPLE: output wire [3:0] data
 // EXAMPLE: output integer count
 // SUPPORT: YES
-output_declaration: KW_OUTPUT net_type? KW_SIGNED? range? list_of_port_identifiers
-| KW_OUTPUT KW_REG KW_SIGNED? range? list_of_variable_port_identifiers
+output_declaration: KW_OUTPUT net_type? KW_SIGNED? range* list_of_port_identifiers
+| KW_OUTPUT KW_REG KW_SIGNED? range* list_of_variable_port_identifiers
 | KW_OUTPUT output_variable_type list_of_variable_port_identifiers
 | KW_OUTPUT scoped_identifier dimension* list_of_port_identifiers
 | KW_OUTPUT IDENTIFIER dimension* list_of_port_identifiers
@@ -2766,6 +2766,20 @@ module_path_multiple_concatenation: "{" constant_expression module_path_concaten
 // EXAMPLE: {4{data}}
 // SUPPORT: YES
 multiple_concatenation: "{" constant_expression concatenation "}"
+// SV: streaming_concatenation ::= { stream_operator [ slice_size ] stream_concatenation }
+//     stream_operator ::= >> | <<
+//     stream_concatenation ::= { stream_expression { , stream_expression } }
+// PARTIAL SUPPORT: only the no-slice-size form is accepted here
+// (`{>>{a, b}}` / `{<<{a, b}}`) -- see `_declarations`/tree_to_model for
+// how `>>` (equivalent to plain concatenation, but also accepting
+// unpacked-array operands, which plain `{}` cannot) is lowered, and why
+// `<<` (bit-level reversal) is rejected with a clear error rather than
+// silently mishandled.
+// PRIORITY: MEDIUM
+// SYNTHESIZABLE: YES
+// EXAMPLE: {>>{a, b}}
+// SUPPORT: PARTIAL
+streaming_concatenation: "{" (OP_BINARY_LOGIC_SHIFTR | OP_BINARY_LOGIC_SHIFTL) "{" expression ( "," expression )* "}" "}"
 // SV: assignment_pattern ::= '{ expression { , expression } }
 //                          | '{ structure_pattern_key : expression { , structure_pattern_key : expression } }
 //                          | '{ constant_expression { expression { , expression } } }
@@ -3054,6 +3068,7 @@ primary: number
     | hierarchical_identifier ( "[" expression "]" )* ( "[" range_expression "]" )?
     | concatenation
     | multiple_concatenation
+    | streaming_concatenation
     | function_call
     | system_function_call
     | "(" mintypmax_expression ")"
