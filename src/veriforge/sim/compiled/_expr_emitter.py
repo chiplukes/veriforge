@@ -23,6 +23,7 @@ from veriforge.model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -338,6 +339,9 @@ class _ExprEmitterMixin:
 
         if etype is Concatenation:
             return self._emit_concat(expr, width)
+
+        if etype is StreamingConcatenation:
+            return self._emit_expr(self._stream_reverse_synthetic(expr), width, signed_override)
 
         if etype is Replication:
             return self._emit_replication(expr)
@@ -1004,6 +1008,9 @@ class _ExprEmitterMixin:
                 return f"((({target}) >> ({base})) & {mask_expr})"
             return f"((({target}) >> (({base}) - ({width_expr}) + 1)) & {mask_expr})"
 
+        if etype is StreamingConcatenation:
+            return self._emit_py_expr(self._stream_reverse_synthetic(expr), width)
+
         if etype is Concatenation:
             parts = expr.parts
             widths = self._concat_eval_widths(parts, width)
@@ -1228,6 +1235,9 @@ class _ExprEmitterMixin:
             if expr.direction == "+:":
                 return f"((({target_mask}) >> ({base})) & {mask_expr})"
             return f"((({target_mask}) >> (({base}) - ({width_expr}) + 1)) & {mask_expr})"
+
+        if etype is StreamingConcatenation:
+            return self._emit_py_mask_expr(self._stream_reverse_synthetic(expr), width)
 
         if etype is Concatenation:
             parts = expr.parts
@@ -2448,6 +2458,55 @@ class _ExprEmitterMixin:
             return f"(0 if {any_x} else (1 if _xor_reduce({operand}, {width}) == 0 else 0))"
         return "0"
 
+    def _stream_reverse_slice_size(self, expr: StreamingConcatenation) -> int:
+        """Resolve `expr.slice_size` to a compile-time int (default 1).
+
+        Mirrors `sim/vm/compiler.py`'s identical resolution -- slice_size
+        must be a constant_expression per the grammar, and the wide path
+        below (via `_wide_emitter.py`'s scratch-buffer chunk copies) is
+        only exercised for slice_size <= 64, matching the `vm`/`vm-fast`
+        restriction (kept consistent across all engines even though a
+        pure-Python engine like `reference` has no such limit).
+        """
+        slice_size = 1
+        if expr.slice_size is not None:
+            resolved = _const_int(expr.slice_size, self._param_env)
+            if resolved is None:
+                raise NotImplementedError(
+                    f"Streaming concatenation slice_size must be a compile-time constant (got {expr.slice_size!r})"
+                )
+            slice_size = resolved
+        if slice_size <= 0:
+            raise ValueError(f"Streaming concatenation slice_size must be positive, got {slice_size}")
+        return slice_size
+
+    def _stream_reverse_synthetic(self, expr: StreamingConcatenation) -> Concatenation:
+        """Desugar `{<<slice_size{...}}` into a plain `Concatenation` of
+        `RangeSelect`s over a synthetic inner `Concatenation(parts=expr.parts)`
+        -- one `RangeSelect` per re-chunked slice, listed in the reversed
+        (output) order, so every existing `Concatenation`/`RangeSelect`
+        emitter (narrow, wide, mask, width, signal-walk) handles
+        `StreamingConcatenation` for free with zero new low-level codegen.
+        `RangeSelect` already supports an arbitrary (non-`Identifier`)
+        `.target` -- see `_emit_expr`'s/`_wide_emitter.py`'s own generic
+        fallback branches. Mirrors `sim/value.py`'s `Value.stream_reverse()`.
+        """
+        inner = Concatenation(parts=expr.parts)
+        total_w = sum(self._expr_width(p) for p in expr.parts)
+        slice_size = self._stream_reverse_slice_size(expr)
+        chunks: list[tuple[int, int]] = []
+        pos = total_w
+        while pos > 0:
+            lo = max(0, pos - slice_size)
+            chunks.append((pos - 1, lo))
+            pos = lo
+        # chunks[0] = MSB-most of `inner` (found first, full-size), ...,
+        # chunks[-1] = LSB-most (possibly partial) -- reassemble reversed:
+        # chunks[-1] becomes the output's MSB part, chunks[0] its LSB part.
+        ordered = list(reversed(chunks))
+        parts = [RangeSelect(target=inner, msb=Literal(hi), lsb=Literal(lo)) for hi, lo in ordered]
+        return Concatenation(parts=parts)
+
     def _emit_concat(self, expr: Concatenation, width: int | None = None) -> str:
         """Emit concatenation: {a, b, c} ΓåÆ (a << (wb+wc)) | (b << wc) | c."""
         parts = expr.parts
@@ -2911,6 +2970,9 @@ class _ExprEmitterMixin:
             return self._expr_width(expr.target)
         if etype is Concatenation:
             return sum(self._expr_width(p) for p in expr.parts)
+        if etype is StreamingConcatenation:
+            # Chunk reversal never changes total bit width.
+            return sum(self._expr_width(p) for p in expr.parts)
         if etype is Replication:
             if isinstance(expr.count, Literal):
                 return int(expr.count.value) * self._expr_width(expr.value)
@@ -3030,7 +3092,7 @@ class _ExprEmitterMixin:
         elif etype is TernaryOp:
             result = self._expr_signed(expr.true_expr, cache) and self._expr_signed(expr.false_expr, cache)
 
-        elif etype in (Concatenation, Replication):
+        elif etype in (Concatenation, Replication, StreamingConcatenation):
             result = False
 
         elif etype is FunctionCall:
@@ -3617,6 +3679,9 @@ class _ExprEmitterMixin:
                 return f"_et{n}_m"
             return mask_str
 
+        if etype is StreamingConcatenation:
+            return self._emit_mask_expr(self._stream_reverse_synthetic(expr), width, signed_override)
+
         if etype is Concatenation:
             parts = expr.parts
             part_widths = self._concat_eval_widths(parts, width)
@@ -4055,6 +4120,12 @@ class _ExprEmitterMixin:
         if etype is Concatenation:
             for p in expr.parts:
                 self._walk_signals(p, sigs)
+            return
+        if etype is StreamingConcatenation:
+            for p in expr.parts:
+                self._walk_signals(p, sigs)
+            if expr.slice_size is not None:
+                self._walk_signals(expr.slice_size, sigs)
             return
         if etype is Replication:
             self._walk_signals(expr.count, sigs)

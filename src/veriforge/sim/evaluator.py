@@ -25,6 +25,7 @@ from veriforge.model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -1058,6 +1059,28 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 return result.sign_extend(width) if signed_override else result.resize(width)
             return result
 
+        # -- StreamingConcatenation (`{<<[N]{...}}`, IEEE 1800-2017
+        # SS11.4.14.1) -----------------------------------------------
+        # Only ever built for the `<<` operator -- `>>` desugars straight
+        # to Concatenation at AST-build time (see
+        # `_build_streaming_concatenation`). Build the plain concatenation
+        # of parts exactly as above, then reverse it in `slice_size`-bit
+        # chunks (default 1, i.e. full bit reversal).
+        if etype is StreamingConcatenation:
+            if not expr.parts:
+                return Value(0, width=0)
+            parts = [self.eval(p, ctx, _expr_self_width(p, ctx)) for p in expr.parts]
+            full = parts[0]
+            for p in parts[1:]:
+                full = full.concat(p)
+            slice_size = int(self.eval(expr.slice_size, ctx)) if expr.slice_size is not None else 1
+            result = full.stream_reverse(slice_size)
+            # Same signed_override reasoning as Concatenation's own
+            # aggregate result above.
+            if width and result.width < width:
+                return result.sign_extend(width) if signed_override else result.resize(width)
+            return result
+
         # -- BitSelect ---------------------------------------------
         if etype is BitSelect:
             # Memory element access: mem[addr]
@@ -1557,6 +1580,9 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         return 1
     if etype is Concatenation:
         return sum(_expr_self_width(p, ctx) for p in expr.parts)
+    if etype is StreamingConcatenation:
+        # Chunk reversal never changes total bit width.
+        return sum(_expr_self_width(p, ctx) for p in expr.parts)
     if etype is Replication:
         if isinstance(expr.count, Literal):
             return int(expr.count.value) * _expr_self_width(expr.value, ctx)
@@ -1722,8 +1748,9 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             cache[id(expr)] = result
         return result
 
-    # -- Concatenation / Replication → always unsigned (§5.5.1) -----------
-    if etype in (Concatenation, Replication):
+    # -- Concatenation / Replication / StreamingConcatenation → always
+    # unsigned (§5.5.1) --------------------------------------------------
+    if etype in (Concatenation, Replication, StreamingConcatenation):
         if cache is not None:
             cache[id(expr)] = False
         return False

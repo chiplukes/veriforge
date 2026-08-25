@@ -143,6 +143,9 @@ class Op(IntEnum):  # cm:5b3d7f
     SMOD = auto()  # Signed modulus (matches trunc-div)
     SPOW = auto()  # Signed power (IEEE 1364-2005 Table 5-6 special values)
 
+    # ── Streaming concatenation (`{<<slice_size{...}}`) ─────────────────
+    STREAM_REVERSE = auto()  # Chunk-reverse TOS: (STREAM_REVERSE, slice_size, 0)
+
 
 # ── Instruction constructor helpers ──────────────────────────────────
 

@@ -636,6 +636,29 @@ class Value:  # cm:c8a1e6
             result_mask = (result_mask << self.width) | self.mask
         return Value(result_val, width=total_width, mask=result_mask)
 
+    def stream_reverse(self, slice_size: int) -> Value:
+        """IEEE 1800-2017 SS11.4.14.1 `{<<slice_size{...}}` chunk reversal.
+
+        Split self's bits into consecutive `slice_size`-bit chunks starting
+        from the MSB end (the last, LSB-most chunk may be narrower if
+        `self.width` isn't a multiple of `slice_size`), then reassemble
+        those chunks in reverse order -- each chunk's own bit order is
+        preserved, only the chunk *order* flips. `slice_size == 1` is full
+        bit reversal; this is the only case `{<<{...}}` (no slice size,
+        which defaults to 1) needs.
+        """
+        if slice_size <= 0:
+            raise ValueError(f"stream_reverse: slice_size must be positive, got {slice_size}")
+        chunks: list[Value] = []
+        pos = self.width
+        while pos > 0:
+            lo = max(0, pos - slice_size)
+            chunks.append(self[pos - 1 : lo])
+            pos = lo
+        if len(chunks) == 1:
+            return chunks[0]
+        return chunks[-1].concat(*chunks[-2::-1])
+
     # ── Width/sign manipulation ────────────────────────────────────────
 
     def resize(self, new_width: int) -> Value:

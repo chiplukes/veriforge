@@ -112,6 +112,8 @@ DEF OP_SDIV           = 82
 DEF OP_SMOD           = 83
 DEF OP_SPOW           = 84
 
+DEF OP_STREAM_REVERSE = 85
+
 DEF STACK_MAX         = 256
 DEF NBA_MAX           = 1024
 DEF NBA_MEM_MAX       = 64
@@ -175,6 +177,38 @@ cdef inline long long _wide_extract(
     if result_w < 64:
         lo &= (1ULL << result_w) - 1
     return <long long>lo
+
+# ── Wide helper: insert up to 64 bits at a given bit offset ─────────
+
+cdef inline void _wide_insert(
+    unsigned long long *dst_v,
+    unsigned long long *dst_m,
+    int words,
+    int bit_offset,
+    unsigned long long val,
+    unsigned long long mask,
+    int val_w,
+) noexcept nogil:
+    """OR *val*/*mask* (val_w bits, val_w <= 64) into a `words`-word
+    destination starting at *bit_offset*. Mirrors OP_CONCAT's inline
+    narrow-part insert logic -- factored out here since OP_STREAM_REVERSE
+    needs the identical operation applied once per re-chunked slice."""
+    cdef int wrd_off = bit_offset >> 6
+    cdef int bit_off = bit_offset & 63
+    if val_w < 64:
+        val &= (1ULL << val_w) - 1
+        mask &= (1ULL << val_w) - 1
+    if wrd_off >= words:
+        return
+    if bit_off == 0:
+        dst_v[wrd_off] |= val
+        dst_m[wrd_off] |= mask
+    else:
+        dst_v[wrd_off] |= val << bit_off
+        dst_m[wrd_off] |= mask << bit_off
+        if wrd_off + 1 < words:
+            dst_v[wrd_off + 1] |= val >> (64 - bit_off)
+            dst_m[wrd_off + 1] |= mask >> (64 - bit_off)
 
 # ── Wide helper: copy words from pool-at-offset to local wide slot ───
 
@@ -656,6 +690,8 @@ cdef int _execute_core(
     cdef unsigned long long ashr_shifted_v, ashr_shifted_m, ashr_fill_bits, ashr_fill_v  # OP_ASHR narrow path
     cdef unsigned long long sx_sign_v, sx_sign_m, sx_fill_v, sx_fill_m, sx_fill_mask, sx_tail_mask  # OP_SIGN_EXT wide path
     cdef int sx_fill_start_word, sx_fill_bit_in_word, sx_tail_word, sx_tail_bit
+    cdef int sr_pos, sr_lo, sr_cw, sr_out_pos  # OP_STREAM_REVERSE
+    cdef unsigned long long sr_chunk_v, sr_chunk_m  # OP_STREAM_REVERSE
 
     cdef int pc = 0
     cdef int op, arg1
@@ -994,6 +1030,65 @@ cdef int _execute_core(
                     stack[sp - 1].val   = 0
                     stack[sp - 1].mask  = 0
                 stack[sp - 1].width = arg1
+            continue
+
+        if op == OP_STREAM_REVERSE:
+            # `{<<slice_size{...}}` -- IEEE 1800-2017 SS11.4.14.1 chunk
+            # reversal. Mirrors sim/value.py's Value.stream_reverse(): walk
+            # TOS's bits from the MSB end in arg1 (slice_size)-bit chunks
+            # (the last, LSB-most chunk may be narrower), then reassemble
+            # those chunks in reverse order. Total width never changes.
+            # The compiler (sim/vm/compiler.py) only ever emits this with
+            # arg1 <= 64 -- a larger slice_size is rejected there, so
+            # `sr_cw` (<= arg1) always fits the single-word extract/insert
+            # helpers used below.
+            w = stack[sp - 1].width
+            if not wflag[sp - 1]:
+                # Fully narrow: operate directly on val/mask.
+                a = stack[sp - 1]
+                result_val = 0
+                result_mask = 0
+                sr_out_pos = 0
+                sr_pos = w
+                while sr_pos > 0:
+                    sr_lo = sr_pos - arg1
+                    if sr_lo < 0:
+                        sr_lo = 0
+                    sr_cw = sr_pos - sr_lo
+                    wmask = mask_for_width(sr_cw)
+                    sr_chunk_v = <unsigned long long>((a.val >> sr_lo) & wmask)
+                    sr_chunk_m = <unsigned long long>((a.mask >> sr_lo) & wmask)
+                    result_val  |= <long long>(sr_chunk_v << sr_out_pos)
+                    result_mask |= <long long>(sr_chunk_m << sr_out_pos)
+                    sr_out_pos += sr_cw
+                    sr_pos = sr_lo
+                stack[sp - 1].val = result_val
+                stack[sp - 1].mask = result_mask
+                # width unchanged
+            else:
+                # Wide: re-chunk via the word-array representation,
+                # assembled in the same concat_rv/concat_rm scratch buffers
+                # OP_CONCAT uses (only one opcode executes at a time, so
+                # reusing them here is safe).
+                for wi in range(WIDE_WORDS):
+                    concat_rv[wi] = 0
+                    concat_rm[wi] = 0
+                sr_out_pos = 0
+                sr_pos = w
+                while sr_pos > 0:
+                    sr_lo = sr_pos - arg1
+                    if sr_lo < 0:
+                        sr_lo = 0
+                    sr_cw = sr_pos - sr_lo
+                    sr_chunk_v = <unsigned long long>_wide_extract(&wv[(sp - 1) * WIDE_WORDS], WIDE_WORDS, sr_lo, sr_cw)
+                    sr_chunk_m = <unsigned long long>_wide_extract(&wm[(sp - 1) * WIDE_WORDS], WIDE_WORDS, sr_lo, sr_cw)
+                    _wide_insert(concat_rv, concat_rm, WIDE_WORDS, sr_out_pos, sr_chunk_v, sr_chunk_m, sr_cw)
+                    sr_out_pos += sr_cw
+                    sr_pos = sr_lo
+                for wi in range(WIDE_WORDS):
+                    wv[(sp - 1) * WIDE_WORDS + wi] = concat_rv[wi]
+                    wm[(sp - 1) * WIDE_WORDS + wi] = concat_rm[wi]
+                # width unchanged
             continue
 
         if op == OP_STORE_BIT:

@@ -362,6 +362,11 @@ class Interpreter:  # cm:e3f1b4
                 s_append(v.sign_extend(arg1))
                 continue
 
+            if op == Op.STREAM_REVERSE:
+                v = s_pop()
+                s_append(v.stream_reverse(arg1))
+                continue
+
             # ── Arithmetic ───────────────────────────────────────
 
             if op == Op.ADD:

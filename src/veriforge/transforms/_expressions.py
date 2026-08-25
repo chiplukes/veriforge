@@ -22,6 +22,7 @@ from ..model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -1147,40 +1148,54 @@ def _build_streaming_concatenation(
     tree: Tree,
     source_file: str | None,
     callbacks: _ExpressionCallbacks,
-) -> Concatenation:
-    """Build the no-slice-size streaming concatenation `{>>{a, b, ...}}` /
-    `{<<{a, b, ...}}` (IEEE 1800-2017 SS11.4.14.1) as a `Concatenation`.
+) -> Concatenation | StreamingConcatenation:
+    """Build a streaming concatenation `{>>[N]{a, b, ...}}` /
+    `{<<[N]{a, b, ...}}` (IEEE 1800-2017 SS11.4.14.1).
 
-    With no slice size, `{>>{...}}` (the "right"/big-endian stream) is
-    defined by the standard to be identical to plain concatenation
-    `{...}` -- the only reason SV requires the streaming syntax at all
-    here is that plain `{}` concatenation syntactically forbids unpacked-
-    array operands, while the streaming form accepts them (each unpacked-
-    array operand streams out element-by-element, ascending index order,
-    before being concatenated with the rest). That per-operand expansion
-    happens later, during evaluation/codegen, once each operand's type
-    (and therefore whether it's an unpacked array at all) is known --
-    here it's just desugared straight to an ordinary `Concatenation`.
+    `{>>{...}}` (the "right"/big-endian stream) is defined by the standard
+    to never reorder anything -- with or without an explicit slice size,
+    it's bit-identical to plain concatenation `{...}`. (Slice size only
+    matters for `>>` when streaming *into* a differently-chunked unpacked-
+    array target, which isn't supported here.) The only reason SV requires
+    the streaming syntax at all for `>>` is that plain `{}` concatenation
+    syntactically forbids unpacked-array operands, while the streaming
+    form accepts them (each unpacked-array operand streams out element-by-
+    element, ascending index order, before being concatenated with the
+    rest). That per-operand expansion happens later, during elaboration
+    (`expand_array_concat_operands`), once each operand's declared shape is
+    known -- here `>>` is just desugared straight to an ordinary
+    `Concatenation`, discarding its slice size.
 
-    `{<<{...}}` (the "left" stream) is a genuinely different operation
-    (bit-level reversal, not just element reordering) that isn't
-    implemented -- raised here as a clear error rather than silently
-    mishandled or left to fail opaquely deeper in the pipeline.
+    `{<<{...}}` (the "left" stream) is a genuinely different operation --
+    bit/chunk-level reversal, not just element reordering -- and needs
+    each operand's real bit width to carry out, which isn't known until an
+    engine's signal table exists. It's therefore built as a
+    `StreamingConcatenation` node and left for each engine to evaluate.
+
+    `slice_size` as a `simple_type` (e.g. `{<<byte{...}}`) is not
+    recognized by the grammar as a type name; it will parse as (and be
+    treated as) an ordinary identifier expression, which is out of scope.
     """
+    direction = "<<"
+    slice_size: Expression | None = None
     parts: list[Expression] = []
     for child in tree.children:
-        if isinstance(child, Token) and child.type == "OP_BINARY_LOGIC_SHIFTL":
-            raise NotImplementedError(
-                "Streaming concatenation `{<<{...}}` (bit-level reversal) is not supported; "
-                "only the no-slice-size `{>>{...}}` form (equivalent to plain concatenation, "
-                "but also accepting unpacked-array operands) is implemented."
-            )
-        if isinstance(child, Tree) and child.data == "expression":
+        if isinstance(child, Token):
+            if child.type == "OP_BINARY_LOGIC_SHIFTR":
+                direction = ">>"
+            continue
+        if child.data == "slice_size":
+            inner = child.children[0]
+            slice_size = callbacks.build_constant_expression(inner, source_file)
+            continue
+        if child.data == "expression":
             parts.append(callbacks.build_expr_inner(child, source_file))
-        elif isinstance(child, Tree):
+        else:
             parts.append(callbacks.build_expression(child, source_file))
     loc = _loc_from_tree(tree, source_file)
-    return Concatenation(parts=parts, loc=loc)
+    if direction == ">>":
+        return Concatenation(parts=parts, loc=loc)
+    return StreamingConcatenation(parts=parts, slice_size=slice_size, loc=loc)
 
 
 def _build_assignment_pattern(

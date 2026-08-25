@@ -28,6 +28,7 @@ from veriforge.model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -1408,6 +1409,39 @@ class Compiler:  # cm:8c1e4a
                 program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
             return
 
+        # -- StreamingConcatenation (`{<<[N]{...}}`, IEEE 1800-2017
+        # SS11.4.14.1) -- only ever built for `<<`; `>>` desugars straight
+        # to Concatenation at AST-build time. Compile the plain
+        # concatenation of parts exactly as above, then chunk-reverse it.
+        if etype is StreamingConcatenation:
+            for part in expr.parts:
+                self._compile_expr(part, program, self._expr_width(part))
+            program.append(instr(Op.CONCAT, len(expr.parts)))
+            slice_size = 1
+            if expr.slice_size is not None:
+                resolved = _const_int(expr.slice_size, self._param_env)
+                if resolved is None:
+                    raise NotImplementedError(
+                        f"Streaming concatenation slice_size must be a compile-time constant (got {expr.slice_size!r})"
+                    )
+                slice_size = resolved
+            if slice_size <= 0:
+                raise ValueError(f"Streaming concatenation slice_size must be positive, got {slice_size}")
+            if slice_size > 64:
+                # Would need multi-word chunk extraction in the Cython
+                # vm-fast interpreter's fixed-width word-array
+                # representation; `vm`/`reference` have no such limit
+                # (Value.stream_reverse is arbitrary-precision), but the
+                # bytecode is shared across `vm`/`vm-fast` and must behave
+                # identically on both.
+                raise NotImplementedError(
+                    f"Streaming concatenation slice_size > 64 is not supported (got {slice_size})"
+                )
+            program.append(instr(Op.STREAM_REVERSE, slice_size))
+            if width:
+                program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
+            return
+
         # -- BitSelect (memory read or scalar bit-select) --
         if etype is BitSelect:
             # A bit-select is always unsigned in its own right (IEEE
@@ -2423,6 +2457,10 @@ class Compiler:  # cm:8c1e4a
         if etype is Concatenation:
             return sum(self._expr_width(p) for p in expr.parts)
 
+        if etype is StreamingConcatenation:
+            # Chunk reversal never changes total bit width.
+            return sum(self._expr_width(p) for p in expr.parts)
+
         if etype is Replication:
             if isinstance(expr.count, Literal):
                 return int(expr.count.value) * self._expr_width(expr.value)
@@ -2558,7 +2596,7 @@ class Compiler:  # cm:8c1e4a
         elif etype is TernaryOp:
             result = self._expr_signed(expr.true_expr, cache) and self._expr_signed(expr.false_expr, cache)
 
-        elif etype in (Concatenation, Replication):
+        elif etype in (Concatenation, Replication, StreamingConcatenation):
             result = False
 
         elif etype is FunctionCall:

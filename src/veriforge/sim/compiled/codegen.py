@@ -29,6 +29,7 @@ from veriforge.model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -1120,6 +1121,8 @@ class CythonCodegen(
             return "ternary expression"
         if etype is Concatenation:
             return "concatenation"
+        if etype is StreamingConcatenation:
+            return "streaming concatenation"
         if etype is Replication:
             return "replication"
         if etype is RangeSelect:
@@ -1202,6 +1205,11 @@ class CythonCodegen(
         if etype is Concatenation:
             for index, part in enumerate(expr.parts):
                 self._validate_wide_transport_expr(part, f"{context} concatenation part {index}")
+            return self._expr_width(expr) > _WORD_BITS
+
+        if etype is StreamingConcatenation:
+            for index, part in enumerate(expr.parts):
+                self._validate_wide_transport_expr(part, f"{context} streaming concatenation part {index}")
             return self._expr_width(expr) > _WORD_BITS
 
         if etype is Replication:

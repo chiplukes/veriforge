@@ -21,6 +21,7 @@ from veriforge.model.expressions import (
     PartSelect,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     TernaryOp,
     UnaryOp,
 )
@@ -4986,6 +4987,83 @@ class _WideEmitterMixin:
             self._free_scratch(tslot)
             return lines
 
+        # ── StreamingConcatenation (`{<<[N]{...}}`, IEEE 1800-2017
+        # SS11.4.14.1) -- only ever built for `<<`; `>>` desugars straight
+        # to Concatenation at AST-build time. Build the plain concatenation
+        # of parts into its own scratch slot (the Concatenation case just
+        # below), then reassemble it in reversed slice_size-bit chunks
+        # using the same wide_slice_extract/wide_shl/wide_or primitives
+        # Concatenation/RangeSelect already use. NOT implemented as a
+        # synthetic RangeSelect(target=<Concatenation>) node (unlike the
+        # narrow-scalar emitter in _expr_emitter.py) because RangeSelect's
+        # own wide case just above bails out (`return None`) for any
+        # non-Identifier target.
+        if et is StreamingConcatenation:
+            slice_size = self._stream_reverse_slice_size(expr)
+            total_w = sum(self._expr_width(p) for p in expr.parts)
+            if slice_size > 64:
+                # Matches the vm/vm-fast restriction (chunk extraction
+                # below is one wide_slice_extract call per chunk, each
+                # sized <= slice_size bits) -- kept consistent across
+                # engines even though `reference` has no such limit.
+                return None
+            inner = Concatenation(parts=expr.parts)
+            islot = self._alloc_scratch()
+            ilines = self._emit_wide_expr_to_scratch(inner, islot, n_words, total_w, indent)
+            if ilines is None:
+                self._free_scratch(islot)
+                return None
+            lines = list(ilines)
+            for wi in range(n_words):
+                lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+            # Walk `inner`'s bits from the MSB end in slice_size-bit chunks
+            # (mirrors sim/value.py's Value.stream_reverse()): the FIRST
+            # chunk found here (inner's own MSB-most, full-size) lands at
+            # the LOWEST output bit position: the LAST chunk found (inner's
+            # LSB-most, possibly partial) lands at the HIGHEST output bit
+            # position -- i.e. placing each chunk at a monotonically
+            # increasing out_pos, in discovery order, already produces the
+            # correct reversed arrangement with no separate list-reversal
+            # step needed.
+            out_pos = 0
+            pos = total_w
+            while pos > 0:
+                lo = max(0, pos - slice_size)
+                cw = pos - lo
+                cslot = self._alloc_scratch()
+                lines.append(
+                    f"{pad}wide_slice_extract(_sc{cslot}_v, _sc{cslot}_m,"
+                    f" _sc{islot}_v, _sc{islot}_m, {lo}, {cw}, {n_words}, {n_words})"
+                )
+                if out_pos == 0:
+                    lines.append(
+                        f"{pad}wide_or(_sc{slot}_v, _sc{slot}_m,"
+                        f" _sc{slot}_v, _sc{slot}_m,"
+                        f" _sc{cslot}_v, _sc{cslot}_m, {n_words}, {dst_width})"
+                    )
+                else:
+                    tmpslot = self._alloc_scratch()
+                    lines.append(
+                        f"{pad}wide_shl(_sc{tmpslot}_v, _sc{tmpslot}_m,"
+                        f" _sc{cslot}_v, _sc{cslot}_m,"
+                        f" {out_pos}, {n_words}, {dst_width})"
+                    )
+                    lines.append(
+                        f"{pad}wide_or(_sc{slot}_v, _sc{slot}_m,"
+                        f" _sc{slot}_v, _sc{slot}_m,"
+                        f" _sc{tmpslot}_v, _sc{tmpslot}_m, {n_words}, {dst_width})"
+                    )
+                    self._free_scratch(tmpslot)
+                self._free_scratch(cslot)
+                out_pos += cw
+                pos = lo
+            self._free_scratch(islot)
+            # Same signed_override reasoning as Concatenation below.
+            if signed_override and out_pos < dst_width:
+                lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(out_pos), indent))
+            return lines
+
         # ── Concatenation ────────────────────────────────────────────────────
         # Verilog {a, b, c}: a=MSB, c=LSB; process reversed (LSB first).
         if et is Concatenation:
@@ -5288,6 +5366,8 @@ class _WideEmitterMixin:
                 self._expr_max_internal_width(expr.false_expr),
             )
         if etype is Concatenation:
+            return max([own, *(self._expr_max_internal_width(p) for p in expr.parts)])
+        if etype is StreamingConcatenation:
             return max([own, *(self._expr_max_internal_width(p) for p in expr.parts)])
         if etype is Replication:
             return max(own, self._expr_max_internal_width(expr.value))

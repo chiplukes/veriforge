@@ -204,6 +204,38 @@ class Concatenation(Expression):
         return d
 
 
+class StreamingConcatenation(Expression):
+    """`{<<{a, b, c}}` / `{<<N{a, b, c}}` -- IEEE 1800-2017 SS11.4.14.1
+    left-stream (bit/chunk-level reversal) form only. The no-slice-size
+    `{>>{...}}` right-stream form is definitionally identical to plain
+    concatenation and is desugared straight to `Concatenation` at
+    AST-build time (see `_build_streaming_concatenation` in
+    `transforms/_expressions.py`); this node only ever represents `<<`.
+    """
+
+    __slots__ = ("parts", "slice_size")
+
+    def __init__(
+        self, parts: list[Expression], slice_size: Expression | None = None, *, loc: SourceLocation | None = None
+    ):
+        super().__init__(loc=loc)
+        self.parts = parts
+        self.slice_size = slice_size
+
+    def _child_nodes(self) -> list[VerilogNode]:
+        nodes: list[VerilogNode] = list(self.parts)
+        if self.slice_size is not None:
+            nodes.append(self.slice_size)
+        return nodes
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["parts"] = [p.to_dict() for p in self.parts]
+        if self.slice_size is not None:
+            d["slice_size"] = self.slice_size.to_dict()
+        return d
+
+
 class AssignmentPattern(Expression):
     """SystemVerilog assignment pattern: '{field: val, ...} or '{val, ...} or '{default: val}"""
 

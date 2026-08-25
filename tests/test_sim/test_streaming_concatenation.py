@@ -1,17 +1,18 @@
-"""Regression tests for the SystemVerilog streaming concatenation operator
-(IEEE 1800-2017 SS11.4.14.1), no-slice-size form only:
-``{>>{a, b, ...}}`` / ``{<<{a, b, ...}}``.
+"""Regression tests for the ``>>`` (right-stream) side of the SystemVerilog
+streaming concatenation operator (IEEE 1800-2017 SS11.4.14.1):
+``{>>[slice_size]{a, b, ...}}``.
 
-With no slice size, ``{>>{...}}`` (the "right"/big-endian stream) is
-defined by the standard to be identical to plain concatenation ``{...}`` --
-the only reason SV requires the streaming syntax at all is that plain
-``{}`` concatenation syntactically forbids unpacked-array operands, while
-the streaming form accepts them (each unpacked-array operand streams out
-element-by-element, ascending index order, before being concatenated with
-the rest). This is implemented in two pieces:
+``>>`` (with or without an explicit slice_size) is defined by the standard
+to never reorder anything -- it's always identical to plain concatenation
+``{...}``. The only reason SV requires the streaming syntax at all is that
+plain ``{}`` concatenation syntactically forbids unpacked-array operands,
+while the streaming form accepts them (each unpacked-array operand streams
+out element-by-element, ascending index order, before being concatenated
+with the rest). This is implemented in two pieces:
 
 1. ``_build_streaming_concatenation`` (transforms/_expressions.py) parses
-   ``{>>{...}}`` straight into an ordinary ``Concatenation`` node.
+   ``{>>[slice_size]{...}}`` straight into an ordinary ``Concatenation``
+   node, discarding the slice_size.
 2. ``expand_array_concat_operands`` (sim/elaborate.py), run unconditionally
    for every simulation right alongside ``materialize_process_locals``,
    expands any ``Concatenation`` part that's a bare unpacked-array
@@ -20,10 +21,9 @@ the rest). This is implemented in two pieces:
    already fully scalar and no engine needs its own array-operand
    handling.
 
-``{<<{...}}`` (the "left" stream) is a genuinely different operation
-(bit-level reversal, not just element reordering) and is deliberately
-rejected with a clear ``NotImplementedError`` at parse time rather than
-silently mishandled.
+``{<<[slice_size]{...}}`` (the "left" stream -- genuine bit/chunk-level
+reversal) is covered separately in
+``test_streaming_concatenation_reversal.py``.
 """
 
 from __future__ import annotations
@@ -57,13 +57,31 @@ class TestStreamingConcatenationParsing:
         ca = mod.continuous_assigns[0]
         assert isinstance(ca.rhs, Concatenation)
 
-    def test_left_stream_raises_not_implemented(self):
-        with pytest.raises(NotImplementedError, match=r"\{<<\{\.\.\.\}\}"):
-            _parse("""
-                module dut(input logic [17:0] a [3:0], output logic [4*18-1:0] wide);
-                assign wide = {<<{a}};
-                endmodule
-            """)
+    def test_left_stream_builds_streaming_concatenation_node(self):
+        """`{<<{...}}` now builds a dedicated node instead of raising --
+        see test_streaming_concatenation_reversal.py for its semantics."""
+        from veriforge.model.expressions import StreamingConcatenation
+
+        mod = _parse("""
+            module dut(input logic [17:0] a [3:0], output logic [4*18-1:0] wide);
+            assign wide = {<<{a}};
+            endmodule
+        """)
+        ca = mod.continuous_assigns[0]
+        assert isinstance(ca.rhs, StreamingConcatenation)
+
+    def test_right_stream_with_explicit_slice_size_desugars_to_concatenation(self):
+        """`{>>N{...}}` (explicit slice_size) is still a no-op -- slice
+        size never reorders anything for `>>`."""
+        from veriforge.model.expressions import Concatenation
+
+        mod = _parse("""
+            module dut(input logic [7:0] x, input logic [7:0] y, output logic [15:0] z);
+            assign z = {>>8{x, y}};
+            endmodule
+        """)
+        ca = mod.continuous_assigns[0]
+        assert isinstance(ca.rhs, Concatenation)
 
     def test_scalar_operands_parse_and_desugar(self):
         from veriforge.model.expressions import Concatenation
@@ -84,6 +102,21 @@ class TestStreamingConcatenationSimulation:
         mod = _parse("""
             module dut(input logic [7:0] x, input logic [7:0] y, output logic [15:0] z);
             assign z = {>>{x, y}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("x", 0xAB)
+        sim.drive("y", 0xCD)
+        sim.run(max_time=0)
+        assert int(sim.signal("z").value) == 0xABCD
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_scalar_operands_with_explicit_slice_size_matches_plain_concatenation(self, engine):
+        """`{>>N{x, y}}` with an explicit slice_size must still behave
+        exactly like `{x, y}` -- slice size is a no-op for `>>`."""
+        mod = _parse("""
+            module dut(input logic [7:0] x, input logic [7:0] y, output logic [15:0] z);
+            assign z = {>>4{x, y}};
             endmodule
         """)
         sim = Simulator(mod, engine=engine)

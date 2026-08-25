@@ -2766,20 +2766,27 @@ module_path_multiple_concatenation: "{" constant_expression module_path_concaten
 // EXAMPLE: {4{data}}
 // SUPPORT: YES
 multiple_concatenation: "{" constant_expression concatenation "}"
+// slice_size (SV) ::= simple_type | constant_expression -- only the
+// constant_expression form is accepted here; a `simple_type` (e.g. `byte`
+// in `{<<byte{...}}`) is not recognized as a type name and will be
+// misparsed as an ordinary identifier expression, then fail elaboration.
+slice_size: constant_expression
 // SV: streaming_concatenation ::= { stream_operator [ slice_size ] stream_concatenation }
 //     stream_operator ::= >> | <<
 //     stream_concatenation ::= { stream_expression { , stream_expression } }
-// PARTIAL SUPPORT: only the no-slice-size form is accepted here
-// (`{>>{a, b}}` / `{<<{a, b}}`) -- see `_declarations`/tree_to_model for
-// how `>>` (equivalent to plain concatenation, but also accepting
-// unpacked-array operands, which plain `{}` cannot) is lowered, and why
-// `<<` (bit-level reversal) is rejected with a clear error rather than
-// silently mishandled.
+// SUPPORT: `>>` (with or without a slice_size) is equivalent to plain
+// concatenation -- slice size never reorders anything for `>>`, it only
+// matters for streaming *assignment* into a differently-chunked unpacked-
+// array target, which is not supported -- see `_expressions.py`'s
+// `_build_streaming_concatenation` for how `>>` is lowered straight to
+// plain `Concatenation`, and how `<<` (genuine bit/chunk-level reversal)
+// builds a `StreamingConcatenation` node instead.
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: {>>{a, b}}
-// SUPPORT: PARTIAL
-streaming_concatenation: "{" (OP_BINARY_LOGIC_SHIFTR | OP_BINARY_LOGIC_SHIFTL) "{" expression ( "," expression )* "}" "}"
+// EXAMPLE: {<<8{a, b}}
+// SUPPORT: YES
+streaming_concatenation: "{" (OP_BINARY_LOGIC_SHIFTR | OP_BINARY_LOGIC_SHIFTL) [slice_size] "{" expression ( "," expression )* "}" "}"
 // SV: assignment_pattern ::= '{ expression { , expression } }
 //                          | '{ structure_pattern_key : expression { , structure_pattern_key : expression } }
 //                          | '{ constant_expression { expression { , expression } } }

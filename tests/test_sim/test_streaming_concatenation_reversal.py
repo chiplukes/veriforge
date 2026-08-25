@@ -1,0 +1,238 @@
+"""Regression tests for the `<<` (left-stream) side of the SystemVerilog
+streaming concatenation operator (IEEE 1800-2017 SS11.4.14.1):
+``{<<[slice_size]{a, b, ...}}`` -- genuine bit/chunk-level reversal, not
+just element reordering (see test_streaming_concatenation.py for the `>>`
+side, which is always a no-op).
+
+Semantics: build the ordinary concatenation of parts (after unpacked-array
+expansion), call its bit vector ``full``, width ``W``. Split ``full``'s
+bits into consecutive ``slice_size``-bit chunks starting from the MSB end
+(the last, LSB-most chunk may be narrower if ``W % slice_size != 0``), then
+reverse chunk order (each chunk's own bit order is preserved). No slice
+size defaults to 1, i.e. full bit reversal.
+
+Implemented via a dedicated ``StreamingConcatenation`` AST node (built in
+``_build_streaming_concatenation``, transforms/_expressions.py) that
+survives to each engine:
+
+- reference/vm: ``Value.stream_reverse()`` (sim/value.py), a pure
+  bit-vector chunk-reversal op reused by both (vm's bytecode interpreter
+  and vm-fast's Cython interpreter both operate on ``Value``/word-array
+  representations at runtime).
+- compiled (scalar, <=64-bit total width): desugared at codegen time into
+  a plain ``Concatenation`` of ``RangeSelect``s over a synthetic inner
+  ``Concatenation(parts=expr.parts)`` (`_stream_reverse_synthetic` in
+  sim/compiled/_expr_emitter.py).
+- compiled (wide, >64-bit total width): re-chunked via the same
+  ``wide_slice_extract``/``wide_shl``/``wide_or`` primitives ordinary wide
+  ``Concatenation`` assembly uses (sim/compiled/_wide_emitter.py).
+
+``slice_size`` must be a compile-time constant (parameter or numeric
+literal) on every engine; `vm`/`vm-fast`/`compiled` additionally restrict
+it to <= 64 (a chunk itself never spans more than one 64-bit word in
+their fixed-width scratch representations) -- `reference` has no such
+limit, since `Value` is arbitrary-precision.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from veriforge.sim.testbench import Simulator
+from veriforge.transforms.tree_to_model import tree_to_design
+from veriforge.verilog_parser import verilog_parser
+
+from .engines import ENGINES
+
+
+def _parse(src: str):
+    parser = verilog_parser(start="module_declaration")
+    tree = parser.build_tree(text=src)
+    design = tree_to_design(tree)
+    return design.modules[0]
+
+
+def _bit_reverse(val: int, nbits: int) -> int:
+    return int(bin(val & ((1 << nbits) - 1))[2:].zfill(nbits)[::-1], 2)
+
+
+def _stream_reverse(val: int, total_w: int, slice_size: int) -> int:
+    """Independent reference implementation (mirrors Value.stream_reverse)."""
+    val &= (1 << total_w) - 1
+    chunks = []
+    pos = total_w
+    while pos > 0:
+        lo = max(0, pos - slice_size)
+        w = pos - lo
+        chunks.append(((val >> lo) & ((1 << w) - 1), w))
+        pos = lo
+    result = 0
+    for chunk, w in reversed(chunks):
+        result = (result << w) | chunk
+    return result
+
+
+class TestStreamingConcatenationReversalParsing:
+    def test_left_stream_no_slice_size_builds_streaming_concatenation(self):
+        from veriforge.model.expressions import StreamingConcatenation
+
+        mod = _parse("""
+            module dut(input logic [15:0] a, output logic [15:0] y);
+            assign y = {<<{a}};
+            endmodule
+        """)
+        ca = mod.continuous_assigns[0]
+        assert isinstance(ca.rhs, StreamingConcatenation)
+        assert ca.rhs.slice_size is None
+
+    def test_left_stream_with_slice_size_captures_it(self):
+        from veriforge.model.expressions import Literal, StreamingConcatenation
+
+        mod = _parse("""
+            module dut(input logic [31:0] a, output logic [31:0] y);
+            assign y = {<<8{a}};
+            endmodule
+        """)
+        ca = mod.continuous_assigns[0]
+        assert isinstance(ca.rhs, StreamingConcatenation)
+        assert isinstance(ca.rhs.slice_size, Literal)
+        assert int(ca.rhs.slice_size.value) == 8
+
+
+class TestStreamingConcatenationReversalSimulation:
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_full_bit_reversal_single_operand(self, engine):
+        """`{<<{a}}` (no slice size) is full bit reversal."""
+        mod = _parse("""
+            module dut(input logic [15:0] a, output logic [15:0] y);
+            assign y = {<<{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", 0b1100_0000_0000_0011)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == _bit_reverse(0b1100_0000_0000_0011, 16)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_byte_swap_idiom(self, engine):
+        """`{<<8{a}}` is the classic byte-swap idiom."""
+        mod = _parse("""
+            module dut(input logic [31:0] a, output logic [31:0] y);
+            assign y = {<<8{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", 0x12345678)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == 0x78563412
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_two_differently_sized_operands(self, engine):
+        """Chunks must straddle operand boundaries correctly, not just
+        reorder whole operands."""
+        mod = _parse("""
+            module dut(input logic [11:0] a, input logic [19:0] b, output logic [31:0] y);
+            assign y = {<<8{a, b}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        a_val = 0xABC
+        b_val = 0x12345
+        sim.drive("a", a_val)
+        sim.drive("b", b_val)
+        sim.run(max_time=0)
+        full = (a_val << 20) | b_val
+        assert int(sim.signal("y").value) == _stream_reverse(full, 32, 8)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_slice_size_not_evenly_dividing_width(self, engine):
+        """20-bit total, slice_size 8: two full 8-bit chunks plus one
+        partial 4-bit chunk -- exercises the partial-chunk boundary."""
+        mod = _parse("""
+            module dut(input logic [19:0] a, output logic [19:0] y);
+            assign y = {<<8{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        val = 0xABCDE
+        sim.drive("a", val)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == _stream_reverse(val, 20, 8)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_wide_total_width_byte_swap(self, engine):
+        """>64-bit total width, exercising the compiled engine's wide
+        scratch-buffer path (and vm-fast's word-array path)."""
+        mod = _parse("""
+            module dut(input logic [95:0] a, output logic [95:0] y);
+            assign y = {<<8{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        val = 0x0102030405060708090A0B0C
+        sim.drive("a", val)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == _stream_reverse(val, 96, 8)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_wide_total_width_full_bit_reversal(self, engine):
+        """>64-bit total width, no slice size (full bit reversal)."""
+        mod = _parse("""
+            module dut(input logic [95:0] a, output logic [95:0] y);
+            assign y = {<<{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        val = 0x0102030405060708090A0B0C
+        sim.drive("a", val)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == _bit_reverse(val, 96)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_unpacked_array_operand_composes_with_reversal(self, engine):
+        """An unpacked-array operand inside `{<<{...}}` must first expand
+        to its elements (expand_array_concat_operands), THEN reverse --
+        composes the two already-tested pieces."""
+        mod = _parse("""
+            module dut(input logic [7:0] a [3:0], output logic [31:0] y);
+            assign y = {<<8{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        vals = [0x11, 0x22, 0x33, 0x44]
+        for i, v in enumerate(vals):
+            sim.drive(f"a[{i}]", v)
+        sim.run(max_time=0)
+        full = 0
+        for v in vals:
+            full = (full << 8) | v
+        assert int(sim.signal("y").value) == _stream_reverse(full, 32, 8)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_slice_size_from_parameter(self, engine):
+        """slice_size may be a parameter reference, not just a literal."""
+        mod = _parse("""
+            module dut #(parameter SZ = 8) (input logic [31:0] a, output logic [31:0] y);
+            assign y = {<<SZ{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", 0x12345678)
+        sim.run(max_time=0)
+        assert int(sim.signal("y").value) == 0x78563412
+
+
+class TestStreamingConcatenationReversalErrors:
+    def test_simple_type_slice_size_is_not_supported(self):
+        """`{<<byte{...}}` (simple_type slice_size) is out of scope --
+        only constant_expression slice sizes are supported. The type name
+        misparses as an ordinary (unresolvable) identifier expression."""
+        mod = _parse("""
+            module dut(input logic [31:0] a, output logic [31:0] y);
+            assign y = {<<byte{a}};
+            endmodule
+        """)
+        with pytest.raises(Exception):  # noqa: B017, PT011
+            sim = Simulator(mod, engine="reference")
+            sim.drive("a", 0x12345678)
+            sim.run(max_time=0)

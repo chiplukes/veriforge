@@ -38,6 +38,7 @@ from ..model.expressions import (
     Replication,
     Range,
     RangeSelect,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -164,10 +165,11 @@ def expand_array_concat_operands(module: Module) -> None:
     if not array_bounds:
         return
 
-    for concat in module.find(Concatenation):
+    def _expand_parts(parts: list[Expression]) -> list[Expression] | None:
+        """Return an expanded parts list, or None if nothing changed."""
         new_parts: list[Expression] = []
         changed = False
-        for part in concat.parts:
+        for part in parts:
             bounds = array_bounds.get(part.name) if isinstance(part, Identifier) and part.hierarchy is None else None
             if bounds is not None:
                 lo, hi = bounds
@@ -177,8 +179,21 @@ def expand_array_concat_operands(module: Module) -> None:
                 changed = True
             else:
                 new_parts.append(part)
-        if changed:
-            concat.parts = new_parts
+        return new_parts if changed else None
+
+    for concat in module.find(Concatenation):
+        expanded = _expand_parts(concat.parts)
+        if expanded is not None:
+            concat.parts = expanded
+
+    # `{<<{...}}` (StreamingConcatenation) accepts unpacked-array operands
+    # the same way `{>>{...}}`/plain Concatenation does -- same expansion,
+    # applied to its parts list too (see `_build_streaming_concatenation`
+    # in transforms/_expressions.py for why this node type exists at all).
+    for stream_concat in module.find(StreamingConcatenation):
+        expanded = _expand_parts(stream_concat.parts)
+        if expanded is not None:
+            stream_concat.parts = expanded
 
 
 def materialize_process_locals(module: Module) -> Module:
