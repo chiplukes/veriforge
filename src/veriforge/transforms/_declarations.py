@@ -426,7 +426,32 @@ def _extract_net_declaration(
 
     for name, dims in net_entries:
         all_dims = extra_dims + dims
-        nets.append(Net(name=name, kind=kind, width=width, signed=signed, dimensions=all_dims or None, loc=loc))
+        # At least one dimension must be left over to serve as the
+        # "memory" convenience representation's own address/index level
+        # (what `foo[i]` selects) -- when this identifier has no
+        # genuinely unpacked trailing dim at all (`dims` empty, e.g. a
+        # PLAIN 2-D packed array `logic [3:0][7:0] arr;` with no `[3:0]`
+        # after the name), the packed range closest to the element width
+        # must be borrowed as that address level, same as it always was
+        # before `packed_dim_count` existed -- only any EARLIER packed
+        # ranges (beyond that one) are genuinely non-addressable and fold
+        # into the element width. Confirmed wrong without this borrow:
+        # `arr[i]` (i.e. `arr`'s OWN packed lanes) stopped being treated
+        # as indexable at all, since `packed_dim_count=len(extra_dims)`
+        # alone would consume every available dimension into the width
+        # with none left over to address.
+        packed_dim_count = len(extra_dims) if dims else max(0, len(extra_dims) - 1)
+        nets.append(
+            Net(
+                name=name,
+                kind=kind,
+                width=width,
+                signed=signed,
+                dimensions=all_dims or None,
+                packed_dim_count=packed_dim_count,
+                loc=loc,
+            )
+        )
 
     return nets, implicit_assigns
 
@@ -868,6 +893,12 @@ def _extract_port_declaration(  # noqa: PLR0912
             extra_packed_dims = packed_ranges[:-1] if len(packed_ranges) > 1 else []
 
             for name, dims, default_value in port_items:
+                # See the identical borrow-one-dim-for-addressing comment
+                # in `_extract_net_declaration` for why this isn't simply
+                # `len(extra_packed_dims)`.
+                packed_dim_count = (
+                    len(extra_packed_dims) if (declared_dims or dims) else max(0, len(extra_packed_dims) - 1)
+                )
                 ports.append(
                     Port(
                         name=name,
@@ -875,6 +906,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                         data_type=data_type,
                         width=width,
                         dimensions=[*extra_packed_dims, *declared_dims, *dims],
+                        packed_dim_count=packed_dim_count,
                         signed=signed,
                         default_value=default_value,
                         loc=loc,

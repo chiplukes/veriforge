@@ -189,11 +189,25 @@ class TernaryOp(Expression):
 class Concatenation(Expression):
     """{a, b, c}"""
 
-    __slots__ = ("parts",)
+    __slots__ = ("from_streaming", "parts")
 
-    def __init__(self, parts: list[Expression], *, loc: SourceLocation | None = None):
+    def __init__(self, parts: list[Expression], *, from_streaming: bool = False, loc: SourceLocation | None = None):
         super().__init__(loc=loc)
         self.parts = parts
+        # True only for a `{>>{...}}` (no-slice-size right-stream) node
+        # desugared straight to `Concatenation` at AST-build time (see
+        # `_build_streaming_concatenation`, transforms/_expressions.py) --
+        # distinguishes it from an ordinary, directly-written `{a, b, c}`.
+        # `elaborate.py`'s `expand_array_concat_operands` needs this: a
+        # genuinely SV UNPACKED array operand is legal ONLY in a streaming
+        # context (plain `{}` concatenation forbids it), where IEEE
+        # 1800-2017 SS11.4.14.1 requires it to stream out element-by-
+        # element -- but a PACKED (e.g. 2-D packed) array operand is legal
+        # directly in plain `{}` too, where it must be read as its own
+        # ordinary whole-array bit-vector value, NOT re-expanded
+        # element-by-element (that reorders/corrupts it -- see the
+        # `from_streaming` check at the expansion pass's only call site).
+        self.from_streaming = from_streaming
 
     def _child_nodes(self) -> list[VerilogNode]:
         return list(self.parts)

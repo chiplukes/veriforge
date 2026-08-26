@@ -29,7 +29,18 @@ class VariableKind(Enum):
 class Variable(VerilogNode):
     """A variable declaration (reg, integer, real, time, event)."""
 
-    __slots__ = ("dimensions", "drivers", "initial_value", "kind", "loads", "name", "signed", "type_name", "width")
+    __slots__ = (
+        "dimensions",
+        "drivers",
+        "initial_value",
+        "kind",
+        "loads",
+        "name",
+        "packed_dim_count",
+        "signed",
+        "type_name",
+        "width",
+    )
 
     def __init__(
         self,
@@ -39,6 +50,7 @@ class Variable(VerilogNode):
         width: Range | None = None,
         signed: bool = False,
         dimensions: list[Range] | None = None,
+        packed_dim_count: int = 0,
         initial_value: Expression | None = None,
         type_name: str | None = None,
         loc: SourceLocation | None = None,
@@ -49,6 +61,9 @@ class Variable(VerilogNode):
         self.width = width
         self.signed = signed
         self.dimensions = dimensions or []
+        # See `Net.packed_dim_count`'s identical docstring (model/nets.py)
+        # for what this counts and why it's needed.
+        self.packed_dim_count = packed_dim_count
         self.initial_value = initial_value
         self.type_name = type_name
         # Connectivity — populated by Layer 3 analysis
@@ -84,6 +99,8 @@ class Variable(VerilogNode):
             d["signed"] = True
         if self.dimensions:
             d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
+        if self.packed_dim_count:
+            d["packed_dim_count"] = self.packed_dim_count
         if self.initial_value:
             d["initial_value"] = self.initial_value.to_dict()
         return d

@@ -16,6 +16,7 @@ from veriforge.model.expressions import (
     BinaryOp,
     BitSelect,
     Concatenation,
+    Expression,
     FunctionCall,
     Identifier,
     Literal,
@@ -213,6 +214,91 @@ class _StmtEmittersMixin:
                             return self._emit_whole_mem_copy_lines(
                                 lhs_mid, rhs_mid, marker_sid=marker_sid, indent=indent, is_nba=is_nba
                             )
+                if (
+                    lhs_mid is not None
+                    and isinstance(rhs, AssignmentPattern)
+                    and rhs.positional
+                    and not rhs.named_pairs
+                    and len(rhs.positional) == self._mem_info[lhs_mid][1]
+                ):
+                    # `arr = '{a, b, ...};` — an unkeyed positional
+                    # assignment pattern. Per IEEE 1800-2017 §10.9.1, item k
+                    # assigns array index k in declaration order — the SAME
+                    # index order plain `arr[k]` indexing already uses, for
+                    # either an ascending- or descending-declared array.
+                    # This must be compiled item-by-item, NOT via the
+                    # generic `RangeSelect`-wrapping fallback just below
+                    # (which flattens the whole pattern into one value and
+                    # slices bits `[k*elem_w, (k+1)*elem_w)` per index —
+                    # the packed-array MSB-first convention, correct only
+                    # for a genuine 2-D packed array's own bit layout, but
+                    # WRONG for a plain unpacked array, whose "index" has
+                    # no bit-position meaning at all). Confirmed wrong
+                    # against the real `ibex_alu` RTL: `imd_val_d_o =
+                    # '{operand_a_i, 32'h0};` (a 2-element unpacked array)
+                    # previously wrote operand_a_i to index 1 and 0 to
+                    # index 0 — reversed from the LRM-correct
+                    # index-0/index-1 assignment.
+                    lines = []
+                    for k, part in enumerate(rhs.positional):
+                        elem_lhs = BitSelect(target=Identifier(name), index=Literal(k))
+                        lines.extend(self._emit_mem_write(elem_lhs, part, indent, is_nba=is_nba))
+                    return lines
+                if lhs_mid is not None and (
+                    (isinstance(rhs, Literal) and not rhs.is_x and not rhs.is_z)
+                    or self._mem_info[lhs_mid][0] <= _WORD_BITS
+                ):
+                    # Whole-array (memory-backed) LHS with an RHS more
+                    # complex than a bare matching-shape memory-to-memory
+                    # copy (the fast path just above) -- e.g. a REGISTERED
+                    # whole-array ternary, `m_axis_tdata <= bypass ?
+                    # s_axis_tdata : merged_tdata_wide;`. Split into one
+                    # per-element write per memory index (all
+                    # compile-time-constant, since `depth` is known).
+                    #
+                    # A constant (non-x/z) `Literal` RHS is sliced entirely
+                    # in PYTHON (`rhs.value` is already known at codegen
+                    # time) so each element's RHS is STILL a plain
+                    # `Literal` -- critically, `_emit_mem_write`'s OWN
+                    # "is this element a zero literal" fast path (routing
+                    # to the wide-aware `_emit_wide_mem_zero_lines`) then
+                    # still recognizes it, unlike wrapping in a
+                    # `RangeSelect` (below), which defeats EVERY one of
+                    # `_emit_mem_write`'s shape-specific fast paths by
+                    # construction (`RangeSelect` never matches any of
+                    # them) and falls through to its final, width-64-only
+                    # scalar fallback -- confirmed wrong for a REAL design:
+                    # `mst_ports_req_o = '0;` (a 134-bit-per-element,
+                    # 2-deep array) crashed the Cython compiler
+                    # ("Converting to Python object not allowed without
+                    # gil") because that scalar fallback doesn't handle
+                    # widths > 64 at all.
+                    #
+                    # For any OTHER (non-constant) RHS, the same
+                    # `RangeSelect`-wrapping trick as before is still used
+                    # (its target already supports an arbitrary
+                    # non-Identifier expression generically, per
+                    # `_emit_expr`'s own RangeSelect fallback) -- but ONLY
+                    # when each element fits in that scalar fallback
+                    # (`elem_w <= _WORD_BITS`); a wide element with a
+                    # genuinely dynamic RHS falls through to the
+                    # `NotImplementedError` raised below instead of
+                    # emitting the same invalid oversized-shift Cython,
+                    # matching this file's `_emit_concat_lhs` sibling fix
+                    # for the identical width limitation.
+                    lhs_elem_w, lhs_depth = self._mem_info[lhs_mid]
+                    lines: list[str] = []
+                    elem_mask_val = (1 << lhs_elem_w) - 1
+                    for k in range(lhs_depth):
+                        lo = k * lhs_elem_w
+                        hi = lo + lhs_elem_w - 1
+                        elem_lhs = BitSelect(target=Identifier(name), index=Literal(k))
+                        if isinstance(rhs, Literal) and not rhs.is_x and not rhs.is_z:
+                            elem_rhs: Expression = Literal((int(rhs.value) >> lo) & elem_mask_val)
+                        else:
+                            elem_rhs = RangeSelect(target=rhs, msb=Literal(hi), lsb=Literal(lo))
+                        lines.extend(self._emit_mem_write(elem_lhs, elem_rhs, indent, is_nba=is_nba))
+                    return lines
                 struct_storage_range = self._resolve_struct_storage_mem_range(name)
                 if struct_storage_range is not None:
                     mem_lhs, msb, lsb = struct_storage_range
@@ -1407,6 +1493,54 @@ class _StmtEmittersMixin:
                             signal_part_lines.extend(signal_lines)
                         else:
                             part_ops.append((extract, mask_extract, sid, None, None))
+                    elif (mem_id := self._mem_map.get(part_name)) is not None and self._mem_info[mem_id][
+                        0
+                    ] <= _WORD_BITS:
+                        # Whole-array (memory-backed) concat member, e.g.
+                        # `{tuser, tlast, arr} <= wide_in;` with `arr` a
+                        # 2-D packed array -- found via a follow-up audit
+                        # for the same "concat-LHS write silently dropped
+                        # for a memory-backed part" gap already fixed for
+                        # `sim/executor.py`'s reference-engine equivalent
+                        # (`_concat_nba_accumulate`). This bare-Identifier
+                        # fallback previously had no memory case at all,
+                        # so `arr` here fell through every branch below
+                        # with no write emitted whatsoever -- confirmed
+                        # wrong: `arr` (and every `arr[i]`) stayed X
+                        # forever. Split into one per-element constant
+                        # range write per memory index (all
+                        # compile-time-constant), each element's value/mask
+                        # a shift+mask of the already-computed whole-part
+                        # `extract`/`mask_extract` expressions -- only
+                        # valid when each element fits in one scalar
+                        # `long long` shift (`elem_w <= _WORD_BITS`); a
+                        # WIDE (>64-bit) element needs `extract` itself
+                        # sliced via the wide-scratch machinery, not a
+                        # plain C-level `>>`, so this deliberately falls
+                        # through to the (pre-existing, still-unfixed)
+                        # struct/else path below instead of emitting
+                        # invalid oversized-shift Cython -- confirmed a
+                        # real design (`elem_w=134`) crashed the Cython
+                        # compiler ("Converting to Python object not
+                        # allowed without gil") before this guard.
+                        elem_w, depth = self._mem_info[mem_id]
+                        for k in range(depth):
+                            k_lo = k * elem_w
+                            elem_val = f"(({extract}) >> {k_lo})" if k_lo else extract
+                            elem_mask = f"(({mask_extract}) >> {k_lo})" if k_lo else mask_extract
+                            mem_part_lines.extend(
+                                self._emit_const_mem_range_write_lines(
+                                    mem_id,
+                                    str(k),
+                                    0,
+                                    elem_w,
+                                    elem_val,
+                                    elem_mask,
+                                    marker_sid=self._mem_marker_sigs[mem_id],
+                                    indent=indent,
+                                    is_nba=is_nba,
+                                )
+                            )
                     else:
                         struct_storage_range = self._resolve_struct_storage_mem_range(part_name)
                         if (

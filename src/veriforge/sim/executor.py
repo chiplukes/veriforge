@@ -14,7 +14,15 @@ import logging
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
-from veriforge.model.expressions import BitSelect, Concatenation, FunctionCall, Identifier, PartSelect, RangeSelect
+from veriforge.model.expressions import (
+    AssignmentPattern,
+    BitSelect,
+    Concatenation,
+    FunctionCall,
+    Identifier,
+    PartSelect,
+    RangeSelect,
+)
 from veriforge.model.statements import (
     BlockingAssign,
     CaseStatement,
@@ -36,7 +44,14 @@ from veriforge.model.statements import (
     WhileLoop,
 )
 
-from .evaluator import EvalContext, ExpressionEvaluator, _expr_self_width, _expr_signed, _resolve_struct_write_target
+from .evaluator import (
+    EvalContext,
+    ExpressionEvaluator,
+    _expr_self_width,
+    _expr_signed,
+    _resolve_struct_write_target,
+    _write_whole_memory,
+)
 from .value import Value
 
 log = logging.getLogger(__name__)
@@ -184,6 +199,8 @@ class StatementExecutor:  # cm:c2f9a1
         if stype is BlockingAssign:
             if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
                 return
+            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
+                return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
             rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
@@ -193,6 +210,8 @@ class StatementExecutor:  # cm:c2f9a1
         # -- Non-blocking assignment -------------------------------
         if stype is NonblockingAssign:
             if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
+                return
+            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
@@ -405,6 +424,8 @@ class StatementExecutor:  # cm:c2f9a1
         if stype is BlockingAssign:
             if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
                 return
+            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
+                return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
             rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
@@ -414,6 +435,8 @@ class StatementExecutor:  # cm:c2f9a1
         # -- Non-blocking assignment -------------------------------
         if stype is NonblockingAssign:
             if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
+                return
+            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
@@ -665,6 +688,53 @@ class StatementExecutor:  # cm:c2f9a1
             self.nba_queue.append(MemNbaEntry(lhs_name, idx, val))
         return True
 
+    def _assign_pattern_to_memory(self, lhs: Expression, rhs: Expression, ctx: EvalContext, *, immediate: bool) -> bool:
+        """Handle `arr = '{a, b, ...};` (positional assignment pattern) against
+        a whole memory-backed LHS.
+
+        Per IEEE 1800-2017 SS10.9.1, an unkeyed assignment pattern's k-th item
+        assigns the array's k-th element in *declaration order* -- which is
+        exactly the same index order `arr[k]` indexing already uses
+        elsewhere in this file (list index k IS Verilog index k, for either
+        an ascending- or descending-declared array). This must be done by
+        writing each pattern item directly to `data[k]`, NOT by evaluating
+        the whole pattern as one flat concatenated bit vector (the way
+        `Concatenation`/`_write_whole_memory` do) and then unflattening it:
+        that packed-array convention (highest list index = the flattened
+        value's MSB-most slice) is only correct for a genuine 2-D PACKED
+        array reinterpreted as a bit vector -- it silently reverses element
+        order for a plain UNPACKED array, whose "index" has no bit-position
+        meaning at all. Confirmed wrong against the real `ibex_alu` RTL:
+        `imd_val_d_o = '{operand_a_i, 32'h0};` (a 2-element unpacked array)
+        previously wrote operand_a_i to index 1 and 0 to index 0 -- exactly
+        reversed from the LRM-correct index-0/index-1 assignment.
+        """
+        if type(lhs) is not Identifier or type(rhs) is not AssignmentPattern:
+            return False
+        if rhs.named_pairs or not rhs.positional:
+            return False
+        lhs_name = self._identifier_name(lhs)
+        if lhs_name not in ctx._memory_names:
+            return False
+        mem = ctx._memories.get(lhs_name)
+        if mem is None:
+            return False
+        data, elem_width = mem
+        depth = len(data)
+        if len(rhs.positional) != depth:
+            return False
+        values = [self.evaluator.eval(part, ctx, width=elem_width) for part in rhs.positional]
+        values = [val.resize(elem_width) if val.width != elem_width else val for val in values]
+        if immediate:
+            for idx, val in enumerate(values):
+                data[idx] = val
+            if ctx._originals is not None and lhs_name not in ctx._originals:
+                ctx._originals[lhs_name] = Value(0)
+            return True
+        for idx, val in enumerate(values):
+            self.nba_queue.append(MemNbaEntry(lhs_name, idx, val))
+        return True
+
     def _write_target(self, lhs: Expression, value: Value, ctx: EvalContext, *, immediate: bool) -> None:  # noqa: PLR0912, PLR0915
         """Write to an assignment target (identifier, bit select, range select, concatenation)."""
         ltype = type(lhs)
@@ -703,6 +773,41 @@ class StatementExecutor:  # cm:c2f9a1
                 # Don't create a spurious ctx._signals entry; drop silently.
                 if "[" in name:
                     return
+                # Whole-array (memory-backed) LHS, e.g. `arr <= cond ? a : b;`
+                # (any RHS more complex than a bare memory-to-memory
+                # Identifier copy -- that simpler case is already handled
+                # by `_copy_whole_memory`'s own per-element `MemNbaEntry`
+                # queueing, called by this method's own caller before
+                # falling through to here). The IMMEDIATE branch below
+                # already correctly splits `value` via `ctx.write_signal`
+                # -> `_write_whole_memory`; the NBA branch previously had
+                # no equivalent -- it queued a generic `NbaEntry`, applied
+                # later via a *plain* `ctx._signals[name] = value` (see
+                # `apply_nba`), which silently bypassed `ctx._memories`
+                # entirely, leaving the memory's OWN per-element storage
+                # (what every other reader -- `mem[i]`, this same
+                # Identifier's next read, etc. -- actually consults)
+                # completely untouched. Confirmed wrong against a real
+                # design: `m_axis_tdata <= bypass ? s_axis_tdata :
+                # merged_tdata_wide;` (a whole-array registered ternary)
+                # read back as index 0's value broadcast to every lane.
+                if name in ctx._memory_names:
+                    mem = ctx._memories.get(name)
+                    if mem is not None:
+                        _mem_data, elem_width = mem
+                        depth = len(_mem_data)
+                        full_width = depth * elem_width
+                        fval = value.resize(full_width) if value.width != full_width else value
+                        if immediate:
+                            if _write_whole_memory(ctx, name, fval):
+                                if ctx._originals is not None and name not in ctx._originals:
+                                    ctx._originals[name] = Value(0)
+                        else:
+                            for k in range(depth):
+                                lsb = k * elem_width
+                                msb = lsb + elem_width - 1
+                                self.nba_queue.append(MemNbaEntry(name, k, fval[msb:lsb]))
+                        return
                 current = Value.x(value.width)
             if current.width != value.width:
                 value = value.resize(current.width)
@@ -1032,6 +1137,33 @@ class StatementExecutor:  # cm:c2f9a1
                 name = ".".join(part.hierarchy) + "." + name
             if _resolve_struct_write_target(name, ctx) is not None:
                 self._write_target(part, part_val, ctx, immediate=False)
+                return
+            # Whole-array (memory-backed) concat member, e.g.
+            # `{tuser, tlast, arr} <= wide_in;` with `arr` a 2-D packed
+            # array -- found via a follow-up audit for the same "NBA path
+            # never got whole-memory awareness" gap fixed in `_write_target`
+            # (see the comment there). `pending` is keyed by scalar
+            # name->Value and applied later via a plain `ctx._signals[name]
+            # = value` (see `apply_nba`) -- for a memory name that creates
+            # a SCALAR shadow entry in `ctx._signals` that happens to read
+            # back correctly for a WHOLE-array read (which checks
+            # `ctx._signals` first) but leaves the memory's OWN per-element
+            # storage (what `arr[i]` actually reads) completely untouched
+            # -- confirmed wrong: after this NBA, `arr` read back correct,
+            # but `arr[0]`..`arr[3]` were all still X. Split into
+            # per-element `MemNbaEntry`s directly (bypassing `pending`,
+            # which has no per-element representation) instead.
+            if name in ctx._memory_names:
+                mem = ctx._memories.get(name)
+                if mem is not None:
+                    _mem_data, elem_width = mem
+                    depth = len(_mem_data)
+                    full_width = depth * elem_width
+                    fval = part_val.resize(full_width) if part_val.width != full_width else part_val
+                    for k in range(depth):
+                        lsb = k * elem_width
+                        msb = lsb + elem_width - 1
+                        self.nba_queue.append(MemNbaEntry(name, k, fval[msb:lsb]))
                 return
             wval = (
                 part_val.resize(ctx.read_signal(name).width)

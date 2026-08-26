@@ -182,6 +182,22 @@ def expand_array_concat_operands(module: Module) -> None:
         return new_parts if changed else None
 
     for concat in module.find(Concatenation):
+        # Only a `{>>{...}}` node desugared straight to `Concatenation`
+        # (see `_build_streaming_concatenation`, transforms/_expressions.py)
+        # is a genuine streaming context -- the only place a real SV
+        # UNPACKED array operand is legal, and the only place IEEE
+        # 1800-2017 SS11.4.14.1's "stream element-by-element" rule applies.
+        # An ordinary, directly-written `{a, b, arr}` (from_streaming
+        # False) may legally contain a PACKED (e.g. 2-D packed) array
+        # operand -- that must be read as its own ordinary whole-array
+        # bit-vector value, NOT re-expanded element-by-element (ascending
+        # index first/MSB-most is backwards from a packed array's own
+        # index-(N-1)-is-MSB convention, corrupting it -- confirmed
+        # against a real design where `{tuser, tlast, arr}`, `arr` a
+        # plain 2-D packed array operand, silently reversed `arr`'s lane
+        # order).
+        if not concat.from_streaming:
+            continue
         expanded = _expand_parts(concat.parts)
         if expanded is not None:
             concat.parts = expanded
@@ -190,6 +206,9 @@ def expand_array_concat_operands(module: Module) -> None:
     # the same way `{>>{...}}`/plain Concatenation does -- same expansion,
     # applied to its parts list too (see `_build_streaming_concatenation`
     # in transforms/_expressions.py for why this node type exists at all).
+    # Every `StreamingConcatenation` node is, by construction, a genuine
+    # streaming context (it only ever represents `<<`) -- no from_streaming
+    # check needed here.
     for stream_concat in module.find(StreamingConcatenation):
         expanded = _expand_parts(stream_concat.parts)
         if expanded is not None:
@@ -716,6 +735,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                 width=net.width,
                 signed=net.signed,
                 dimensions=net.dimensions,
+                packed_dim_count=net.packed_dim_count,
                 initial_value=net.initial_value,
             )
         )
@@ -729,6 +749,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                 width=var.width,
                 signed=var.signed,
                 dimensions=var.dimensions,
+                packed_dim_count=var.packed_dim_count,
                 initial_value=var.initial_value,
                 type_name=var.type_name,
             )
@@ -745,6 +766,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                     width=port.width,
                     signed=port.signed,
                     dimensions=port.dimensions,
+                    packed_dim_count=port.packed_dim_count,
                 )
             )
 
@@ -1032,100 +1054,6 @@ def _expand_port_connection_pairs(
     return pairs
 
 
-def _expand_unpacked_array_elements(expr: Expression, dimensions: list[Range]) -> list[Expression]:
-    """Expand an unpacked-array expression into element selects."""
-    if not dimensions:
-        return [expr]
-
-    first, *rest = dimensions
-    indices = _dimension_indices(first)
-    if indices is None:
-        return [expr]
-
-    elements: list[Expression] = []
-    for index in indices:
-        idx_expr = Literal(index)
-        elem_expr = BitSelect(target=copy.deepcopy(expr), index=idx_expr)
-        elements.extend(_expand_unpacked_array_elements(elem_expr, rest))
-    return elements
-
-
-def _expand_unpacked_array_rhs(
-    rhs: Expression,
-    lhs_parts: list[Expression],
-    signal_dimensions: dict[str, list[Range]],
-) -> list[Expression]:
-    """Expand an unpacked-array RHS into per-element expressions when possible."""
-    if isinstance(rhs, Identifier) and rhs.hierarchy is None and signal_dimensions.get(rhs.name):
-        rhs_parts = _expand_unpacked_array_elements(copy.deepcopy(rhs), signal_dimensions[rhs.name])
-        if len(rhs_parts) == len(lhs_parts):
-            return rhs_parts
-
-    if isinstance(rhs, AssignmentPattern):
-        if rhs.positional and len(rhs.positional) == len(lhs_parts):
-            return [copy.deepcopy(part) for part in rhs.positional]
-        if rhs.default_value is not None and not rhs.named_pairs and not rhs.positional:
-            return [copy.deepcopy(rhs.default_value) for _ in lhs_parts]
-
-    return [copy.deepcopy(rhs) for _ in lhs_parts]
-
-
-def _expand_unpacked_array_stmt(stmt, signal_dimensions: dict[str, list[Range]]):
-    """Lower whole unpacked-array procedural assignments into per-element assignments."""
-    from veriforge.model.statements import (  # noqa: PLC0415
-        BlockingAssign,
-        CaseStatement,
-        DelayControl,
-        EventControl,
-        ForLoop,
-        ForeverLoop,
-        IfStatement,
-        NonblockingAssign,
-        RepeatLoop,
-        SeqBlock,
-        WhileLoop,
-    )
-
-    if isinstance(stmt, (BlockingAssign, NonblockingAssign)):
-        lhs = stmt.lhs
-        if isinstance(lhs, Identifier) and lhs.hierarchy is None:
-            lhs_dims = signal_dimensions.get(lhs.name)
-            if lhs_dims:
-                lhs_parts = _expand_unpacked_array_elements(copy.deepcopy(lhs), lhs_dims)
-                rhs_parts = _expand_unpacked_array_rhs(stmt.rhs, lhs_parts, signal_dimensions)
-                assign_type = type(stmt)
-                parts = [
-                    assign_type(lhs_part, rhs_part) for lhs_part, rhs_part in zip(lhs_parts, rhs_parts, strict=False)
-                ]
-                return SeqBlock(parts) if len(parts) > 1 else parts[0]
-        return stmt
-
-    if isinstance(stmt, SeqBlock):
-        stmt.statements = [_expand_unpacked_array_stmt(s, signal_dimensions) for s in stmt.statements]
-        return stmt
-    if isinstance(stmt, IfStatement):
-        stmt.then_body = _expand_unpacked_array_stmt(stmt.then_body, signal_dimensions)
-        stmt.else_body = _expand_unpacked_array_stmt(stmt.else_body, signal_dimensions)
-        return stmt
-    if isinstance(stmt, CaseStatement):
-        for item in stmt.items:
-            item.body = _expand_unpacked_array_stmt(item.body, signal_dimensions)
-        return stmt
-    if isinstance(stmt, ForLoop):
-        stmt.init = _expand_unpacked_array_stmt(stmt.init, signal_dimensions)
-        stmt.update = _expand_unpacked_array_stmt(stmt.update, signal_dimensions)
-        stmt.body = _expand_unpacked_array_stmt(stmt.body, signal_dimensions)
-        return stmt
-    if isinstance(stmt, WhileLoop):
-        stmt.body = _expand_unpacked_array_stmt(stmt.body, signal_dimensions)
-        return stmt
-    if isinstance(stmt, (ForeverLoop, RepeatLoop, DelayControl, EventControl)):
-        if hasattr(stmt, "body") and stmt.body is not None:
-            stmt.body = _expand_unpacked_array_stmt(stmt.body, signal_dimensions)
-        return stmt
-    return stmt
-
-
 def _dimension_indices(dim: Range) -> list[int] | None:
     """Return the concrete indices covered by a resolved unpacked-array dimension."""
     try:
@@ -1156,38 +1084,62 @@ def _resolve_port_for_conn(conn, sub: Module) -> Port | None:
 
 def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str]) -> None:
     """Deep-copy and rename submodule logic into *flat*."""
-    signal_dimensions: dict[str, list[Range]] = {}
-    for port in sub.ports:
-        signal_dimensions[port.name] = list(getattr(port, "dimensions", []) or [])
-    for net in sub.nets:
-        signal_dimensions[net.name] = list(getattr(net, "dimensions", []) or [])
-    for var in sub.variables:
-        signal_dimensions[var.name] = list(getattr(var, "dimensions", []) or [])
-
     for ca in sub.continuous_assigns:
-        lhs = ca.lhs
-        rhs = ca.rhs
-        if isinstance(lhs, Identifier) and lhs.hierarchy is None and signal_dimensions.get(lhs.name):
-            lhs_parts = _expand_unpacked_array_elements(copy.deepcopy(lhs), signal_dimensions[lhs.name])
-            rhs_parts = _expand_unpacked_array_rhs(copy.deepcopy(rhs), lhs_parts, signal_dimensions)
-            for lhs_expr, rhs_expr in zip(lhs_parts, rhs_parts, strict=False):
-                ca_copy = ContinuousAssign(lhs_expr, rhs_expr)
-                _prefix_identifiers(ca_copy, prefix, sub_signals)
-                flat.continuous_assigns.append(ca_copy)
-            continue
+        # A continuous assign whose LHS is a bare dimensioned identifier
+        # (`assign arr = ...;`) used to always be expanded here into N
+        # per-element assigns (`arr[N-1] = ...`, ..., `arr[0] = ...`) via
+        # `_expand_unpacked_array_elements`/`_expand_unpacked_array_rhs` --
+        # unconditionally, for BOTH a genuinely unpacked array AND a 2-D
+        # PACKED array (same conflation as `expand_array_concat_operands`'s
+        # `from_streaming` fix a few hundred lines up; this codebase has
+        # no way, at this stage, to structurally tell the two apart). That
+        # expansion is now fully redundant for a packed array -- the
+        # "memory" whole-array read/write machinery (`_read_whole_memory`/
+        # `_write_whole_memory` in evaluator.py, and each engine's own
+        # equivalent) already reads/writes ANY dimensioned identifier as
+        # its own ordinary flat bit-vector value correctly, with no
+        # per-element decomposition needed at all -- and it was actively
+        # WRONG whenever the RHS wasn't itself an array of the SAME shape
+        # (`_expand_unpacked_array_rhs`'s fallback,
+        # `return [copy.deepcopy(rhs) for _ in lhs_parts]`, broadcasts the
+        # UNSLICED whole RHS to every single LHS element instead of
+        # bit-slicing it). Confirmed against a real design: `assign
+        # arr_out = flat_in;` inside a child module (`arr_out` a 2-D
+        # packed array, `flat_in` a plain flat scalar) read back as every
+        # lane broadcasting flat_in's own low byte, but only once `child`
+        # was instantiated inside a parent (this function only runs for
+        # an INSTANTIATED submodule's own logic, which is why a `child`
+        # simulated standalone never exposed it). Simply deep-copying and
+        # renaming the assign unchanged, below, lets the already-correct
+        # whole-array machinery handle it.
         ca_copy = copy.deepcopy(ca)
         _prefix_identifiers(ca_copy, prefix, sub_signals)
         flat.continuous_assigns.append(ca_copy)
 
     for ab in sub.always_blocks:
+        # Used to run every always-block body through
+        # `_expand_unpacked_array_stmt` here too, same as continuous
+        # assigns above -- removed for the identical reason (see the
+        # comment on the continuous-assign loop above): it conflated
+        # packed and unpacked dimensions, and its RHS fallback broadcast
+        # an unsliced RHS to every LHS element instead of bit-slicing it.
+        # Confirmed wrong against a real design for a whole-array
+        # REGISTERED ternary, `m_axis_tdata <= bypass ? s_axis_tdata :
+        # merged_tdata_wide;`: expanded into N per-element assigns each
+        # keeping the FULL (unindexed) ternary as its RHS, so each 8-bit
+        # element assign evaluated the whole 32-bit ternary result at its
+        # own narrow width and kept only its low byte -- every lane ended
+        # up holding the SAME (lowest-byte-truncated) value. The
+        # already-fixed whole-array read/write machinery (this executor's
+        # `_write_target`, now NBA-whole-memory-aware too) handles the
+        # un-expanded assign correctly with no per-element decomposition
+        # needed.
         ab_copy = copy.deepcopy(ab)
-        ab_copy.body = _expand_unpacked_array_stmt(ab_copy.body, signal_dimensions)
         _prefix_identifiers(ab_copy, prefix, sub_signals)
         flat.always_blocks.append(ab_copy)
 
     for ib in sub.initial_blocks:
         ib_copy = copy.deepcopy(ib)
-        ib_copy.body = _expand_unpacked_array_stmt(ib_copy.body, signal_dimensions)
         _prefix_identifiers(ib_copy, prefix, sub_signals)
         flat.initial_blocks.append(ib_copy)
 
@@ -1305,9 +1257,27 @@ def _flatten_interface_instances(flat: Module, intf_instances: list[tuple[str, o
         if not isinstance(intf, InterfaceModel):
             continue
         for net in intf.nets:
-            flat.nets.append(Net(f"{inst_name}.{net.name}", net.kind, width=net.width, signed=net.signed))
+            flat.nets.append(
+                Net(
+                    f"{inst_name}.{net.name}",
+                    net.kind,
+                    width=net.width,
+                    signed=net.signed,
+                    dimensions=net.dimensions,
+                    packed_dim_count=net.packed_dim_count,
+                )
+            )
         for var in intf.variables:
-            flat.variables.append(Variable(f"{inst_name}.{var.name}", var.kind, width=var.width, signed=var.signed))
+            flat.variables.append(
+                Variable(
+                    f"{inst_name}.{var.name}",
+                    var.kind,
+                    width=var.width,
+                    signed=var.signed,
+                    dimensions=var.dimensions,
+                    packed_dim_count=var.packed_dim_count,
+                )
+            )
         # Copy continuous assigns with prefixed identifiers
         intf_signals = _submodule_signal_names_from_intf(intf)
         for ca in intf.continuous_assigns:

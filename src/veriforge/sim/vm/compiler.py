@@ -419,6 +419,35 @@ class Compiler:  # cm:8c1e4a
                     program.append(instr(Op.NBA_MEM, encoded_arg))
             return True
 
+        # Handle '{a, b, ...} — an unkeyed positional assignment pattern.
+        # Per IEEE 1800-2017 §10.9.1, item k assigns array index k in
+        # declaration order — the SAME index order plain `arr[k]` indexing
+        # already uses, for either an ascending- or descending-declared
+        # array. This must be compiled item-by-item, NOT by concatenating
+        # the whole pattern into one flat value and unflattening it into the
+        # memory (the packed-array MSB-first convention that a general
+        # `_compile_expr`+whole-memory-store would apply is only correct
+        # for a genuine 2-D packed array's own bit layout — for a plain
+        # unpacked array it silently reverses element order). Confirmed
+        # wrong against the real `ibex_alu` RTL: `imd_val_d_o = '{operand_a_i,
+        # 32'h0};` (a 2-element unpacked array) previously wrote
+        # operand_a_i to index 1 and 0 to index 0 — reversed from the
+        # LRM-correct index-0/index-1 assignment.
+        if isinstance(rhs, AssignmentPattern) and rhs.positional and not rhs.named_pairs:
+            if len(rhs.positional) != lhs_depth:
+                return False
+            for addr, part in enumerate(rhs.positional):
+                self._compile_expr(part, program, width=lhs_elem_w)
+                if self._expr_width(part) != lhs_elem_w:
+                    program.append(instr(Op.RESIZE, lhs_elem_w))
+                addr_cid = self._add_int_const(addr, 32)
+                program.append(instr(Op.LOAD_CONST, addr_cid))
+                if immediate:
+                    program.append(instr(Op.STORE_MEM, encoded_arg))
+                else:
+                    program.append(instr(Op.NBA_MEM, encoded_arg))
+            return True
+
         return False
 
     def _eval_initial_value(self, expr, width: int) -> Value | None:
@@ -494,8 +523,8 @@ class Compiler:  # cm:8c1e4a
             if net.dimensions:
                 if lsb != 0:
                     self._memory_bases[net.name] = lsb
-                depth = _dim_depth(net.dimensions[0], senv)
-                self._register_memory(net.name, width, depth)
+                depth, elem_width = _memory_shape(net.dimensions, width, senv, net.packed_dim_count)
+                self._register_memory(net.name, elem_width, depth)
             else:
                 if lsb != 0:
                     self._signal_bases[net.name] = lsb
@@ -514,8 +543,8 @@ class Compiler:  # cm:8c1e4a
             if var.dimensions:
                 if lsb != 0:
                     self._memory_bases[var.name] = lsb
-                depth = _dim_depth(var.dimensions[0], senv)
-                self._register_memory(var.name, width, depth)
+                depth, elem_width = _memory_shape(var.dimensions, width, senv, var.packed_dim_count)
+                self._register_memory(var.name, elem_width, depth)
             else:
                 if lsb != 0:
                     self._signal_bases[var.name] = lsb
@@ -535,8 +564,8 @@ class Compiler:  # cm:8c1e4a
                 if getattr(port, "dimensions", None):
                     if lsb != 0:
                         self._memory_bases[port.name] = lsb
-                    depth = _dim_depth(port.dimensions[0], senv)
-                    self._register_memory(port.name, width, depth)
+                    depth, elem_width = _memory_shape(port.dimensions, width, senv, port.packed_dim_count)
+                    self._register_memory(port.name, elem_width, depth)
                 else:
                     if lsb != 0:
                         self._signal_bases[port.name] = lsb
@@ -655,6 +684,30 @@ class Compiler:  # cm:8c1e4a
         for assign in module.continuous_assigns:
             program: list[tuple[int, int, int]] = []
             if isinstance(assign.lhs, Concatenation) and self._compile_matching_concat_copy(
+                assign.lhs, assign.rhs, program, immediate=True
+            ):
+                program.append(instr(Op.PROC_END))
+
+                sensitivity = self._collect_expr_signals(assign.rhs)
+                proc = CompiledProcess(
+                    ProcessType.CONTINUOUS,
+                    program,
+                    sensitivity,
+                    source_block=assign,
+                )
+                self.processes.append(proc)
+                continue
+            # Bare-Identifier-to-bare-Identifier (or `'{...}`) whole-memory
+            # LHS (typically a hierarchy-flattened whole-array PORT
+            # CONNECTION, e.g. `.imd_val_q_i(imd_val_q_full)`): a direct
+            # per-index copy/assign, NOT the generic eval-to-flat-value +
+            # unflatten path below (which applies a packed-array MSB-first
+            # convention that's only valid for a genuine 2-D packed array,
+            # and silently reverses/misorders elements of a plain unpacked
+            # array). Mirrors `_compile_whole_memory_copy`'s existing use
+            # from procedural blocking/nonblocking assigns -- continuous
+            # assigns never called it at all before.
+            if isinstance(assign.lhs, Identifier) and self._compile_whole_memory_copy(
                 assign.lhs, assign.rhs, program, immediate=True
             ):
                 program.append(instr(Op.PROC_END))
@@ -3419,3 +3472,32 @@ def _dim_depth(dim, param_env=None) -> int:
     except (ValueError, TypeError):
         pass
     return 1
+
+
+def _memory_shape(dimensions: list, base_width: int, senv: dict, packed_dim_count: int = 0) -> tuple[int, int]:
+    """Resolve a dimensioned declaration's true (depth, elem_width).
+
+    Mirrors `sim/scheduler.py`'s identical helper of the same name: a
+    dimensioned net/var/port's `dimensions` list can hold BOTH extra
+    PACKED dims (from the element's own multi-dim packed declaration,
+    e.g. the outer `[3:0]` in `logic [3:0][7:0] mem [3:0]`) and genuinely
+    UNPACKED array dimension(s) (the trailing `[3:0]` there) --
+    `dimensions` alone can't tell the two apart (both are just `Range`
+    entries, and guessing "last dim only" broke a genuine multi-
+    dimensional unpacked array's depth computation the same way guessing
+    "every dim" broke the packed-element case), so this uses
+    `packed_dim_count` (`Net`/`Variable`/`Port`'s own field recording how
+    many LEADING `dimensions` entries are packed) instead of guessing.
+    Every dimension from `packed_dim_count` onward is a genuine address
+    dimension; depth is their product (this engine only ever addresses
+    memories with a single flat index, so multiple genuine dims collapse
+    to one flat depth here). A no-op for the common single-dimension
+    case either way.
+    """
+    elem_width = base_width
+    for extra_dim in dimensions[:packed_dim_count]:
+        elem_width *= _dim_depth(extra_dim, senv)
+    depth = 1
+    for addr_dim in dimensions[packed_dim_count:]:
+        depth *= _dim_depth(addr_dim, senv)
+    return depth, elem_width

@@ -142,6 +142,46 @@ def _dim_strides(dimensions: list[Range], param_env=None) -> list[tuple[int, int
     return strides
 
 
+def _memory_shape_layout(
+    dimensions: list[Range], base_width: int, param_env=None, packed_dim_count: int = 0
+) -> tuple[int, int, list[tuple[int, int, int, int]]]:
+    """Resolve a dimensioned declaration's true (elem_width, depth, mem_layout).
+
+    A dimensioned net/var/port's `dimensions` list can hold BOTH extra
+    PACKED dims (from the element's own multi-dim packed declaration,
+    e.g. the outer `[3:0]` in `logic [3:0][7:0] mem [3:0]`) and genuinely
+    UNPACKED array dimension(s) (the trailing `[3:0]` there) --
+    `dimensions` alone can't distinguish the two (both are just `Range`
+    entries). Treating every entry as its own genuinely-addressable
+    unpacked level (needed for a real multi-dimensional array,
+    `mem[i][j]`, which `_dim_strides` supports via one stride-tuple per
+    dimension) is correct for that case but wrong for a "memory whose
+    ELEMENT is itself a 2-D packed array" (the leading packed-extra dims
+    aren't separately addressable at all, they only widen each element --
+    confirmed wrong, silently dropping the true depth dim, for
+    `logic [3:0][7:0] mem [3:0]`) -- and the OPPOSITE fix (always
+    treating only the last dim as addressable) is just as wrong the other
+    way for a genuine multi-dim array (confirmed wrong: `reg [7:0] mem
+    [2][3]`'s total depth silently divided between depth and element
+    width instead of multiplying together). `packed_dim_count`
+    (`Net`/`Variable`/`Port`'s own field, set correctly by declaration
+    parsing) resolves the ambiguity directly instead of guessing: every
+    dimension from `packed_dim_count` onward is a genuine address level,
+    kept as ITS OWN `_dim_strides` entry (preserving multi-level
+    `mem[i][j]` indexing); everything before it multiplies into
+    `elem_width`. A no-op for the common single-dimension case either
+    way.
+    """
+    elem_width = base_width
+    for extra_dim in dimensions[:packed_dim_count]:
+        elem_width *= _dim_depth(extra_dim, param_env)
+    mem_layout = _dim_strides(dimensions[packed_dim_count:], param_env)
+    depth = 1
+    for _start, _step, dim_depth, _stride in mem_layout:
+        depth *= dim_depth
+    return elem_width, depth, mem_layout
+
+
 class CythonCodegen(
     _GenSectionsMixin, _StmtEmittersMixin, _WideEmitterMixin, _ExprEmitterMixin, _ProcessCompilerMixin
 ):  # cm:b1c5e8
@@ -1760,11 +1800,8 @@ class CythonCodegen(
             if net.dimensions:
                 if lsb != 0:
                     self._memory_bases[net.name] = lsb
-                dims = _dim_strides(net.dimensions, senv)
-                depth = 1
-                for _start, _step, dim_depth, _stride in dims:
-                    depth *= dim_depth
-                self._register_memory(net.name, w, depth, dims)
+                elem_width, depth, dims = _memory_shape_layout(net.dimensions, w, senv, net.packed_dim_count)
+                self._register_memory(net.name, elem_width, depth, dims)
             else:
                 if lsb != 0:
                     self._signal_bases[net.name] = lsb
@@ -1785,11 +1822,8 @@ class CythonCodegen(
             if var.dimensions:
                 if lsb != 0:
                     self._memory_bases[var.name] = lsb
-                dims = _dim_strides(var.dimensions, senv)
-                depth = 1
-                for _start, _step, dim_depth, _stride in dims:
-                    depth *= dim_depth
-                self._register_memory(var.name, w, depth, dims)
+                elem_width, depth, dims = _memory_shape_layout(var.dimensions, w, senv, var.packed_dim_count)
+                self._register_memory(var.name, elem_width, depth, dims)
             else:
                 if lsb != 0:
                     self._signal_bases[var.name] = lsb
@@ -1814,11 +1848,8 @@ class CythonCodegen(
                 if getattr(port, "dimensions", None):
                     if lsb != 0:
                         self._memory_bases[port.name] = lsb
-                    dims = _dim_strides(port.dimensions, senv)
-                    depth = 1
-                    for _start, _step, dim_depth, _stride in dims:
-                        depth *= dim_depth
-                    self._register_memory(port.name, w, depth, dims)
+                    elem_width, depth, dims = _memory_shape_layout(port.dimensions, w, senv, port.packed_dim_count)
+                    self._register_memory(port.name, elem_width, depth, dims)
                 else:
                     if lsb != 0:
                         self._signal_bases[port.name] = lsb

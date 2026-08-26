@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from veriforge._env import get_env
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.expressions import (
+    AssignmentPattern,
     BinaryOp,
     BitSelect,
     Concatenation,
@@ -149,6 +150,51 @@ class _ProcessCompilerMixin:
                 mem_id = self._mem_map.get(assign.lhs.name)
                 if mem_id is not None:
                     _elem_w, depth = self._mem_info[mem_id]
+                    # Bare-Identifier-to-bare-Identifier memory copy of
+                    # matching shape (typically a hierarchy-flattened
+                    # whole-array PORT CONNECTION, e.g. `.imd_val_q_i
+                    # (imd_val_q_full)`): use a direct per-INDEX copy, not
+                    # the highest-Verilog-index-first Concatenation
+                    # synthesis just below. That reversal is only valid
+                    # SV semantics for a genuine 2-D PACKED array
+                    # reinterpreted as a flat bit vector -- for a plain
+                    # UNPACKED array (this case) it silently swaps element
+                    # order whenever the copy's own index numbering
+                    # doesn't happen to match that packed convention.
+                    # Confirmed wrong against the real `ibex_ex_block`/
+                    # `ibex_alu` RTL bridging an ascending-declared
+                    # `imd_val_q_i[2]` input port between hierarchy
+                    # levels: index 0 and index 1 arrived swapped.
+                    if isinstance(assign.rhs, Identifier):
+                        rhs_mid = self._mem_map.get(assign.rhs.name)
+                        if (
+                            rhs_mid is not None
+                            and self._mem_info[rhs_mid] == (_elem_w, depth)
+                            and self._memory_layout_matches(mem_id, rhs_mid)
+                        ):
+                            marker_sid = self._mem_marker_sigs[mem_id]
+                            lines = self._emit_whole_mem_copy_lines(
+                                mem_id, rhs_mid, marker_sid=marker_sid, indent=1, is_nba=False
+                            )
+                            self._processes.append((sensitivity, lines))
+                            continue
+                    # `arr = '{a, b, ...};` (unkeyed positional assignment
+                    # pattern) whole-memory LHS: reuse `_emit_lhs_write`'s
+                    # own item-by-item AssignmentPattern branch instead of
+                    # the Concatenation-reversal synthesis below, for
+                    # exactly the reasons documented on that branch --
+                    # confirmed wrong for the real `ibex_ex_block` RTL,
+                    # `assign alu_imd_val_q = '{imd_val_q_i[0][31:0],
+                    # imd_val_q_i[1][31:0]};`.
+                    if (
+                        isinstance(assign.rhs, AssignmentPattern)
+                        and assign.rhs.positional
+                        and not assign.rhs.named_pairs
+                        and len(assign.rhs.positional) == depth
+                    ):
+                        lines = self._emit_lhs_write(assign.lhs, assign.rhs, indent=1, is_nba=False)
+                        self._processes.append((sensitivity, lines))
+                        continue
                     lhs_parts = [
                         BitSelect(target=Identifier(assign.lhs.name), index=Literal(idx))
                         for idx in range(depth - 1, -1, -1)

@@ -110,6 +110,27 @@ class _ExprEmitterMixin:
                     mask=True,
                     elem_width=self._mem_info[struct_info[1]][0],
                 )
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference -- see the identical fallback (and
+                # its rationale) in `_emit_expr`'s Identifier case. Found
+                # during a follow-up audit for other emitter functions
+                # sharing the same gap (`_emit_expr`/`_emit_py_expr`/
+                # `_emit_py_mask_expr`/`_emit_mask_expr` all needed it);
+                # this one is used for `casex`/`casez` selector and item
+                # masks specifically, so a bare 2-D packed array used
+                # directly as a `casex` selector or item value previously
+                # always read as fully-known (mask "0") regardless of its
+                # true per-element mask. `_emit_expr_mask` itself has no
+                # `Concatenation` case (it's a leaner, width-less sibling
+                # of `_emit_mask_expr`), so delegate to `_emit_mask_expr`
+                # (which already handles `Concatenation`) at the array's
+                # own natural width instead of recursing into this
+                # function.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_mask_expr(synthetic, _elem_w * depth)
             return "0"
         if etype is Literal:
             if expr.original_text:
@@ -280,6 +301,26 @@ class _ExprEmitterMixin:
                     struct_info[4],
                     elem_width=self._mem_info[struct_info[1]][0],
                 )
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference (2-D packed array read as a single
+                # flat vector, e.g. `assign flat = arr;`, or `arr` used as
+                # a bare Concatenation member): the depth is known at
+                # compile time, so synthesize the equivalent concatenation
+                # of every element (highest Verilog index first, matching
+                # standard packed-array bit layout) and delegate to the
+                # Concatenation case below, reusing its already-correct
+                # codegen rather than duplicating it. Mirrors the
+                # identical fallback already present in `_expr_width`
+                # (this same file) and `_wide_emitter.py`'s
+                # `_emit_wide_expr_to_scratch` -- this scalar path never
+                # got the equivalent fix, so it silently fell through to
+                # the `local loop variable` check below and then `"0"`.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_expr(synthetic, width, signed_override)
+
             # Local loop variable (e.g. for-loop iterator)
             lv = self._local_vars.get(expr.name)
             if lv is not None:
@@ -932,6 +973,14 @@ class _ExprEmitterMixin:
                         elem_width=self._mem_info[struct_info[1]][0],
                     )
                 return f"_wmem{struct_info[1]}_py_extract_val(c, ({index_expr}), {struct_info[3]}, {struct_info[4]})"
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference -- see the identical fallback (and
+                # its rationale) in `_emit_expr`'s Identifier case above.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_py_expr(synthetic, width)
             return None
 
         if etype is Literal:
@@ -1152,6 +1201,14 @@ class _ExprEmitterMixin:
             sid = self._signal_map.get(name)
             if sid is not None:
                 return f"_sig_py_mask(c, {sid})"
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference -- see the identical fallback (and
+                # its rationale) in `_emit_expr`'s Identifier case.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_py_mask_expr(synthetic, width)
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is None:
                 return None
@@ -3192,6 +3249,14 @@ class _ExprEmitterMixin:
                     return self._emit_signal_slice_expr(base_sid, str(offset), field_width, mask=True)
                 wmask_val = _cy_lit((1 << field_width) - 1)
                 return f"((c.mask[{base_sid}] >> {offset}) & {wmask_val})"
+            mem_id = self._mem_map.get(name)
+            if mem_id is not None:
+                # Whole-array reference -- see the identical fallback (and
+                # its rationale) in `_emit_expr`'s Identifier case.
+                _elem_w, depth = self._mem_info[mem_id]
+                parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
+                synthetic = Concatenation(parts=parts)
+                return self._emit_mask_expr(synthetic, width, signed_override)
             return "0"
 
         if etype is Literal:

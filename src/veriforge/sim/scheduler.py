@@ -29,6 +29,7 @@ from veriforge.model.expressions import (
     Identifier,
     Literal,
     PartSelect,
+    Range,
     RangeSelect,
     Replication,
     TernaryOp,
@@ -298,15 +299,13 @@ class Scheduler:  # cm:9a7f2c
                     lsb = lsb_val
             if net.dimensions:
                 # Net array: wire [W-1:0] name [lo:hi]
-                dim = net.dimensions[0]
-                lo = _const_int(dim.msb, senv)
-                hi = _const_int(dim.lsb, senv)
-                if lo is not None and hi is not None:
+                shape = _memory_shape(net.dimensions, width, senv, net.packed_dim_count)
+                if shape is not None:
+                    depth, elem_width = shape
                     if lsb != 0:
                         self.ctx._memory_bases[net.name] = lsb
-                    depth = abs(hi - lo) + 1
-                    mem_data = [Value.x(width) for _ in range(depth)]
-                    self.ctx._memories[net.name] = (mem_data, width)
+                    mem_data = [Value.x(elem_width) for _ in range(depth)]
+                    self.ctx._memories[net.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(net.name)
                     continue
             if lsb != 0:
@@ -327,15 +326,13 @@ class Scheduler:  # cm:9a7f2c
                     lsb = lsb_val
             if var.dimensions:
                 # Memory array: reg [W-1:0] mem [lo:hi]
-                dim = var.dimensions[0]
-                lo = _const_int(dim.msb, senv)
-                hi = _const_int(dim.lsb, senv)
-                if lo is not None and hi is not None:
+                shape = _memory_shape(var.dimensions, width, senv, var.packed_dim_count)
+                if shape is not None:
+                    depth, elem_width = shape
                     if lsb != 0:
                         self.ctx._memory_bases[var.name] = lsb
-                    depth = abs(hi - lo) + 1
-                    mem_data = [Value.x(width) for _ in range(depth)]
-                    self.ctx._memories[var.name] = (mem_data, width)
+                    mem_data = [Value.x(elem_width) for _ in range(depth)]
+                    self.ctx._memories[var.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(var.name)
                     continue
             if lsb != 0:
@@ -363,15 +360,13 @@ class Scheduler:  # cm:9a7f2c
                 # plain `width`-bit (i.e. only the innermost dimension)
                 # scalar -- which made `foo[i]` a *bit* select into that
                 # truncated scalar instead of an element select.
-                dim = port.dimensions[0]
-                lo = _const_int(dim.msb, senv)
-                hi = _const_int(dim.lsb, senv)
-                if lo is not None and hi is not None:
+                shape = _memory_shape(port.dimensions, width, senv, port.packed_dim_count)
+                if shape is not None:
+                    depth, elem_width = shape
                     if lsb != 0:
                         self.ctx._memory_bases[port.name] = lsb
-                    depth = abs(hi - lo) + 1
-                    mem_data = [Value.x(width) for _ in range(depth)]
-                    self.ctx._memories[port.name] = (mem_data, width)
+                    mem_data = [Value.x(elem_width) for _ in range(depth)]
+                    self.ctx._memories[port.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(port.name)
                     continue
             if getattr(port, "dimensions", None):
@@ -869,6 +864,16 @@ class Scheduler:  # cm:9a7f2c
         changed = False
         for proc in self._continuous_procs:
             old = self._read_lhs(proc.assign.lhs)
+            if self.executor._copy_whole_memory(proc.assign.lhs, proc.assign.rhs, self.ctx, immediate=True):
+                new = self._read_lhs(proc.assign.lhs)
+                if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
+                    changed = True
+                continue
+            if self.executor._assign_pattern_to_memory(proc.assign.lhs, proc.assign.rhs, self.ctx, immediate=True):
+                new = self._read_lhs(proc.assign.lhs)
+                if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
+                    changed = True
+                continue
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
             rhs_val = self.executor._maybe_sign_extend(proc.assign.rhs, rhs_val, proc.assign.lhs, self.ctx)
@@ -893,6 +898,45 @@ class Scheduler:  # cm:9a7f2c
             if not proc.sensitivity.intersection(dirty):
                 continue
             old = self._read_lhs(proc.assign.lhs)
+            # A bare memory-to-memory Identifier continuous assign (e.g. a
+            # whole-array port connection, `assign u.imd_val_q_i =
+            # imd_val_q_full;`) is handled via a direct per-INDEX copy
+            # here -- NOT by evaluating the RHS as a flat value
+            # (`_read_whole_memory`) and re-splitting it into the LHS
+            # (`_write_whole_memory`) below. Those two helpers each
+            # independently assume the memory's highest Python-list index
+            # is its MSB-most slice -- correct for a descending-declared
+            # array (`foo [3:0]`) but WRONG for an ascending-declared one
+            # (`foo [4]`/`foo [0:3]`, per IEEE 1800's `[size]` shorthand
+            # SS7.4.2, index 0 is logically "first"/outer) -- round-
+            # tripping through flatten-then-unflatten SWAPS a connected
+            # pair's lanes whenever the two sides declare OPPOSITE
+            # directions (confirmed wrong for a real design connecting an
+            # ascending-declared `[2]`-shorthand wrapper array to a
+            # descending-declared DUT port of the same depth/width).
+            # `_copy_whole_memory`'s direct per-index copy sidesteps the
+            # whole question -- it never repacks through a shared flat
+            # bit-vector at all, so it's correct regardless of either
+            # side's declared direction.
+            if self.executor._copy_whole_memory(proc.assign.lhs, proc.assign.rhs, self.ctx, immediate=True):
+                new = self._read_lhs(proc.assign.lhs)
+                if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
+                    changed = True
+                    dirty.update(_lhs_base_names(proc.assign.lhs))
+                continue
+            # `arr = '{a, b, ...};` (unkeyed positional assignment pattern)
+            # whole-memory LHS -- same reasoning as `_copy_whole_memory`
+            # just above, but for a pattern RHS rather than a bare
+            # Identifier RHS. See `_assign_pattern_to_memory`'s own
+            # docstring; confirmed wrong for the real `ibex_ex_block` RTL,
+            # `assign alu_imd_val_q = '{imd_val_q_i[0][31:0],
+            # imd_val_q_i[1][31:0]};`.
+            if self.executor._assign_pattern_to_memory(proc.assign.lhs, proc.assign.rhs, self.ctx, immediate=True):
+                new = self._read_lhs(proc.assign.lhs)
+                if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
+                    changed = True
+                    dirty.update(_lhs_base_names(proc.assign.lhs))
+                continue
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
             rhs_val = self.executor._maybe_sign_extend(proc.assign.rhs, rhs_val, proc.assign.lhs, self.ctx)
@@ -975,6 +1019,31 @@ class Scheduler:  # cm:9a7f2c
                 mask = (current.mask >> lsb) & ((1 << width) - 1)
                 return Value(val, width=width, mask=mask)
             return None
+        if isinstance(lhs, Concatenation):
+            # A concat-target LHS (`{a, b} = ...`, e.g. an instance output
+            # port connected to `{tuser, tlast}`) previously fell through
+            # to the final `return None` below -- with both `old` and
+            # `new` None, every caller's `if old is not None and new is
+            # not None:` guard (`_run_continuous_assigns`,
+            # `_run_dirty_continuous_assigns`) silently skipped change
+            # detection for it entirely. That meant a concat-LHS write was
+            # NEVER recognized as a change, so `_run_dirty_continuous_assigns`
+            # never added the concat's member signals (`tuser`/`tlast`) to
+            # the dirty set (see `_lhs_base_names`, which already handles
+            # `Concatenation` correctly and was the one piece already
+            # right) -- any other continuous assign/always_comb reading
+            # `tuser` downstream was never re-triggered, leaving it stuck
+            # at its initial value (X) forever. Recurse per-part (reusing
+            # every other case above, including nested BitSelect/RangeSelect
+            # concat members) and concatenate the results, MSB-first,
+            # matching `Concatenation`'s own value semantics.
+            part_vals = [self._read_lhs(part) for part in lhs.parts]
+            if any(v is None for v in part_vals):
+                return None
+            result = part_vals[0]
+            for v in part_vals[1:]:
+                result = result.concat(v)
+            return result
         return None
 
     def _collect_triggered(self, dirty: set[str]) -> list[Process]:
@@ -1269,6 +1338,56 @@ def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
             if unprefixed not in local:
                 local[unprefixed] = v
     return local
+
+
+def _memory_shape(
+    dimensions: list[Range], base_width: int, senv: dict[str, int], packed_dim_count: int = 0
+) -> tuple[int, int] | None:
+    """Resolve a dimensioned declaration's true (depth, elem_width).
+
+    A dimensioned net/var/port's ``dimensions`` list can hold BOTH extra
+    PACKED dims (from the element's own multi-dim packed declaration, e.g.
+    the outer ``[3:0]`` in ``logic [3:0][7:0] mem [3:0]``) and genuinely
+    UNPACKED array dimension(s) (the trailing ``[3:0]`` there) --
+    declaration parsing (transforms/_declarations.py) always orders them
+    packed-dims-first, unpacked-dims-last (``dimensions=[*extra_packed_dims,
+    *declared_dims, *dims]``) and records how many LEADING entries are
+    packed via ``packed_dim_count`` (`Net`/`Variable`/`Port`'s own field of
+    the same name) -- `dimensions` alone can't tell the two apart (both
+    are just `Range` entries), which previously caused two OPPOSITE
+    mistakes depending on which heuristic was guessed: treating every
+    dimension as packed-or-address uniformly is wrong for a "memory whose
+    ELEMENT is itself a 2-D packed array" (`logic [3:0][7:0] mem [3:0]`,
+    1 packed + 1 address dim -- confirmed wrong: read back only its
+    lowest byte) in one direction, and wrong for a genuine
+    multi-dimensional unpacked array (`reg [7:0] mem [2][3]`, 2 address
+    dims, 0 packed -- confirmed wrong: total depth silently divided
+    between depth and element width instead of multiplying together) in
+    the other. `packed_dim_count` resolves the ambiguity directly instead
+    of guessing. Every dimension from `packed_dim_count` onward is a
+    genuine address dimension; depth is their product (this engine only
+    ever addresses memories with a single flat index, so multiple genuine
+    dims collapse to one flat depth here -- unlike the compiled engine's
+    `_mem_layouts`, which preserves each dimension as its own address
+    level for `mem[i][j]`-style multi-level indexing).
+
+    Returns None if any dimension's bounds aren't compile-time constants.
+    """
+    elem_width = base_width
+    for extra_dim in dimensions[:packed_dim_count]:
+        elo = _const_int(extra_dim.msb, senv)
+        ehi = _const_int(extra_dim.lsb, senv)
+        if elo is None or ehi is None:
+            return None
+        elem_width *= abs(ehi - elo) + 1
+    depth = 1
+    for addr_dim in dimensions[packed_dim_count:]:
+        lo = _const_int(addr_dim.msb, senv)
+        hi = _const_int(addr_dim.lsb, senv)
+        if lo is None or hi is None:
+            return None
+        depth *= abs(hi - lo) + 1
+    return depth, elem_width
 
 
 def _collect_reads(expr: Expression) -> set[str]:

@@ -30,7 +30,17 @@ class NetKind(Enum):
 class Net(VerilogNode):
     """A net declaration (wire, tri, etc.)."""
 
-    __slots__ = ("dimensions", "drivers", "initial_value", "kind", "loads", "name", "signed", "width")
+    __slots__ = (
+        "dimensions",
+        "drivers",
+        "initial_value",
+        "kind",
+        "loads",
+        "name",
+        "packed_dim_count",
+        "signed",
+        "width",
+    )
 
     def __init__(
         self,
@@ -40,6 +50,7 @@ class Net(VerilogNode):
         width: Range | None = None,
         signed: bool = False,
         dimensions: list[Range] | None = None,
+        packed_dim_count: int = 0,
         initial_value: Expression | None = None,
         loc: SourceLocation | None = None,
     ):
@@ -49,6 +60,17 @@ class Net(VerilogNode):
         self.width = width
         self.signed = signed
         self.dimensions = dimensions or []
+        # How many of `dimensions`' LEADING entries are extra PACKED
+        # dims (from this signal's own multi-dim packed declaration, e.g.
+        # the outer `[3:0]` in `logic [3:0][7:0] mem [3:0]`) rather than
+        # genuinely UNPACKED (separately addressable) array dimensions --
+        # see `sim/scheduler.py`'s `_memory_shape` for why this
+        # distinction matters and can't be recovered from `dimensions`
+        # alone. Default 0 (every dimension is a genuine address level)
+        # matches a plain single-dimension declaration either way, and
+        # preserves prior behavior for any caller that builds a `Net`
+        # directly without setting this.
+        self.packed_dim_count = packed_dim_count
         self.initial_value = initial_value
         # Connectivity — populated by Layer 3 analysis
         self.drivers: list = []
@@ -83,6 +105,8 @@ class Net(VerilogNode):
             d["signed"] = True
         if self.dimensions:
             d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
+        if self.packed_dim_count:
+            d["packed_dim_count"] = self.packed_dim_count
         if self.initial_value:
             d["initial_value"] = self.initial_value.to_dict()
         return d

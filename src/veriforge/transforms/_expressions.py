@@ -250,13 +250,30 @@ def _build_binary_chain(
 
 
 def _build_sv_fill_literal(tree: Tree, source_file: str | None, loc: SourceLocation) -> Literal:
-    """Build a Literal from a SV fill literal ('0, '1, 'x, 'z)."""
+    """Build a Literal from a SV fill literal ('0, '1, 'x, 'z).
+
+    `'1` is marked `signed=True` even though it's an ordinary unsigned
+    quantity everywhere else -- this is a deliberate, narrow reuse of the
+    existing "how do I extend this Literal to a wider context width"
+    decision every engine already makes for its width-extension step:
+    `sign_extend(width)` when `signed`, `resize(width)` (zero-extend)
+    otherwise. Per IEEE 1800-2017 SS5.7.1, an unsized fill literal extends
+    by REPLICATING its own fill digit to the destination width, not by
+    zero-extending -- for `'1` those two behaviors coincide exactly
+    (sign-extending an all-1s value fills with more 1s), which is why
+    reusing `signed` here gives the right bits with no new width-extension
+    code path needed. `'0` doesn't need this (zero-extension already IS
+    correct fill-extension for an all-0s value). Confirmed wrong before
+    this fix: `out = '1;` for a >32-bit LHS inside `always_comb` evaluated
+    '1 as a 32-bit 0xFFFFFFFF, then zero-extended it into the wider LHS,
+    leaving every bit above 31 incorrectly 0 instead of 1.
+    """
     text = _collect_text(tree).strip()
     fill_char = text[-1].lower() if text else "0"
     if fill_char == "0":
         return Literal(value=0, original_text=text, loc=loc)
     elif fill_char == "1":
-        return Literal(value=-1, original_text=text, loc=loc)
+        return Literal(value=-1, original_text=text, signed=True, loc=loc)
     elif fill_char == "x":
         return Literal(value=0, original_text=text, is_x=True, loc=loc)
     elif fill_char == "z":
@@ -1194,7 +1211,7 @@ def _build_streaming_concatenation(
             parts.append(callbacks.build_expression(child, source_file))
     loc = _loc_from_tree(tree, source_file)
     if direction == ">>":
-        return Concatenation(parts=parts, loc=loc)
+        return Concatenation(parts=parts, from_streaming=True, loc=loc)
     return StreamingConcatenation(parts=parts, slice_size=slice_size, loc=loc)
 
 

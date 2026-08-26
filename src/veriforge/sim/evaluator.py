@@ -1551,6 +1551,23 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         struct_val = _resolve_struct_field_value(name, ctx)
         if struct_val is not None:
             return struct_val.width
+        # Whole-array reference (2-D packed array read as a single flat
+        # vector) -- found via a follow-up audit for the same "missing
+        # whole-memory fallback" gap fixed elsewhere in this function
+        # (`eval()`'s own Identifier hot path) and in the compiled
+        # engine's several narrow-path emitters. Without this, a bare
+        # memory Identifier used as e.g. a Concatenation member (whose
+        # width is looked up via THIS function, not `eval()` directly --
+        # see the Concatenation case below) silently defaulted to 32 bits
+        # regardless of its true `elem_width * depth`, corrupting any
+        # such member whose true width isn't coincidentally 32 (the
+        # earlier issue-#7a regression tests all happened to use exactly
+        # 32-bit arrays, masking this). Confirmed wrong for a 24-bit
+        # `logic [2:0][7:0] arr` used inside `{tuser, tlast, arr}`.
+        mem = ctx._memories.get(name)
+        if mem is not None:
+            _mem_data, elem_width = mem
+            return elem_width * len(_mem_data)
         return 32
     if etype is Literal:
         return expr.width or 32
