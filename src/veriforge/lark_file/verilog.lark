@@ -520,9 +520,9 @@ integer_declaration: KW_INTEGER list_of_variable_identifiers ";"
 // EXAMPLE: trireg (small) [7:0] mem;
 // SUPPORT: YES
 net_declaration: net_type KW_SIGNED? delay3? list_of_net_identifiers ";"
-    | net_type drive_strength? KW_SIGNED?  delay3? list_of_net_decl_assignments ";"
+    | net_type_true drive_strength? KW_SIGNED?  delay3? list_of_net_decl_assignments ";"
     | net_type ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_identifiers ";"
-    | net_type drive_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_decl_assignments ";"
+    | net_type_true drive_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_decl_assignments ";"
     | KW_TRIREG charge_strength? KW_SIGNED? delay3? list_of_net_identifiers ";"
     | KW_TRIREG drive_strength? KW_SIGNED? delay3? list_of_net_decl_assignments ";"
     | KW_TRIREG charge_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range delay3? list_of_net_identifiers ";"
@@ -667,6 +667,28 @@ time_declaration: KW_TIME list_of_variable_identifiers ";"
 // EXAMPLE: wire
 // SUPPORT: YES
 net_type: KW_SUPPLY0 | KW_SUPPLY1 | KW_TRI | KW_TRIAND | KW_TRIOR | KW_TRI0 | KW_TRI1 | KW_UWIRE | KW_WIRE | KW_WAND | KW_WOR | KW_LOGIC
+// `logic` is included in `net_type` above only so `input`/`output` port
+// declarations (which reuse this rule, e.g. `input logic clk`) accept it --
+// per IEEE 1800, `logic` itself is never a real net type, only a 4-state
+// VARIABLE type. `net_declaration`'s two `list_of_net_decl_assignments`
+// alternatives (below) use this narrower `net_type_true` instead, excluding
+// `KW_LOGIC`: those alternatives are what a `= expr` declaration
+// initializer needs to match to become an (INTENTIONAL, continuous)
+// implicit `assign` -- e.g. `wire foo = a & b;`. Letting `logic` ALSO match
+// there made `logic [W:0] name = expr;` grammatically ambiguous between
+// `net_declaration` (synthesizing a permanent continuous assign from the
+// initializer) and `logic_declaration` (a one-time `initial_value`, the
+// LRM-correct reading for a `logic`/variable declaration) -- and the
+// earley parser's ambiguity resolution silently preferred the former.
+// Harmless for reference/vm (a no-dependency constant assign only ever
+// resettles once), but the compiled engine re-runs every continuous
+// assign unconditionally every delta cycle, so the phantom assign
+// permanently re-clobbers back to the initializer's constant on every
+// cycle -- confirmed against a minimal repro (`logic [3:0] cnt = 0;
+// always_ff @(posedge clk) cnt <= cnt + 1;`): reference/vm count up
+// correctly forever, compiled engine's `cnt` never leaves its declared
+// initial value.
+net_type_true: KW_SUPPLY0 | KW_SUPPLY1 | KW_TRI | KW_TRIAND | KW_TRIOR | KW_TRI0 | KW_TRI1 | KW_UWIRE | KW_WIRE | KW_WAND | KW_WOR
 // BNF: output_variable_type ::= integer | time
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES

@@ -4941,7 +4941,21 @@ cdef class CyContext:
             offset += plen
 
         # ── Output buffers ──
-        self.nba_cap = NBA_MAX
+        # `NBA_MAX` (1024) is a reasonable default, but a design with many
+        # parallel-instantiated submodules (e.g. a `generate`-loop of 64
+        # copies, each with its own internal pipeline registers) can
+        # legitimately queue more non-blocking writes than that in a
+        # single delta-loop iteration -- confirmed via real-world feedback
+        # on `axis_dg_merge.sv` (64 `axis_dg_one_merge` instances):
+        # `NBA_MAX`'s fixed 1024-entry cap was exceeded, correctly
+        # detected and raised (this queue's overflow check is sound,
+        # unlike the sibling `nba_mem_cap` bug this queue almost shares a
+        # name with -- see `setup_memory`'s own capacity comment) rather
+        # than silently corrupting anything, but a legitimate design
+        # should not need to hit that error at all. Size generously off
+        # `sig_count` (known by this point) instead of only the fixed
+        # default.
+        self.nba_cap = max(NBA_MAX, self.sig_count * 8)
         self.nba_buf = <NBAEntry *>malloc(self.nba_cap * sizeof(NBAEntry))
         self.nba_count = 0
 
@@ -4996,6 +5010,35 @@ cdef class CyContext:
             self.mem_base[i] = <int>info[2]
 
         self._mem_allocated = True
+
+        # `nba_mem_buf` was allocated in `setup()` at the fixed
+        # NBA_MEM_MAX capacity (this engine's own hardcoded-64 sibling of
+        # the compiled engine's identical bug -- see the call site in
+        # sim/compiled/_gen_sections.py's `_nba_mem_queue_bound` for the
+        # full story, discovered via the same real-world
+        # `axis_pix_correction2` feedback: a 128-lane AXI-Stream memory's
+        # whole-array NBA copy pushes one queue entry per element, one
+        # per delta-loop iteration). Unlike the compiled engine (which
+        # regenerates per-design code and can size this at codegen time),
+        # this interpreter is a single shared extension reused across
+        # every design, so instead the queue is grown here -- now that
+        # memory shapes are finally known -- via the same
+        # realloc-on-demand pattern `_run_delta_loop` already uses for
+        # `changed_buf`. This engine fails loudly (a clean
+        # `RuntimeError`, see `_run_delta_loop`'s status==2 case) rather
+        # than silently corrupting adjacent state when this queue
+        # overflows, but a legitimate design deeper than 64 elements
+        # should not need to hit that error at all.
+        total_mem_elements = 0
+        for i in range(n_mems):
+            total_mem_elements += self.mem_depth[i]
+        needed_cap = total_mem_elements * 4
+        if needed_cap > self.nba_mem_cap:
+            new_nba_mem_buf = <NBAMemEntry *>realloc(self.nba_mem_buf, needed_cap * sizeof(NBAMemEntry))
+            if new_nba_mem_buf == NULL:
+                raise MemoryError("VM Cython interpreter: out of memory growing nba_mem_buf")
+            self.nba_mem_buf = new_nba_mem_buf
+            self.nba_mem_cap = needed_cap
 
     def read_mem(self, int mem_id, int addr):
         """Read a memory element from Python. Returns (val, mask)."""

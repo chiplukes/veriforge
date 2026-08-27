@@ -220,6 +220,37 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     __slots__ = ()
 
+    def _nba_mem_queue_bound(self) -> int:
+        """Compute a safe capacity for the NBA memory queues (see the call
+        site in `_gen_constants` for the full story on why a hardcoded
+        constant here silently corrupts unrelated memory for any design
+        with a whole-array NBA copy wider than that constant).
+
+        A single non-blocking statement (a whole-array copy, a
+        concat-LHS memory member, or an ordinary `mem[addr] <= val;`)
+        pushes at most one queue entry per element of the memories it
+        targets, so the total number of elements across every memory in
+        the design is a safe upper bound for how many entries any ONE
+        such statement can push in a single delta-loop iteration. Several
+        *different* processes could in principle all target the exact
+        same memory in the same edge (legal, if unusual, SystemVerilog --
+        "last NBA wins"), so this multiplies in a generous safety margin
+        rather than assuming exactly one writer per memory; the memory
+        cost of over-provisioning here is a few KB even for a large
+        design, utterly negligible next to the cost of a silent
+        out-of-bounds write into adjacent simulation state.
+
+        Precise counting (walking the compiled process bodies for the
+        exact number of push sites) would be tighter, but `self._processes`
+        holds already-generated Cython lines while `self._seq_processes`
+        still holds raw AST bodies at the point `_gen_constants` runs
+        (`_gen_process_functions`, which lowers them to lines, runs
+        later) -- so exact counting isn't available this early without
+        reordering the generation pipeline.
+        """
+        total_mem_elements = sum(depth for _elem_w, depth in self._mem_info)
+        return total_mem_elements * 4
+
     def _gen_header(self) -> str:
         return (
             "# cython: language_level=3, boundscheck=False, wraparound=False\n"
@@ -246,8 +277,28 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # (e.g. combo loops with intermediate writes) still terminate.
         lines.append(f"DEF DELTA_CONV_CHECK_START = {min(16, max(self._delta_limit - 2, 0))}")
         if self._n_mems > 0:
-            lines.append("DEF NBA_MEM_MAX = 64")
-            lines.append("DEF NBA_MEM_RANGE_MAX = 64")
+            # These two queues buffer whole-element (NBA_MEM_MAX) and
+            # partial-bit-range (NBA_MEM_RANGE_MAX) non-blocking memory
+            # writes queued during ONE delta-loop iteration (every
+            # sequential process fires at most once per iteration, and the
+            # queues are fully drained -- reset to 0 -- before the next
+            # iteration begins, per the "if c.nba_pending: ... count = 0"
+            # drain block below). A hardcoded "64 is surely enough" bound
+            # silently overflows this FIXED-SIZE C array for any design
+            # with a whole-array NBA copy/concat-LHS wider than 64
+            # elements (e.g. a 128-lane AXI-Stream bus, `s0_pixels_tdata
+            # <= axis_fifo_tdata;` with a 128-element memory) -- with NO
+            # bounds check, the overflow silently corrupts whatever
+            # memory follows this struct in the class layout (empirically
+            # confirmed: it silently clobbered `_snap_v[]`/`_snap_m[]`
+            # -- the pre-edge snapshot arrays `always_ff` bodies read via
+            # `sv`/`sm` -- corrupting an unrelated COMBINATIONAL signal's
+            # snapshotted value mid-iteration and causing a real design's
+            # FIFO read pointer to advance one edge early). See
+            # `_nba_mem_queue_bound` for how the real capacity is derived.
+            nba_mem_bound = max(64, self._nba_mem_queue_bound())
+            lines.append(f"DEF NBA_MEM_MAX = {nba_mem_bound}")
+            lines.append(f"DEF NBA_MEM_RANGE_MAX = {nba_mem_bound}")
         # Build unique constant names (sanitised names can collide)
         used: set[str] = set()
         cnames: list[str] = []

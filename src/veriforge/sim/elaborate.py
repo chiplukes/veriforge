@@ -759,6 +759,22 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
     # Ports that don't have a matching net/var declaration need a signal too
     for port in sub.ports:
         if port.name not in seen:
+            # ANSI inline initializer (`output reg foo = 1;`) -- applies
+            # the same as a net/var's own `initial_value` above, but only
+            # for output/inout ports: an input port's default_value is the
+            # unrelated "unconnected instance port" fallback feature, which
+            # real hardware can't apply to an externally-driven signal (see
+            # `check_input_port_init`'s warning for that case) and isn't a
+            # one-time reset value at all. Previously dropped entirely here
+            # -- confirmed wrong against the real `axis_regslice.v` RTL:
+            # `output reg s_axis_tready =1;` (no separate net/var
+            # declaration backs it, so THIS branch is the only place that
+            # constructs its flattened signal) silently lost its declared
+            # power-on value for every submodule INSTANCE of that module,
+            # leaving it X forever in the compiled engine (reference/vm
+            # happened to recover via a different X-convergence path
+            # through the surrounding feedback logic, masking the gap).
+            port_initial_value = port.default_value if port.direction != PortDirection.INPUT else None
             flat.nets.append(
                 Net(
                     f"{prefix}.{port.name}",
@@ -767,6 +783,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                     signed=port.signed,
                     dimensions=port.dimensions,
                     packed_dim_count=port.packed_dim_count,
+                    initial_value=port_initial_value,
                 )
             )
 

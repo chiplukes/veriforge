@@ -408,7 +408,7 @@ def _extract_net_declaration(
             elif child.type == "NET_IDENTIFIER":
                 net_entries.append((str(child), []))
         elif isinstance(child, Tree):
-            if child.data == "net_type":
+            if child.data in ("net_type", "net_type_true"):
                 kind = _net_kind_from_tree(child)
             elif child.data == "range":
                 range_ = _build_range(child, source_file, build_constant_expression)

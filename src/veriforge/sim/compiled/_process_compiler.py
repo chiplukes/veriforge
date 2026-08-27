@@ -178,6 +178,54 @@ class _ProcessCompilerMixin:
                             )
                             self._processes.append((sensitivity, lines))
                             continue
+                    # `arr = cond ? mem_a : mem_b;` whole-memory LHS with a
+                    # TernaryOp RHS whose branches are themselves
+                    # matching-shape memories (e.g. a bypass mux, `assign
+                    # m_axis_tdata = bypass ? s_axis_tdata :
+                    # merged_tdata_wide;`): the generic Concatenation-of-
+                    # BitSelects fallback further below only produces
+                    # correct per-element extraction when the WHOLE RHS
+                    # resolves to a single signal slice via
+                    # `_resolve_signal_slice_source`, which a `TernaryOp`
+                    # never does -- it silently fell back to squeezing the
+                    # entire >64-bit ternary through the scalar-only
+                    # `_emit_expr`, producing garbage for nearly every
+                    # element. Confirmed wrong against the real
+                    # `axis_dg_merge.sv` RTL. See
+                    # `_emit_whole_mem_ternary_lines` (_wide_emitter.py)
+                    # for the fix.
+                    if isinstance(assign.rhs, TernaryOp):
+                        true_mid = (
+                            self._mem_map.get(assign.rhs.true_expr.name)
+                            if isinstance(assign.rhs.true_expr, Identifier)
+                            else None
+                        )
+                        false_mid = (
+                            self._mem_map.get(assign.rhs.false_expr.name)
+                            if isinstance(assign.rhs.false_expr, Identifier)
+                            else None
+                        )
+                        if (
+                            true_mid is not None
+                            and false_mid is not None
+                            and self._mem_info[true_mid] == (_elem_w, depth)
+                            and self._mem_info[false_mid] == (_elem_w, depth)
+                            and self._memory_layout_matches(mem_id, true_mid)
+                            and self._memory_layout_matches(mem_id, false_mid)
+                        ):
+                            marker_sid = self._mem_marker_sigs[mem_id]
+                            cond_expr = self._emit_expr(assign.rhs.condition, 1)
+                            lines = self._emit_whole_mem_ternary_lines(
+                                mem_id,
+                                cond_expr,
+                                true_mid,
+                                false_mid,
+                                marker_sid=marker_sid,
+                                indent=1,
+                                is_nba=False,
+                            )
+                            self._processes.append((sensitivity, lines))
+                            continue
                     # `arr = '{a, b, ...};` (unkeyed positional assignment
                     # pattern) whole-memory LHS: reuse `_emit_lhs_write`'s
                     # own item-by-item AssignmentPattern branch instead of
@@ -1055,6 +1103,78 @@ class _ProcessCompilerMixin:
             part_name = self._identifier_name(part)
             sid = self._signal_map.get(part_name)
             if sid is None:
+                mem_id = self._mem_map.get(part_name)
+                if mem_id is not None and self._mem_info[mem_id][0] <= _WORD_BITS:
+                    # Whole-array (memory-backed) concat-LHS member in a
+                    # CONTINUOUS assign, e.g. a hierarchy-flattened port
+                    # connection `.m_axis_tdata({tuser, tlast, arr})` with
+                    # `arr` a 2-D packed array -- the sibling gap to the
+                    # one already fixed in `_emit_concat_lhs`
+                    # (sim/compiled/_stmt_emitters.py, for PROCEDURAL
+                    # blocking/NBA concat-LHS assigns) and
+                    # `_concat_nba_accumulate` (sim/executor.py, reference
+                    # engine). This bare-Identifier fallback previously had
+                    # no memory case at all, so `arr` fell through to
+                    # `continue` with no write ever emitted -- confirmed
+                    # wrong against the real `axis_pix_correction2`/
+                    # `axis_row_correct` RTL: `.m_axis_tdata({inreg_tuser,
+                    # inreg_tlast, inreg_tdata})` left `inreg_tdata` (and
+                    # everything downstream of it) permanently X. Split
+                    # into one per-element constant range write per memory
+                    # index (all compile-time-constant); only valid when
+                    # each element fits in one scalar shift
+                    # (`elem_w <= _WORD_BITS`); a wide element deliberately
+                    # falls through to the pre-existing struct/else path
+                    # instead, matching `_emit_concat_lhs`'s identical
+                    # guard for the same width limitation.
+                    elem_w, depth = self._mem_info[mem_id]
+                    lines = []
+                    for k in range(depth):
+                        k_lo = k * elem_w
+                        if wide_signal_rhs_source is not None:
+                            # The whole-part `extract`/`mask_extract` computed
+                            # above (for this branch, always the "whole RHS
+                            # squeezed through a single scalar `_emit_expr`"
+                            # fallback -- this part's own total width is
+                            # >_WORD_BITS, so neither of the two dedicated
+                            # wide-part branches above applied) is NOT
+                            # trustworthy here: `_emit_expr` has no general
+                            # >64-bit support. Slice each element directly
+                            # out of the wide RHS SIGNAL instead (this is
+                            # exactly what the dedicated wide-part branches
+                            # above do for a part that fits alone in 64 bits
+                            # -- `_emit_signal_slice_expr` is already
+                            # word-boundary-correct for a source signal of
+                            # any width). Confirmed wrong without this:
+                            # a memory member of a concat fed from a genuinely
+                            # wide (>64-bit) submodule port (e.g. an
+                            # `xpm_fifo_sync` mock's `dout`) read back
+                            # corrupted (wrong, word-boundary-shifted values)
+                            # for every element beyond the first ~64 bits.
+                            rhs_sid, rhs_base_lsb = wide_signal_rhs_source
+                            elem_lsb = f"({offset_expr}) + {k_lo}" if k_lo else offset_expr
+                            if rhs_base_lsb != "0":
+                                elem_lsb = f"({rhs_base_lsb}) + ({elem_lsb})"
+                            elem_val = self._emit_signal_slice_expr(rhs_sid, elem_lsb, elem_w)
+                            elem_mask = self._emit_signal_slice_expr(rhs_sid, elem_lsb, elem_w, mask=True)
+                        else:
+                            elem_val = f"(({extract}) >> {k_lo})" if k_lo else extract
+                            elem_mask = f"(({mask_extract}) >> {k_lo})" if k_lo else mask_extract
+                        lines.extend(
+                            self._emit_const_mem_range_write_lines(
+                                mem_id,
+                                str(k),
+                                0,
+                                elem_w,
+                                elem_val,
+                                elem_mask,
+                                marker_sid=self._mem_marker_sigs[mem_id],
+                                indent=1,
+                                is_nba=False,
+                            )
+                        )
+                    self._processes.append((sensitivity, lines))
+                    continue
                 struct_storage_range = self._resolve_struct_storage_mem_range(part_name)
                 if struct_storage_range is not None:
                     mem_lhs, msb, lsb = struct_storage_range
@@ -1104,6 +1224,33 @@ class _ProcessCompilerMixin:
                     ]
                 self._processes.append((sensitivity, lines))
                 continue
+            # Plain (non-memory, non-struct) bare-Identifier concat-LHS
+            # member in a CONTINUOUS assign, e.g. a hierarchy-flattened
+            # port connection `.m_axis_tdata({m_axis_pixout_tuser,
+            # m_axis_pixout_tlast, m_axis_pixout_tdata})` where the last
+            # element is itself a genuinely wide (>64-bit) plain signal.
+            # Every OTHER branch in this function checks
+            # `self._signal_widths[...] > _WORD_BITS` before falling back
+            # to a bare `c.val[sid] = v` scalar write; this one -- the
+            # final catch-all -- didn't, so a wide whole-signal concat
+            # member silently truncated to (and stayed X in, since
+            # `extract`/`v` themselves are also computed by the
+            # non-wide-aware `_emit_expr` path in this situation) a single
+            # 64-bit word. Confirmed wrong against the real
+            # `axis_pix_correction2` RTL: `m_axis_pixout_tdata` (1536
+            # bits) never received a driver at all and read back entirely
+            # X on every accepted output handshake. The procedural/NBA
+            # sibling path (`_emit_concat_lhs` in `_stmt_emitters.py`)
+            # already has this exact case covered via
+            # `_emit_concat_signal_part_lines` -- reuse it here instead of
+            # duplicating the wide-copy logic.
+            if self._signal_widths[sid] > _WORD_BITS:
+                wide_lines = self._emit_concat_signal_part_lines(
+                    sid, None, pw, width_expr, extract, mask_extract, part_rhs_source, 1, is_nba=False
+                )
+                if wide_lines is not None:
+                    self._processes.append((sensitivity, wide_lines))
+                    continue
             lines = [
                 f"    cdef long long v = ({extract}) & wmask({pw})",
                 f"    cdef long long m = ({mask_extract}) & wmask({pw})",

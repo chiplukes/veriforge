@@ -668,6 +668,116 @@ class _WideEmitterMixin:
         )
         return lines
 
+    def _emit_whole_mem_ternary_lines(
+        self,
+        lhs_mid: int,
+        cond_expr: str,
+        true_mid: int,
+        false_mid: int,
+        *,
+        marker_sid: int,
+        indent: int,
+        is_nba: bool,
+    ) -> list[str]:
+        """Emit a per-element `lhs = cond ? true_mem : false_mem;` copy for
+        whole-memory-shaped ternary operands (see the call site in
+        `_process_compiler.py`'s whole-array-LHS continuous-assign
+        handling for the full story). `_compile_concat_cont_assign`'s
+        generic per-part RHS-slicing fallback only produces correct
+        results when the WHOLE RHS resolves to a single signal slice via
+        `_resolve_signal_slice_source`, which a `TernaryOp` never does --
+        it silently squeezed the entire >64-bit ternary through the
+        scalar-only `_emit_expr` instead, producing garbage for every
+        memory element beyond whatever the first ~64 bits happened to
+        decode to. Confirmed via real-world feedback on
+        `axis_dg_merge.sv`'s `m_axis_tdata <= bypass ? s_axis_tdata :
+        merged_tdata_wide;` (both operands 2-D packed arrays of matching
+        shape) -- ~97% of lanes read back nonsense on the compiled engine
+        while the first few pixels happened to read correctly (they fit
+        within whatever the scalar expression coincidentally evaluated
+        to). Modeled directly on `_emit_whole_mem_copy_lines` just above,
+        with each per-element read now itself conditioned on `cond_expr`.
+        """
+        pad = "    " * indent
+        elem_w, depth = self._mem_info[lhs_mid]
+        cond_var = f"_ternmem_cond_{self._next_temp_index()}"
+        lines = [f"{pad}cdef bint {cond_var} = ({cond_expr}) != 0"]
+        if elem_w > _WORD_BITS:
+            words = self._mem_words(lhs_mid)
+            if is_nba:
+                for addr in range(depth):
+                    for word_index in range(words):
+                        word_addr = addr * words + word_index
+                        lines.extend(
+                            [
+                                f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
+                                f"{pad}c.nba_mem_addr[c.nba_mem_count] = {word_addr}",
+                                f"{pad}c.nba_mem_val[c.nba_mem_count] = <long long>(c.wide_mem_{true_mid}_val[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_val[{word_addr}])",
+                                f"{pad}c.nba_mem_mask[c.nba_mem_count] = <long long>(c.wide_mem_{true_mid}_mask[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_mask[{word_addr}])",
+                                f"{pad}c.nba_mem_count += 1",
+                            ]
+                        )
+                lines.append(f"{pad}c.nba_pending = 1")
+                return lines
+
+            lines.append(f"{pad}cdef int changed = 0")
+            for addr in range(depth):
+                for word_index in range(words):
+                    word_addr = addr * words + word_index
+                    lines.extend(
+                        [
+                            f"{pad}cdef unsigned long long _ternmem_v_{word_addr} = c.wide_mem_{true_mid}_val[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_val[{word_addr}]",
+                            f"{pad}cdef unsigned long long _ternmem_m_{word_addr} = c.wide_mem_{true_mid}_mask[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_mask[{word_addr}]",
+                            f"{pad}if c.wide_mem_{lhs_mid}_val[{word_addr}] != _ternmem_v_{word_addr} or c.wide_mem_{lhs_mid}_mask[{word_addr}] != _ternmem_m_{word_addr}:",
+                            f"{pad}    c.wide_mem_{lhs_mid}_val[{word_addr}] = _ternmem_v_{word_addr}",
+                            f"{pad}    c.wide_mem_{lhs_mid}_mask[{word_addr}] = _ternmem_m_{word_addr}",
+                            f"{pad}    changed = 1",
+                        ]
+                    )
+            lines.extend(
+                [
+                    f"{pad}if changed:",
+                    f"{pad}    c.val[{marker_sid}] ^= 1",
+                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                ]
+            )
+            return lines
+
+        if is_nba:
+            for addr in range(depth):
+                lines.extend(
+                    [
+                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
+                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = {addr}",
+                        f"{pad}c.nba_mem_val[c.nba_mem_count] = c.mem_{true_mid}_val[{addr}] if {cond_var} else c.mem_{false_mid}_val[{addr}]",
+                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = c.mem_{true_mid}_mask[{addr}] if {cond_var} else c.mem_{false_mid}_mask[{addr}]",
+                        f"{pad}c.nba_mem_count += 1",
+                    ]
+                )
+            lines.append(f"{pad}c.nba_pending = 1")
+            return lines
+
+        lines.append(f"{pad}cdef int changed = 0")
+        for addr in range(depth):
+            lines.extend(
+                [
+                    f"{pad}cdef long long _ternmem_v_{addr} = c.mem_{true_mid}_val[{addr}] if {cond_var} else c.mem_{false_mid}_val[{addr}]",
+                    f"{pad}cdef long long _ternmem_m_{addr} = c.mem_{true_mid}_mask[{addr}] if {cond_var} else c.mem_{false_mid}_mask[{addr}]",
+                    f"{pad}if c.mem_{lhs_mid}_val[{addr}] != _ternmem_v_{addr} or c.mem_{lhs_mid}_mask[{addr}] != _ternmem_m_{addr}:",
+                    f"{pad}    c.mem_{lhs_mid}_val[{addr}] = _ternmem_v_{addr}",
+                    f"{pad}    c.mem_{lhs_mid}_mask[{addr}] = _ternmem_m_{addr}",
+                    f"{pad}    changed = 1",
+                ]
+            )
+        lines.extend(
+            [
+                f"{pad}if changed:",
+                f"{pad}    c.val[{marker_sid}] ^= 1",
+                f"{pad}    c.dirty[{marker_sid}] = 1",
+            ]
+        )
+        return lines
+
     def _emit_flat_concat_whole_assign(self, dst_sid: int, flat_parts: list[tuple[str, int, str, str]]) -> list[str]:
         dst_width = self._signal_widths[dst_sid]
         dst_words = (dst_width + (_WORD_BITS - 1)) // _WORD_BITS if dst_width > _WORD_BITS else 0

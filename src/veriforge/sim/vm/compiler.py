@@ -400,6 +400,45 @@ class Compiler:  # cm:8c1e4a
                     program.append(instr(Op.NBA_MEM, encoded_arg))
             return True
 
+        # `lhs = cond ? mem_a : mem_b;` — a ternary whose branches are
+        # themselves whole-memory identifiers matching the LHS's shape
+        # (e.g. a bypass mux, `m_axis_tdata <= bypass ? s_axis_tdata :
+        # merged_tdata_wide;`). Compiled PER ELEMENT (a narrow, `elem_w`-
+        # wide synthetic ternary of `BitSelect`s into each source memory)
+        # rather than falling through to the generic
+        # `_compile_expr(rhs, width=lhs_w)` + unflatten path below, which
+        # evaluates the WHOLE ternary as one flat value using this
+        # engine's fixed-capacity "wide value" bytecode representation
+        # (`WIDE_WORDS` 64-bit words) -- for a memory wider than that (a
+        # 128-element, 18-bit array is 2304 bits, vastly more than
+        # `WIDE_WORDS * 64`), the result silently truncates instead of
+        # raising, corrupting every element past the truncation point.
+        # Confirmed wrong against the real `axis_dg_merge.sv` RTL.
+        if isinstance(rhs, TernaryOp):
+            true_info = self._resolve_whole_memory_identifier(rhs.true_expr)
+            false_info = self._resolve_whole_memory_identifier(rhs.false_expr)
+            if true_info is not None and false_info is not None:
+                true_name, true_mid = true_info
+                false_name, false_mid = false_info
+                if self.mem_info[true_mid][:2] == (lhs_elem_w, lhs_depth) and self.mem_info[false_mid][:2] == (
+                    lhs_elem_w,
+                    lhs_depth,
+                ):
+                    for addr in range(lhs_depth):
+                        elem_ternary = TernaryOp(
+                            condition=rhs.condition,
+                            true_expr=BitSelect(target=Identifier(true_name), index=Literal(addr)),
+                            false_expr=BitSelect(target=Identifier(false_name), index=Literal(addr)),
+                        )
+                        self._compile_expr(elem_ternary, program, width=lhs_elem_w)
+                        addr_cid = self._add_int_const(addr, 32)
+                        program.append(instr(Op.LOAD_CONST, addr_cid))
+                        if immediate:
+                            program.append(instr(Op.STORE_MEM, encoded_arg))
+                        else:
+                            program.append(instr(Op.NBA_MEM, encoded_arg))
+                    return True
+
         # Handle '{default: expr} — fill every element with the same value.
         if (
             isinstance(rhs, AssignmentPattern)

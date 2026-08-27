@@ -214,6 +214,45 @@ class _StmtEmittersMixin:
                             return self._emit_whole_mem_copy_lines(
                                 lhs_mid, rhs_mid, marker_sid=marker_sid, indent=indent, is_nba=is_nba
                             )
+                if lhs_mid is not None and isinstance(rhs, TernaryOp):
+                    # `arr <= cond ? mem_a : mem_b;` whole-memory LHS with
+                    # a TernaryOp RHS whose branches are themselves
+                    # matching-shape memories (e.g. a registered bypass
+                    # mux, `m_axis_tdata <= bypass ? s_axis_tdata :
+                    # merged_tdata_wide;`). The generic `RangeSelect`-
+                    # wrapping fallback further below computes the WHOLE
+                    # ternary via the scalar-only `_emit_expr` before
+                    # slicing each element's bit range back out of it --
+                    # `_emit_expr` has no memory-identifier support, so
+                    # this silently produced garbage for nearly every
+                    # element. Confirmed wrong against the real
+                    # `axis_dg_merge.sv` RTL. See
+                    # `_emit_whole_mem_ternary_lines` (_wide_emitter.py,
+                    # shared with this file's continuous-assign sibling in
+                    # `_process_compiler.py`) for the fix.
+                    true_mid = self._mem_map.get(rhs.true_expr.name) if isinstance(rhs.true_expr, Identifier) else None
+                    false_mid = (
+                        self._mem_map.get(rhs.false_expr.name) if isinstance(rhs.false_expr, Identifier) else None
+                    )
+                    if (
+                        true_mid is not None
+                        and false_mid is not None
+                        and self._mem_info[true_mid] == self._mem_info[lhs_mid]
+                        and self._mem_info[false_mid] == self._mem_info[lhs_mid]
+                        and self._memory_layout_matches(lhs_mid, true_mid)
+                        and self._memory_layout_matches(lhs_mid, false_mid)
+                    ):
+                        marker_sid = self._mem_marker_sigs[lhs_mid]
+                        cond_expr = self._emit_expr(rhs.condition, 1)
+                        return self._emit_whole_mem_ternary_lines(
+                            lhs_mid,
+                            cond_expr,
+                            true_mid,
+                            false_mid,
+                            marker_sid=marker_sid,
+                            indent=indent,
+                            is_nba=is_nba,
+                        )
                 if (
                     lhs_mid is not None
                     and isinstance(rhs, AssignmentPattern)
