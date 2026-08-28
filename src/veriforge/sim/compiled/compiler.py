@@ -59,6 +59,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 
 from veriforge._env import get_env
 
@@ -72,6 +73,29 @@ log = logging.getLogger(__name__)
 # Bump this whenever the codegen framework changes in a way that
 # makes previously cached .pyd/.so files incompatible.
 _CACHE_VERSION = "5"
+
+
+def _progress_enabled() -> bool:
+    """Whether to print elaborate/compile progress to stderr.
+
+    On by default -- a cache-miss compiled-engine build can silently take
+    anywhere from seconds to several minutes (large designs with many
+    generate-loop instances or many separate modules combine into one
+    monolithic .pyx/.c file, and neither Cython's translation pass nor the
+    C compiler's own pass scale linearly with total generated code size),
+    and a silent terminal for that whole span is easy to mistake for a
+    hang. Set ``VERIFORGE_QUIET_BUILD=1`` to suppress.
+    """
+    return get_env("QUIET_BUILD") not in ("1", "true", "True")
+
+
+def _report_progress(message: str) -> None:
+    if _progress_enabled():
+        print(f"[veriforge] {message}", file=sys.stderr, flush=True)
+
+
+def _report_build_progress(elapsed: float) -> None:
+    _report_progress(f"  ... still compiling (C compiler), {elapsed:.0f}s elapsed")
 
 
 class _nullctx:
@@ -340,6 +364,12 @@ class CythonCompiler:  # cm:3d7f4a
 
             dest_pyx = os.path.join(build_dir, f"{keyed_name}.pyx")
             shutil.copy2(pyx_path, dest_pyx)
+            pyx_lines = sum(1 for _ in open(dest_pyx, encoding="utf-8"))  # noqa: SIM115 — small file, read-then-close is fine here
+            _report_progress(
+                f"compiling '{module_name}' ({pyx_lines} lines of generated Cython, cache miss) "
+                "— invoking Cython + C compiler, this can take from seconds to several minutes "
+                "for large designs..."
+            )
 
             c_path = os.path.join(build_dir, f"{keyed_name}.c")
             if os.path.exists(c_path):
@@ -353,7 +383,9 @@ class CythonCompiler:  # cm:3d7f4a
             with open(setup_path, "w", encoding="utf-8") as f:
                 f.write(setup_source)
 
+            _build_t0 = time.monotonic()
             self._run_build(build_dir)
+            _report_progress(f"done compiling '{module_name}' in {time.monotonic() - _build_t0:.1f}s")
 
             ext_path = _find_extension(build_dir, keyed_name)
             if ext_path is None:
@@ -371,15 +403,144 @@ class CythonCompiler:  # cm:3d7f4a
                 )
             return mod
 
-    def _generate_setup_py(self, module_name: str) -> str:
-        """Generate a minimal setup.py for building the extension."""
+    def compile_pyx_files(self, file_paths: list[str], source_sha256_hex: str, module_name: str) -> object:
+        """Compile a design's ``.pyx``/``.h`` files already on disk (as
+        written by :meth:`~.codegen.CythonCodegen.generate_to_files`) into
+        ONE extension module; return the imported module.
+
+        Generalizes :meth:`compile_pyx_file` (kept separate, with its own
+        simpler single-file contract, rather than having this delegate to
+        it) to N source files: ``file_paths[0]`` is always
+        the "main" file (renamed to ``{keyed_name}.pyx`` so the built
+        extension is importable as *module_name*'s cache-keyed name, same
+        as :meth:`compile_pyx_file`'s only file); any further ``.pyx``
+        entries are extra sources of the SAME extension (see
+        ``generate_to_files``'s docstring for why this is both valid and
+        the whole point); any ``.h`` entries are plain headers copied
+        alongside for the ``#include``s in those ``.pyx``/generated ``.c``
+        files to find.
+
+        Args:
+            file_paths:         Paths on disk, main file first.
+            source_sha256_hex:  Combined hex SHA-256 digest of every file's
+                                 content (as returned by
+                                 ``generate_to_files``).
+            module_name:        Python module name for the extension.
+
+        Returns:
+            The imported extension module.
+
+        Raises:
+            RuntimeError: If Cython or a C compiler is not available, or if
+                          compilation fails.
+        """
+        no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
+
+        key = _cache_key_from_source_hash(source_sha256_hex)
+        keyed_name = _keyed_module_name(module_name, key)
+        build_dir = os.path.join(self._cache_dir, keyed_name)
+
+        lock_path = build_dir + ".lock"
+        os.makedirs(self._cache_dir, exist_ok=True)
+        lock_ctx = _FileLock(lock_path) if _FileLock is not None else None
+
+        with lock_ctx if lock_ctx is not None else _nullctx():
+            if not no_cache:
+                cached = _find_extension(build_dir, keyed_name)
+                if cached is not None:
+                    try:
+                        mod = self._import_extension(cached, keyed_name)
+                        if not hasattr(mod, "CompiledSim"):
+                            raise AttributeError(
+                                f"Cached module {keyed_name} is missing CompiledSim "
+                                f"— cache entry is corrupt, forcing recompile"
+                            )
+                        log.debug("Cache hit: %s", cached)
+                        return mod
+                    except Exception as e:
+                        log.warning("Stale/corrupt cache entry %s — removing and recompiling: %s", keyed_name, e)
+                        self._remove_build_dir(build_dir)
+
+            log.info("Compiling %s (cache key %s, %d source files)", module_name, key, len(file_paths))
+            self._remove_build_dir(build_dir)
+            os.makedirs(build_dir, exist_ok=True)
+
+            main_path, *extra_paths = file_paths
+            dest_main = os.path.join(build_dir, f"{keyed_name}.pyx")
+            shutil.copy2(main_path, dest_main)
+
+            extra_pyx_names: list[str] = []
+            total_lines = sum(1 for _ in open(dest_main, encoding="utf-8"))  # noqa: SIM115 — small file
+            for p in extra_paths:
+                dest = os.path.join(build_dir, os.path.basename(p))
+                shutil.copy2(p, dest)
+                if p.endswith(".pyx"):
+                    extra_pyx_names.append(os.path.basename(p))
+                    total_lines += sum(1 for _ in open(dest, encoding="utf-8"))  # noqa: SIM115 — small file
+
+            c_path = os.path.join(build_dir, f"{keyed_name}.c")
+            if os.path.exists(c_path):
+                try:
+                    os.remove(c_path)
+                except OSError:
+                    pass
+
+            n_files_desc = f"{len(file_paths)} files" if len(file_paths) > 1 else "1 file"
+            _report_progress(
+                f"compiling '{module_name}' ({total_lines} lines of generated Cython across {n_files_desc}, "
+                "cache miss) — invoking Cython + C compiler, this can take from seconds to several minutes "
+                "for large designs..."
+            )
+
+            setup_source = self._generate_setup_py(keyed_name, extra_pyx_names)
+            setup_path = os.path.join(build_dir, "setup.py")
+            with open(setup_path, "w", encoding="utf-8") as f:
+                f.write(setup_source)
+
+            _build_t0 = time.monotonic()
+            self._run_build(build_dir, n_sources=1 + len(extra_pyx_names))
+            _report_progress(f"done compiling '{module_name}' in {time.monotonic() - _build_t0:.1f}s")
+
+            ext_path = _find_extension(build_dir, keyed_name)
+            if ext_path is None:
+                raise RuntimeError(
+                    f"Compilation succeeded but no extension found in {build_dir}. "
+                    f"Expected {keyed_name}.pyd or {keyed_name}*.so"
+                )
+
+            mod = self._import_extension(ext_path, keyed_name)
+            if not hasattr(mod, "CompiledSim"):
+                raise RuntimeError(
+                    f"Compiled module {keyed_name} is missing CompiledSim. "
+                    f"The Cython source may have been truncated during translation. "
+                    f"Try deleting {build_dir!r} and rerunning."
+                )
+            return mod
+
+    def _generate_setup_py(self, module_name: str, extra_sources: list[str] | None = None) -> str:
+        """Generate a minimal setup.py for building the extension.
+
+        *extra_sources* (bare ``.pyx`` filenames, already sitting in the
+        build directory alongside ``{module_name}.pyx``) are compiled as
+        additional sources of the SAME extension -- see
+        :meth:`compile_pyx_files`/``codegen.py``'s ``generate_to_files``
+        for why (splitting a large design's generated code across
+        multiple files for parallel Cython/C-compiler translation, while
+        still producing exactly one importable extension module). Cython
+        and setuptools both support a multi-``.pyx``-source extension
+        natively; the only caveat (handled entirely on the codegen side,
+        not here) is that cross-file `cdef` calls need `cdef public` +
+        `cdef extern from` rather than `cimport`.
+        """
+        sources = [f"{module_name}.pyx", *(extra_sources or [])]
+        sources_repr = ", ".join(f'"{s}"' for s in sources)
         return f"""\
 from setuptools import Extension, setup
 from Cython.Build import cythonize
 
 setup(
     ext_modules=cythonize(
-        [Extension("{module_name}", ["{module_name}.pyx"],
+        [Extension("{module_name}", [{sources_repr}],
                    extra_compile_args=["-O0"])],
         compiler_directives={{
             "language_level": "3",
@@ -393,8 +554,20 @@ setup(
 )
 """
 
-    def _run_build(self, build_dir: str) -> None:
-        """Run the build command in the given directory."""
+    def _run_build(self, build_dir: str, *, n_sources: int = 1) -> None:
+        """Run the build command in the given directory.
+
+        *n_sources* is how many ``.pyx`` files this build's Extension has
+        (see :meth:`compile_pyx_files`) -- when more than one, the C
+        compiler's per-file `.c` -> `.o` steps are independent and safe to
+        run concurrently, so ``--parallel`` is passed (setuptools' own
+        thread-pool-based parallel `build_ext`, not Cython's separate
+        `nthreads` -- the latter uses `multiprocessing.Pool`/forkserver,
+        which was observed to fail outright in at least one sandboxed
+        environment during development; the thread-pool-based C-compile
+        parallelism has no such issue and is where most of the wall-clock
+        time is anyway for a large split design).
+        """
         try:
             import Cython  # noqa: F401
         except ImportError:
@@ -403,6 +576,10 @@ setup(
             ) from None
 
         cmd = [sys.executable, "setup.py", "build_ext", "--inplace", "--build-temp", "t", "--build-lib", "l"]
+        if n_sources > 1:
+            n_jobs = min(n_sources, os.cpu_count() or 1)
+            if n_jobs > 1:
+                cmd.extend(["--parallel", str(n_jobs)])
         log.debug("Running: %s in %s", cmd, build_dir)
 
         # On Windows, MSVC (cl.exe) is a child of setup.py and inherits the
@@ -422,8 +599,27 @@ setup(
         except FileNotFoundError:
             raise RuntimeError("Failed to run build command. Ensure Python is accessible.") from None
 
+        total_timeout = 600  # cm:3d7f4b
+        poll_interval = 5.0
+        elapsed = 0.0
         try:
-            stdout, stderr = proc.communicate(timeout=600)  # cm:3d7f4b
+            # Poll in short slices instead of one blocking communicate(...,
+            # timeout=total_timeout) call, so a large design's build prints
+            # visible "still compiling" progress instead of leaving the
+            # terminal silent for however many minutes the C compiler takes
+            # (see _report_progress -- gated by VERIFORGE_QUIET_BUILD, on by
+            # default). communicate() is documented safe to call again after
+            # a TimeoutExpired -- it just keeps waiting on the same pipes.
+            while True:
+                remaining = total_timeout - elapsed
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(poll_interval, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed += poll_interval
+                    if elapsed >= total_timeout:
+                        raise
+                    _report_build_progress(elapsed)
         except subprocess.TimeoutExpired:
             # Kill the full process tree so all pipe handles are closed.
             if platform.system() == "Windows":
@@ -435,7 +631,7 @@ setup(
             proc.kill()
             proc.wait()
             raise RuntimeError(
-                f"Cython compilation timed out after 300 s in {build_dir}. "
+                f"Cython compilation timed out after {total_timeout} s in {build_dir}. "
                 "The generated module may be too large for the C compiler. "
                 "Use engine='vm' for complex designs."
             ) from None

@@ -1704,6 +1704,281 @@ class CythonCodegen(
 
     # ΓöÇΓöÇ Signal registration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+    def generate_to_files(self, module: Module, out_dir: str, *, delta_limit: int = 10_000) -> tuple[list[str], str]:
+        """Generate a design's compiled-engine source, split across multiple
+        ``.pyx`` files when the design is large enough for that to matter,
+        for parallel Cython translation and C compilation.
+
+        Why this exists: a design with many `generate`-loop instances (a
+        `generate for` of dozens/hundreds of structurally-identical
+        submodules -- common in per-pixel/per-lane processing pipelines)
+        fully inlines every instance separately (no instance-sharing --
+        see the module docstring), producing one process function
+        (`cont_N`/`combo_N`/`seq_N`) per instance's own continuous
+        assigns/always blocks. For a real 128-lane image-processing design,
+        this was measured at 682,435 lines of generated Cython (35 MB) for
+        ONE module -- and both Cython's own ``.pyx``->``.c`` translation and
+        the C compiler's compile of the resulting ~6.7M-line, 244MB ``.c``
+        file scale *worse than linearly* with single-translation-unit size
+        (measured: 3.8x more generated code took 18x longer to compile),
+        making a large design's from-scratch compiled-engine build take
+        several minutes to build (and, combined with the existing 600s
+        build timeout in `compiler.py`, edging uncomfortably close to it).
+
+        Splitting the bulk of that generated code (the process functions --
+        everything else, `_gen_header` through `_gen_user_functions`, is
+        comparatively small and duplicated verbatim into every file rather
+        than shared via cross-file linkage, trading a little redundant
+        boilerplate for much simpler/more robust codegen) across N
+        ``.pyx`` "worker" files turns one giant serial compile into N
+        smaller ones, compiled as one Extension's `sources` list
+        (`compiler.py`'s `compile_pyx_files`) -- Cython and the C compiler
+        both support this as ordinary multi-file same-extension
+        compilation with NO Python-level import step at runtime, AS LONG
+        AS the cross-file call boundary uses `cdef public` (defining side)
+        + `cdef extern from "<worker>.h"` (calling side) rather than a
+        plain `cimport` -- `cimport` of a `cdef` function assumes the
+        target is a SEPARATELY IMPORTABLE module and inserts a runtime
+        Python-level `import` of it, which fails for a worker file that
+        was never built as its own standalone extension (confirmed via a
+        minimal proof-of-concept before implementing this for real). The
+        shared `SimCtx` struct has the same problem one level up: declared
+        as a plain Cython `cdef struct` (even byte-for-byte identically)
+        separately in two ``.pyx`` files, each file's copy gets its own
+        distinct mangled C struct tag, incompatible with the other's --
+        so it's instead declared `cdef extern from` a real, hand-generated
+        plain-C header (`_gen_struct_extern`/`_gen_struct_extern_c`) that
+        every file (including main) references identically.
+
+        EXPERIMENTAL and opt-in only: this degenerates to exactly one file
+        (still built via the same `compile_pyx_files` multi-file-capable
+        path in `compiler.py`, just with a `sources` list of length 1 --
+        identical to the pre-split-support build) unless BOTH
+        `VERIFORGE_COMPILE_SPLIT=1` is set AND the design has at least
+        `_min_funcs_to_split` process functions. Default is off: measured
+        speedup on a real large design was real (~35-40% faster wall-clock
+        compile) but so was a regression on a medium design (split was
+        SLOWER than unsplit) and an unexplained, traceback-free crash on a
+        subsequent run of that same large design -- not yet trusted enough
+        to enable by default. See the call site in
+        `compiled_scheduler.py`/the `split_enabled` local here for the
+        exact gating.
+
+        Returns ``(file_paths, source_sha256_hex)`` -- *file_paths[0]* is
+        always the main file; the combined hash covers every file's
+        content, in the same order, for cache-key purposes.
+        """
+        import hashlib
+        import os
+
+        self._module = module
+        self._delta_limit = delta_limit
+
+        if module.instances:
+            raise NotImplementedError(
+                "Compiled engine does not support module instantiation / hierarchy. Use engine='vm' instead."
+            )
+        if module.generate_blocks:
+            raise NotImplementedError(
+                "Generate constructs must be elaborated before compilation. "
+                "Call flatten_module() or elaborate_generates() first."
+            )
+
+        self._register_signals(module)
+        self._function_map = {f.name: f for f in module.functions}
+        self._task_map = {t.name: t for t in module.tasks}
+        self._register_func_task_signals(module)
+        self._validate_wide_transport_only(module)
+        self._compile_continuous_assigns(module)
+        self._compile_always_blocks(module)
+        self._compile_initial_blocks(module)
+        self._scan_wide_intermediates(module)
+        self._timing_diagnostics = self._collect_timing_diagnostics(module)
+
+        n_cont = len(self._processes)
+        n_combo = len(self._combo_processes)
+        n_seq = len(self._seq_processes)
+        total_funcs = n_cont + n_combo + n_seq
+
+        # EXPERIMENTAL, opt-in only (default OFF) -- set VERIFORGE_COMPILE_SPLIT=1
+        # to enable. Measured on a real large design: ~35-40% faster wall-clock
+        # compile (346.5s vs. a ~540-580s unsplit baseline) when it works, but
+        # (a) it was SLOWER than unsplit for a medium design (128 generate-loop
+        # instances alone: ~57s split vs. ~29s unsplit -- the split's fixed
+        # per-file overhead and duplicated preamble aren't worth it below some
+        # design size not yet well characterized), and (b) a run against the
+        # large design that exercised it crashed with no Python traceback at
+        # all (consistent with either an OOM under N-way parallel `gcc`
+        # invocations each compiling a large file, or a genuine bug in the
+        # cross-file `cdef public`/`cdef extern from` linkage -- not yet
+        # root-caused). Needs more validation (smarter size threshold, safer
+        # parallelism cap, smaller duplicated preamble) before this is trusted
+        # enough to default on.
+        split_enabled = get_env("COMPILE_SPLIT", "0") in ("1", "true", "True")
+        _min_funcs_to_split = 200
+        n_workers = min(max(1, total_funcs // 50), 8) if (split_enabled and total_funcs >= _min_funcs_to_split) else 0
+
+        hasher = hashlib.sha256()
+        file_paths: list[str] = []
+
+        def _open_writer(path: str):
+            fh = open(path, "wb")  # noqa: SIM115 -- closed explicitly in the finally block below
+
+            def _write(text: str) -> None:
+                encoded = text.encode("utf-8")
+                fh.write(encoded)
+                hasher.update(encoded)
+
+            return fh, _write
+
+        main_path = os.path.join(out_dir, "main.pyx")
+        file_paths.append(main_path)
+        handles = []
+        try:
+            main_fh, main_write = _open_writer(main_path)
+            handles.append(main_fh)
+
+            if n_workers == 0:
+                small_sections = [
+                    self._gen_header,
+                    self._gen_constants,
+                    self._gen_struct,
+                    self._gen_wmask,
+                    self._gen_wide_primitives,
+                    self._gen_wide_adapters,
+                    self._gen_wide_mem_helpers,
+                    self._gen_user_functions,
+                ]
+                for gen_fn in small_sections:
+                    main_write(gen_fn())
+                    main_write("\n\n")
+                self._gen_process_functions_to(main_write)
+                for gen_fn in (self._gen_delta_loop, self._gen_compiled_sim):
+                    main_write("\n\n")
+                    main_write(gen_fn())
+                main_write("\n")
+                return file_paths, hasher.hexdigest()
+
+            # Split path: shared header + N worker files.
+            header_path = os.path.join(out_dir, "shared.h")
+            with open(header_path, "wb") as hfh:
+                hfh.write(self._gen_struct_extern_c().encode("utf-8"))
+            # The header participates in the build (every file #includes
+            # it) but not in the cache-key hash stream via _write above --
+            # hash it explicitly so a header-affecting change (e.g. a
+            # struct field added because a design has a different memory/
+            # signal count) still changes the cache key.
+            with open(header_path, "rb") as hfh:
+                hasher.update(hfh.read())
+
+            worker_paths = [os.path.join(out_dir, f"worker{w}.pyx") for w in range(n_workers)]
+            file_paths.extend(worker_paths)
+            file_paths.append(header_path)
+            worker_writers = []
+            for wp in worker_paths:
+                wfh, wwrite = _open_writer(wp)
+                handles.append(wfh)
+                worker_writers.append(wwrite)
+
+            # Main needs the FULL `_gen_constants()` (its O(n_sigs) part --
+            # `_gen_constants_signal_names` -- feeds `_gen_compiled_sim`'s
+            # `__init__`, main-file-only); workers only need the small,
+            # O(1)-in-signal-count `_gen_constants_core` subset actually
+            # referenced from a process function body or a shared helper
+            # function -- see `_gen_constants_core`'s docstring for why
+            # this split matters (duplicating the FULL constants block
+            # into every worker made an early version of this feature
+            # slower overall than not splitting at all).
+            header_text = self._gen_header()
+            struct_extern_text = self._gen_struct_extern("shared.h")
+            wmask_text = self._gen_wmask()
+            wide_primitives_text = self._gen_wide_primitives()
+            wide_adapters_text = self._gen_wide_adapters()
+            wide_mem_helpers_text = self._gen_wide_mem_helpers()
+            user_functions_text = self._gen_user_functions()
+
+            main_preamble = "\n\n".join(
+                [
+                    header_text,
+                    self._gen_constants(),
+                    struct_extern_text,
+                    wmask_text,
+                    wide_primitives_text,
+                    wide_adapters_text,
+                    wide_mem_helpers_text,
+                    user_functions_text,
+                ]
+            )
+            main_write(main_preamble + "\n\n")
+
+            worker_preamble = "\n\n".join(
+                [
+                    header_text,
+                    self._gen_constants_core(),
+                    struct_extern_text,
+                    wmask_text,
+                    wide_primitives_text,
+                    wide_adapters_text,
+                    wide_mem_helpers_text,
+                    user_functions_text,
+                ]
+            )
+            for wwrite in worker_writers:
+                wwrite(worker_preamble + "\n\n")
+
+            # Precompute the routing table (function key -> worker index)
+            # up front, in the exact same order `_gen_process_functions_to`
+            # iterates, so main's extern declarations can be emitted BEFORE
+            # that call (Cython requires declarations before use) while
+            # `route_fn` (called DURING that same iteration) makes the
+            # identical assignment by simply replaying the same counter.
+            def _iter_keys():
+                for i in range(n_cont):
+                    yield ("cont", i, False)
+                for i in range(n_combo):
+                    yield ("combo", i, False)
+                for i in range(n_seq):
+                    yield ("seq", i, True)
+
+            routing: dict[tuple[str, int], int] = {}
+            protos_by_worker: list[list[str]] = [[] for _ in range(n_workers)]
+            for idx, (prefix, i, use_sv) in enumerate(_iter_keys()):
+                w = idx % n_workers
+                routing[(prefix, i)] = w
+                proto = (
+                    f"void {prefix}_{i}(SimCtx *c, long long *sv, long long *sm) noexcept nogil"
+                    if use_sv
+                    else f"void {prefix}_{i}(SimCtx *c) noexcept nogil"
+                )
+                protos_by_worker[w].append(proto)
+
+            for w in range(n_workers):
+                if not protos_by_worker[w]:
+                    continue
+                main_write(f'cdef extern from "worker{w}.h":\n')
+                for proto in protos_by_worker[w]:
+                    main_write(f"    {proto}\n")
+                main_write("\n")
+
+            def route_fn(prefix: str, i: int):
+                w = routing[(prefix, i)]
+                return worker_writers[w], True
+
+            self._gen_process_functions_to(main_write, route_fn=route_fn)
+
+            for gen_fn in (self._gen_delta_loop, self._gen_compiled_sim):
+                main_write("\n\n")
+                main_write(gen_fn())
+            main_write("\n")
+
+            for wwrite in worker_writers:
+                wwrite("\n")
+
+            return file_paths, hasher.hexdigest()
+        finally:
+            for fh in handles:
+                fh.close()
+
     def _register_signal(self, name: str, width: int, signed: bool = False) -> int:
         if name in self._signal_map:
             return self._signal_map[name]

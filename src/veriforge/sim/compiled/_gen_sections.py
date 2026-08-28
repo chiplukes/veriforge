@@ -261,8 +261,32 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "from libc.stdio cimport snprintf"
         )
 
-    def _gen_constants(self) -> str:
-        wide_offsets, wide_words, total_wide_words = self._wide_layout()
+    def _gen_constants_core(self) -> str:
+        """The fixed-count (independent of signal/memory count) `DEF`
+        constants, plus per-memory `MEM_{mid}_WIDTH` -- everything actually
+        referenced from within a process function body or one of the
+        shared helper-function sections (`_gen_wide_mem_helpers` uses
+        `MEM_{mid}_WIDTH`; nothing in a process function body references
+        any `DEF` constant by name at all -- signal/memory ids are always
+        interpolated as plain integer literals, e.g. `c.val[{sid}]` with
+        `sid` a Python int, never a symbolic `DEF SIG_x` reference).
+
+        Split out from `_gen_constants_signal_names` (below) specifically
+        so `generate_to_files`'s split-compile path can duplicate ONLY
+        this (small, O(1) in signal count) piece into every worker file,
+        instead of the full `_gen_constants()` output -- which, for a
+        design with thousands of signals (`DEF SIG_x`/`W_x`/
+        `WIDE_WORDS_x`/`WIDE_OFFSET_x`, 4 lines each, used ONLY by
+        `_gen_compiled_sim`'s `__init__`, itself main-file-only), made the
+        split-compile path duplicate that O(n_sigs) block into every
+        worker for no benefit -- confirmed empirically: a first cut that
+        duplicated the *entire* `_gen_constants()` output into every
+        worker file made total generated-code volume (and therefore
+        overall compile wall time) WORSE than the unsplit baseline for a
+        128-instance design, exactly backwards from this feature's whole
+        point.
+        """
+        _wide_offsets, _wide_words, total_wide_words = self._wide_layout()
         lines = [f"DEF N_SIGS = {max(self._n_sigs, 1)}"]
         lines.append(f"DEF N_WIDE_WORDS = {max(total_wide_words, self._dynamic_max_wide_words, 1)}")
         lines.append("DEF OUT_BUF_MAX = 65536")
@@ -299,6 +323,22 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             nba_mem_bound = max(64, self._nba_mem_queue_bound())
             lines.append(f"DEF NBA_MEM_MAX = {nba_mem_bound}")
             lines.append(f"DEF NBA_MEM_RANGE_MAX = {nba_mem_bound}")
+        for mid in range(self._n_mems):
+            ew, _depth = self._mem_info[mid]
+            lines.append(f"DEF MEM_{mid}_WIDTH = {ew}")
+        return "\n".join(lines)
+
+    def _gen_constants_signal_names(self) -> str:
+        """The O(n_sigs)/O(n_mems) `DEF` constants -- symbolic per-signal
+        names (`SIG_x`/`W_x`/`WIDE_WORDS_x`/`WIDE_OFFSET_x`) and the
+        remaining per-memory ones (`MEM_{mid}_DEPTH`/`MEM_{mid}_WORDS`,
+        `_WIDTH` itself being in `_gen_constants_core` since a shared
+        helper function needs it) -- referenced ONLY from
+        `_gen_compiled_sim` (the `CompiledSim` class's `__init__`), so
+        needed in the main file only; see `_gen_constants_core`.
+        """
+        wide_offsets, wide_words, _total_wide_words = self._wide_layout()
+        lines: list[str] = []
         # Build unique constant names (sanitised names can collide)
         used: set[str] = set()
         cnames: list[str] = []
@@ -318,17 +358,43 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append(f"DEF W_{cname} = {self._signal_widths[sid]}")
             lines.append(f"DEF WIDE_WORDS_{cname} = {wide_words[sid]}")
             lines.append(f"DEF WIDE_OFFSET_{cname} = {wide_offsets[sid]}")
-        # Memory constants
+        # Memory constants (MEM_{mid}_WIDTH is in _gen_constants_core)
         for mid in range(self._n_mems):
-            ew, depth = self._mem_info[mid]
-            lines.append(f"DEF MEM_{mid}_WIDTH = {ew}")
-            lines.append(f"DEF MEM_{mid}_DEPTH = {depth}")
+            lines.append(f"DEF MEM_{mid}_DEPTH = {self._mem_info[mid][1]}")
             lines.append(f"DEF MEM_{mid}_WORDS = {self._mem_words(mid)}")
         return "\n".join(lines)
 
-    def _gen_struct(self) -> str:
+    def _gen_constants(self) -> str:
+        return self._gen_constants_core() + "\n" + self._gen_constants_signal_names()
+
+    def _struct_size_literals(self) -> dict[str, int]:
+        """The literal (int) values behind the `DEF`-named array sizes used
+        in the ``SimCtx`` field list -- computed exactly as `_gen_constants`
+        computes them, factored out so both it and the plain-C-header
+        renderer used for the split-compile path (`_gen_struct_extern_c`)
+        stay in sync by construction rather than by two independently
+        maintained copies of this arithmetic.
+        """
+        _wide_offsets, _wide_words, total_wide_words = self._wide_layout()
+        literals = {
+            "N_SIGS": max(self._n_sigs, 1),
+            "N_WIDE_WORDS": max(total_wide_words, self._dynamic_max_wide_words, 1),
+            "OUT_BUF_MAX": 65536,
+        }
+        if self._n_mems > 0:
+            nba_mem_bound = max(64, self._nba_mem_queue_bound())
+            literals["NBA_MEM_MAX"] = nba_mem_bound
+            literals["NBA_MEM_RANGE_MAX"] = nba_mem_bound
+        return literals
+
+    def _struct_field_lines(self) -> list[str]:
+        """The ``SimCtx`` field declarations, indented for use directly under
+        a ``cdef struct SimCtx:``/``cdef extern from ...: cdef struct
+        SimCtx:`` header line. Array sizes reference the `DEF`-named
+        constants (`N_SIGS` etc.) -- valid Cython either way; see
+        `_gen_struct`/`_gen_struct_extern`.
+        """
         lines = [
-            "cdef struct SimCtx:",
             "    long long val[N_SIGS]",
             "    long long mask[N_SIGS]",
             "    int       width[N_SIGS]",
@@ -381,7 +447,53 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "    long long nba_mem_range_mask[NBA_MEM_RANGE_MAX]",
                 ]
             )
-        return "\n".join(lines)
+        return lines
+
+    def _gen_struct(self) -> str:
+        return "\n".join(["cdef struct SimCtx:", *self._struct_field_lines()])
+
+    def _gen_struct_extern(self, header_name: str) -> str:
+        """Same fields as `_gen_struct`, but declared as living in the plain
+        C header *header_name* (see `_gen_struct_extern_c`) instead of as a
+        Cython-native struct. Used identically by the main file and every
+        worker file in the split-compile path (`generate_to_files`) so that
+        every file's ``SimCtx`` resolves to the exact same plain C type --
+        a Cython-native `cdef struct` declared separately (even from
+        byte-for-byte identical text) in two different ``.pyx`` files gets
+        two distinct, incompatible mangled C struct tags, which very much
+        matters here since worker files receive a ``SimCtx *`` from the
+        main file across a real (non-inlined) C function call.
+        """
+        return "\n".join(
+            [
+                f'cdef extern from "{header_name}":',
+                "    cdef struct SimCtx:",
+                *(f"    {line}" for line in self._struct_field_lines()),
+            ]
+        )
+
+    def _gen_struct_extern_c(self) -> str:
+        """Plain C header text defining ``struct SimCtx`` for the
+        split-compile path -- see `_gen_struct_extern`. Same field list as
+        `_gen_struct`, with the `DEF`-named array sizes (`N_SIGS` etc.)
+        substituted for their literal values (a plain ``.h`` file has no
+        concept of Cython's `DEF`), via `_struct_size_literals` so the two
+        never drift out of sync.
+        """
+        literals = self._struct_size_literals()
+        body_lines = self._struct_field_lines()
+        for name, value in literals.items():
+            body_lines = [re.sub(rf"\b{name}\b", str(value), line) for line in body_lines]
+        return "\n".join(
+            [
+                "#ifndef VERIFORGE_SIMCTX_H",
+                "#define VERIFORGE_SIMCTX_H",
+                "struct SimCtx {",
+                *(f"    {line.strip()};" for line in body_lines),
+                "};",
+                "#endif",
+            ]
+        )
 
     def _gen_wmask(self) -> str:
         lines: list[str] = []
@@ -698,7 +810,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         return "\n".join(parts)
 
-    def _gen_process_functions_to(self, write_fn) -> None:
+    def _gen_process_functions_to(self, write_fn, *, route_fn=None) -> None:
         """Stream process functions one at a time via *write_fn*.
 
         Produces byte-for-byte identical output to ``_gen_process_functions()``
@@ -709,6 +821,20 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         *write_fn* is called with successive ``str`` fragments whose
         concatenation equals the full section text.
+
+        *route_fn*, if given, is called as ``route_fn(prefix, i)`` (``prefix``
+        one of ``"cont"``/``"combo"``/``"seq"``, ``i`` the function's index
+        within its group) before each function is emitted, and must return
+        either ``None`` (emit to *write_fn* as ``cdef inline``, the default
+        behavior) or a ``(target_write_fn, is_public)`` pair -- used by
+        :meth:`~.codegen.CythonCodegen.generate_to_files` to split a large
+        design's process functions across multiple ``.pyx`` files for
+        parallel compilation (see that method's docstring for why). A
+        function routed to a non-``write_fn`` target is emitted as
+        ``cdef public`` instead of ``cdef inline`` -- `inline` and
+        cross-translation-unit (`public`) linkage don't mix cleanly, and a
+        function living in its own file has no same-file call site to
+        benefit from inlining anyway.
         """
         if not self._processes and not self._combo_processes and not self._seq_processes:
             write_fn("# No process functions")
@@ -735,16 +861,20 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
             ("seq", (self._compile_always_body(body) for _edges, _sens, body in self._seq_processes), True, True),
         )
-        first_func = True
+        first_func_seen: set[int] = set()  # ids of streams that already received their first chunk
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
             for i, body_lines in enumerate(body_groups):
+                routed = route_fn(prefix, i) if route_fn is not None else None
+                target_write_fn, is_public = (write_fn, False) if routed is None else routed
+                qualifier = "public" if is_public else "inline"
+
                 func_parts: list[str] = []
                 if use_sv:
                     func_parts.append(
-                        f"cdef inline void {prefix}_{i}(SimCtx *c, long long *sv, long long *sm) noexcept nogil:"
+                        f"cdef {qualifier} void {prefix}_{i}(SimCtx *c, long long *sv, long long *sm) noexcept nogil:"
                     )
                 else:
-                    func_parts.append(f"cdef inline void {prefix}_{i}(SimCtx *c) noexcept nogil:")
+                    func_parts.append(f"cdef {qualifier} void {prefix}_{i}(SimCtx *c) noexcept nogil:")
 
                 if body_lines:
                     decls: list[str] = []
@@ -796,11 +926,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 # Between functions: write a leading \n so that the trailing \n
                 # from the previous chunk and this \n together form the blank line
                 # separator, matching "\n".join(all_parts) with "" elements.
-                if first_func:
-                    write_fn(chunk)
-                    first_func = False
+                # Tracked per-target (not globally) so each routed-to file's own
+                # first chunk is unprefixed, same as the single-stream case.
+                stream_key = id(target_write_fn)
+                if stream_key not in first_func_seen:
+                    target_write_fn(chunk)
+                    first_func_seen.add(stream_key)
                 else:
-                    write_fn("\n" + chunk)
+                    target_write_fn("\n" + chunk)
 
     def _gen_delta_loop(self) -> str:  # noqa: PLR0912, PLR0915
         has_seq = bool(self._seq_processes)
@@ -1419,13 +1552,38 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         # batch_run method ΓÇö multi-cycle execution entirely in C
         sn = max(self._n_sigs, 1)
+        # Per-mid narrow-memory-element write dispatch, mirroring
+        # `mem_write` above -- lets `batch_run`'s events schedule writes
+        # into a memory-shaped port (e.g. a wide AXI-Stream `tdata` bus
+        # modeled as a 2-D packed array, addressed element-wise as
+        # `port[i]`) the same way plain-signal events already work,
+        # entirely inside the nogil loop (no per-event Python call). Wide
+        # (>64-bit) memory elements aren't supported by this event path
+        # (documented limitation, not yet needed).
+        narrow_mem_ids = [mid for mid in range(self._n_mems) if self._mem_info[mid][0] <= _WORD_BITS]
+        mem_event_dispatch: list[str] = []
+        for j, mid in enumerate(narrow_mem_ids):
+            marker_sid = self._mem_marker_sigs[mid]
+            kw = "if" if j == 0 else "elif"
+            mem_event_dispatch.extend(
+                [
+                    f"                    {kw} ev_mem_mids[mem_ev_idx] == {mid}:",
+                    f"                        self.ctx.mem_{mid}_val[ev_mem_addrs[mem_ev_idx]] = ev_mem_vals[mem_ev_idx]",
+                    f"                        self.ctx.mem_{mid}_mask[ev_mem_addrs[mem_ev_idx]] = 0",
+                    f"                        self.ctx.val[{marker_sid}] ^= 1",
+                    f"                        self.ctx.dirty[{marker_sid}] = 1",
+                ]
+            )
         lines.extend(
             [
                 "",
                 "    cpdef int batch_run(self, int cycles, int clk_sid,",
                 "                        int n_events=0, int[::1] ev_cycles=None,",
-                "                        int[::1] ev_sids=None, long long[::1] ev_vals=None):",
-                "        cdef int i, ev_idx = 0, cycles_run = cycles",
+                "                        int[::1] ev_sids=None, long long[::1] ev_vals=None,",
+                "                        int n_mem_events=0, int[::1] ev_mem_cycles=None,",
+                "                        int[::1] ev_mem_mids=None, int[::1] ev_mem_addrs=None,",
+                "                        long long[::1] ev_mem_vals=None):",
+                "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles",
                 f"        cdef long long sv[{sn}]",
                 f"        cdef long long sm[{sn}]",
                 "        self.ctx.error_code = ERR_NONE",
@@ -1440,6 +1598,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    self.ctx.dirty[ev_sids[ev_idx]] = 1",
                 "                    ev_applied = 1",
                 "                    ev_idx += 1",
+                "                while mem_ev_idx < n_mem_events and ev_mem_cycles[mem_ev_idx] == i:",
+                *(mem_event_dispatch if mem_event_dispatch else ["                    pass"]),
+                "                    ev_applied = 1",
+                "                    mem_ev_idx += 1",
                 "                # Settle: propagate event through continuous assigns",
                 "                # before snapshotting so port wiring (e.g. DUT rst port",
                 "                # driven by bench rst reg) reflects the event in sv[].",
@@ -1450,7 +1612,26 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    if self.ctx.error_code != ERR_NONE:",
                 "                        cycles_run = i + 1",
                 "                        break",
+                "                # Settle combinational logic (cont_N) before EACH",
+                "                # edge's snapshot, exactly like refresh_data_snapshot()",
+                "                # does for the reactive step()/settle() path -- without",
+                "                # this, a signal driven via this cycle's events (or",
+                "                # reactively before this batch_run() call) that only",
+                "                # reaches an always_ff body through an intervening",
+                "                # continuous assign (e.g. input padding/format-",
+                "                # conversion logic) is captured in sv[]/sm[] at its",
+                "                # STALE pre-drive value, not the freshly-propagated one",
+                "                # -- confirmed wrong against the real axis_pix_correction2",
+                "                # RTL (input pixel data padded via a continuous assign",
+                "                # before reaching axis_row_correct's own registers):",
+                "                # driving stimulus via batch_run (with or without this",
+                "                # method's own events -- reactive drive-then-batch_run(1)",
+                "                # hit the identical bug) silently fed every downstream",
+                "                # always_ff its garbage/stale pre-drive input forever,",
+                "                # vs. the same stimulus working correctly via ordinary",
+                "                # bench.step()/settle().",
                 "                # Snapshot before posedge",
+                *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                # Posedge: drive clk high",
@@ -1465,6 +1646,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    cycles_run = i + 1",
                 "                    break",
                 "                # Snapshot before negedge",
+                *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                # Negedge: drive clk low",

@@ -15,6 +15,7 @@ import heapq
 import json
 import os
 import tempfile
+import time
 import warnings
 import logging
 from pathlib import Path
@@ -34,6 +35,7 @@ from .compiler import (
     _cython_version,
     _keyed_module_name,
     _platform_tag,
+    _report_progress,
 )
 
 if TYPE_CHECKING:
@@ -415,24 +417,20 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                     return
 
         # Cache miss — run full codegen + compile (streaming path to cap peak memory)
+        _report_progress(f"generating Cython source for '{module.name}' (elaboration cache miss)...")
+        _codegen_t0 = time.monotonic()
         self._codegen = CythonCodegen()
-        tmp_fd, tmp_pyx_path = tempfile.mkstemp(suffix=".pyx", prefix="veriforge_")
-        os.close(tmp_fd)
-        try:
-            source_hash = self._codegen.generate_to_file(module, tmp_pyx_path, delta_limit=self.delta_limit)
+        with tempfile.TemporaryDirectory(prefix="veriforge_") as tmp_dir:
+            file_paths, source_hash = self._codegen.generate_to_files(module, tmp_dir, delta_limit=self.delta_limit)
+            _report_progress(f"generated Cython source for '{module.name}' in {time.monotonic() - _codegen_t0:.1f}s")
             try:
-                mod = self._compiler.compile_pyx_file(tmp_pyx_path, source_hash, f"compiled_{module.name}")
+                mod = self._compiler.compile_pyx_files(file_paths, source_hash, f"compiled_{module.name}")
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to compile Cython extension for module '{module.name}'. "
                     f"Ensure a C compiler is available or use engine='vm'. "
                     f"Original error: {exc}"
                 ) from exc
-        finally:
-            try:
-                os.unlink(tmp_pyx_path)
-            except FileNotFoundError:
-                pass
 
         self._sim = mod.CompiledSim()
         self._signal_map = dict(self._codegen.signal_map)
@@ -1181,18 +1179,52 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         if events:
             import array
 
-            n = len(events)
-            ev_cycles = array.array("i", [e[0] for e in events])
-            ev_sids = array.array("i", [self._signal_map[e[1]] for e in events])
-            ev_vals = array.array("q", [e[2] for e in events])
-            completed = self._sim.batch_run(
-                cycles,
-                clk_sid,
-                n_events=n,
-                ev_cycles=ev_cycles,
-                ev_sids=ev_sids,
-                ev_vals=ev_vals,
-            )
+            # Split into plain-signal events (the pre-existing case, a
+            # direct `self._signal_map` hit) and memory-element events
+            # (name has a "MEM[idx]" shape, e.g. a wide AXI-Stream `tdata`
+            # bus modeled as a 2-D packed array and addressed element-wise
+            # -- `read_signal`'s existing "MEM[idx]" fallback resolves the
+            # same shape for reads; this is that same addressing scheme's
+            # write-side, extended into `batch_run`'s C-level event loop
+            # so a whole beat's worth of per-lane writes can be scheduled
+            # without any per-event Python call). Only narrow (<=64-bit)
+            # memory elements are supported here -- see
+            # `_gen_compiled_sim`'s `batch_run` codegen for why.
+            sig_events = []
+            mem_events: list[tuple[int, int, int, int]] = []  # (cycle, mid, addr, val)
+            for cycle, name, val in events:
+                sid = self._signal_map.get(name)
+                if sid is not None:
+                    sig_events.append((cycle, sid, val))
+                    continue
+                mid = addr = None
+                if "[" in name and self._codegen is not None and name.endswith("]"):
+                    bracket = name.index("[")
+                    mid = self._codegen.mem_map.get(name[:bracket])
+                    if mid is not None:
+                        addr = int(name[bracket + 1 : -1])
+                if mid is None:
+                    raise ValueError(f"batch_run: unknown event target signal {name!r}")
+                elem_w, depth = self._codegen.mem_info[mid]
+                if not (0 <= addr < depth):
+                    raise ValueError(f"batch_run: memory element index out of range: {name!r}")
+                if elem_w > 64:
+                    raise ValueError(f"batch_run: wide (>64-bit) memory element events aren't supported yet: {name!r}")
+                mem_events.append((cycle, mid, addr, val))
+
+            kwargs: dict[str, object] = {}
+            if sig_events:
+                kwargs["n_events"] = len(sig_events)
+                kwargs["ev_cycles"] = array.array("i", [e[0] for e in sig_events])
+                kwargs["ev_sids"] = array.array("i", [e[1] for e in sig_events])
+                kwargs["ev_vals"] = array.array("q", [e[2] for e in sig_events])
+            if mem_events:
+                kwargs["n_mem_events"] = len(mem_events)
+                kwargs["ev_mem_cycles"] = array.array("i", [e[0] for e in mem_events])
+                kwargs["ev_mem_mids"] = array.array("i", [e[1] for e in mem_events])
+                kwargs["ev_mem_addrs"] = array.array("i", [e[2] for e in mem_events])
+                kwargs["ev_mem_vals"] = array.array("q", [e[3] for e in mem_events])
+            completed = self._sim.batch_run(cycles, clk_sid, **kwargs)
         else:
             completed = self._sim.batch_run(cycles, clk_sid)
         self._time += completed * clock_period

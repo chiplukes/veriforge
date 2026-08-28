@@ -112,6 +112,35 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Simulation
 
+- **Wide-signal pre-edge snapshot gap in the compiled engine** — the
+  posedge/negedge snapshot arrays (`_snap_v`/`_snap_m` in the generated
+  `SimCtx`) are `long long[N_SIGS]`, one slot per signal ID, and only ever
+  hold a signal's lower 64 bits. `_sig_extract_word_val_sv` /
+  `_sig_extract_word_mask_sv` (`sim/compiled/templates/narrow_accessors.pxi`)
+  detect a wide signal (`c.wide_words[sid] > 0`) and explicitly bypass the
+  snapshot, falling through to `_sig_extract_word_val`/`_mask` — i.e. the
+  *current* (post-delta-loop-so-far) value rather than the true pre-edge
+  value. For a plain unconditional register (`q <= wide_bus;`) this is
+  usually harmless since nothing re-derives the bus mid-delta-loop, but it
+  breaks any wide signal that feeds a conditionally-gated `always_ff` fed by
+  a mux/skid-buffer-style continuous re-derivation from a signal updated in
+  the same edge (confirmed trigger: `axis_regslice.v`'s skid buffer,
+  instantiated in the `axis_pix_correction2` project's `axis_row_correct.sv`
+  behind a wide concatenated `{tuser,tlast,tdata}` port — a narrow version of
+  the identical skid-buffer logic pattern works correctly, isolating the bug
+  to the wide (>64-bit) path specifically, not the skid-buffer shape). Fix
+  requires a real wide-word snapshot (e.g. `wide_snap_val`/`wide_snap_mask`
+  arrays sized like `wide_val`/`wide_mask`, populated by
+  `refresh_data_snapshot()` and the `batch_run()` per-cycle loop alongside
+  the existing narrow `sv`/`sm` memcpy) and updating the two `_sv` accessor
+  functions above to read from it instead of falling back to the live value.
+  Note: a real, separate, already-fixed bug in this same area was that
+  `batch_run()`'s internal C loop snapshotted via a raw `memcpy` with no
+  combinational settle first — fixed by running `cont_N(&self.ctx)` for
+  every continuous-assign process immediately before each posedge/negedge
+  snapshot, matching `refresh_data_snapshot()`'s existing pattern. That fix
+  is real and shipped; the wide-signal gap above is the remaining, deeper
+  issue.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native
