@@ -1204,6 +1204,47 @@ class _GenWideSectionsMixin:
                     f"    hi_m = _wmem{mid}_word_mask(c, addr, src_word + 1)",
                     "    return (lo_m >> src_shift) | (hi_m << (64 - src_shift))",
                     "",
+                    # Pre-edge-snapshot variants -- mirror the plain accessors
+                    # above but read wide_mem_{mid}_snap_val/snap_mask instead
+                    # of the live wide_mem_{mid}_val/mask. Redirected into by
+                    # _seq_body_to_sv_reads for reads of this memory from a
+                    # sequential process that never blocking-writes it itself
+                    # (see notes/roadmap.md "Wide-signal pre-edge snapshot gap"
+                    # -- a wide 2-D packed array port/wire is modeled as a
+                    # memory, not a wide signal, and previously had no
+                    # pre-edge snapshot at all, live-reading a value that a
+                    # continuous assign (e.g. port propagation) could still be
+                    # actively re-deriving within the same clock edge).
+                    f"cdef inline unsigned long long _wmem{mid}_word_val_snap(SimCtx *c, int addr, int word_index) noexcept nogil:",
+                    f"    if 0 <= word_index < {words}:",
+                    f"        return c.wide_mem_{mid}_snap_val[addr * {words} + word_index]",
+                    "    return 0",
+                    "",
+                    f"cdef inline unsigned long long _wmem{mid}_word_mask_snap(SimCtx *c, int addr, int word_index) noexcept nogil:",
+                    f"    if 0 <= word_index < {words}:",
+                    f"        return c.wide_mem_{mid}_snap_mask[addr * {words} + word_index]",
+                    "    return 0",
+                    "",
+                    f"cdef inline unsigned long long _wmem{mid}_extract_val_snap(SimCtx *c, int addr, int lsb) noexcept nogil:",
+                    "    cdef int src_word = lsb >> 6",
+                    "    cdef int src_shift = lsb & 63",
+                    f"    cdef unsigned long long lo_v = _wmem{mid}_word_val_snap(c, addr, src_word)",
+                    "    cdef unsigned long long hi_v",
+                    "    if src_shift == 0:",
+                    "        return lo_v",
+                    f"    hi_v = _wmem{mid}_word_val_snap(c, addr, src_word + 1)",
+                    "    return (lo_v >> src_shift) | (hi_v << (64 - src_shift))",
+                    "",
+                    f"cdef inline unsigned long long _wmem{mid}_extract_mask_snap(SimCtx *c, int addr, int lsb) noexcept nogil:",
+                    "    cdef int src_word = lsb >> 6",
+                    "    cdef int src_shift = lsb & 63",
+                    f"    cdef unsigned long long lo_m = _wmem{mid}_word_mask_snap(c, addr, src_word)",
+                    "    cdef unsigned long long hi_m",
+                    "    if src_shift == 0:",
+                    "        return lo_m",
+                    f"    hi_m = _wmem{mid}_word_mask_snap(c, addr, src_word + 1)",
+                    "    return (lo_m >> src_shift) | (hi_m << (64 - src_shift))",
+                    "",
                     f"cdef inline object _wmem{mid}_py_extract_val(SimCtx *c, int addr, int lsb, int width):",
                     "    cdef int i, chunk_lsb, chunk_w",
                     "    cdef object value = 0",
@@ -1249,6 +1290,47 @@ class _GenWideSectionsMixin:
                     "        chunk_mask = _word_mask64(chunk_w)",
                     "        chunk_val = _sig_extract_word_val(c, src_sid, src_lsb + src_shift) & chunk_mask",
                     "        chunk_rmask = _sig_extract_word_mask(c, src_sid, src_lsb + src_shift) & chunk_mask",
+                    f"        c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                    f"        c.nba_mem_range_addr[c.nba_mem_range_count] = (addr * {words}) + word_index",
+                    "        c.nba_mem_range_msb[c.nba_mem_range_count] = word_lsb + chunk_w - 1",
+                    "        c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
+                    "        c.nba_mem_range_val[c.nba_mem_range_count] = <long long>chunk_val",
+                    "        c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>chunk_rmask",
+                    "        c.nba_mem_range_count += 1",
+                    "    c.nba_pending = 1",
+                    "",
+                    # Pre-edge-snapshot twin of the helper above -- identical
+                    # except for reading the NBA-staged slice's *signal*
+                    # source via _sig_extract_word_val_sv/_mask_sv (sv[]/sm[]
+                    # for narrow, wide_snap_val/mask for wide) instead of the
+                    # live value. Selected at emission time
+                    # (_emit_const_mem_range_write_lines) only when src_sid
+                    # is known not to be blocking-written elsewhere in the
+                    # same seq body (self._body_tainted_sids) -- see
+                    # notes/roadmap.md "Wide-signal pre-edge snapshot gap":
+                    # confirmed real-world trigger is a mocked
+                    # `xpm_fifo_sync`'s `mem[wr_addr] <= din;`, where `din`
+                    # is a plain input port fed by a continuous assign from
+                    # a memory-backed skid-buffer output (never tainted).
+                    f"cdef inline void _wmem{mid}_stage_insert_signal_slice_sv(SimCtx *c, long long *sv, long long *sm, int addr, int dst_lsb, int src_sid, int src_lsb, int src_width) noexcept nogil:",
+                    "    cdef int start_word, end_word, word_index",
+                    "    cdef int chunk_lsb, chunk_msb, chunk_w, src_shift, word_lsb",
+                    "    cdef unsigned long long chunk_mask, chunk_val, chunk_rmask",
+                    "    if src_width <= 0:",
+                    "        return",
+                    "    start_word = dst_lsb >> 6",
+                    "    end_word = (dst_lsb + src_width - 1) >> 6",
+                    "    for word_index in range(start_word, end_word + 1):",
+                    "        chunk_lsb = dst_lsb if dst_lsb > word_index * 64 else word_index * 64",
+                    "        chunk_msb = dst_lsb + src_width - 1",
+                    "        if chunk_msb > ((word_index + 1) * 64) - 1:",
+                    "            chunk_msb = ((word_index + 1) * 64) - 1",
+                    "        chunk_w = chunk_msb - chunk_lsb + 1",
+                    "        src_shift = chunk_lsb - dst_lsb",
+                    "        word_lsb = chunk_lsb - (word_index * 64)",
+                    "        chunk_mask = _word_mask64(chunk_w)",
+                    "        chunk_val = _sig_extract_word_val_sv(sv, sm, c, src_sid, src_lsb + src_shift) & chunk_mask",
+                    "        chunk_rmask = _sig_extract_word_mask_sv(sm, c, src_sid, src_lsb + src_shift) & chunk_mask",
                     f"        c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
                     f"        c.nba_mem_range_addr[c.nba_mem_range_count] = (addr * {words}) + word_index",
                     "        c.nba_mem_range_msb[c.nba_mem_range_count] = word_lsb + chunk_w - 1",

@@ -188,6 +188,7 @@ class CythonCodegen(
     """Generate a complete .pyx source from a module AST."""
 
     __slots__ = (
+        "_body_tainted_sids",
         "_combo_processes",
         "_delta_limit",
         "_dynamic_max_wide_words",
@@ -230,6 +231,7 @@ class CythonCodegen(
     )
 
     def __init__(self) -> None:
+        self._body_tainted_sids: set[int] | None = None
         self._signal_map: dict[str, int] = {}
         self._signal_names: list[str] = []
         self._signal_widths: list[int] = []

@@ -112,35 +112,61 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Simulation
 
-- **Wide-signal pre-edge snapshot gap in the compiled engine** — the
-  posedge/negedge snapshot arrays (`_snap_v`/`_snap_m` in the generated
-  `SimCtx`) are `long long[N_SIGS]`, one slot per signal ID, and only ever
-  hold a signal's lower 64 bits. `_sig_extract_word_val_sv` /
-  `_sig_extract_word_mask_sv` (`sim/compiled/templates/narrow_accessors.pxi`)
-  detect a wide signal (`c.wide_words[sid] > 0`) and explicitly bypass the
-  snapshot, falling through to `_sig_extract_word_val`/`_mask` — i.e. the
-  *current* (post-delta-loop-so-far) value rather than the true pre-edge
-  value. For a plain unconditional register (`q <= wide_bus;`) this is
-  usually harmless since nothing re-derives the bus mid-delta-loop, but it
-  breaks any wide signal that feeds a conditionally-gated `always_ff` fed by
-  a mux/skid-buffer-style continuous re-derivation from a signal updated in
-  the same edge (confirmed trigger: `axis_regslice.v`'s skid buffer,
-  instantiated in the `axis_pix_correction2` project's `axis_row_correct.sv`
-  behind a wide concatenated `{tuser,tlast,tdata}` port — a narrow version of
-  the identical skid-buffer logic pattern works correctly, isolating the bug
-  to the wide (>64-bit) path specifically, not the skid-buffer shape). Fix
-  requires a real wide-word snapshot (e.g. `wide_snap_val`/`wide_snap_mask`
-  arrays sized like `wide_val`/`wide_mask`, populated by
-  `refresh_data_snapshot()` and the `batch_run()` per-cycle loop alongside
-  the existing narrow `sv`/`sm` memcpy) and updating the two `_sv` accessor
-  functions above to read from it instead of falling back to the live value.
-  Note: a real, separate, already-fixed bug in this same area was that
-  `batch_run()`'s internal C loop snapshotted via a raw `memcpy` with no
-  combinational settle first — fixed by running `cont_N(&self.ctx)` for
-  every continuous-assign process immediately before each posedge/negedge
-  snapshot, matching `refresh_data_snapshot()`'s existing pattern. That fix
-  is real and shipped; the wide-signal gap above is the remaining, deeper
-  issue.
+- **Wide-signal pre-edge snapshot gap in the compiled engine** — **Fixed**
+  (three layers, all landed and regression-clean: full suite 8394 passed / 0
+  failed after all three). Turned out to be three separate-but-related gaps,
+  each surfaced by peeling back the previous fix against the real
+  `axis_pix_correction2` repro (`axis_regslice.v`'s skid buffer, reached via
+  a wide `{tuser,tlast,tdata}` port, driving a mocked `xpm_fifo_sync`):
+  1. *Wide signals*: `_sig_extract_word_val_sv`/`_sig_extract_word_mask_sv`
+     (`sim/compiled/templates/narrow_accessors.pxi`) bypassed the snapshot
+     entirely for any signal with `c.wide_words[sid] > 0`, always reading
+     the live value. Fixed with real `wide_snap_val`/`wide_snap_mask`
+     `SimCtx` fields, populated everywhere `sv`/`sm` already are
+     (`snapshot()`, `refresh_data_snapshot()`, `batch_run()`'s three
+     snapshot points).
+  2. *Memories*: a 2-D packed array used for per-element addressing (e.g. an
+     AXI-Stream `tdata` bus modeled per-lane) is elaborated as a *memory*,
+     not a signal, and memory reads (`c.mem_{mid}_val[addr]`,
+     `_wmem{mid}_extract_val(c, ...)`) had no pre-edge concept at all,
+     for any process kind. Fixed with per-memory `mem_{mid}_snap_val`/
+     `wide_mem_{mid}_snap_val` fields plus `_wmem{mid}_extract_val_snap`/
+     `_extract_mask_snap` accessors, and a coarse (per-mid, not
+     per-address — a dynamic address expression makes per-element taint
+     undecidable at codegen time) taint rule in `_seq_body_to_sv_reads`.
+  3. *Shared, call-site-blind memory-write helpers*: `mem[addr] <= a_signal;`
+     (a whole-element NBA write sourced from a plain signal, elem width
+     > 64 bits — the actual `xpm_fifo_sync` mock's `mem[wr_addr] <= din;`)
+     compiles to `_wmem{mid}_stage_insert_signal_slice`, a *shared* function
+     (one definition, called from cont/combo/seq alike) whose body read the
+     signal source live with no way to know its caller's context. Fixing
+     this one couldn't reuse the text-substitution trick above (the
+     surrounding call arguments can be arbitrary expressions, not safely
+     regex-skippable) — instead added a real per-body blocking-write
+     pre-scan (`_collect_blocking_write_sids`, run once before compiling a
+     seq body's statements via a new `_compile_always_body(..., is_seq=True)`
+     path) so the statement emitter can choose a `_sv`-suffixed twin
+     (`_wmem{mid}_stage_insert_signal_slice_sv`) at *generation* time
+     whenever the signal source is provably not a local blocking-written
+     temp in that same body.
+  Verified against the real design: reactively-driven input (`s_in.put()` +
+  `wait_drain()`) followed by a `batch_run()` tail — exactly the pattern in
+  `test_lowered_source_with_batch_run` — now produces correct output across
+  multiple distinct rows, not just the one the shipped test covers.
+  **Still out of scope / not covered by any of the three fixes above**:
+  driving *new* data across a wide/memory-backed bus via `batch_run()`'s own
+  `events=` mechanism directly (as opposed to reactively via `bench.step()`)
+  remains unsafe — confirmed still failing (`lowered_batch_run_test.py`, a
+  scratch repro, not shipped). Root cause not yet isolated; likely a
+  distinct issue in how `batch_run()`'s per-cycle event-application loop
+  settles a memory-backed input before its own snapshot points, separate
+  from the three read-side gaps above. There may also be other
+  call-site-blind shared helpers with the same class of bug as (3) above
+  (candidates, unconfirmed: `_whole_stage_insert_signal_slice`,
+  `_whole_stage_insert_word`, `_whole_stage_insert_signal`,
+  `_whole_assign_mem_elem_{mid}`) — not audited beyond the one actually
+  exercised by this repro; worth a dedicated sweep before assuming the
+  compiled engine's memory/wide-signal snapshot story is fully closed.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

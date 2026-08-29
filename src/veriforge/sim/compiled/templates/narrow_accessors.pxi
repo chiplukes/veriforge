@@ -66,14 +66,35 @@ cdef inline unsigned long long _sig_extract_word_mask(SimCtx *c, int sid, int ls
     hi_m = _sig_word_mask(c, sid, src_word + 1)
     return (lo_m >> src_shift) | (hi_m << (64 - src_shift))
 
+cdef inline unsigned long long _sig_word_val_snap(SimCtx *c, int sid, int word_index) noexcept nogil:
+    if 0 <= word_index < c.wide_words[sid]:
+        return c.wide_snap_val[c.wide_offset[sid] + word_index]
+    return 0
+
+cdef inline unsigned long long _sig_word_mask_snap(SimCtx *c, int sid, int word_index) noexcept nogil:
+    if 0 <= word_index < c.wide_words[sid]:
+        return c.wide_snap_mask[c.wide_offset[sid] + word_index]
+    return 0
+
 cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
     cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_v
     cdef unsigned long long hi_v
     if c.wide_words[sid] > 0:
-        # Wide signal: sv[] only holds lower 64 bits; use original helper
-        return _sig_extract_word_val(c, sid, lsb)
+        # Wide signal: read from the pre-edge wide snapshot (wide_snap_val),
+        # populated by snapshot()/refresh_data_snapshot()/batch_run() at the
+        # same points that populate sv[]/sm[] for narrow signals below --
+        # see notes/roadmap.md "Wide-signal pre-edge snapshot gap in the
+        # compiled engine" for the bug this replaces (previously fell
+        # through to the LIVE value here, breaking any wide signal feeding
+        # a conditionally-gated always_ff re-derived from a register
+        # updated in the same edge, e.g. a register-slice/skid buffer).
+        lo_v = _sig_word_val_snap(c, sid, src_word)
+        if src_shift == 0:
+            return lo_v
+        hi_v = _sig_word_val_snap(c, sid, src_word + 1)
+        return (lo_v >> src_shift) | (hi_v << (64 - src_shift))
     # Narrow signal: read from pre-posedge snapshot
     lo_v = <unsigned long long>sv[sid] & _word_mask64(c.width[sid])
     if src_shift == 0:
@@ -81,10 +102,18 @@ cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long
     return lo_v >> src_shift
 
 cdef inline unsigned long long _sig_extract_word_mask_sv(long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
+    cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_m
+    cdef unsigned long long hi_m
     if c.wide_words[sid] > 0:
-        return _sig_extract_word_mask(c, sid, lsb)
+        # Wide signal: read from the pre-edge wide snapshot -- see
+        # _sig_extract_word_val_sv above.
+        lo_m = _sig_word_mask_snap(c, sid, src_word)
+        if src_shift == 0:
+            return lo_m
+        hi_m = _sig_word_mask_snap(c, sid, src_word + 1)
+        return (lo_m >> src_shift) | (hi_m << (64 - src_shift))
     lo_m = <unsigned long long>sm[sid] & _word_mask64(c.width[sid])
     if src_shift == 0:
         return lo_m

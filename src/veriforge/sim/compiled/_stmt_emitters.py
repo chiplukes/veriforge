@@ -1795,10 +1795,25 @@ class _StmtEmittersMixin:
         if elem_w > _WORD_BITS:
             if rhs_source is not None:
                 rhs_sid, rhs_lsb = rhs_source
-                helper = f"_wmem{mid}_stage_insert_signal_slice" if is_nba else f"_wmem{mid}_assign_insert_signal_slice"
                 if is_nba:
-                    return [f"{pad}{helper}(c, ({idx}), {lsb_v}, {rhs_sid}, <int>({rhs_lsb}), {sel_w})"]
-                return [f"{pad}{helper}(c, ({idx}), {lsb_v}, {rhs_sid}, <int>({rhs_lsb}), {sel_w}, {marker_sid})"]
+                    # Prefer the pre-edge-snapshot-reading twin whenever we
+                    # know (from a same-body blocking-write pre-scan --
+                    # `self._body_tainted_sids`, `None` outside seq bodies)
+                    # that rhs_sid isn't a local blocking-written temp here.
+                    # See _wmem{mid}_stage_insert_signal_slice_sv's own
+                    # comment (_gen_wide_section.py) for why this matters.
+                    if self._body_tainted_sids is not None and rhs_sid not in self._body_tainted_sids:
+                        return [
+                            f"{pad}_wmem{mid}_stage_insert_signal_slice_sv(c, sv, sm, ({idx}), {lsb_v},"
+                            f" {rhs_sid}, <int>({rhs_lsb}), {sel_w})"
+                        ]
+                    return [
+                        f"{pad}_wmem{mid}_stage_insert_signal_slice(c, ({idx}), {lsb_v}, {rhs_sid}, <int>({rhs_lsb}), {sel_w})"
+                    ]
+                return [
+                    f"{pad}_wmem{mid}_assign_insert_signal_slice(c, ({idx}), {lsb_v}, {rhs_sid},"
+                    f" <int>({rhs_lsb}), {sel_w}, {marker_sid})"
+                ]
             words = self._mem_words(mid)
             lines = [] if is_nba else [f"{pad}_mchg = 0"]
             start_word = lsb_v // _WORD_BITS

@@ -23,6 +23,8 @@ from veriforge.sim.compiled._codegen_utils import (
     _cy_u64_hex,
     _const_int,
 )
+from veriforge.model.expressions import Identifier
+from veriforge.model.statements import BlockingAssign
 from veriforge.sim.compiled._gen_narrow_accessors import _gen_narrow_accessor_code
 from veriforge.sim.compiled._gen_narrow_stage import _gen_narrow_stage_code
 from veriforge.sim.compiled._gen_narrow_assign import _gen_narrow_assign_code
@@ -32,6 +34,18 @@ from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
 
 _BLOCKING_WRITE_RE = re.compile(r"^\s*c\.val\[(\d+)\]\s*=(?!=)")
 _NARROW_LHS_RE = re.compile(r"^\s*_set_(?:val|mask)_word\s*\(\s*c\s*,\s*(\d+)\s*,")
+
+# Memory-element counterparts of the two patterns above -- see
+# _seq_body_to_sv_reads's "Memories" docstring section for why memories need
+# their own (coarser, per-mid rather than per-address) taint tracking.
+_MEM_BLOCKING_WRITE_RE = re.compile(r"^\s*c\.(?:wide_)?mem_(\d+)_val\[[^\]]*\]\s*=(?!=)")
+_MEM_ASSIGN_HELPER_RE = re.compile(r"_wmem(\d+)_assign_insert")
+_MEM_VAL_RE = re.compile(r"c\.mem_(\d+)_val\[")
+_MEM_MASK_RE = re.compile(r"c\.mem_(\d+)_mask\[")
+_WIDE_MEM_VAL_RE = re.compile(r"c\.wide_mem_(\d+)_val\[")
+_WIDE_MEM_MASK_RE = re.compile(r"c\.wide_mem_(\d+)_mask\[")
+_WMEM_EXTRACT_VAL_RE = re.compile(r"_wmem(\d+)_extract_val\(c,")
+_WMEM_EXTRACT_MASK_RE = re.compile(r"_wmem(\d+)_extract_mask\(c,")
 
 # Maximum number of trigger[] terms to inline on a single sensitivity check line.
 # Longer sensitivity sets are split across multiple shorter lines using parenthesised
@@ -115,6 +129,40 @@ def _seq_body_to_sv_reads(
       c.mask[N]                     → sm[N]    (only if N not blocking-written or async here)
       _sig_extract_word_val(c, …)   → _sig_extract_word_val_sv(sv, sm, c, …)
       _sig_extract_word_mask(c, …)  → _sig_extract_word_mask_sv(sm, c, …)
+
+    **Memories** — a 2-D packed array (e.g. an AXI-Stream `tdata` bus modeled
+    per-lane for element addressing) is elaborated as a *memory*, not a
+    plain signal, so it never goes through the `c.val[N]`/`_sig_extract_word_val`
+    substitutions above at all -- it has its own read paths
+    (`c.mem_{mid}_val[addr]`/`c.mem_{mid}_mask[addr]` for narrow elements,
+    `_wmem{mid}_extract_val(c, addr, lsb)`/`_wmem{mid}_extract_mask(c, ...)`
+    for wide ones) that, before this, had NO pre-edge snapshot concept
+    whatsoever -- always live, regardless of process kind. This matters the
+    same way it does for wide signals: a memory fed by a continuous assign
+    (e.g. a wide port connection propagating a parent module's bits into a
+    child's flattened packed-array port) can still be re-derived by further
+    delta-loop settling within the same clock edge, so a sequential process
+    reading it needs a value frozen at the edge, not the live one (confirmed
+    against the real axis_pix_correction2 RTL: `axis_regslice.v`'s skid
+    buffer reads its wide input port -- itself modeled as a memory for
+    per-lane addressing -- and read the live, still-settling value under
+    batch_run()-driven stimulus).
+
+    Substituted the same way, but per memory id (`mid`) rather than per
+    signal id, and *coarser*: if `mid` is blocking-written **anywhere** in
+    this body (`c.mem_{mid}_val[...] = ...`, `c.wide_mem_{mid}_val[...] = ...`,
+    or a call into a `_wmem{mid}_assign_*` blocking-write helper), every read
+    of that mid in this body is left untouched (100% live, matching prior
+    behavior) rather than tracking taint per-address -- a dynamic address
+    expression makes exact per-element taint undecidable at codegen time, and
+    this coarse rule is a pure no-op for any mid that already worked
+    correctly (nothing to preserve if the mid is never written here):
+      c.mem_{mid}_val[…]                    → c.mem_{mid}_snap_val[…]
+      c.mem_{mid}_mask[…]                   → c.mem_{mid}_snap_mask[…]
+      c.wide_mem_{mid}_val[…]               → c.wide_mem_{mid}_snap_val[…]
+      c.wide_mem_{mid}_mask[…]              → c.wide_mem_{mid}_snap_mask[…]
+      _wmem{mid}_extract_val(c, …)          → _wmem{mid}_extract_val_snap(c, …)
+      _wmem{mid}_extract_mask(c, …)         → _wmem{mid}_extract_mask_snap(c, …)
     """
     # First pass: collect signal IDs that are blocking-written in this process.
     # Also seed tainted with async sensitivity signals (negedge signals) and
@@ -123,6 +171,7 @@ def _seq_body_to_sv_reads(
     tainted: set[int] = set(async_sids) if async_sids else set()
     if func_internal_sids:
         tainted.update(func_internal_sids)
+    tainted_mem: set[int] = set()
     for line in body_lines:
         m = _BLOCKING_WRITE_RE.match(line)
         if m:
@@ -130,6 +179,11 @@ def _seq_body_to_sv_reads(
         m = _NARROW_LHS_RE.match(line)
         if m:
             tainted.add(int(m.group(1)))
+        m = _MEM_BLOCKING_WRITE_RE.match(line)
+        if m:
+            tainted_mem.add(int(m.group(1)))
+        for m in _MEM_ASSIGN_HELPER_RE.finditer(line):
+            tainted_mem.add(int(m.group(1)))
 
     # Second pass: substitute, skipping tainted signal IDs.
     def _sub_val(match: re.Match) -> str:
@@ -157,10 +211,44 @@ def _seq_body_to_sv_reads(
             return m.group(0)
         return f"_sig_extract_word_mask_sv(sm, c, {m.group(1)},"
 
+    def _sub_mem_val(m: re.Match) -> str:
+        mid = int(m.group(1))
+        return m.group(0) if mid in tainted_mem else f"c.mem_{mid}_snap_val["
+
+    def _sub_mem_mask(m: re.Match) -> str:
+        mid = int(m.group(1))
+        return m.group(0) if mid in tainted_mem else f"c.mem_{mid}_snap_mask["
+
+    def _sub_wide_mem_val(m: re.Match) -> str:
+        mid = int(m.group(1))
+        return m.group(0) if mid in tainted_mem else f"c.wide_mem_{mid}_snap_val["
+
+    def _sub_wide_mem_mask(m: re.Match) -> str:
+        mid = int(m.group(1))
+        return m.group(0) if mid in tainted_mem else f"c.wide_mem_{mid}_snap_mask["
+
+    def _sub_wmem_extract_val(m: re.Match) -> str:
+        mid = int(m.group(1))
+        if mid in tainted_mem:
+            return m.group(0)
+        return f"_wmem{mid}_extract_val_snap(c,"
+
+    def _sub_wmem_extract_mask(m: re.Match) -> str:
+        mid = int(m.group(1))
+        if mid in tainted_mem:
+            return m.group(0)
+        return f"_wmem{mid}_extract_mask_snap(c,"
+
     result = []
     for line in body_lines:
         line = wide_val_re.sub(_sub_wide_val, line)
         line = wide_mask_re.sub(_sub_wide_mask, line)
+        line = _WMEM_EXTRACT_VAL_RE.sub(_sub_wmem_extract_val, line)
+        line = _WMEM_EXTRACT_MASK_RE.sub(_sub_wmem_extract_mask, line)
+        line = _WIDE_MEM_VAL_RE.sub(_sub_wide_mem_val, line)
+        line = _WIDE_MEM_MASK_RE.sub(_sub_wide_mem_mask, line)
+        line = _MEM_VAL_RE.sub(_sub_mem_val, line)
+        line = _MEM_MASK_RE.sub(_sub_mem_mask, line)
         # For lines that are themselves a blocking-write LHS, only substitute the RHS.
         m = _BLOCKING_WRITE_RE.match(line)
         if m:
@@ -219,6 +307,43 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     """Mixin providing all _gen_* section-builder methods for CythonCodegen."""
 
     __slots__ = ()
+
+    def _mem_snap_memcpy_lines(self, indent: str) -> list[str]:
+        """Lines that copy every memory's live val/mask arrays into their
+        pre-edge snapshot (`mem_{mid}_snap_val`/`wide_mem_{mid}_snap_val`)
+        counterparts. Emitted at every point that already snapshots
+        `ctx.val`/`ctx.mask` into `sv`/`sm` (`snapshot()`,
+        `refresh_data_snapshot()`, and each of `batch_run()`'s three
+        snapshot points) -- see notes/roadmap.md "Wide-signal pre-edge
+        snapshot gap" for why a 2-D packed array (elaborated as a `memory`
+        for per-element addressing, not a plain signal) needs this too: a
+        memory fed by a continuous assign (e.g. a wide port connection) can
+        still be re-derived by further delta-loop settling within the same
+        clock edge, so a sequential process reading it needs the same
+        frozen-at-the-edge value narrow/wide signals get from sv[]/sm[]/
+        wide_snap_val/wide_snap_mask.
+        """
+        lines: list[str] = []
+        for mid in range(self._n_mems):
+            elem_w, depth = self._mem_info[mid]
+            if elem_w > _WORD_BITS:
+                words = self._mem_words(mid)
+                lines.append(
+                    f"{indent}memcpy(self.ctx.wide_mem_{mid}_snap_val, self.ctx.wide_mem_{mid}_val,"
+                    f" {depth * words} * sizeof(unsigned long long))"
+                )
+                lines.append(
+                    f"{indent}memcpy(self.ctx.wide_mem_{mid}_snap_mask, self.ctx.wide_mem_{mid}_mask,"
+                    f" {depth * words} * sizeof(unsigned long long))"
+                )
+            else:
+                lines.append(
+                    f"{indent}memcpy(self.ctx.mem_{mid}_snap_val, self.ctx.mem_{mid}_val, {depth} * sizeof(long long))"
+                )
+                lines.append(
+                    f"{indent}memcpy(self.ctx.mem_{mid}_snap_mask, self.ctx.mem_{mid}_mask, {depth} * sizeof(long long))"
+                )
+        return lines
 
     def _nba_mem_queue_bound(self) -> int:
         """Compute a safe capacity for the NBA memory queues (see the call
@@ -409,6 +534,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    int       nba_pending",
             "    unsigned long long wide_val[N_WIDE_WORDS]",
             "    unsigned long long wide_mask[N_WIDE_WORDS]",
+            "    unsigned long long wide_snap_val[N_WIDE_WORDS]",
+            "    unsigned long long wide_snap_mask[N_WIDE_WORDS]",
             "    long long conv_val[N_SIGS]",
             "    long long conv_mask[N_SIGS]",
             "    unsigned long long conv_wide_val[N_WIDE_WORDS]",
@@ -426,9 +553,13 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 words = self._mem_words(mid)
                 lines.append(f"    unsigned long long wide_mem_{mid}_val[{depth * words}]")
                 lines.append(f"    unsigned long long wide_mem_{mid}_mask[{depth * words}]")
+                lines.append(f"    unsigned long long wide_mem_{mid}_snap_val[{depth * words}]")
+                lines.append(f"    unsigned long long wide_mem_{mid}_snap_mask[{depth * words}]")
             else:
                 lines.append(f"    long long mem_{mid}_val[{depth}]")
                 lines.append(f"    long long mem_{mid}_mask[{depth}]")
+                lines.append(f"    long long mem_{mid}_snap_val[{depth}]")
+                lines.append(f"    long long mem_{mid}_snap_mask[{depth}]")
         # NBA memory queue
         if self._n_mems > 0:
             lines.extend(
@@ -705,16 +836,51 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             return "# No user-defined functions"
         return "\n".join(parts)
 
-    def _compile_always_body(self, block_body) -> list[str]:
+    def _collect_blocking_write_sids(self, block_body) -> set[int]:
+        """Every signal id blocking-assigned (``=``, not ``<=``) anywhere in a
+        process body, resolved via ``self._signal_map``.
+
+        Computed once per seq body, *before* any statement is compiled, so
+        that per-statement emitters needing to choose between a live-reading
+        and a pre-edge-snapshot-reading helper for an NBA statement's signal
+        RHS source (e.g. ``_wmem{mid}_stage_insert_signal_slice`` vs. its
+        ``_sv``-suffixed twin -- see notes/roadmap.md "Wide-signal pre-edge
+        snapshot gap") can make that decision at emission time instead of via
+        `_seq_body_to_sv_reads`'s later text-level substitution, which can't
+        safely parse these particular call sites' other (arbitrary-
+        expression) arguments. Mirrors `_BLOCKING_WRITE_RE`'s scope exactly:
+        only a plain (possibly hierarchical) identifier LHS resolves to a
+        whole signal id here -- bit/range-select and memory-element targets
+        don't taint a whole signal's value and are out of scope.
+        """
+        tainted: set[int] = set()
+        for assign in block_body.find(BlockingAssign):
+            target = assign.lhs
+            if isinstance(target, Identifier):
+                name = target.name
+                if target.hierarchy:
+                    name = ".".join(target.hierarchy) + "." + name
+                sid = self._signal_map.get(name)
+                if sid is not None:
+                    tainted.add(sid)
+        return tainted
+
+    def _compile_always_body(self, block_body, *, is_seq: bool = False) -> list[str]:
         """Compile one always-block body Statement to code lines on demand.
 
         Resets the expression-temporary counters so names are unique per function.
         Called from the process-function generators so the IR for each block is
         discarded as soon as its text has been written to disk.
+
+        *is_seq* pre-computes `self._body_tainted_sids` (see
+        `_collect_blocking_write_sids`) for statement emitters that need it;
+        left `None` for cont/combo bodies, which have no `sv`/`sm` in scope
+        at all and must never attempt the snapshot-reading path.
         """
         self._et_count = 0
         self._et_node_masks = {}
         self._et_node_vals = {}
+        self._body_tainted_sids = self._collect_blocking_write_sids(block_body) if is_seq else None
         return self._emit_stmt(block_body, indent=1)
 
     def _gen_process_functions(self) -> str:
@@ -746,7 +912,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
             ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
-            ("seq", (self._compile_always_body(body) for _edges, _sens, body in self._seq_processes), True, True),
+            (
+                "seq",
+                (self._compile_always_body(body, is_seq=True) for _edges, _sens, body in self._seq_processes),
+                True,
+                True,
+            ),
         )
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
             for i, body_lines in enumerate(body_groups):
@@ -859,7 +1030,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
             ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
-            ("seq", (self._compile_always_body(body) for _edges, _sens, body in self._seq_processes), True, True),
+            (
+                "seq",
+                (self._compile_always_body(body, is_seq=True) for _edges, _sens, body in self._seq_processes),
+                True,
+                True,
+            ),
         )
         first_func_seen: set[int] = set()  # ids of streams that already received their first chunk
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
@@ -1225,6 +1401,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            self.ctx.wide_mask[i] = 0",
             "            self.ctx.wide_nba_val[i] = 0",
             "            self.ctx.wide_nba_mask[i] = 0",
+            "            self.ctx.wide_snap_val[i] = 0",
+            "            self.ctx.wide_snap_mask[i] = 0",
         ]
         # Per-signal width and mask init (outside the loop, constant indices)
         for sid in range(self._n_sigs):
@@ -1260,10 +1438,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append(
                     f"            self.ctx.wide_mem_{mid}_mask[i] = _word_mask64(MEM_{mid}_WIDTH - ((i % MEM_{mid}_WORDS) * 64))"
                 )
+                lines.append(f"            self.ctx.wide_mem_{mid}_snap_val[i] = 0")
+                lines.append(f"            self.ctx.wide_mem_{mid}_snap_mask[i] = 0")
             else:
                 lines.append(f"        for i in range({depth}):")
                 lines.append(f"            self.ctx.mem_{mid}_val[i] = 0")
                 lines.append(f"            self.ctx.mem_{mid}_mask[i] = wmask(MEM_{mid}_WIDTH)")
+                lines.append(f"            self.ctx.mem_{mid}_snap_val[i] = 0")
+                lines.append(f"            self.ctx.mem_{mid}_snap_mask[i] = 0")
         if self._n_mems > 0:
             lines.append("        self.ctx.nba_mem_count = 0")
             lines.append("        self.ctx.nba_mem_range_count = 0")
@@ -1408,6 +1590,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "    cpdef void snapshot(self):",
                 f"        memcpy(self._snap_v, self.ctx.val, {sn} * sizeof(long long))",
                 f"        memcpy(self._snap_m, self.ctx.mask, {sn} * sizeof(long long))",
+                "        memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+                "        memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._mem_snap_memcpy_lines("        "),
             ]
         )
 
@@ -1435,6 +1620,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     *settle_lines,
                     f"        memcpy(self._snap_v, self.ctx.val, {sn} * sizeof(long long))",
                     f"        memcpy(self._snap_m, self.ctx.mask, {sn} * sizeof(long long))",
+                    "        memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+                    "        memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                    *self._mem_snap_memcpy_lines("        "),
                     *restore_lines,
                 ]
             )
@@ -1608,6 +1796,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                if ev_applied:",
                 f"                    memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                    memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
+                "                    memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+                "                    memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._mem_snap_memcpy_lines("                    "),
                 "                    delta_loop(&self.ctx, sv, sm)",
                 "                    if self.ctx.error_code != ERR_NONE:",
                 "                        cycles_run = i + 1",
@@ -1634,6 +1825,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
+                "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+                "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._mem_snap_memcpy_lines("                "),
                 "                # Posedge: drive clk high",
                 "                self.ctx.val[clk_sid] = 1",
                 "                self.ctx.mask[clk_sid] = 0",
@@ -1649,6 +1843,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
+                "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+                "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._mem_snap_memcpy_lines("                "),
                 "                # Negedge: drive clk low",
                 "                self.ctx.val[clk_sid] = 0",
                 "                self.ctx.mask[clk_sid] = 0",
