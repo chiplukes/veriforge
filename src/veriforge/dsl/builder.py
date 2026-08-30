@@ -83,11 +83,23 @@ def _check_identifier(name: str, kind: str = "signal") -> None:
 
 
 def _to_expr_node(value: object) -> Expression:
-    """Convert a Python value to an Expression model node."""
+    """Convert a Python value to an Expression model node.
+
+    A bare Python int becomes an unsized, unbased Literal -- the DSL
+    equivalent of writing a plain decimal number like `5` in Verilog
+    source, which IEEE 1800-2017 SS5.7.1 defines as *signed*. Marked
+    `signed=True` to match: without it, `5 * a` for a signed wire `a`
+    silently computes as unsigned under Verilog's "either operand
+    unsigned -> whole expression unsigned" type-promotion rule, reading
+    `a`'s bit pattern as unsigned instead of sign-extending it (confirmed
+    wrong via a real design, `cineform-fpga`'s wavelet modules -- see
+    `_build_decimal_number`'s identical fix in
+    `transforms/_expressions.py` for the parser-side counterpart).
+    """
     if isinstance(value, Expr):
         return value._as_expr()
     if isinstance(value, int):  # bool is subclass of int
-        return Literal(int(value), original_text=str(int(value)))
+        return Literal(int(value), original_text=str(int(value)), signed=True)
     if isinstance(value, str):
         return StringLiteral(value)
     if isinstance(value, Expression):
@@ -109,9 +121,10 @@ def _to_expr_node(value: object) -> Expression:
 
 
 def _to_lit(value: object) -> Literal:
-    """Convert a Python int to a Literal."""
+    """Convert a Python int to a Literal. See `_to_expr_node`'s docstring
+    for why this is `signed=True` (unsized decimal literal semantics)."""
     if isinstance(value, int):
-        return Literal(int(value), original_text=str(int(value)))
+        return Literal(int(value), original_text=str(int(value)), signed=True)
     raise TypeError(f"Cannot convert {type(value).__name__} to Literal")
 
 

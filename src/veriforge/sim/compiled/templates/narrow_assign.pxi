@@ -6297,6 +6297,45 @@ cdef inline void _whole_stage_insert_signal_slice(SimCtx *c, int dst_sid, int ds
         _whole_stage_insert_word(c, dst_sid, dst_lsb + src_bit, chunk, word_v, word_m)
         src_bit += chunk
 
+cdef inline void _whole_stage_insert_signal_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int lsb, int src_sid, int src_width) noexcept nogil:
+    # Pre-edge-snapshot twin of _whole_stage_insert_signal -- identical
+    # except the source read goes through _sig_extract_word_val_sv/
+    # _mask_sv (wide_snap_val/sv[]) instead of the live value. Selected at
+    # emission time (_stmt_emitters.py's struct/range-select LHS writers)
+    # only when src_sid is known not to be blocking-written elsewhere in
+    # the same seq body (self._body_tainted_sids) -- see notes/roadmap.md
+    # "Wide-signal pre-edge snapshot gap": same class of bug as
+    # _whole_stage_signal_sv, found auditing every other call-site-blind
+    # NBA helper that reads a signal source via a runtime sid rather than
+    # inline-substitutable `c.val[N]`/`_sig_extract_word_val(c, N, ...)`
+    # text.
+    cdef int src_bit = 0
+    cdef int chunk
+    cdef unsigned long long word_v, word_m
+    while src_bit < src_width:
+        chunk = src_width - src_bit
+        if chunk > 64:
+            chunk = 64
+        word_v = _sig_extract_word_val_sv(sv, sm, c, src_sid, src_bit)
+        word_m = _sig_extract_word_mask_sv(sm, c, src_sid, src_bit)
+        _whole_stage_insert_word(c, dst_sid, lsb + src_bit, chunk, word_v, word_m)
+        src_bit += chunk
+
+cdef inline void _whole_stage_insert_signal_slice_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int dst_lsb, int src_sid, int src_lsb, int src_width) noexcept nogil:
+    # Pre-edge-snapshot twin of _whole_stage_insert_signal_slice -- see
+    # _whole_stage_insert_signal_sv's comment above for the rationale.
+    cdef int src_bit = 0
+    cdef int chunk
+    cdef unsigned long long word_v, word_m
+    while src_bit < src_width:
+        chunk = src_width - src_bit
+        if chunk > 64:
+            chunk = 64
+        word_v = _sig_extract_word_val_sv(sv, sm, c, src_sid, src_lsb + src_bit)
+        word_m = _sig_extract_word_mask_sv(sm, c, src_sid, src_lsb + src_bit)
+        _whole_stage_insert_word(c, dst_sid, dst_lsb + src_bit, chunk, word_v, word_m)
+        src_bit += chunk
+
 cdef inline void _whole_assign_const_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
     cdef int i, remaining_w, changed = 0

@@ -341,7 +341,20 @@ def _build_sized_number(
 
 
 def _build_decimal_number(tree: Tree, source_file: str | None, loc: SourceLocation) -> Literal:
-    """Build a Literal from a decimal_number subtree."""
+    """Build a Literal from a decimal_number subtree.
+
+    An unsized, unbased decimal number (`5`, not `8'd5`) is a *signed*
+    integer per IEEE 1800-2017 SS5.7.1 ("unsized single-bit values... An
+    unsized number that has no base is treated as decimal and is signed").
+    Without `signed=True` here, a binary op mixing this literal with a
+    signed operand (`5 * a`, `a` a signed wire) silently computes as
+    *unsigned* under Verilog's own "either operand unsigned -> whole
+    expression unsigned" type-promotion rule, reinterpreting `a`'s bit
+    pattern as unsigned instead of sign-extending it -- confirmed wrong via
+    a real design (`cineform-fpga`'s `wavelet_26_horizontal`/`_vertical`):
+    `5 * a` with `a = -709` produced 324135 (`5 * 64827`, `a`'s raw bit
+    pattern reinterpreted unsigned) instead of the correct -3545.
+    """
     has_base = any(isinstance(c, Tree) and c.data == "decimal_base" for c in tree.children)
 
     if has_base:
@@ -349,9 +362,9 @@ def _build_decimal_number(tree: Tree, source_file: str | None, loc: SourceLocati
 
     text = _collect_text(tree)
     try:
-        return Literal(value=int(text), original_text=text, loc=loc)
+        return Literal(value=int(text), original_text=text, signed=True, loc=loc)
     except ValueError:
-        return Literal(value=text, original_text=text, loc=loc)
+        return Literal(value=text, original_text=text, signed=True, loc=loc)
 
 
 def _parse_verilog_number(  # noqa: PLR0911, PLR0912

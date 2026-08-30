@@ -193,15 +193,67 @@ edits. Remaining fallback cases still re-emit the full module:
   `events=`-scheduled multi-row `batch_run()` repro now produce fully
   correct output. Full regression suite re-run after fix 5: 8394 passed / 0
   failed, identical to the pre-fix baseline — no regressions.
-  **Still unaudited** (found during investigation, never confirmed as
-  actually broken — the clock-edge bug above fully explained every
-  symptom observed, so these remain theoretical): other shared, call-site-
-  blind NBA-write helpers structurally similar to `_wmem{mid}_stage_insert_
-  signal_slice` (item 3) — `_whole_stage_insert_signal_slice`,
-  `_whole_stage_insert_word`, `_whole_stage_insert_signal` (the narrow
-  variant; the wide one was fixed as item 4's `_whole_stage_signal_sv`),
-  `_whole_assign_mem_elem_{mid}`. Worth a dedicated sweep for the same
-  live-vs-snapshot gap before assuming none of them can hit it.
+  **Audit of the remaining call-site-blind helpers flagged above — done,
+  two more confirmed and fixed**:
+  6. `_whole_stage_insert_signal`/`_whole_stage_insert_signal_slice`
+     (`templates/narrow_assign.pxi`) — same live-read bug as items 3/4,
+     confirmed reachable with `is_nba=True` from four call sites in
+     `_stmt_emitters.py` (struct-field-from-signal, struct-field-from-slice,
+     and both the dynamic- and constant-bounds range-select-LHS-from-slice
+     paths — i.e. `sig[msb:lsb] <= other_sig[range];]` and matching
+     struct-field shapes). Fixed with `_whole_stage_insert_signal_sv`/
+     `_whole_stage_insert_signal_slice_sv` twins and a shared
+     `_whole_stage_call()` dispatch helper (`_stmt_emitters.py`) so all four
+     sites pick the `_sv` variant consistently. Regression-verified: full
+     suite 8394 passed / 0 failed (same as before this pair).
+     **Likely fixed a second, independently-reported real-world bug as a
+     side effect**: `cineform-fpga`'s `notes/veriforge_bugs_found.md` "Bug 3"
+     (a signed range-select of a wide wire reading corrupted values,
+     compiled engine only, only inside a large composed design,
+     `bayer_encode_core`, ~190K generated Cython lines) — shape matches this
+     fix exactly (a registered capture of a wide range-select). Re-ran all
+     four of that report's own test cases against the real design after
+     this fix: all four now produce a bit-exact match against pycineform's
+     golden output on the compiled engine (previously required
+     `engine="reference"` to avoid the corruption). The report's own
+     `batch_run()` is never used in that test, ruling out item 5 as the
+     explanation; this fix (or, less likely, one of 1-4) is the most
+     plausible cause. Not bisected further to confirm which exact layer
+     gets credit — the empirical result (4/4 real-design golden matches)
+     is the evidence, not a traced root cause specific to that report.
+  7. `_whole_stage_repeat_signal_slice`/`_whole_assign_repeat_signal_slice`
+     (`{N{sig[range]}}` replication into a wide destination) — same
+     live-read pattern, but confirmed **dead code**: no call site anywhere
+     in the codegen (`_stmt_emitters.py`, `_process_compiler.py`,
+     `_wide_emitter.py`) ever emits a call to it. Left unfixed (no way to
+     exercise or verify a fix with zero callers) but flagged here — if a
+     future codegen path starts emitting this shape, apply the same
+     `_sv`-twin + `_body_tainted_sids` dispatch pattern before wiring it up.
+  8. `_whole_assign_mem_elem_{mid}` (`mem[idx]` read into a plain signal) —
+     confirmed **safe, no fix needed**: its only call site
+     (`_process_compiler.py`) always appends to `self._processes` (cont_N),
+     never reachable with `is_nba=True`; live reads are correct there by
+     construction. No `_whole_stage_mem_elem_{mid}` (NBA) variant exists.
+- **Unsized decimal literal treated as unsigned in arithmetic (all
+  engines)** — **Fixed.** Found via `cineform-fpga`'s own bug report
+  (`veriforge_bugs_found.md`, "Bug 1"). An unsized, unbased decimal number
+  (`5`, not `8'd5`) is a *signed* integer per IEEE 1800-2017 SS5.7.1, but
+  both `_build_decimal_number` (`transforms/_expressions.py`, the real
+  Verilog parser path) and the DSL's `_to_expr_node`/`_to_lit`
+  (`dsl/builder.py`, for a bare Python `int` used in a DSL expression)
+  constructed these as `signed=False`. Under Verilog's own binary-op
+  type-promotion rule ("either operand unsigned -> whole expression
+  unsigned"), `5 * a` for a signed wire `a` silently computed as
+  *unsigned*, reinterpreting `a`'s raw bit pattern instead of sign-
+  extending it — confirmed exactly: `a = -709` (bits `0xFD3B`, read
+  unsigned as 64827) gave `5 * 64827 = 324135` instead of the correct
+  `5 * -709 = -3545`. Fixed by passing `signed=True` at both literal-
+  construction sites. Verified: the report's own repro plus a sweep over
+  `{-32768, -1, 1, 32767, -709, 0}` now give correct results on all four
+  engines (reference, compiled, vm, vm-fast). Regression-verified against
+  `tests/test_dsl/`, `tests/test_verilog_parser/`, `tests/test_model/`,
+  and `tests/test_sim/test_fill_literal_width.py` (no failures); folded
+  into the same full-suite run as items 6/7/8 above.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

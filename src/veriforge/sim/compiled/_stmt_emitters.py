@@ -60,6 +60,26 @@ class _StmtEmittersMixin:
 
     __slots__ = ()
 
+    def _whole_stage_call(self, base_name: str, *, is_nba: bool, src_sid: int, args: str) -> str:
+        """Build a call to a `_whole_{stage,assign}_{base_name}` whole-
+        signal-copy helper (e.g. ``insert_signal``, ``insert_signal_slice``),
+        using the pre-edge-snapshot `_sv`-suffixed twin (passing `sv, sm`)
+        whenever `is_nba` and `src_sid` is provably not blocking-written
+        elsewhere in the same seq body (`self._body_tainted_sids`, `None`
+        outside seq bodies). *args* is the helper's own arguments after
+        `c` (and, for the `_sv` case, after `sv, sm`) -- see
+        notes/roadmap.md "Wide-signal pre-edge snapshot gap": these
+        `_whole_stage_*` helpers are shared, call-site-blind functions that
+        read their signal source via a runtime sid, exactly the class of
+        bug fixed there for `_whole_stage_signal`/`_wmem{mid}_stage_insert_
+        signal_slice`.
+        """
+        if is_nba:
+            if self._body_tainted_sids is not None and src_sid not in self._body_tainted_sids:
+                return f"_whole_stage_{base_name}_sv(c, sv, sm, {args})"
+            return f"_whole_stage_{base_name}(c, {args})"
+        return f"_whole_assign_{base_name}(c, {args})"
+
     # ΓöÇΓöÇ Statement codegen ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     def _emit_stmt(  # noqa: PLR0911, PLR0912
@@ -353,16 +373,23 @@ class _StmtEmittersMixin:
                             rhs_name = ".".join(rhs.hierarchy) + "." + rhs_name
                         rhs_sid = self._signal_map.get(rhs_name)
                     if rhs_sid is not None and self._signal_widths[rhs_sid] == field_width:
-                        helper = "_whole_stage_insert_signal" if is_nba else "_whole_assign_insert_signal"
-                        return [f"{pad}{helper}(c, {base_sid}, {offset}, {rhs_sid}, {field_width})"]
+                        call = self._whole_stage_call(
+                            "insert_signal",
+                            is_nba=is_nba,
+                            src_sid=rhs_sid,
+                            args=f"{base_sid}, {offset}, {rhs_sid}, {field_width}",
+                        )
+                        return [f"{pad}{call}"]
                     rhs_source = self._resolve_signal_slice_source(rhs)
                     if field_width > _WORD_BITS and rhs_source is not None:
                         rhs_source_sid, rhs_source_lsb = rhs_source
-                        helper = "_whole_stage_insert_signal_slice" if is_nba else "_whole_assign_insert_signal_slice"
-                        return [
-                            f"{pad}{helper}(c, {base_sid}, {offset}, {rhs_source_sid},"
-                            f" <int>({rhs_source_lsb}), {field_width})"
-                        ]
+                        call = self._whole_stage_call(
+                            "insert_signal_slice",
+                            is_nba=is_nba,
+                            src_sid=rhs_source_sid,
+                            args=f"{base_sid}, {offset}, {rhs_source_sid}, <int>({rhs_source_lsb}), {field_width}",
+                        )
+                        return [f"{pad}{call}"]
                     rhs_mem_source = self._resolve_memory_slice_source(rhs)
                     if field_width > _WORD_BITS and rhs_mem_source is not None:
                         rhs_mid, _rhs_idx, _rhs_lsb = rhs_mem_source
@@ -770,11 +797,14 @@ class _StmtEmittersMixin:
                 width_expr = f"(({msb}) - ({lsb}) + 1)"
             if rhs_source is not None:
                 rhs_source_sid, rhs_source_lsb = rhs_source
-                helper = "_whole_stage_insert_signal_slice" if is_nba else "_whole_assign_insert_signal_slice"
                 pad = "    " * indent
-                return [
-                    f"{pad}{helper}(c, {sid}, <int>({lsb_str}), {rhs_source_sid}, <int>({rhs_source_lsb}), {width_expr})"
-                ]
+                call = self._whole_stage_call(
+                    "insert_signal_slice",
+                    is_nba=is_nba,
+                    src_sid=rhs_source_sid,
+                    args=f"{sid}, <int>({lsb_str}), {rhs_source_sid}, <int>({rhs_source_lsb}), {width_expr}",
+                )
+                return [f"{pad}{call}"]
             if rhs_mem_source is not None:
                 rhs_mid, rhs_idx, rhs_lsb = rhs_mem_source
                 if self._mem_info[rhs_mid][0] > _WORD_BITS:
@@ -909,8 +939,13 @@ class _StmtEmittersMixin:
             rhs_source = self._resolve_signal_slice_source(rhs)
             if rhs_source is not None:
                 rhs_source_sid, rhs_source_lsb = rhs_source
-                helper = "_whole_stage_insert_signal_slice" if is_nba else "_whole_assign_insert_signal_slice"
-                return [f"{pad}{helper}(c, {sid}, {lsb_val}, {rhs_source_sid}, <int>({rhs_source_lsb}), {sel_w})"]
+                call = self._whole_stage_call(
+                    "insert_signal_slice",
+                    is_nba=is_nba,
+                    src_sid=rhs_source_sid,
+                    args=f"{sid}, {lsb_val}, {rhs_source_sid}, <int>({rhs_source_lsb}), {sel_w}",
+                )
+                return [f"{pad}{call}"]
             rhs_mem_source = self._resolve_memory_slice_source(rhs)
             if rhs_mem_source is not None:
                 rhs_mid, rhs_idx, rhs_lsb = rhs_mem_source
