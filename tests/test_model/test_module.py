@@ -288,6 +288,45 @@ endmodule""",
         assert data.default_value.value.parts[0].width == 8
         assert data.default_value.value.parts[0].value == 0
 
+    def test_signed_ranged_parameter_port_list_style(self, parser):
+        """`parameter signed [msb:lsb] name = value;` inside a `#(...)` port
+        list must set BOTH `Parameter.signed` and `Parameter.width` from its
+        own declaration -- previously silently dropped both (always
+        `signed=False`, `width=None`) because `_extract_parameters` only
+        looked for a `parameter_type` wrapper node, which this grammar
+        production (`parameter_declaration: KW_PARAMETER KW_SIGNED? range?
+        ...`) never produces; `KW_SIGNED`/`range` are direct children here
+        instead. Confirmed as the root cause of a real cross-engine bug: a
+        signed parameter whose value's own top bit was set (>= half its
+        declared range) silently zero-extended instead of sign-extended
+        when read into a wider signal, on all four simulation engines,
+        found via the grammar-driven fuzzer's own parameter generation
+        (see notes/roadmap.md).
+        """
+        m = _parse_module(parser, "module m #(parameter signed [63:0] P = 64'sd1) (); endmodule")
+        p = m.get_parameter("P")
+        assert p is not None
+        assert p.signed is True
+        assert p.width is not None
+        assert isinstance(p.width.msb, Literal)
+        assert p.width.msb.value == 63
+        assert isinstance(p.width.lsb, Literal)
+        assert p.width.lsb.value == 0
+
+    def test_signed_ranged_parameter_body_style(self, parser):
+        """Same as above but for the body-declared (non-`#(...)`) form --
+        `parameter signed [msb:lsb] name = value;` directly in the module
+        body. Uses the identical grammar production and hit the identical
+        bug.
+        """
+        m = _parse_module(parser, "module m; parameter signed [15:0] P = 16'sd1; endmodule")
+        p = m.get_parameter("P")
+        assert p is not None
+        assert p.signed is True
+        assert p.width is not None
+        assert isinstance(p.width.msb, Literal)
+        assert p.width.msb.value == 15
+
 
 class TestNets:
     """Net extraction tests."""

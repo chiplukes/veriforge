@@ -394,7 +394,56 @@ edits. Remaining fallback cases still re-emit the full module:
   first and the full relevant suite (not just a couple files) run after,
   per the fuzzing round's own documented workflow (`notes/fuzzer.md` "Repro
   Workflow") -- appropriately scoped as a dedicated follow-up rather than
-  a same-turn patch.
+  a same-turn patch. Two more independent fuzzer-found instances of this
+  exact shape (large-value signed parameter widened into a bigger signal,
+  upper bits wrong on `reference`/`vm`/`vm-fast`/`compiled` alike vs
+  Icarus) turned up in the full cross-check run below, reinforcing this is
+  a real, frequently-reachable bug, not a one-off.
+- **Full cross-check run (task-tracking: fuzzing-round item 32) — 300
+  modules, all four engines + Icarus, seed 10000**: 48/300 mismatching
+  (`compiled`: 39, `iverilog`: 7, `vm-fast`: 6, `vm`: 4; some mismatches hit
+  more than one engine). Triaged by inspecting each `mismatch_NNNNN/
+  module.v` + `mismatches.txt`:
+  - **30/48** contain a genuine `{<<{...}}`/`{<<N{...}}` streaming
+    concatenation (26 in a flat module, 4 via the hierarchical strategy) --
+    the same X-propagation/value divergence documented above. By far the
+    dominant category; nothing new here beyond confirming scale.
+  - **3+/48** are the signed-parameter sign-extension bug documented just
+    above (confirmed via direct inspection: `mismatch_10105`'s `assign o5 =
+    p1;` and `mismatch_10135`'s upper-bits-only divergence are unmistakably
+    this shape; likely more hiding among the streaming-concat-tagged ones
+    too, since large params and streaming concat are both common in the
+    same generated modules and weren't cross-checked against each other).
+  - **~9/48** are `compiled`-engine-only value/mask mismatches with no
+    streaming concat present (`mismatch_10030`, `10104`, `10109`, `10184`,
+    `10216`, `10271`, `10279`, `10280`, `10291`) -- plausibly more instances
+    of this session's already-known compiled-engine wide/whole-signal bug
+    family (see the wide-signal pre-edge-snapshot items earlier in this
+    section) rather than a new class, but none of these has been
+    individually reduced/confirmed as such yet.
+  - **A handful of small, distinct, NOT-yet-characterized leads**, each
+    worth its own reduction pass in a future session:
+    - `mismatch_10063`/`mismatch_10239`: off-by-one-in-the-low-bits
+      `iverilog`/`compiled` divergences (values differ by exactly 1, upper
+      bits agree) -- possibly a rounding/truncation edge case, unrelated to
+      the sign-extension bug's upper-bits shape.
+    - `mismatch_10053`/`mismatch_10268`: purely combinational (no clock)
+      `reference`-vs-`iverilog` **mask** divergences (same value where both
+      resolve it, disagreement only on which bits are X) -- a different
+      flavor of X-propagation disagreement than the streaming-concat one,
+      since neither module contains streaming concat.
+    - `mismatch_10108`: `iverilog` `vvp` timeout ("likely unbounded
+      simulation loop") on a clocked module with a very wide (125-bit
+      parameter) division chain and no loops at all -- more likely an
+      Icarus bignum-division performance artifact from the large parameter
+      values task #28 now generates than a real infinite-loop bug; worth
+      revisiting if it recurs (e.g. capping generated parameter magnitude,
+      or a longer `vvp` timeout) rather than assuming it's a correctness bug.
+
+  None of this was fixed inline -- per the same documented workflow, this
+  is the triage/categorization pass; the concrete fix work (starting with
+  the already-root-caused signed-parameter bug) is scoped as its own
+  follow-up.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

@@ -343,6 +343,21 @@ def _extract_parameters(
         if isinstance(child, Tree) and child.data == "parameter_type":
             param_type, width, signed = _extract_parameter_type(child, source_file, build_constant_expression)
             break
+        # `parameter_declaration: KW_PARAMETER KW_SIGNED? range? ...` puts
+        # KW_SIGNED/range directly as this node's own children -- no
+        # `parameter_type` wrapper at all for this (very common) plain
+        # `parameter signed [msb:lsb] name = value;` form (that wrapper is
+        # a SEPARATE grammar rule, `parameter_type: KW_INTEGER | KW_REAL |
+        # ...`, only for typed parameters). Missing this meant every plain
+        # `signed`/ranged parameter silently got `Parameter.signed=False`,
+        # `Parameter.width=None` regardless of its own declaration --
+        # confirmed via the fuzzing round's own parameter generation
+        # finding a real sign-extension bug that traced back to exactly
+        # this (see notes/roadmap.md).
+        if isinstance(child, Token) and child.type == "KW_SIGNED":
+            signed = True
+        elif isinstance(child, Tree) and child.data == "range":
+            width = _build_range(child, source_file, build_constant_expression)
 
     for node in tree.iter_subtrees():
         if node.data == "param_assignment":

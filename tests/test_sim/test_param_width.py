@@ -694,3 +694,87 @@ class TestSignedComparisonThroughHierarchy:
                     f"expected {'111 (sentinel)' if expected_always_true else 'acc passthrough'}"
                 )
         assert standalone == composed, f"[{engine}, op={op}] standalone={standalone} != composed={composed}"
+
+
+class TestSignedParameterSignExtension:
+    """`parameter signed [msb:lsb] name = value;` must sign-extend correctly
+    when read into a wider signal, on every engine.
+
+    Regression for a real bug found via the grammar-driven fuzzer's own
+    parameter generation (`notes/roadmap.md`): `_extract_parameters`
+    (`transforms/_declarations.py`) only populated `Parameter.signed`/
+    `.width` from a `parameter_type` wrapper node -- but
+    `parameter_declaration`'s own grammar rule (`KW_PARAMETER KW_SIGNED?
+    range? ...`) puts `KW_SIGNED`/`range` directly as this node's own
+    children, with no such wrapper. Every plain `signed`/ranged parameter
+    silently got `signed=False`, `width=None` regardless of its own
+    declaration, so a parameter whose value's own top bit was set (>= half
+    its declared range) zero-extended instead of sign-extended when read
+    into a wider signal -- on all four simulation engines identically
+    (confirmed via direct inspection that they all share this one upstream
+    parser gap, not four independent engine bugs). This class builds the
+    module from real Verilog *text* (unlike the rest of this file, which
+    constructs `Parameter` objects directly in Python and so never
+    exercised the parser at all) specifically to catch a regression in the
+    parser step itself.
+    """
+
+    @staticmethod
+    def _build(msb_value: int) -> tuple[Module, Design]:
+        """A parameter whose value's own top bit (at its declared width)
+        is set -- must sign-extend, not zero-extend, when copied to the
+        wider output below.
+        """
+        from veriforge.transforms.tree_to_model import tree_to_design
+        from veriforge.verilog_parser import verilog_parser
+
+        src = f"""
+        module signed_param_sign_ext #(
+            parameter signed [63:0] P = 64'sd{msb_value}
+        ) (output signed [67:0] o);
+            assign o = P;
+        endmodule
+        """
+        vp = verilog_parser(start="source_text")
+        tree = vp.build_tree(src)
+        design = tree_to_design(tree, source_file="signed_param_sign_ext.v")
+        top = next(m for m in design.modules if m.name == "signed_param_sign_ext")
+        return top, design
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_large_value_sign_extends_not_zero_extends(self, engine):
+        if engine == "compiled" and not _has_compiler:
+            pytest.skip("No C compiler available")
+        if engine == "vm-fast":
+            pytest.importorskip("Cython")
+
+        # 2**63 has bit 63 set -- a negative 64-bit two's-complement value.
+        top, design = self._build(2**63)
+        sim = Simulator(top, engine=engine, design=design)
+        sim.settle()
+
+        got = sim.read("o")
+        # Correct: sign-extend -- top 4 bits of the 68-bit result are 1s,
+        # matching Icarus Verilog's behavior for the identical module
+        # (confirmed directly; this was the oracle disagreement that found
+        # the bug). Wrong (the bug): top 4 bits come back 0.
+        expected = Value((2**63) | (0xF << 64), width=68)
+        assert got == expected, f"[{engine}] expected sign-extended {expected}, got {got}"
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast", "compiled"])
+    def test_small_value_still_zero_extends(self, engine):
+        """A small positive value (top bit clear) must still zero-extend --
+        this isn't "always sign-extend", it's "sign-extend based on the
+        value's own top bit", so a small positive signed parameter must
+        NOT come back with its upper bits incorrectly set to 1.
+        """
+        if engine == "compiled" and not _has_compiler:
+            pytest.skip("No C compiler available")
+        if engine == "vm-fast":
+            pytest.importorskip("Cython")
+
+        top, design = self._build(5)
+        sim = Simulator(top, engine=engine, design=design)
+        sim.settle()
+
+        assert sim.read("o") == Value(5, width=68)
