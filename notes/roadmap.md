@@ -368,27 +368,171 @@ edits. Remaining fallback cases still re-emit the full module:
   `Strategy.HIERARCHICAL` "concat out of a port" case) now agree across
   the board; full `tests/test_sim/` suite re-run clean after the fix.
 
-  **Residual, genuinely distinct findings, NOT covered by this fix** (a
-  handful of files still mismatch after re-verification -- each is a
-  separate, smaller lead for a future session, not chased further here):
-  - `mismatch_10055`, `mismatch_10024`: small numeric/mask differences
-    (`vm-fast` vs `reference`) on modules that DO contain streaming concat
-    -- concrete, non-x values differing by a few bits, or masks differing
-    in extent -- looks like a genuine `vm-fast`-specific streaming-concat
-    *value* computation bug, distinct from the sensitivity gap just fixed.
-  - `mismatch_10096`, `mismatch_10151`: `compiled`-specific value/mask
-    divergences on modules with streaming concat, one involving a
-    combinational `assign` that reads `clk` directly and inter-signal
-    feedback (`o10 = ~o12`-style) -- complex enough not to have been
-    reduced further.
+  **Residual findings from the first re-verification pass, since resolved
+  or reclassified** (kept here for the investigation trail):
   - `mismatch_10017`, `mismatch_10075`: on inspection, the ACTUAL
-    mismatching signal in each has nothing to do with streaming concat at
+    mismatching signal in each had nothing to do with streaming concat at
     all (`o10 <= clk;` / `o11 <= $unsigned(clk);` -- a plain clock-to-reg
-    copy) -- an unrelated `compiled`-engine clock-timing/sampling
-    off-by-one-cycle issue that happened to co-occur in a module that also
-    used streaming concat elsewhere. Confirms the earlier "~9/48 are
-    compiled-engine-only, no streaming concat" bucket (below) and this
-    bucket are likely the SAME pre-existing bug family, not two.
+    copy) -- this turned out to be a real, separate, now-fixed bug (see
+    "Clock/trigger signal read within its own triggered process body"
+    below), not a streaming-concat issue. Confirms the earlier "~9/48 are
+    compiled-engine-only, no streaming concat" bucket and this one were the
+    same underlying bug family.
+  - `mismatch_10055`, `mismatch_10024`, `mismatch_10096`, `mismatch_10104`,
+    `mismatch_10151`, and 6 more of the original "~9/48 compiled-only"
+    bucket: ALL resolved by the clock-read fix below except the four
+    covered in its own "Residual" subsection immediately following this
+    entry (`mismatch_10024`/`10055` -- vm-fast, root-caused, see below;
+    `mismatch_10096`/`10104` -- compiled, not yet reduced).
+- **Clock/trigger signal read within its own triggered process body gave
+  its stale PRE-edge value, `compiled` only — Fixed.** Found while
+  re-verifying the streaming-concat fix above against the full
+  300-module cross-check's remaining mismatches -- turned out to explain
+  the large majority of them, and had nothing to do with streaming concat
+  at all. Minimal repro:
+  ```verilog
+  module t (input clk, output reg [2:0] o);
+    always @(posedge clk) o <= clk;
+  endmodule
+  ```
+  Drive `clk` low, settle, drive `clk` high, settle: `reference`/`vm`/
+  `vm-fast` all correctly capture `o <= 1` (clk's own just-transitioned
+  value); `compiled` gave `o <= 0` (the stale pre-edge value) instead.
+
+  **Root cause**: `_seq_body_to_sv_reads` (`sim/compiled/_gen_sections.py`)
+  rewrites ordinary signal reads inside a seq process body to read from
+  `sv[]`/`sm[]` (a snapshot taken BEFORE the edge, giving other registers
+  correct NBA-race-free pre-edge values) -- correct for every signal
+  EXCEPT the process's own edge-trigger signal(s), whose value has, by
+  definition, already genuinely transitioned to the new state by the time
+  the triggered body runs (`sv[clk_sid]` is deliberately left at its
+  pre-transition value so `step()`'s own separate edge-DETECTION logic can
+  compare old-vs-new -- correct for THAT purpose, wrong for a body read).
+  This exception already existed (`async_sids`/`seq_negedge_sids`) but was
+  scoped to negedge sensitivity signals only (async reset inputs), never
+  extended to the ordinary posedge clock case despite the identical
+  mechanism applying equally to it. Fixed by broadening `seq_negedge_sids`
+  to include every edge-trigger signal, posedge or negedge.
+
+  Verified: 3 new regression tests
+  (`tests/test_sim/compiled/test_scheduling.py`,
+  `TestClockSignalReadWithinItsOwnTriggeredBody`, including a guard test
+  confirming an ORDINARY non-trigger signal still correctly uses the
+  pre-edge snapshot -- this fix must not turn into "never use sv[] at
+  all") confirmed to fail without the fix and pass with it; re-verified
+  the full 300-module cross-check's 42 flat modules again -- mismatching
+  files dropped from 14 to 4.
+
+  **Follow-up: all 4 residuals triaged, 3 fixed, 1 remains open** (see the
+  three entries immediately below for the fixed ones):
+  - `mismatch_10024`, `mismatch_10055` (`vm-fast`) -- fixed, see
+    "`vm`/`vm-fast` streaming concatenation exceeding fixed wide-value
+    capacity" below.
+  - `mismatch_10104` (`compiled`) -- fixed, see "`compiled` bitwise-op
+    (`&`/`|`/`^`) mask computation ignored its own combined signedness"
+    below.
+  - `mismatch_10096` (`compiled`) -- **still open, extensively
+    characterized but not yet minimized**. `reference` gives `o11` all-x
+    while `compiled` resolves it to a concrete value (the opposite mask
+    direction from every other bug found this round) at vector 4 of a
+    seeded stimulus run (not vector 0 -- state accumulated over several
+    clock cycles matters, not a single combinational evaluation). Original
+    shape:
+    ```verilog
+    assign o10 = ~o12;
+    assign o11 = {r7[4], i1 ? r9[25] : {3{i3}},
+                  {~&{<<{clk, i2[99:23], o12}}, {{2{r6}}, r7 - o12}}};
+    assign o12 = {i1[7] ? {{2{clk}}, {<<2{i2, i1}}, i2} : {3{r9}},
+                  ~|i3[1], !i5};
+    always @(posedge clk) begin
+      r6 <= <some update depending on o11/o12/r6/r7/i1>;
+      r7 <= o10;
+      r9 <= r6;
+    end
+    ```
+    Ruled out (each in isolation, WITHOUT the full context, no divergence):
+    `!i5` alone (an 8-bit value with mask `0x23` but a definite 1 in an
+    unmasked bit resolves identically, correctly, everywhere); `r8`
+    entirely (unused by the divergence); the always block's own update
+    complexity (a trivially simplified `r6 <= i2[64:0]; r7 <= o10[30:0];
+    r9 <= i1;` still reproduces just as reliably). Every attempt to drop
+    ANY ONE piece of `o11`'s or `o12`'s own expression -- the `i1 ? r9 :
+    {3{i3}}` ternary, the `r6`/`r7` term, `o12`'s own ternary+nested-
+    streaming-concat -- made the divergence disappear, even with
+    everything else fully restored; only the complete combination (both
+    `o11` and `o12` at full complexity, `r6`+`r7`+`r9` all present and
+    real, run across several clock cycles) reproduces. This resistance to
+    single-piece reduction suggests either a genuine multi-signal
+    interaction (unlike every other bug this round, which reduced to 3-10
+    lines) or a capacity/threshold effect similar in spirit to the
+    `vm-fast` `WIDE_WORDS` bug above but not yet identified as such for
+    `compiled`. Left as a genuinely open lead for a future session.
+- **`vm`/`vm-fast` streaming concatenation exceeding fixed wide-value
+  capacity — Fixed (raised + guarded).** Root cause: `vm`/`vm-fast` share
+  one compiled bytecode whose wide (>64-bit) values -- signals, constants,
+  AND intermediate stack values alike -- are stored in a fixed-size word
+  slot (`WIDE_WORDS` in `sim/vm/_interp_fast.pyx`, kept in sync with
+  `_WIDE_WORDS` in `vm_scheduler.py` and `_VM_FAST_WIDE_WORDS` in
+  `compiler.py`). A streaming concatenation's PRE-reversal combined width
+  is the sum of all its parts -- unlike a plain `Concatenation`, which the
+  compiler can narrow to a smaller destination width up front, chunk
+  reversal needs the full stream materialized first, so that combined
+  width can exceed the fixed capacity even when every individual operand
+  and the final destination are comfortably narrow. Two real fuzzer-found
+  modules landed at 397 and 385 combined bits, just over the old 384-bit
+  (6-word) cap, and silently returned wrong (frequently all-zero) results
+  on `vm-fast` only. Fixed two ways:
+  1. Raised the cap a modest amount (6 -> 8 words, 384 -> 512 bits) --
+     enough to correctly compute both fuzzer-found cases outright. A large
+     increase was deliberately rejected: it's a fixed per-value allocation
+     applied to every wide signal/constant/stack-slot in every vm-fast
+     design, not just ones using streaming concatenation, so raising it
+     is a blanket memory/performance cost paid by every vm-fast user.
+  2. Added a compile-time guard (`sim/vm/compiler.py`, `StreamingConcatenation`
+     case) that raises a clear `NotImplementedError` if the combined width
+     still exceeds the (new) cap, matching the existing `slice_size > 64`
+     guard, instead of silently corrupting.
+
+  Verified: 4 new regression tests
+  (`tests/test_sim/test_streaming_concatenation_reversal.py`,
+  `TestStreamingConcatenationVmFastWideCapacity`) covering both the
+  raised-cap correctness case and the still-over-the-new-cap clear-error
+  case; both original fuzzer-found modules now compute matching, correct
+  values on all four engines. Required rebuilding the Cython extension
+  (`_interp_fast.c`/`.so` regenerated from the edited `.pyx`).
+- **`compiled` bitwise-op (`&`/`|`/`^`/`~^`/`^~`) mask computation ignored
+  its own combined signedness — Fixed.** Root cause: `_emit_binary`
+  (`sim/compiled/_expr_emitter.py`, the VALUE-side emitter) has an explicit
+  case computing a bitwise op's own combined signedness from its two
+  operands (IEEE 1364-2005 SS5.5.2: "if any operand is unsigned, the
+  result is unsigned") and passing that decision down into each operand's
+  own compilation -- but `_emit_mask_expr` (the MASK-side emitter) had NO
+  matching case for these five operators, silently falling through to a
+  generic branch that just passed an OUTER `signed_override` through
+  unchanged (or `None`) instead of computing this op's own decision.
+  Minimal repro (`y` undriven, i.e. fully-x):
+  ```verilog
+  module t (input clk, input y, output reg [24:0] x);
+    always @(posedge clk) x <= $signed(y) | 25'd0;
+  endmodule
+  ```
+  Since `25'd0` is unsigned, IEEE's combining rule makes the WHOLE
+  expression unsigned, so `$signed(y)` must be read as if it were
+  `$unsigned(y)` here -- zero-extended, not sign-extended, to the OR's
+  own working width. The VALUE side got this right (`x`'s value correctly
+  reads back 0, fully defined in bits [24:1]). The MASK side, missing the
+  same combining-rule case, defaulted to the cast's OWN literal decision
+  ($signed always sign-extends) instead of the overriding unsigned
+  context -- sign-extending `y`'s x sign bit into every one of those same
+  upper bits, corrupting an almost-fully-defined 25-bit result into an
+  entirely-ambiguous one. Fixed by adding the matching bitwise-op case to
+  `_emit_mask_expr`, mirroring `_emit_binary`'s existing one exactly.
+
+  This was NOT a self-reference/NBA-snapshot bug despite first appearing
+  inside a self-referential seq body during reduction (`mismatch_10104`'s
+  actual shape) -- confirmed general: reproduces identically for a plain
+  combinational `assign` and for two entirely unrelated signals, with no
+  self-reference needed at all.
 - **Signed parameter value >= 2^(width-1) zero-extended instead of
   sign-extended when read into a wider signal, ALL FOUR engines — Fixed.**
   Found via the fuzzing round's own parameter generation (task #28)

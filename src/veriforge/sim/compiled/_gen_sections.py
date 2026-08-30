@@ -101,11 +101,20 @@ def _seq_body_to_sv_reads(
     Without this guard, subsequent reads would see the pre-edge stale value, causing
     pointer corruption in CDC FIFOs and similar logic.
 
-    **Exception** — signals listed in *async_sids* (negedge sensitivity signals such as
-    async reset inputs) must also use c.val[] not sv[], because when the body fires on
-    the negedge of that signal, the snapshot still holds the pre-transition (high) value.
-    Reading sv[rst_n] inside ``if (!rst_n)`` would evaluate to 1 (not reset), causing
-    the else branch to execute instead of the reset path.
+    **Exception** — signals listed in *async_sids* (every one of THIS process's own
+    posedge/negedge sensitivity/trigger signals -- the ordinary clock included, not
+    just negedge/async-reset ones as the name suggests) must also use c.val[] not
+    sv[], because by the time this body actually runs, that signal's edge has
+    already genuinely happened -- sv[] still holds its PRE-transition value (that's
+    the whole point of taking the snapshot before flipping it, so step()'s own
+    separate edge-DETECTION logic can compare old-vs-new), but any read of the
+    trigger signal FROM WITHIN the body it triggered must see the value that
+    triggered it. Originally implemented only for negedge sensitivity signals
+    (async reset inputs: reading sv[rst_n] inside ``if (!rst_n)`` on the negedge
+    that fires this body would evaluate to 1 (not reset), causing the else branch
+    to execute instead of the reset path) -- confirmed the identical gap also hits
+    the ordinary posedge clock itself: ``always @(posedge clk) o <= clk;`` gave
+    ``o <= 0`` (sv[]'s stale pre-edge value) instead of the correct ``o <= 1``.
 
     **Exception** — signals listed in *func_internal_sids* (a user-defined function's own
     port/local/return-variable signals -- see ``_gen_user_functions``) must also use
@@ -865,7 +874,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     tainted.add(sid)
         return tainted
 
-    def _compile_always_body(self, block_body, *, is_seq: bool = False) -> list[str]:
+    def _compile_always_body(self, block_body, *, is_seq: bool = False, edge_sids: set[int] | None = None) -> list[str]:
         """Compile one always-block body Statement to code lines on demand.
 
         Resets the expression-temporary counters so names are unique per function.
@@ -876,11 +885,34 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         `_collect_blocking_write_sids`) for statement emitters that need it;
         left `None` for cont/combo bodies, which have no `sv`/`sm` in scope
         at all and must never attempt the snapshot-reading path.
+
+        *edge_sids* -- this seq process's own posedge/negedge trigger
+        signal id(s) (`edges.keys()` from `_process_compiler.py`'s
+        `_seq_processes` tuple) -- are unioned into `_body_tainted_sids` too,
+        forcing a LIVE read (never the `sv`/`sm` pre-edge snapshot) for any
+        read of the signal that triggered this very body. `sv[clk_sid]` is
+        deliberately left at its PRE-edge value by `refresh_data_snapshot()`
+        (`compiled_scheduler.py`) so `step()`'s own edge-DETECTION logic can
+        compare old-vs-new and recognize the transition -- but by the time
+        the body created by THIS function actually starts running, that
+        transition has already happened for real, so `clk`'s live value is
+        already 1 (for a posedge) and any read of `clk` from inside its own
+        triggering body must see that, not the stale pre-edge snapshot the
+        same array holds for unrelated purposes. Confirmed wrong directly:
+        `always @(posedge clk) o <= clk;` gave `o <= 0` (the pre-edge value)
+        instead of the correct `o <= 1` -- reference/vm/vm-fast all use a
+        separate old-value slot just for edge detection and don't share this
+        gap.
         """
         self._et_count = 0
         self._et_node_masks = {}
         self._et_node_vals = {}
-        self._body_tainted_sids = self._collect_blocking_write_sids(block_body) if is_seq else None
+        if is_seq:
+            self._body_tainted_sids = self._collect_blocking_write_sids(block_body)
+            if edge_sids:
+                self._body_tainted_sids |= edge_sids
+        else:
+            self._body_tainted_sids = None
         return self._emit_stmt(block_body, indent=1)
 
     def _gen_process_functions(self) -> str:
@@ -890,12 +922,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         if not self._processes and not self._combo_processes and not self._seq_processes:
             return "# No process functions"
 
-        # Pre-compute per-seq-process negedge sids (async reset signals).
-        # These must NOT be rewritten to sv[] in the body because when the negedge
-        # fires, sv[] still holds the pre-transition (high) value.
-        seq_negedge_sids = [
-            {sid for sid, et in edges.items() if et == "negedge"} for edges, _, _ in self._seq_processes
-        ]
+        # Pre-compute per-seq-process edge-trigger sids (every posedge AND
+        # negedge sensitivity signal, ordinary clocks included). These must
+        # NOT be rewritten to sv[] in the body: by the time the body runs
+        # the edge has already genuinely happened, but sv[] still holds the
+        # PRE-transition value -- see `_seq_body_to_sv_reads`'s docstring.
+        seq_negedge_sids = [{sid for sid, _et in edges.items()} for edges, _, _ in self._seq_processes]
         # Every user-defined function's own internal signals (ports, return
         # variable, locals) must also never be rewritten to sv[]/sm[] -- see
         # `_seq_body_to_sv_reads`'s own docstring (func_internal_sids
@@ -914,7 +946,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
             (
                 "seq",
-                (self._compile_always_body(body, is_seq=True) for _edges, _sens, body in self._seq_processes),
+                (
+                    self._compile_always_body(body, is_seq=True, edge_sids=set(_edges))
+                    for _edges, _sens, body in self._seq_processes
+                ),
                 True,
                 True,
             ),
@@ -1011,9 +1046,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             write_fn("# No process functions")
             return
 
-        seq_negedge_sids = [
-            {sid for sid, et in edges.items() if et == "negedge"} for edges, _, _ in self._seq_processes
-        ]
+        # Every posedge AND negedge sensitivity/trigger signal per seq
+        # process (ordinary clocks included) -- see `_seq_body_to_sv_reads`'s
+        # docstring for why these must never be rewritten to sv[]/sm[].
+        seq_negedge_sids = [{sid for sid, _et in edges.items()} for edges, _, _ in self._seq_processes]
         # Mirrors `_gen_process_functions`'s identical precomputation -- see
         # `_seq_body_to_sv_reads`'s docstring (func_internal_sids exception)
         # for the rationale; this method must stay byte-for-byte identical
@@ -1032,7 +1068,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
             (
                 "seq",
-                (self._compile_always_body(body, is_seq=True) for _edges, _sens, body in self._seq_processes),
+                (
+                    self._compile_always_body(body, is_seq=True, edge_sids=set(_edges))
+                    for _edges, _sens, body in self._seq_processes
+                ),
                 True,
                 True,
             ),

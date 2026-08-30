@@ -119,7 +119,20 @@ DEF NBA_MAX           = 1024
 DEF NBA_MEM_MAX       = 64
 DEF DISP_BUF_CAP      = 4096    # flat long long slots for display output
 
-DEF WIDE_WORDS        = 6       # max 64-bit words per wide value (384-bit max)
+DEF WIDE_WORDS        = 8       # max 64-bit words per wide value (512-bit max)
+# Raised from 6 (384 bits) to 8 (512 bits): the grammar-driven fuzzer found
+# real streaming-concat expressions (three-ish ~128-bit operands summed
+# together, e.g. `{<<{a, b, {c, c, d}}}`) whose combined pre-reversal width
+# lands just over the old 384-bit cap (397/385 bits in the two fuzzer-found
+# cases) despite every individual operand and the final destination both
+# being comfortably narrow -- see notes/roadmap.md and
+# `sim/vm/compiler.py`'s `_VM_FAST_WIDE_WORDS` (must stay in sync with this
+# value, and with `_WIDE_WORDS` in `sim/vm/vm_scheduler.py`) for the full
+# story, including why this was raised a modest amount rather than a large
+# one (a fixed per-wide-value allocation applied to every wide signal,
+# constant, and stack slot in every vm-fast design, not just ones using
+# streaming concatenation) and why exceeding even the new cap raises a
+# clear NotImplementedError instead of silently corrupting.
 DEF WIDE_NBA_MAX      = 64      # max wide NBA entries per delta cycle
 DEF WIDE_PART_NBA_MAX = 64      # max wide partial (bit/range) NBA entries per delta cycle
 

@@ -3370,6 +3370,28 @@ class _ExprEmitterMixin:
                 )
             elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">="):
                 mask_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+            elif expr.op in ("&", "|", "^", "~^", "^~"):
+                # Mirrors `_emit_binary`'s IDENTICAL bitwise-op case on the
+                # VALUE side (see its own docstring for the full IEEE
+                # 1364-2005 SS5.5.2 rationale and Icarus-confirmed repro)
+                # -- this was previously MISSING here entirely, silently
+                # falling through to the generic `else` below and just
+                # passing an OUTER `signed_override` straight through
+                # unchanged (or `None`) instead of computing this op's OWN
+                # combined signedness from its own two operands. That
+                # divergence from the VALUE side (which already computes
+                # this correctly) meant a signed operand needing
+                # zero-extension per this op's own combining rule (e.g. one
+                # operand is a `$signed(...)` cast, the other an unsized/
+                # unsigned literal) sign-extended its MASK while correctly
+                # zero-extending its VALUE -- confirmed against the
+                # reference oracle for `$signed(y) | 25'd0` with `y` a
+                # fully-x 1-bit signal: value correctly zero-extends (bits
+                # [24:1] read back as defined 0, only bit 0 ambiguous), but
+                # the mask sign-extended the x sign bit into every one of
+                # those same upper bits, corrupting an almost-fully-defined
+                # 25-bit result into an entirely-ambiguous one.
+                mask_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
             else:
                 mask_override = signed_override
             lm = self._emit_mask_expr(expr.left, bitwise_op_width, mask_override)

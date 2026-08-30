@@ -296,3 +296,77 @@ class TestStreamingConcatenationReversalErrors:
             sim = Simulator(mod, engine="reference")
             sim.drive("a", 0x12345678)
             sim.run(max_time=0)
+
+
+class TestStreamingConcatenationVmFastWideCapacity:
+    """`vm`/`vm-fast` share one compiled bytecode whose wide (>64-bit)
+    values -- signals, constants, AND intermediate stack values alike --
+    are stored in a fixed `_VM_FAST_WIDE_WORDS`-word slot (`sim/vm/
+    compiler.py`; kept in sync with `DEF WIDE_WORDS` in `_interp_fast.pyx`
+    and `_WIDE_WORDS` in `vm_scheduler.py`).
+
+    A streaming concatenation's PRE-reversal combined width is the sum of
+    all its parts -- unlike a plain `Concatenation`, which the compiler can
+    narrow to a smaller destination width up front, a chunk-reversal needs
+    the full stream materialized before any truncation, so that combined
+    width can exceed the fixed capacity even when every individual operand
+    and the final destination are both comfortably narrow. Found via the
+    grammar-driven fuzzer (`notes/roadmap.md`): two real fuzzer-generated
+    modules landed at 397 and 385 combined bits, just over the
+    then-current 384-bit (6-word) cap, and silently returned wrong
+    (frequently all-zero) results on `vm-fast` only -- `reference`/`vm`
+    have no such limit and computed them correctly. Fixed two ways: the
+    cap was raised a modest amount (6 -> 8 words, 384 -> 512 bits) to
+    correctly compute both of the fuzzer's own found cases outright, AND
+    exceeding even the new cap now raises a clear `NotImplementedError` at
+    compile time (matching the existing `slice_size > 64` guard) instead
+    of silently corrupting -- raising the cap by a large amount instead
+    was deliberately rejected: it's a fixed per-value allocation applied
+    to every wide signal/constant/stack-slot in every vm-fast design, not
+    just ones using streaming concatenation.
+    """
+
+    @pytest.mark.parametrize("engine", ("vm", "vm-fast"))
+    def test_combined_width_just_under_cap_computes_correctly(self, engine):
+        """397 bits (three ~128-bit-class operands, one nested) -- over the
+        OLD 384-bit cap, under the current 512-bit one. Exact shape from a
+        real fuzzer-found mismatch, reduced.
+        """
+        mod = _parse("""
+            module dut(input logic [7:0] i3, input logic [127:0] i1,
+                       input logic [63:0] i2, input logic [127:0] i4,
+                       output logic [33:0] o);
+            assign o = {<<{i3, i1, {i4, i4, i2}}};
+            endmodule
+        """)
+        i3, i1, i2, i4 = (
+            0xAB,
+            0x0123456789ABCDEF0123456789ABCDEF,
+            0xFEDCBA9876543210,
+            0xAAAABBBBCCCCDDDDEEEEFFFF11112222,
+        )
+        full = (i3 << (128 + 128 + 128 + 64)) | (i1 << (128 + 128 + 64)) | (i4 << (128 + 64)) | (i4 << 64) | i2
+        expected = _stream_reverse(full, 8 + 128 + 128 + 128 + 64, 1) & ((1 << 34) - 1)
+
+        sim = Simulator(mod, engine=engine)
+        sim.drive("i3", i3)
+        sim.drive("i1", i1)
+        sim.drive("i2", i2)
+        sim.drive("i4", i4)
+        sim.run(max_time=0)
+        assert int(sim.signal("o").value) == expected
+
+    @pytest.mark.parametrize("engine", ("vm", "vm-fast"))
+    def test_combined_width_over_cap_raises_clearly(self, engine):
+        """Comfortably over even the current (raised) cap -- must raise a
+        clear NotImplementedError at compile time, never silently corrupt.
+        """
+        mod = _parse("""
+            module dut(input logic [127:0] a, input logic [127:0] b,
+                       input logic [127:0] c, input logic [127:0] d,
+                       input logic [127:0] e, output logic [33:0] o);
+            assign o = {<<{a, b, c, d, e}};
+            endmodule
+        """)
+        with pytest.raises(NotImplementedError, match="exceeds vm-fast's fixed wide-value capacity"):
+            Simulator(mod, engine=engine)

@@ -273,7 +273,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
             # Compute narrow/wide split: signals/constants >64 bits get a separate
             # unsigned-word pool to avoid <long long> overflow in CyContext.setup().
-            _WIDE_WORDS = 6  # must match DEF WIDE_WORDS in _interp_fast.pyx
+            _WIDE_WORDS = 8  # must match DEF WIDE_WORDS in _interp_fast.pyx
             _MASK64 = 0xFFFF_FFFF_FFFF_FFFF
             _SIGN64 = 1 << 63
 

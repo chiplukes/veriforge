@@ -66,6 +66,16 @@ if TYPE_CHECKING:
     from veriforge.model.variables import Variable
 
 
+# Must match `DEF WIDE_WORDS` in `sim/vm/_interp_fast.pyx` and
+# `_WIDE_WORDS` in `sim/vm/vm_scheduler.py` -- the fixed per-value word
+# count vm-fast's Cython interpreter allocates for every wide (>64-bit)
+# signal, constant, AND intermediate stack value. Referenced here (not
+# imported from either) because both of those live in compiled/generated
+# artifacts this pure-Python compiler module has no import-time access to;
+# kept in sync by convention across all three sites, same as the existing
+# duplication between `_interp_fast.pyx` and `vm_scheduler.py`.
+_VM_FAST_WIDE_WORDS = 8
+
 # ── Process types ────────────────────────────────────────────────────
 
 
@@ -1506,6 +1516,44 @@ class Compiler:  # cm:8c1e4a
         # to Concatenation at AST-build time. Compile the plain
         # concatenation of parts exactly as above, then chunk-reverse it.
         if etype is StreamingConcatenation:
+            # The chunk-reversal below needs the FULL pre-reversal
+            # concatenated width materialized before any final
+            # RESIZE/SIGN_EXT truncation can apply -- unlike a plain
+            # Concatenation, which the compiler can (and does) narrow to
+            # the destination's own width up front when it's smaller, a
+            # streaming reversal must reorder chunks across the WHOLE
+            # stream first, so there's no equivalent early-truncation
+            # optimization available here. That intermediate can
+            # legitimately exceed `_VM_FAST_WIDE_WORDS * 64` bits even when
+            # every individual part and the final destination are both
+            # comfortably narrow (e.g. three ~128-bit operands alone sum to
+            # 384+ bits) -- vm-fast's `OP_STREAM_REVERSE` operates on a
+            # fixed `_VM_FAST_WIDE_WORDS`-word stack slot regardless of the
+            # value's own nominal width, so silently proceeding here reads/
+            # writes past that fixed allocation and corrupts the result
+            # instead of raising. Confirmed via the fuzzer (notes/
+            # roadmap.md): `{<<{i3, i1, {i4, i4, i2}}}` with i1/i4 128-bit
+            # and i2 64-bit (520-bit combined content) returned an
+            # incorrect (often all-zero) result on `vm-fast` only --
+            # `reference`/`vm` have no such limit (`Value.stream_reverse`
+            # is arbitrary-precision) and computed it correctly. Raising
+            # `_VM_FAST_WIDE_WORDS` itself was considered and rejected: it's
+            # a fixed per-value allocation applied to EVERY wide signal,
+            # constant, and stack slot in EVERY vm-fast design (not just
+            # ones using streaming concatenation), so raising it is a
+            # blanket memory/performance cost for all vm-fast users to fix
+            # one narrow, avoidable-by-erroring construct -- the same
+            # "raise clearly instead" choice already made for the
+            # `slice_size > 64` case just below, and for the whole-memory-
+            # ternary case elsewhere in this file (see its own comment).
+            full_width = sum(self._expr_width(p) for p in expr.parts)
+            if full_width > _VM_FAST_WIDE_WORDS * 64:
+                raise NotImplementedError(
+                    f"Streaming concatenation combined operand width ({full_width} bits) exceeds "
+                    f"vm-fast's fixed wide-value capacity ({_VM_FAST_WIDE_WORDS * 64} bits) -- "
+                    "vm and vm-fast share this compiled bytecode, so both are affected; "
+                    "use engine='reference' or engine='compiled' for this expression"
+                )
             for part in expr.parts:
                 self._compile_expr(part, program, self._expr_width(part))
             program.append(instr(Op.CONCAT, len(expr.parts)))
