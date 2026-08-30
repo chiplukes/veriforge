@@ -142,16 +142,37 @@ def _codegen_infra_hash() -> str:
     return _codegen_infra_hash_cache
 
 
-def _compute_elab_hash(module_name: str, source_files: list[str]) -> str:
-    """Compute a hash from source files + codegen infrastructure + module name."""
+def _compute_elab_hash(module: Module, source_files: list[str]) -> str:
+    """Compute a hash from source files + codegen infrastructure + module name.
+
+    When a *source_files* entry is a real file on disk, its content is
+    hashed directly -- cheap, and correctly invalidates the cache whenever
+    that file's content changes. When a listed path does NOT exist on disk
+    -- always true for in-memory-constructed Designs (the fuzzer, and any
+    other programmatically-built Design not backed by a real file) --
+    falling back to hashing the path STRING itself is unsound: every such
+    Design shares the same placeholder path (e.g. the fuzzer's hardcoded
+    "fuzz.v"), so the elaboration hash comes out IDENTICAL across
+    completely different module bodies, and the elaboration cache silently
+    returns another module's stale compiled binary for every subsequent
+    module. Confirmed directly: this made every `engine="compiled"` fuzz
+    run, after its first module, compare against the FIRST module's stale
+    compiled .so regardless of what the current module actually contained
+    -- a systemic false-positive-mismatch generator, not a real simulator
+    bug. Falling back to a hash of the module's own emitted Verilog text
+    instead keeps the cache correctly content-keyed regardless of whether
+    it's backed by a real file.
+    """
     h = hashlib.sha256()
-    h.update(module_name.encode("utf-8"))
+    h.update(module.name.encode("utf-8"))
     h.update(_codegen_infra_hash().encode("utf-8"))
     for sf in sorted(source_files):
         try:
             h.update(Path(sf).read_bytes())
         except OSError:
-            h.update(sf.encode("utf-8"))
+            from ...codegen.verilog_emitter import emit_module
+
+            h.update(emit_module(module).encode("utf-8"))
     return h.hexdigest()[:16]
 
 
@@ -392,7 +413,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         # Try codegen cache: skip .pyx generation if sources unchanged
         elab_hash: str | None = None
         if source_files:
-            elab_hash = _compute_elab_hash(module.name, source_files)
+            elab_hash = _compute_elab_hash(module, source_files)
             cached = _load_elab_cache(self._compiler.cache_dir, elab_hash)
             if cached is not None:
                 mod = self._compiler.load_cached(cached["keyed_name"])

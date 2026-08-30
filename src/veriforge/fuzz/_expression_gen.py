@@ -19,6 +19,7 @@ from ..model.expressions import (
     Literal,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     TernaryOp,
     UnaryOp,
 )
@@ -47,7 +48,7 @@ _BINARY_OPS = [
 ]
 _UNARY_OPS = ["~", "-", "!"]
 _REDUCTION_OPS = ["&", "|", "^", "~&", "~|", "~^"]
-_NODE_KINDS = ("binary", "unary", "reduction", "ternary", "concat", "replicate", "cast")
+_NODE_KINDS = ("binary", "unary", "reduction", "ternary", "concat", "replicate", "streaming_concat", "cast")
 
 
 class ExpressionGenerator:
@@ -159,6 +160,8 @@ class ExpressionGenerator:
             return self._concat(rng, depth, callables, exclude)
         if kind == "replicate":
             return self._replicate(rng, depth, callables, exclude)
+        if kind == "streaming_concat":
+            return self._streaming_concat(rng, depth, callables, exclude)
         if kind == "cast":
             return self._cast(rng, depth, callables, exclude)
         if kind == "call":
@@ -204,6 +207,35 @@ class ExpressionGenerator:
             Literal(n, width=32, base="d", signed=False),
             self.expr(rng, depth - 1, callables=callables, exclude=exclude),
         )
+
+    def _streaming_concat(self, rng, depth, callables, exclude=None) -> Expression:
+        """Generate a `{<<{...}}` / `{>>{...}}` streaming concatenation.
+
+        Only the `<<` (left-stream) direction has a dedicated model node --
+        `>>` with no slice_size is definitionally identical to plain
+        concatenation and is desugared straight to `Concatenation` at
+        AST-build time (see `StreamingConcatenation`'s own docstring), so
+        picking `>>` here just emits a `Concatenation` directly instead of
+        constructing a node the real parser would never itself produce.
+        """
+        n = rng.choice((2, 3))
+        parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
+        direction = rng.choice(("<<", ">>"))
+        if direction == ">>":
+            return Concatenation(parts)
+
+        slice_size: Expression | None
+        roll = rng.random()
+        if roll < 0.4:
+            # No slice_size -- bit-level stream, the common case.
+            slice_size = None
+        elif roll < 0.7 or not self._ctx.parameters:
+            slice_size = Literal(rng.choice((1, 2, 4, 8)), width=32, base="d", signed=False)
+        else:
+            # A declared parameter is a valid constant-expression slice_size
+            # (unlike a wire/reg, which IEEE 1800 disallows here).
+            slice_size = rng.choice(self._ctx.parameters).as_identifier()
+        return StreamingConcatenation(parts, slice_size)
 
     def _cast(self, rng, depth, callables, exclude=None) -> FunctionCall:
         cast = rng.choice(("$signed", "$unsigned"))

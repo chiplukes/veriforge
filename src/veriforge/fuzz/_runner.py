@@ -23,6 +23,7 @@ from pathlib import Path
 import signal
 
 from ..model.design import Module
+from ..model.expressions import StreamingConcatenation
 from ..sim.testbench import Simulator
 from ..sim.value import Value
 from ..codegen.verilog_emitter import emit_module, emit_expression
@@ -197,8 +198,18 @@ class FuzzRunner:
                 result.mismatches.extend(diffs)
                 self.mismatches_by_engine[engine] = self.mismatches_by_engine.get(engine, 0) + 1
 
-        # Icarus cross-check
-        if self._icarus:
+        # Icarus cross-check -- skipped for modules containing a genuine
+        # `{<<{...}}` streaming concatenation: Icarus Verilog has no support
+        # for the construct at all ("sorry: Streaming concatenation not
+        # supported", confirmed directly), so treating a resulting compile
+        # failure as a mismatch would just flood mismatch_NNNNN/ with false
+        # positives on every such module. `>>` streaming concat is unaffected
+        # since it desugars to plain Concatenation before it ever reaches
+        # here (see StreamingConcatenation's own docstring) -- only the `<<`
+        # node itself needs this carve-out, and cross-engine comparison
+        # (reference vs vm/vm-fast/compiled, still run above) remains fully
+        # active for it regardless.
+        if self._icarus and not any(mod.find(StreamingConcatenation)):
             try:
                 icarus_res = self._simulate_icarus(verilog, vectors, mod)
                 diffs = self._compare(oracle, icarus_res, "iverilog", vectors)

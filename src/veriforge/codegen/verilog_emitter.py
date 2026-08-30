@@ -28,6 +28,7 @@ from ..model.expressions import (
     Range,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -784,6 +785,14 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         else:
             inner = emit_expression(expr.value)
         return "{" + emit_expression(expr.count) + "{" + inner + "}}"
+    if isinstance(expr, StreamingConcatenation):
+        # This node only ever represents `<<` (left-stream) -- the `>>`
+        # form is desugared to plain `Concatenation` at AST-build time (see
+        # the node's own docstring in model/expressions.py), so `<<` is the
+        # only direction this emitter ever needs to produce.
+        slice_str = emit_expression(expr.slice_size) if expr.slice_size is not None else ""
+        parts = ", ".join(emit_expression(p) for p in expr.parts)
+        return "{<<" + slice_str + "{" + parts + "}}"
     if isinstance(expr, BitSelect):
         return f"{emit_expression(expr.target)}[{emit_expression(expr.index)}]"
     if isinstance(expr, RangeSelect):

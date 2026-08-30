@@ -254,6 +254,54 @@ edits. Remaining fallback cases still re-emit the full module:
   `tests/test_dsl/`, `tests/test_verilog_parser/`, `tests/test_model/`,
   and `tests/test_sim/test_fill_literal_width.py` (no failures); folded
   into the same full-suite run as items 6/7/8 above.
+- **Compiled-engine elaboration-cache collision for non-file-backed Designs**
+  — **Fixed.** `_compute_elab_hash` (`sim/compiled/compiled_scheduler.py`)
+  hashed `Design.source_files` path *strings* as a fallback whenever
+  `Path(sf).read_bytes()` raised `OSError` (i.e. the path doesn't exist on
+  disk) — always true for any programmatically-constructed `Design` not
+  backed by a real file (the grammar-driven fuzzer's `tree_to_design(tree,
+  source_file="fuzz.v")`, and likely other in-memory/DSL-built designs).
+  Since the fallback hash depended only on the fixed placeholder path
+  string plus `module.name` (always `"t"` for the fuzzer) — never on the
+  module's actual content — every module generated in a single fuzz run
+  produced the *same* elaboration hash, so the elaboration cache
+  transparently returned the *first* module's stale compiled `.so` for
+  every subsequent module regardless of what that module actually
+  contained. Confirmed directly (two different module bodies, same name
+  `"t"`, same placeholder `source_file`): the second module silently read
+  back the first module's compiled results, with zero "cache miss"/compile
+  log output at all. In a smoke fuzz run (`--max 200 --no-icarus --engines
+  ... compiled`, seed 42) this produced 61/104 modules "mismatching" against
+  the reference engine — a systemic false-positive-mismatch generator for
+  any `engine="compiled"` fuzz run, not a real simulator bug; almost
+  certainly the reason `_detect_engines()` in `fuzz/_runner.py` requires an
+  explicit opt-in (`VERIFORGE_DIFF_COMPILED=1` or `--engines ... compiled`)
+  rather than including `compiled` by default. Fixed by falling back to a
+  hash of the module's own emitted Verilog text (`emit_module(module)`)
+  instead of the bare path string whenever a listed source file can't be
+  read from disk — verified the two-different-bodies-same-name repro above
+  now elaborates and compiles correctly for both, matching the reference
+  engine.
+- **`StreamingConcatenation` unsupported by `emit_expression`** — **Fixed.**
+  `codegen/verilog_emitter.py::emit_expression` had no `isinstance` case for
+  `StreamingConcatenation` at all (added in `69849a6`, wired into every
+  simulation engine and the parser, but never into the text emitter) —
+  silently fell through to `"/* unknown expression */"`. Found while adding
+  streaming-concat generation to the fuzzer (any `{<<{...}}` node anywhere
+  in a `Design` — including inside a module port connection, per this
+  session's fuzzing-round plan — would corrupt on re-emission). Fixed by
+  adding a case mirroring `Concatenation`/`Replication`, emitting `{<<` +
+  optional `slice_size` + `{parts}}` (this node only ever represents `<<`;
+  `>>` desugars to plain `Concatenation` at AST-build time, per the node's
+  own docstring, so no `>>` case is needed here).
+- **Icarus Verilog has no `{<<{...}}` support at all** — confirmed directly
+  (`iverilog -g2012`: `"sorry: Streaming concatenation not supported"`).
+  Not a veriforge bug, but the fuzzer's Icarus cross-check
+  (`fuzz/_runner.py::_run_one`) now explicitly skips Icarus for any module
+  containing a genuine `StreamingConcatenation` node (`mod.find(...)`) to
+  avoid flooding `fuzz_output/` with false-positive "icarus failed"
+  mismatches; cross-engine comparison (reference vs vm/vm-fast/compiled)
+  is unaffected and still runs for these modules.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native
