@@ -112,10 +112,11 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Simulation
 
-- **Wide-signal pre-edge snapshot gap in the compiled engine** — **Fixed**
-  (three layers, all landed and regression-clean: full suite 8394 passed / 0
-  failed after all three). Turned out to be three separate-but-related gaps,
-  each surfaced by peeling back the previous fix against the real
+- **Wide-signal pre-edge snapshot gap in the compiled engine** — **Fixed and
+  fully resolved** (five layers, all landed and regression-clean: full suite
+  8394 passed / 0 failed both after layer 3 and again after layer 5). Turned
+  out to be five separate-but-related gaps, each surfaced by peeling back
+  the previous fix against the real
   `axis_pix_correction2` repro (`axis_regslice.v`'s skid buffer, reached via
   a wide `{tuser,tlast,tdata}` port, driving a mocked `xpm_fifo_sync`):
   1. *Wide signals*: `_sig_extract_word_val_sv`/`_sig_extract_word_mask_sv`
@@ -149,24 +150,58 @@ edits. Remaining fallback cases still re-emit the full module:
      (`_wmem{mid}_stage_insert_signal_slice_sv`) at *generation* time
      whenever the signal source is provably not a local blocking-written
      temp in that same body.
-  Verified against the real design: reactively-driven input (`s_in.put()` +
-  `wait_drain()`) followed by a `batch_run()` tail — exactly the pattern in
-  `test_lowered_source_with_batch_run` — now produces correct output across
-  multiple distinct rows, not just the one the shipped test covers.
-  **Still out of scope / not covered by any of the three fixes above**:
-  driving *new* data across a wide/memory-backed bus via `batch_run()`'s own
-  `events=` mechanism directly (as opposed to reactively via `bench.step()`)
-  remains unsafe — confirmed still failing (`lowered_batch_run_test.py`, a
-  scratch repro, not shipped). Root cause not yet isolated; likely a
-  distinct issue in how `batch_run()`'s per-cycle event-application loop
-  settles a memory-backed input before its own snapshot points, separate
-  from the three read-side gaps above. There may also be other
-  call-site-blind shared helpers with the same class of bug as (3) above
-  (candidates, unconfirmed: `_whole_stage_insert_signal_slice`,
-  `_whole_stage_insert_word`, `_whole_stage_insert_signal`,
-  `_whole_assign_mem_elem_{mid}`) — not audited beyond the one actually
-  exercised by this repro; worth a dedicated sweep before assuming the
-  compiled engine's memory/wide-signal snapshot story is fully closed.
+  4. *Whole-signal-to-signal wide NBA copies*: `m_axis_tdata <= s_axis_tdata;`
+     (both plain wide signals, same width, no bit-range/concat at all —
+     `axis_regslice.v`'s own skid-buffer registers) never went through
+     `_sig_extract_word_val`/`_wmem{mid}_extract_val` in the first place, so
+     none of fixes 1-3 touched it: `_emit_wide_signal_copy_lines`
+     (`_wide_emitter.py`) routes straight to `_whole_stage_signal`/
+     `_whole_stage_signal_s`, another shared, call-site-blind helper (same
+     class of gap as item 3, different call shape) that reads
+     `c.wide_val`/`c.val[src_sid]` live. Fixed the same way as item 3: new
+     `_whole_stage_signal_sv`/`_whole_stage_signal_s_sv` twins
+     (`templates/narrow_assign.pxi`) reading `wide_snap_val`/`sv[]`, selected
+     by `_emit_wide_signal_copy_lines` via the same `_body_tainted_sids`
+     check. Confirmed via direct C-level instrumentation
+     (`debug_wide_snap`/`debug_wide_live`, temporary `cpdef` methods) that
+     the source's snapshot was byte-for-byte correct at the moment of the
+     copy — this fix is real and necessary, but turned out not to be
+     sufficient by itself to explain the observed failure; see item 5.
+  5. *`batch_run()`'s first-call clock-state assumption* — the actual root
+     cause of the remaining failure (`lowered_batch_run_test.py`, the
+     `events=`-scheduled 2-row/288-beat repro, and a raw-poke-per-cycle
+     `batch_run(1)` loop both hung identically; none of fixes 1-4 alone
+     resolved it). `batch_run()`'s C loop unconditionally treats its very
+     first iteration as starting from clock-low: it drives `clk_sid` high
+     ("posedge"), which is a no-op if the clock was already 1 entering the
+     call (as it commonly is after prior reactive `bench.step()`-based
+     driving, e.g. `init_bench()`'s warm-up cycles), silently dropping the
+     caller's first requested cycle and shifting every subsequent edge by
+     one — confirmed by direct C-level instrumentation: `clk=1'b1` on
+     entry, and the design's `always_ff` block provably never fired at all
+     during the first `batch_run(1)` call, only starting from the second.
+     Fixed by checking `self.ctx.val[clk_sid] != 0` once at the top of
+     `batch_run()`'s `nogil` block and, if so, forcing one real negedge
+     (settle + snapshot + drive low + `delta_loop`) before the caller's own
+     posedge/negedge loop begins, so its first posedge is always a genuine
+     0→1 transition. This was the fix that actually closed the gap; 1-4
+     were real, necessary, and independently regression-verified, but none
+     of them were what was blocking the `axis_pix_correction2` repro.
+  Verified against the real design: both the reactive-input +
+  `batch_run()`-tail pattern (`test_lowered_source_with_batch_run`, and a
+  from-scratch 3-row reactive-drive variant) *and* the original
+  `events=`-scheduled multi-row `batch_run()` repro now produce fully
+  correct output. Full regression suite re-run after fix 5: 8394 passed / 0
+  failed, identical to the pre-fix baseline — no regressions.
+  **Still unaudited** (found during investigation, never confirmed as
+  actually broken — the clock-edge bug above fully explained every
+  symptom observed, so these remain theoretical): other shared, call-site-
+  blind NBA-write helpers structurally similar to `_wmem{mid}_stage_insert_
+  signal_slice` (item 3) — `_whole_stage_insert_signal_slice`,
+  `_whole_stage_insert_word`, `_whole_stage_insert_signal` (the narrow
+  variant; the wide one was fixed as item 4's `_whole_stage_signal_sv`),
+  `_whole_assign_mem_elem_{mid}`. Worth a dedicated sweep for the same
+  live-vs-snapshot gap before assuming none of them can hit it.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

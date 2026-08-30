@@ -1551,6 +1551,14 @@ class _WideEmitterMixin:
 
         phase = "stage" if is_nba else "assign"
         pad = "    " * indent
+        if is_nba and self._body_tainted_sids is not None and rhs_sid not in self._body_tainted_sids:
+            # Pre-edge-snapshot variants -- see _whole_stage_signal_sv's
+            # own comment (narrow_assign.pxi) for why a whole-signal NBA
+            # copy needs this even though it never goes through
+            # `_sig_extract_word_val`/`_sv` at all.
+            if rhs_signed and lhs_w > rhs_w:
+                return [f"{pad}_whole_stage_signal_s_sv(c, sv, sm, {dst_sid}, {rhs_sid})"]
+            return [f"{pad}_whole_stage_signal_sv(c, sv, sm, {dst_sid}, {rhs_sid})"]
         if rhs_signed and lhs_w > rhs_w:
             return [f"{pad}_whole_{phase}_signal_s(c, {dst_sid}, {rhs_sid})"]
         return [f"{pad}_whole_{phase}_signal(c, {dst_sid}, {rhs_sid})"]

@@ -6071,6 +6071,118 @@ cdef inline void _whole_stage_signal_s(SimCtx *c, int dst_sid, int src_sid) noex
     c.nba_dirty[dst_sid] = 1
     c.nba_pending = 1
 
+cdef inline void _whole_stage_signal_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int src_sid) noexcept nogil:
+    # Pre-edge-snapshot twin of _whole_stage_signal above -- identical
+    # except every SOURCE read goes through the snapshot (wide_snap_val/
+    # wide_snap_mask for a wide source, sv[]/sm[] for a narrow one) instead
+    # of the live value. Selected at emission time
+    # (_emit_wide_signal_copy_lines, _wide_emitter.py) only when src_sid is
+    # known not to be blocking-written elsewhere in the same seq body
+    # (self._body_tainted_sids) -- see notes/roadmap.md "Wide-signal
+    # pre-edge snapshot gap": confirmed real-world trigger is
+    # `axis_regslice.v`'s `m_axis_tdata <= s_axis_tdata;` (a whole-signal,
+    # not bit-range, NBA copy -- the ONE code path that class of fix never
+    # reached, since `_whole_stage_signal` reads src_sid directly rather
+    # than through `_sig_extract_word_val`).
+    cdef int dst_words = c.wide_words[dst_sid]
+    cdef int src_words = c.wide_words[src_sid]
+    cdef int dst_offset = c.wide_offset[dst_sid]
+    cdef int src_offset = c.wide_offset[src_sid]
+    cdef int i, remaining_w
+    cdef unsigned long long word_v, word_m, tail_mask
+    if dst_words > 0:
+        for i in range(dst_words):
+            if src_words > 0:
+                if i < src_words:
+                    word_v = c.wide_snap_val[src_offset + i]
+                    word_m = c.wide_snap_mask[src_offset + i]
+                else:
+                    word_v = 0
+                    word_m = 0
+            elif i == 0:
+                word_v = <unsigned long long>sv[src_sid]
+                word_m = <unsigned long long>sm[src_sid]
+            else:
+                word_v = 0
+                word_m = 0
+            remaining_w = c.width[dst_sid] - (i * 64)
+            tail_mask = _word_mask64(remaining_w)
+            c.wide_nba_val[dst_offset + i] = word_v & tail_mask
+            c.wide_nba_mask[dst_offset + i] = word_m & tail_mask
+        c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
+        c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[dst_offset]
+    elif src_words > 0:
+        c.nba_val[dst_sid] = <long long>(c.wide_snap_val[src_offset] & _word_mask64(c.width[dst_sid]))
+        c.nba_mask[dst_sid] = <long long>(c.wide_snap_mask[src_offset] & _word_mask64(c.width[dst_sid]))
+    else:
+        c.nba_val[dst_sid] = sv[src_sid] & wmask(c.width[dst_sid])
+        c.nba_mask[dst_sid] = sm[src_sid] & wmask(c.width[dst_sid])
+    c.nba_dirty[dst_sid] = 1
+    c.nba_pending = 1
+
+cdef inline void _whole_stage_signal_s_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int src_sid) noexcept nogil:
+    # Pre-edge-snapshot twin of _whole_stage_signal_s -- see
+    # _whole_stage_signal_sv's comment above for the rationale; identical
+    # to _whole_stage_signal_s except every SOURCE read is snapshot-based.
+    cdef int dst_words = c.wide_words[dst_sid]
+    cdef int src_words = c.wide_words[src_sid]
+    cdef int dst_offset = c.wide_offset[dst_sid]
+    cdef int src_offset = c.wide_offset[src_sid]
+    cdef int i, remaining_w
+    cdef int sign_bit_local
+    cdef unsigned long long word_v, word_m, tail_mask, sign_word_v, sign_word_m, sign_fill, sign_fill_mask, src_tail_mask
+    if src_words > 0:
+        sign_bit_local = (c.width[src_sid] - 1) - ((src_words - 1) * 64)
+        sign_word_v = c.wide_snap_val[src_offset + src_words - 1]
+        sign_word_m = c.wide_snap_mask[src_offset + src_words - 1]
+    else:
+        sign_bit_local = c.width[src_sid] - 1
+        sign_word_v = <unsigned long long>sv[src_sid]
+        sign_word_m = <unsigned long long>sm[src_sid]
+    if sign_word_m & (<unsigned long long>1 << sign_bit_local):
+        sign_fill = 0
+        sign_fill_mask = <unsigned long long>-1
+    elif sign_word_v & (<unsigned long long>1 << sign_bit_local):
+        sign_fill = <unsigned long long>-1
+        sign_fill_mask = 0
+    else:
+        sign_fill = 0
+        sign_fill_mask = 0
+    if dst_words > 0:
+        for i in range(dst_words):
+            if src_words > 0:
+                if i < src_words - 1:
+                    word_v = c.wide_snap_val[src_offset + i]
+                    word_m = c.wide_snap_mask[src_offset + i]
+                elif i == src_words - 1:
+                    src_tail_mask = _word_mask64(sign_bit_local + 1)
+                    word_v = (c.wide_snap_val[src_offset + i] & src_tail_mask) | (sign_fill & ~src_tail_mask)
+                    word_m = (c.wide_snap_mask[src_offset + i] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)
+                else:
+                    word_v = sign_fill
+                    word_m = sign_fill_mask
+            elif i == 0:
+                src_tail_mask = _word_mask64(sign_bit_local + 1)
+                word_v = <unsigned long long>_sign_ext(sv[src_sid], c.width[src_sid])
+                word_m = (<unsigned long long>sm[src_sid] & src_tail_mask) | (sign_fill_mask & ~src_tail_mask)
+            else:
+                word_v = sign_fill
+                word_m = sign_fill_mask
+            remaining_w = c.width[dst_sid] - (i * 64)
+            tail_mask = _word_mask64(remaining_w)
+            c.wide_nba_val[dst_offset + i] = word_v & tail_mask
+            c.wide_nba_mask[dst_offset + i] = word_m & tail_mask
+        c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
+        c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[dst_offset]
+    elif src_words > 0:
+        c.nba_val[dst_sid] = <long long>(c.wide_snap_val[src_offset] & _word_mask64(c.width[dst_sid]))
+        c.nba_mask[dst_sid] = <long long>(c.wide_snap_mask[src_offset] & _word_mask64(c.width[dst_sid]))
+    else:
+        c.nba_val[dst_sid] = _sign_ext(sv[src_sid], c.width[src_sid]) & wmask(c.width[dst_sid])
+        c.nba_mask[dst_sid] = sm[src_sid] & wmask(c.width[dst_sid])
+    c.nba_dirty[dst_sid] = 1
+    c.nba_pending = 1
+
 cdef inline void _whole_stage_const_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
     cdef int dst_offset = c.wide_offset[dst_sid]
