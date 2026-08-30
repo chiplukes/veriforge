@@ -32,6 +32,7 @@ from veriforge.model.expressions import (
     Range,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     TernaryOp,
     UnaryOp,
 )
@@ -1459,6 +1460,30 @@ def _walk_expr_reads(expr: Expression, reads: set[str]) -> None:  # noqa: PLR091
     if isinstance(expr, Replication):
         _walk_expr_reads(expr.count, reads)
         _walk_expr_reads(expr.value, reads)
+        return
+
+    if isinstance(expr, StreamingConcatenation):
+        # Previously unhandled -- same gap class as AssignmentPattern above
+        # (fell through to a silent no-op): any signal referenced ONLY
+        # inside a `{<<{...}}`/`{<<N{...}}` streaming concatenation was
+        # invisible to sensitivity analysis, so a continuous assign or
+        # always @(*) block driven solely by such a signal was registered
+        # with an EMPTY (or unrelated) read-set and never got scheduled to
+        # (re-)run after elaboration -- leaving its output permanently x
+        # regardless of what the streaming concatenation's own operands
+        # were driven to. Confirmed directly: `StreamingConcatenation`
+        # evaluates correctly on its own (`Value.stream_reverse` gives the
+        # right answer), the assign process itself simply never re-ran.
+        # vm/vm-fast share this same gap (`sim/vm/compiler.py`'s analogous
+        # `_walk_expr_signals`); only compiled (generic reflective
+        # `__slots__` walk, not a hand-maintained per-node-type dispatch)
+        # was unaffected -- this was the root cause of the fuzzing round's
+        # dominant "streaming-concat X-propagation divergence" finding
+        # (notes/roadmap.md), not a `compiled`-engine bug as first assumed.
+        for part in expr.parts:
+            _walk_expr_reads(part, reads)
+        if expr.slice_size is not None:
+            _walk_expr_reads(expr.slice_size, reads)
         return
 
     if isinstance(expr, BitSelect):

@@ -3188,6 +3188,22 @@ class Compiler:  # cm:8c1e4a
             self._walk_expr_signals(expr.value, signals)
             return
 
+        if isinstance(expr, StreamingConcatenation):
+            # Previously unhandled: same gap as AssignmentPattern above --
+            # see the matching fix/comment in `sim/scheduler.py`'s
+            # `_walk_expr_reads` for the reference-engine counterpart of
+            # this same bug (confirmed cross-engine: this was the root
+            # cause of the fuzzing round's dominant "streaming-concat
+            # X-propagation divergence" finding, notes/roadmap.md -- not a
+            # `compiled`-engine bug as first assumed. vm-fast shares this
+            # gap too, since it executes the same bytecode this compiler
+            # produces.)
+            for part in expr.parts:
+                self._walk_expr_signals(part, signals)
+            if expr.slice_size is not None:
+                self._walk_expr_signals(expr.slice_size, signals)
+            return
+
         if isinstance(expr, BitSelect):
             # If this is a memory read, add the memory's marker signal
             # so that combo processes re-fire when the memory is written.

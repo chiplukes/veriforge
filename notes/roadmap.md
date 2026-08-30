@@ -315,112 +315,136 @@ edits. Remaining fallback cases still re-emit the full module:
   needs a decision: either lift the 64-bit limitation in vm/compiled to
   match reference/vm-fast, or make reference/vm-fast raise the same error
   for consistency, so all four engines agree on what's legal.
-- **Suspected `StreamingConcatenation` X-propagation/width-truncation
-  divergence, `compiled` vs the other three engines** — found via a
-  hand-built repro while validating parameter generation (not yet reduced
-  to a minimal case): `assign y = {<<8{a, P}}` where the concatenated
-  content (`a` 8 bits + `P` 12 bits = 20 bits) isn't a multiple of the
-  8-bit slice_size and the LHS (`y`, 24 bits) is wider than that 20-bit
-  content. `reference`/`vm`/`vm-fast` agree with each other (the
-  unfilled/misaligned bits read back as X); `compiled` gives a concrete,
-  differing value in that same region instead. Also independently visible
-  in a `--no-icarus --engines ... compiled` smoke fuzz run of the new
-  streaming-concat generator: 6 of 11 mismatches involved a
-  `StreamingConcatenation` node, split between `compiled`-vs-reference and
-  (separately) `vm`/`vm-fast`-vs-reference divergences. A third, standalone
-  repro turned up in a parameter-generation smoke run and does NOT involve
-  a parameter at all (plain literal slice_size, so this reaches back to
-  plain task-#27-scope streaming-concat, nothing param-specific):
-  `always @(*) o9 = {<<32'd2{!(|i5), r8}};` -- `reference` gives `o9` a
-  mostly-X result (`mask=0xfffffffffffffffd`) while `vm` resolves the same
-  concrete `val` fully (`mask=0x0`), i.e. `vm` marks bits as known that
-  `reference` leaves unknown. Also reproduces through the new
-  `Strategy.HIERARCHICAL` "concat *out of* a port" shape specifically
-  (`wire [2:0] w6; wire w7; assign o9 = {<<{w6, w7}};` where `w6`/`w7` are
-  an instance's own output wires) -- same `vm`/`vm-fast`-vs-`reference`
-  X-mask divergence, confirming this is the same pre-existing bug class
-  rather than anything hierarchy-specific. A full 200-module
-  `--no-icarus --engines ... compiled` run of the streaming-concat
-  generator (task tracking: fuzzing-round item 27) landed at 19/200
-  mismatching (compiled: 17, vm: 2, vm-fast: 3) -- the fuzzing round's
-  headline finding so far. Not yet reduced to a minimal repro or
-  root-caused -- flagged here for the fuzzing round's own triage pass
-  (`notes/fuzzer.md` "Repro Workflow") rather than fixed inline.
+- **`StreamingConcatenation` operands invisible to sensitivity/dependency
+  tracking on `reference`/`vm`/`vm-fast` — Fixed.** This was the fuzzing
+  round's headline finding, and turned out NOT to be a `compiled`-engine
+  bug at all (the opposite of the original suspicion below, kept for the
+  investigation trail): a signal referenced ONLY inside a
+  `{<<{...}}`/`{<<N{...}}` streaming concatenation was invisible to
+  `sim/scheduler.py`'s `_walk_expr_reads` and `sim/vm/compiler.py`'s
+  `_walk_expr_signals` -- both walkers have a case for every other
+  expression node (`Concatenation`, `Replication`, ...) but none for
+  `StreamingConcatenation`, so a continuous assign or `always @(*)` block
+  driven solely by such a signal was registered with a sensitivity set
+  that never included it, and so never got scheduled to re-run after
+  elaboration -- leaving the output permanently stuck at its
+  elaboration-time `x`, REGARDLESS of what the streaming concatenation's
+  operands were subsequently driven to. `StreamingConcatenation` itself
+  evaluates completely correctly in isolation (`Value.stream_reverse` is
+  fine) -- the bug is purely in whether the containing process ever runs
+  again. `compiled` was unaffected (collects signal references via a
+  generic reflective walk, not hand-maintained per-node dispatch), so
+  every prior mismatch attributed "to compiled" in this bug's earlier
+  write-up was actually reference/vm/vm-fast failing to update at all,
+  with `compiled` alone producing the correct answer. This is the EXACT
+  same gap class already fixed once for `AssignmentPattern` in both of
+  these same functions (see their own comments) -- `StreamingConcatenation`
+  was added later (`69849a6`) and never got the same treatment.
+
+  Confirmed with a minimal, no-parameter, no-hierarchy repro:
+  `assign o = {<<{a}};` (or `always @(*) o = {<<{a}};`) with `a` driven to
+  a concrete, fully-defined value AFTER the `Simulator` is constructed --
+  `reference`/`vm`/`vm-fast` all returned all-`x` for `o` regardless of
+  `a`'s value; `compiled` alone computed the correct bit-reversal. Only
+  visible via `sim.settle()` (a continuous assign has no protection even
+  on its first `settle()` call; a combinational `always @(*)` gets a
+  one-time bootstrap pass on its FIRST `settle()` only, so needs two
+  drive-then-settle cycles to expose) -- every PRE-EXISTING streaming-concat
+  test used `sim.run(max_time=0)` instead, which always does a full,
+  sensitivity-independent pass regardless of this bug (`settle()`'s own
+  docstring: "`run()` already does the equivalent unconditionally on every
+  call"), so none of them caught it despite covering the `<<` form
+  directly.
+
+  Fixed by adding a `StreamingConcatenation` case (walking `.parts` and
+  `.slice_size`) to both walkers. Verified: all 8 of this bug's own new
+  regression tests (`tests/test_sim/test_streaming_concatenation_reversal.py`,
+  `TestStreamingConcatenationReversalSensitivity`) fail without the fix and
+  pass with it; re-ran every one of the 42 flat (non-hierarchical) modules
+  from the 300-module full cross-check run below against all four
+  engines -- 30 previously-mismatching-or-worse cases (including the
+  original hand-built repro, `mismatch_00090`, `mismatch_10082`,
+  `mismatch_10203`, `mismatch_10262`, `mismatch_10174`, and the
+  `Strategy.HIERARCHICAL` "concat out of a port" case) now agree across
+  the board; full `tests/test_sim/` suite re-run clean after the fix.
+
+  **Residual, genuinely distinct findings, NOT covered by this fix** (a
+  handful of files still mismatch after re-verification -- each is a
+  separate, smaller lead for a future session, not chased further here):
+  - `mismatch_10055`, `mismatch_10024`: small numeric/mask differences
+    (`vm-fast` vs `reference`) on modules that DO contain streaming concat
+    -- concrete, non-x values differing by a few bits, or masks differing
+    in extent -- looks like a genuine `vm-fast`-specific streaming-concat
+    *value* computation bug, distinct from the sensitivity gap just fixed.
+  - `mismatch_10096`, `mismatch_10151`: `compiled`-specific value/mask
+    divergences on modules with streaming concat, one involving a
+    combinational `assign` that reads `clk` directly and inter-signal
+    feedback (`o10 = ~o12`-style) -- complex enough not to have been
+    reduced further.
+  - `mismatch_10017`, `mismatch_10075`: on inspection, the ACTUAL
+    mismatching signal in each has nothing to do with streaming concat at
+    all (`o10 <= clk;` / `o11 <= $unsigned(clk);` -- a plain clock-to-reg
+    copy) -- an unrelated `compiled`-engine clock-timing/sampling
+    off-by-one-cycle issue that happened to co-occur in a module that also
+    used streaming concat elsewhere. Confirms the earlier "~9/48 are
+    compiled-engine-only, no streaming concat" bucket (below) and this
+    bucket are likely the SAME pre-existing bug family, not two.
 - **Signed parameter value >= 2^(width-1) zero-extended instead of
-  sign-extended when read into a wider signal, ALL FOUR engines** — found
-  via the fuzzing round's own parameter generation (task #28) hitting a
-  large enough edge-case value for the first time; NOT specific to
-  streaming-concat/hierarchy. Minimal, fully reduced repro:
+  sign-extended when read into a wider signal, ALL FOUR engines — Fixed.**
+  Found via the fuzzing round's own parameter generation (task #28)
+  hitting a large enough edge-case value for the first time; NOT specific
+  to streaming-concat/hierarchy. Minimal, fully reduced repro:
   ```verilog
   module a (output signed [67:0] o);
     parameter signed [63:0] p = 64'sd14019245667914476225;  // bit 63 set
     assign o = p;
   endmodule
   ```
-  `reference`/`vm`/`vm-fast`/`compiled` all agree with each other and are
-  all wrong: the top 4 bits of `o` come back `0000` (zero-extension)
+  `reference`/`vm`/`vm-fast`/`compiled` all agreed with each other and were
+  all wrong: the top 4 bits of `o` came back `0000` (zero-extension)
   instead of the correct `1111` (sign-extension, since bit 63 of `p`'s
   value is set -- it's a negative 64-bit number in two's complement).
   Confirmed **specific to parameters**: the exact same value used instead
   as a signed *input port* or as a bare signed *literal* in the same
-  widening-assign shape sign-extends correctly on every engine (so this
-  isn't a general widening/sign-extension bug -- only parameter reads hit
-  it, confirming the shared runtime-value path is parameter-specific, not
-  the everyday RTL-expression-evaluation path every engine otherwise uses).
+  widening-assign shape sign-extended correctly on every engine already.
 
-  **Root cause located**: `_eval_const` in `semantics.py` (the single
-  shared primitive `const_int`/`analysis/const_fold.py` and every engine's
-  own parameter/genvar resolution ultimately delegate to -- confirmed via
-  its own docstrings and call chain, not just a suspicious analog) resolves
-  an `Identifier` referencing a parameter via `Identifier.resolved` →
-  `Parameter.default_value`, then its own `Literal` case does `return
-  int(expr.value)` with **no** two's-complement reinterpretation based on
-  `expr.signed`/`expr.width` at all -- so a signed literal whose raw stored
-  value has its own sign bit set (any value >= `2^(width-1)`) comes back as
-  a large *positive* Python int instead of the correct negative one, and
-  whatever later packs that value into the destination signal's width just
-  masks/zero-extends a positive number, never sign-extending. `sim/
-  elaborate.py`'s `_build_param_env`'s own `_eval_const_expr` has the
-  textually-identical bug (`return int(expr.value)`, same missing
-  reinterpretation) but is scoped to width/genvar-bound calculations per
-  its docstring, so it's very likely NOT itself hit by this exact repro --
-  `semantics._eval_const` is the confirmed shared path all four engines
-  actually go through for `assign o = p;`.
+  **Root cause** (a parser gap, not the shared-runtime-value-path
+  hypothesis first suspected): `_extract_parameters`
+  (`transforms/_declarations.py`) only populated `Parameter.signed`/
+  `.width` from a `parameter_type` grammar wrapper node -- but
+  `parameter_declaration`'s own rule (`KW_PARAMETER KW_SIGNED? range?
+  ...`) puts `KW_SIGNED`/`range` directly as this node's own children, with
+  no such wrapper (that wrapper is a separate rule, `parameter_type:
+  KW_INTEGER | KW_REAL | ...`, only for typed parameters). Every plain
+  `parameter signed [msb:lsb] name = value;` (port-list or body style)
+  silently got `signed=False`, `width=None` regardless of its own
+  declaration -- confirmed directly: `p.signed` was `False` even for a
+  parameter written explicitly `signed`. Fixed by scanning for
+  `KW_SIGNED`/`range` directly on `parameter_declaration`'s own children
+  too, in addition to the existing `parameter_type`-wrapper case.
 
-  **Not fixed inline**: `_eval_const`/`const_int` is a small, deeply-shared
-  primitive (name resolution, width inference, generate-block/genvar
-  evaluation, parameter overrides all route through it) -- a fix here has a
-  wide blast radius that needs its own deterministic regression test added
-  first and the full relevant suite (not just a couple files) run after,
-  per the fuzzing round's own documented workflow (`notes/fuzzer.md` "Repro
-  Workflow") -- appropriately scoped as a dedicated follow-up rather than
-  a same-turn patch. Two more independent fuzzer-found instances of this
-  exact shape (large-value signed parameter widened into a bigger signal,
-  upper bits wrong on `reference`/`vm`/`vm-fast`/`compiled` alike vs
-  Icarus) turned up in the full cross-check run below, reinforcing this is
-  a real, frequently-reachable bug, not a one-off.
+  Verified: `tests/test_model/test_module.py` (parser → model attributes)
+  and `tests/test_sim/test_param_width.py`
+  (`TestSignedParameterSignExtension`, end-to-end across all four engines)
+  regression tests added, confirmed to fail without the fix and pass with
+  it; full `tests/test_verilog_parser/`, `tests/test_model/`,
+  `tests/test_analysis/`, `tests/test_dsl/` (2515 passed) and
+  `tests/test_sim/` (5289 passed) re-run clean after the fix.
 - **Full cross-check run (task-tracking: fuzzing-round item 32) — 300
-  modules, all four engines + Icarus, seed 10000**: 48/300 mismatching
-  (`compiled`: 39, `iverilog`: 7, `vm-fast`: 6, `vm`: 4; some mismatches hit
-  more than one engine). Triaged by inspecting each `mismatch_NNNNN/
-  module.v` + `mismatches.txt`:
-  - **30/48** contain a genuine `{<<{...}}`/`{<<N{...}}` streaming
-    concatenation (26 in a flat module, 4 via the hierarchical strategy) --
-    the same X-propagation/value divergence documented above. By far the
-    dominant category; nothing new here beyond confirming scale.
-  - **3+/48** are the signed-parameter sign-extension bug documented just
-    above (confirmed via direct inspection: `mismatch_10105`'s `assign o5 =
-    p1;` and `mismatch_10135`'s upper-bits-only divergence are unmistakably
-    this shape; likely more hiding among the streaming-concat-tagged ones
-    too, since large params and streaming concat are both common in the
-    same generated modules and weren't cross-checked against each other).
+  modules, all four engines + Icarus, seed 10000**: 48/300 mismatching at
+  the time, before either fix above landed (`compiled`: 39, `iverilog`: 7,
+  `vm-fast`: 6, `vm`: 4; some mismatches hit more than one engine). Triaged
+  by inspecting each `mismatch_NNNNN/module.v` + `mismatches.txt`; both of
+  the bugs found through this triage are now fixed (see above) --
+  remaining, not-yet-addressed categories:
   - **~9/48** are `compiled`-engine-only value/mask mismatches with no
     streaming concat present (`mismatch_10030`, `10104`, `10109`, `10184`,
     `10216`, `10271`, `10279`, `10280`, `10291`) -- plausibly more instances
     of this session's already-known compiled-engine wide/whole-signal bug
     family (see the wide-signal pre-edge-snapshot items earlier in this
-    section) rather than a new class, but none of these has been
-    individually reduced/confirmed as such yet.
+    section), and/or the same clock-timing issue found via `mismatch_10017`/
+    `10075` above, but none of these has been individually reduced/
+    confirmed as such yet.
   - **A handful of small, distinct, NOT-yet-characterized leads**, each
     worth its own reduction pass in a future session:
     - `mismatch_10063`/`mismatch_10239`: off-by-one-in-the-low-bits
@@ -439,11 +463,6 @@ edits. Remaining fallback cases still re-emit the full module:
       values task #28 now generates than a real infinite-loop bug; worth
       revisiting if it recurs (e.g. capping generated parameter magnitude,
       or a longer `vvp` timeout) rather than assuming it's a correctness bug.
-
-  None of this was fixed inline -- per the same documented workflow, this
-  is the triage/categorization pass; the concrete fix work (starting with
-  the already-root-caused signed-parameter bug) is scoped as its own
-  follow-up.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

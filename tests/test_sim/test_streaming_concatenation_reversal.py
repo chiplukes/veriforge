@@ -222,6 +222,66 @@ class TestStreamingConcatenationReversalSimulation:
         assert int(sim.signal("y").value) == 0x78563412
 
 
+class TestStreamingConcatenationReversalSensitivity:
+    """Regression for a real bug found via the grammar-driven fuzzer's own
+    streaming-concat generation (`notes/roadmap.md`, "the fuzzing round's
+    headline finding"): a signal referenced ONLY inside a
+    `StreamingConcatenation` was invisible to sensitivity/dependency
+    analysis on `reference`/`vm`/`vm-fast` (`sim/scheduler.py`'s
+    `_walk_expr_reads` and `sim/vm/compiler.py`'s `_walk_expr_signals` both
+    had no case for it -- the exact same gap class already fixed once for
+    `AssignmentPattern`, just never extended to this later-added node).
+    `compiled` was unaffected (it collects signal references via a generic
+    reflective walk, not a hand-maintained per-node-type dispatch).
+
+    This is invisible to every OTHER test in this file: they all drive
+    once and settle via `sim.run(max_time=0)`, which -- unlike calling
+    `sim.settle()` directly -- always performs at least one full,
+    sensitivity-independent pass (`settle()`'s own docstring: "`run()`
+    already does the equivalent unconditionally on every call"). A
+    continuous assign has no such protection even on its FIRST `settle()`
+    call; a combinational `always @(*)` block gets a one-time bootstrap
+    pass on its first `settle()` only, so reproducing the bug there needs
+    TWO drive-then-settle cycles, not one. Both shapes are covered below.
+    """
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_continuous_assign_rereads_after_settle(self, engine):
+        """`assign y = {<<{a}};` must reflect a *newly driven* `a` -- not
+        just correctly evaluate once at elaboration/first bootstrap time.
+        """
+        mod = _parse("""
+            module dut(input logic [15:0] a, output logic [15:0] y);
+            assign y = {<<{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", 0x1234)
+        sim.settle()
+        assert int(sim.signal("y").value) == _bit_reverse(0x1234, 16)
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_combinational_always_rereads_after_second_settle(self, engine):
+        """`always @(*) y = {<<{a}};` must re-fire on a SECOND drive+settle
+        cycle, not just the first (which a one-time bootstrap pass makes
+        correct regardless of the sensitivity-tracking bug this guards
+        against -- confirmed directly: this test's first assertion alone
+        passes even without the fix; only the second one catches it).
+        """
+        mod = _parse("""
+            module dut(input logic [15:0] a, output logic [15:0] y);
+            always @(*) y = {<<{a}};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", 0x1234)
+        sim.settle()
+        assert int(sim.signal("y").value) == _bit_reverse(0x1234, 16)
+        sim.drive("a", 0x5678)
+        sim.settle()
+        assert int(sim.signal("y").value) == _bit_reverse(0x5678, 16)
+
+
 class TestStreamingConcatenationReversalErrors:
     def test_simple_type_slice_size_is_not_supported(self):
         """`{<<byte{...}}` (simple_type slice_size) is out of scope --
