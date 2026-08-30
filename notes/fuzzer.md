@@ -45,7 +45,7 @@ If neither `--max` nor `--hours` is specified, the fuzzer runs until interrupted
 
 ## What It Generates
 
-The fuzzer uses **six module strategies**, chosen randomly with weights
+The fuzzer uses **seven module strategies**, chosen randomly with weights
 favoring simpler shapes:
 
 | Strategy | Description |
@@ -56,12 +56,38 @@ favoring simpler shapes:
 | **clocked_sequential** | Single `always @(posedge clk)` with nonblocking assigns |
 | **nested_blocks** | Deeply nested `begin/end` with local variables |
 | **mixed** | Random mix of assigns + always blocks + internal nets |
+| **hierarchical** | Flat child module + parent module + an `Instance` connecting them |
 
 Each module gets random signal widths (biased toward edge cases: 1, 8, 16,
-32, 63, 64, 65, 80, 127, 128), random signedness, random expression trees
-(arithmetic, bitwise, logical, relational, reduction, ternary, concat,
-replicate, `$signed`/`$unsigned`), and random statement shapes (if/else
-chains, case/casex/casez, for loops, while loops, begin/end blocks).
+32, 63, 64, 65, 80, 127, 128), random signedness, 0-3 declared parameters
+(same edge-case-biased widths/values), random expression trees (arithmetic,
+bitwise, logical, relational, reduction, ternary, concat, streaming concat
+`{<<{...}}` / `{<<N{...}}`, replicate, `$signed`/`$unsigned`), and random
+statement shapes (if/else chains, case/casex/casez, for loops, while loops,
+begin/end blocks).
+
+**The `hierarchical` strategy** generates a child module from one of the
+other six (flat) strategies, then a parent module (always named `t`, the
+fuzzer's fixed top-module name) that instantiates it. Every child *output*
+port connects to a freshly-declared parent wire (required: Verilog output
+ports must bind to a net). Every child *input* port connects to a parent-side
+expression that's forced to be a concat/streaming-concat roughly half the
+time -- targeting "wide concatenation feeding a module port", the shape that
+caused several real compiled-engine bugs found via `axis_pix_correction2`
+(see `notes/roadmap.md`) before this fuzzing round existed. Some of the
+parent's own outputs are, in turn, woven from the instance's output wires
+via concat/streaming-concat ("concat *out of* a port"). No width-matching is
+forced on port-connection actuals beyond the output side -- Verilog's own
+implicit truncation/extension at a port connection is exactly the same as
+at any continuous-assign RHS, which every other strategy already leaves
+unconstrained. Nested hierarchy (a child that itself instantiates something)
+is a non-goal for now -- the child is always a flat strategy.
+
+Since a `hierarchical` module is two `Module`s, not one, the fuzzer's
+generation entry point is `ModuleGenerator.generate_design() -> Design`
+(`Design(modules=[mod])` normally, `Design(modules=[child, parent])` for
+`hierarchical`) -- `generate() -> Module` still exists and stays
+single-module for any external caller that only wants one flat module.
 
 ## How It Compares
 
@@ -142,10 +168,11 @@ parse_metadata.GrammarMetadataParser  ← SUPPORT: YES/NO from verilog.lark
    ┌───────────────────────────────┐
    │ ExpressionGenerator           │
    │ StatementGenerator            │
-   │ ModuleGenerator (6 strategies)│
+   │ ModuleGenerator (7 strategies)│
    └───────────────────────────────┘
            ↓
-       Module (model object)
+   Design (one or two Module model objects --
+   two only for the hierarchical strategy)
            ↓
     ┌──────┴───────┐
     ↓              ↓
@@ -169,6 +196,21 @@ parse_metadata.GrammarMetadataParser  ← SUPPORT: YES/NO from verilog.lark
   and moves on.
 - **Output ports** always use `output reg`, which Icarus requires `-g2012`
   to accept.
+- **Streaming concatenation `{<<{...}}` is skipped for the Icarus
+  cross-check entirely** (for the whole design, not just the top module --
+  the hierarchical strategy's child module draws from the same expression
+  machinery and can independently contain one too): Icarus Verilog has no
+  support for the construct at all ("sorry: Streaming concatenation not
+  supported", confirmed directly). Cross-engine comparison (reference vs
+  vm/vm-fast/compiled) still runs normally for these modules.
+- **Hierarchy is one level deep** — the `hierarchical` strategy's child is
+  always a flat (non-`hierarchical`) strategy; nested instantiation isn't
+  generated. Parameterized/overridden port widths on the instantiation
+  aren't generated either (no parameter port overrides, i.e. no `#(...)` on
+  the *instantiation* itself -- module-level parameter declarations with
+  random default values are generated independently of hierarchy).
 - The fuzzer generates only **IEEE 1364-2005 + select SystemVerilog**
   constructs. SV-only features (interfaces, packages, enums, structs) are
-  not yet in the generation pool.
+  not yet in the generation pool. `logic`-declared signals are not
+  generated either (deferred to a separate follow-up needing a
+  Verilator-based oracle, since Icarus's SV support is weaker there).

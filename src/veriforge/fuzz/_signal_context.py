@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 from ..model.expressions import Identifier, Literal, Range
 from ..model.nets import Net, NetKind
+from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
 from ..model.variables import Variable, VariableKind
 
@@ -25,6 +26,7 @@ class Signal:
     width: int
     signed: bool
     kind: str  # "input", "output", "wire", "reg", "local", "parameter"
+    value: int | None = None  # constant value, "parameter" kind only
 
     def as_identifier(self) -> Identifier:
         return Identifier(self.name)
@@ -48,6 +50,14 @@ class Signal:
     def as_variable(self) -> Variable:
         kind = VariableKind.REG if self.kind in ("reg", "local") else VariableKind.LOGIC
         return Variable(self.name, kind=kind, width=self.as_range(), signed=self.signed)
+
+    def as_parameter(self) -> Parameter:
+        return Parameter(
+            self.name,
+            width=self.as_range(),
+            signed=self.signed,
+            default_value=Literal(self.value or 0, width=self.width, base="d", signed=self.signed),
+        )
 
 
 class SignalContext:
@@ -86,6 +96,7 @@ class SignalContext:
         # Populated by ModuleGenerator strategies after assembly
         self.always_blocks: list = []
         self.continuous_assigns: list = []
+        self.instances: list = []
 
     # ------------------------------------------------------------------
     # Signal creation
@@ -153,7 +164,7 @@ class SignalContext:
         return s
 
     def add_param(self, name: str, width: int, signed: bool, value: int) -> Signal:
-        s = Signal(name=name, width=width, signed=signed, kind="parameter")
+        s = Signal(name=name, width=width, signed=signed, kind="parameter", value=value)
         self._params.append(s)
         return s
 
@@ -342,3 +353,6 @@ class SignalContext:
 
     def emit_variables(self) -> list[Variable]:
         return [s.as_variable() for s in self._regs]
+
+    def emit_parameters(self) -> list[Parameter]:
+        return [s.as_parameter() for s in self._params]

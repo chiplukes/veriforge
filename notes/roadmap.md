@@ -302,6 +302,99 @@ edits. Remaining fallback cases still re-emit the full module:
   avoid flooding `fuzz_output/` with false-positive "icarus failed"
   mismatches; cross-engine comparison (reference vs vm/vm-fast/compiled)
   is unaffected and still runs for these modules.
+- **Streaming-concat slice_size > 64 rejected only by vm/compiled, not
+  reference/vm-fast** — `_streaming_concat` in the fuzzer's expression
+  generator (added alongside the streaming-concat fuzzing round above) hit
+  this directly: a declared parameter used as slice_size can carry any
+  value (params are generated with the same edge-case-biased widths as
+  everything else), and `sim/vm/compiler.py` / `sim/compiled/_wide_emitter.py`
+  both explicitly raise `NotImplementedError` for `slice_size > 64` while
+  `reference`/`vm-fast` apparently accept it. Worked around in the
+  generator itself (only offers a parameter as slice_size when its constant
+  value already falls in `1..64`) rather than fixed at the engine level —
+  needs a decision: either lift the 64-bit limitation in vm/compiled to
+  match reference/vm-fast, or make reference/vm-fast raise the same error
+  for consistency, so all four engines agree on what's legal.
+- **Suspected `StreamingConcatenation` X-propagation/width-truncation
+  divergence, `compiled` vs the other three engines** — found via a
+  hand-built repro while validating parameter generation (not yet reduced
+  to a minimal case): `assign y = {<<8{a, P}}` where the concatenated
+  content (`a` 8 bits + `P` 12 bits = 20 bits) isn't a multiple of the
+  8-bit slice_size and the LHS (`y`, 24 bits) is wider than that 20-bit
+  content. `reference`/`vm`/`vm-fast` agree with each other (the
+  unfilled/misaligned bits read back as X); `compiled` gives a concrete,
+  differing value in that same region instead. Also independently visible
+  in a `--no-icarus --engines ... compiled` smoke fuzz run of the new
+  streaming-concat generator: 6 of 11 mismatches involved a
+  `StreamingConcatenation` node, split between `compiled`-vs-reference and
+  (separately) `vm`/`vm-fast`-vs-reference divergences. A third, standalone
+  repro turned up in a parameter-generation smoke run and does NOT involve
+  a parameter at all (plain literal slice_size, so this reaches back to
+  plain task-#27-scope streaming-concat, nothing param-specific):
+  `always @(*) o9 = {<<32'd2{!(|i5), r8}};` -- `reference` gives `o9` a
+  mostly-X result (`mask=0xfffffffffffffffd`) while `vm` resolves the same
+  concrete `val` fully (`mask=0x0`), i.e. `vm` marks bits as known that
+  `reference` leaves unknown. Also reproduces through the new
+  `Strategy.HIERARCHICAL` "concat *out of* a port" shape specifically
+  (`wire [2:0] w6; wire w7; assign o9 = {<<{w6, w7}};` where `w6`/`w7` are
+  an instance's own output wires) -- same `vm`/`vm-fast`-vs-`reference`
+  X-mask divergence, confirming this is the same pre-existing bug class
+  rather than anything hierarchy-specific. A full 200-module
+  `--no-icarus --engines ... compiled` run of the streaming-concat
+  generator (task tracking: fuzzing-round item 27) landed at 19/200
+  mismatching (compiled: 17, vm: 2, vm-fast: 3) -- the fuzzing round's
+  headline finding so far. Not yet reduced to a minimal repro or
+  root-caused -- flagged here for the fuzzing round's own triage pass
+  (`notes/fuzzer.md` "Repro Workflow") rather than fixed inline.
+- **Signed parameter value >= 2^(width-1) zero-extended instead of
+  sign-extended when read into a wider signal, ALL FOUR engines** — found
+  via the fuzzing round's own parameter generation (task #28) hitting a
+  large enough edge-case value for the first time; NOT specific to
+  streaming-concat/hierarchy. Minimal, fully reduced repro:
+  ```verilog
+  module a (output signed [67:0] o);
+    parameter signed [63:0] p = 64'sd14019245667914476225;  // bit 63 set
+    assign o = p;
+  endmodule
+  ```
+  `reference`/`vm`/`vm-fast`/`compiled` all agree with each other and are
+  all wrong: the top 4 bits of `o` come back `0000` (zero-extension)
+  instead of the correct `1111` (sign-extension, since bit 63 of `p`'s
+  value is set -- it's a negative 64-bit number in two's complement).
+  Confirmed **specific to parameters**: the exact same value used instead
+  as a signed *input port* or as a bare signed *literal* in the same
+  widening-assign shape sign-extends correctly on every engine (so this
+  isn't a general widening/sign-extension bug -- only parameter reads hit
+  it, confirming the shared runtime-value path is parameter-specific, not
+  the everyday RTL-expression-evaluation path every engine otherwise uses).
+
+  **Root cause located**: `_eval_const` in `semantics.py` (the single
+  shared primitive `const_int`/`analysis/const_fold.py` and every engine's
+  own parameter/genvar resolution ultimately delegate to -- confirmed via
+  its own docstrings and call chain, not just a suspicious analog) resolves
+  an `Identifier` referencing a parameter via `Identifier.resolved` →
+  `Parameter.default_value`, then its own `Literal` case does `return
+  int(expr.value)` with **no** two's-complement reinterpretation based on
+  `expr.signed`/`expr.width` at all -- so a signed literal whose raw stored
+  value has its own sign bit set (any value >= `2^(width-1)`) comes back as
+  a large *positive* Python int instead of the correct negative one, and
+  whatever later packs that value into the destination signal's width just
+  masks/zero-extends a positive number, never sign-extending. `sim/
+  elaborate.py`'s `_build_param_env`'s own `_eval_const_expr` has the
+  textually-identical bug (`return int(expr.value)`, same missing
+  reinterpretation) but is scoped to width/genvar-bound calculations per
+  its docstring, so it's very likely NOT itself hit by this exact repro --
+  `semantics._eval_const` is the confirmed shared path all four engines
+  actually go through for `assign o = p;`.
+
+  **Not fixed inline**: `_eval_const`/`const_int` is a small, deeply-shared
+  primitive (name resolution, width inference, generate-block/genvar
+  evaluation, parameter overrides all route through it) -- a fix here has a
+  wide blast radius that needs its own deterministic regression test added
+  first and the full relevant suite (not just a couple files) run after,
+  per the fuzzing round's own documented workflow (`notes/fuzzer.md` "Repro
+  Workflow") -- appropriately scoped as a dedicated follow-up rather than
+  a same-turn patch.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

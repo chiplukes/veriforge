@@ -224,17 +224,27 @@ class ExpressionGenerator:
         if direction == ">>":
             return Concatenation(parts)
 
+        # A slice_size > 64 hits an explicit, intentional limitation in both
+        # the vm compiler and the compiled engine's wide emitter
+        # ("Streaming concatenation slice_size > 64 is not supported") --
+        # confirmed directly. Any declared parameter is only a candidate
+        # slice_size if its own constant VALUE happens to already fall in
+        # the legal range; most won't (params are generated with the same
+        # wide-edge-case-biased widths/values as everything else), so this
+        # is usually just a plain literal.
+        safe_params = [p for p in self._ctx.parameters if p.value is not None and 1 <= p.value <= 64]
+
         slice_size: Expression | None
         roll = rng.random()
         if roll < 0.4:
             # No slice_size -- bit-level stream, the common case.
             slice_size = None
-        elif roll < 0.7 or not self._ctx.parameters:
+        elif roll < 0.7 or not safe_params:
             slice_size = Literal(rng.choice((1, 2, 4, 8)), width=32, base="d", signed=False)
         else:
             # A declared parameter is a valid constant-expression slice_size
             # (unlike a wire/reg, which IEEE 1800 disallows here).
-            slice_size = rng.choice(self._ctx.parameters).as_identifier()
+            slice_size = rng.choice(safe_params).as_identifier()
         return StreamingConcatenation(parts, slice_size)
 
     def _cast(self, rng, depth, callables, exclude=None) -> FunctionCall:
