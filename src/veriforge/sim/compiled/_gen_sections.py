@@ -317,6 +317,73 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     __slots__ = ()
 
+    def _cont_settle_fixpoint_lines(self, indent: str) -> list[str]:
+        """Lines that run every continuous-assign process repeatedly, to a
+        fixed point, instead of one single pass in declaration order.
+
+        Emitted at every point that settles continuous assigns immediately
+        before snapshotting `ctx.val`/`ctx.mask` into `sv`/`sm`
+        (`refresh_data_snapshot()` and each of `batch_run()`'s three
+        snapshot points -- NOT plain `snapshot()`, which has no continuous
+        assigns to settle at all, just a raw pre-edge capture). A single
+        pass is NOT enough when a multi-hop continuous-assign dependency
+        chain is declared "out of order" relative to its own data
+        dependencies -- e.g. `assign o10 = ~o12; assign o12 = {...};`:
+        `o10`'s own process runs BEFORE `o12`'s in one top-to-bottom pass,
+        so `o10` computes from `o12`'s STALE (pre-this-settle) value; only
+        a later, genuinely unrelated trigger would ever re-run `o10` for
+        real. That stale value then gets baked into the snapshot itself,
+        so a sequential process's NBA read captures the WRONG value at
+        every single clock edge, forever -- confirmed wrong (against the
+        reference oracle) via the grammar-driven fuzzer, and confirmed to
+        be exactly this ordering issue by simply swapping the two `assign`
+        statements, which made the divergence disappear entirely. See
+        notes/roadmap.md ("mismatch_10096").
+
+        Bounded by the number of continuous-assign processes -- a safe
+        convergence bound for any acyclic dependency graph among them (a
+        genuine combinational LOOP, a design error, would never converge
+        regardless of how many passes are allowed, so this bound doesn't
+        mask a real infinite loop, it just stops chasing one, same as
+        `DELTA_LIMIT` elsewhere). Reuses the `conv_val`/`conv_mask`/
+        `conv_wide_val`/`conv_wide_mask` scratch buffers `delta_loop`'s own
+        oscillation-detection check already uses (safe: this always
+        finishes before `delta_loop` starts, so there's no overlap) rather
+        than disturbing `dirty[]`, which `delta_loop`'s own triggering
+        depends on seeing exactly as external drives/events left it.
+
+        Callers must declare `cdef int _cont_settle_it, _cont_settle_stable,
+        _cont_settle_sid` themselves -- ONCE per enclosing Cython function,
+        since `batch_run()` calls this three times within the same
+        function and a repeated `cdef` would be a redeclaration error.
+        """
+        if not self._processes:
+            return []
+        n = len(self._processes)
+        sn = max(self._n_sigs, 1)
+        return [
+            f"{indent}for _cont_settle_it in range({n}):",
+            f"{indent}    memcpy(self.ctx.conv_val, self.ctx.val, {sn} * sizeof(long long))",
+            f"{indent}    memcpy(self.ctx.conv_mask, self.ctx.mask, {sn} * sizeof(long long))",
+            f"{indent}    memcpy(self.ctx.conv_wide_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+            f"{indent}    memcpy(self.ctx.conv_wide_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+            *(f"{indent}    cont_{i}(&self.ctx)" for i in range(n)),
+            f"{indent}    _cont_settle_stable = 1",
+            f"{indent}    for _cont_settle_sid in range({sn}):",
+            f"{indent}        if self.ctx.val[_cont_settle_sid] != self.ctx.conv_val[_cont_settle_sid]"
+            f" or self.ctx.mask[_cont_settle_sid] != self.ctx.conv_mask[_cont_settle_sid]:",
+            f"{indent}            _cont_settle_stable = 0",
+            f"{indent}            break",
+            f"{indent}    if _cont_settle_stable:",
+            f"{indent}        for _cont_settle_sid in range(N_WIDE_WORDS):",
+            f"{indent}            if self.ctx.wide_val[_cont_settle_sid] != self.ctx.conv_wide_val[_cont_settle_sid]"
+            f" or self.ctx.wide_mask[_cont_settle_sid] != self.ctx.conv_wide_mask[_cont_settle_sid]:",
+            f"{indent}                _cont_settle_stable = 0",
+            f"{indent}                break",
+            f"{indent}    if _cont_settle_stable:",
+            f"{indent}        break",
+        ]
+
     def _mem_snap_memcpy_lines(self, indent: str) -> list[str]:
         """Lines that copy every memory's live val/mask arrays into their
         pre-edge snapshot (`mem_{mid}_snap_val`/`wide_mem_{mid}_snap_val`)
@@ -1645,12 +1712,24 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 f"        cdef long long _sv_{s} = self._snap_v[{s}], _sm_{s} = self._snap_m[{s}]" for s in clock_sids
             ]
             restore_lines = [f"        self._snap_v[{s}] = _sv_{s}; self._snap_m[{s}] = _sm_{s}" for s in clock_sids]
-            # Run one pass of all continuous assigns so that coro-driven signals
-            # (e.g. bench STALL_REQ) propagate to port-connected submodule signals
-            # (e.g. u_stall.STALL_REQ) before we snapshot.  Without this, the
-            # snapshot captures the un-propagated value and sequential processes
+            # Settle all continuous assigns to a FIXED POINT (not just one
+            # pass) so coro-driven signals (e.g. bench STALL_REQ) propagate
+            # to port-connected submodule signals (e.g. u_stall.STALL_REQ),
+            # and so a multi-hop continuous-assign chain declared "out of
+            # order" relative to its own dependencies still converges
+            # before we snapshot -- see `_cont_settle_fixpoint_lines`'s own
+            # docstring for the full story (and the confirmed bug a single
+            # pass here caused). Without full convergence, the snapshot
+            # captures an under-propagated value and sequential processes
             # see stale data at the posedge.
-            settle_lines = [f"        cont_{i}(&self.ctx)" for i in range(len(self._processes))]
+            settle_lines = (
+                [
+                    "        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid",
+                    *self._cont_settle_fixpoint_lines("        "),
+                ]
+                if self._processes
+                else []
+            )
             lines.extend(
                 [
                     "",
@@ -1811,6 +1890,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                        int[::1] ev_mem_mids=None, int[::1] ev_mem_addrs=None,",
                 "                        long long[::1] ev_mem_vals=None):",
                 "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles",
+                *(
+                    ["        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid"]
+                    if self._processes
+                    else []
+                ),
                 f"        cdef long long sv[{sn}]",
                 f"        cdef long long sm[{sn}]",
                 "        self.ctx.error_code = ERR_NONE",
@@ -1825,7 +1909,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # dropping the caller's first requested cycle and",
                 "                # shifting every subsequent edge by one (see",
                 '                # notes/roadmap.md "batch_run() first-call clock-state").',
-                *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
+                *self._cont_settle_fixpoint_lines("                "),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
@@ -1882,7 +1966,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # vs. the same stimulus working correctly via ordinary",
                 "                # bench.step()/settle().",
                 "                # Snapshot before posedge",
-                *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
+                *self._cont_settle_fixpoint_lines("                "),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
@@ -1900,7 +1984,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    cycles_run = i + 1",
                 "                    break",
                 "                # Snapshot before negedge",
-                *(f"                cont_{i}(&self.ctx)" for i in range(len(self._processes))),
+                *self._cont_settle_fixpoint_lines("                "),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",

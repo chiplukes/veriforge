@@ -157,3 +157,138 @@ class TestClockSignalReadWithinItsOwnTriggeredBody:
             sim.drive("clk", Value(1, width=1))
             sim.settle()
             assert int(sim.read("o")) == 1, f"{eng}: o should capture d's driven value at the posedge"
+
+
+class TestContinuousAssignSnapshotConvergence:
+    """Bug regression: the pre-edge snapshot (`sv[]`/`sm[]`) used for a
+    sequential process's NBA reads was built from only ONE pass through all
+    continuous-assign processes, in DECLARATION order -- not settled to a
+    fixed point first. A multi-hop continuous-assign chain declared "out of
+    order" relative to its own data dependencies (a later `assign` needed
+    by an earlier one) left the snapshot one hop stale.
+
+    Root cause: `refresh_data_snapshot()` and each of `batch_run()`'s three
+    snapshot points (`sim/compiled/_gen_sections.py`) ran `cont_0()...
+    cont_N()` exactly once before snapshotting -- correct only when
+    declaration order happens to already match dependency order. Given
+    `assign o10 = ~o12; assign o12 = {...};` (`o12` declared AFTER `o10`,
+    which reads it), `o10`'s own process ran first in that single pass and
+    computed from `o12`'s STALE value; that stale `o10` then got baked
+    into the snapshot, so `r7 <= o10;` captured the wrong value at every
+    single clock edge, forever. Confirmed by simply swapping the two
+    `assign` statements, which made the divergence disappear entirely (see
+    `notes/roadmap.md`, "mismatch_10096"). Fixed by settling continuous
+    assigns to a genuine fixed point (bounded by the number of continuous
+    processes, mirroring `delta_loop`'s own oscillation-detection scratch
+    buffers) before every snapshot point, not just one blind pass.
+    """
+
+    ENGINES = ["reference", "compiled"]  # noqa: RUF012
+
+    def test_out_of_order_continuous_assign_chain_settles_before_snapshot(self):
+        """Original fuzzer-found module (task tracking: mismatch_10096),
+        driven with the exact stimulus sequence that reproduced the
+        divergence. Simplifying `o11`/`o12` down to their essential
+        `o10 = ~o12; o12 = f(...)` declaration-order shape (verified
+        separately to reproduce with hand-picked stimulus too) was tried
+        first but didn't reproduce with a SHORT, simple drive sequence --
+        this bug needs several clock cycles of real accumulated register
+        state, not just one settle, so the full original module + its
+        original reproducing vectors are used here instead of a further
+        reduction, to keep the regression test's own fidelity to the
+        confirmed failure exact.
+        """
+        mod = _parse("""
+            module t (
+                input [0:0] clk,
+                input signed [15:0] i1,
+                input signed [100:0] i2,
+                input signed [6:0] i3,
+                input [86:0] i4,
+                input signed [7:0] i5,
+                output signed [79:0] o10,
+                output [79:0] o11,
+                output signed [127:0] o12
+            );
+                reg [64:0] r6;
+                reg [30:0] r7;
+                reg [111:0] r8;
+                reg [31:0] r9;
+                assign o10 = ~o12;
+                assign o11 = {r7[32'd4], i1 ? r9[32'd25] : {32'd3{i3}},
+                              {~&{<<{clk, i2[32'd99:32'd23], o12}}, {{32'd2{r6}}, r7 - o12}}};
+                assign o12 = {i1[32'd7] ? {{32'd2{clk}}, {<<32'd2{i2, i1}}, i2} : {32'd3{r9}},
+                              ~|i3[32'd1], !i5};
+
+                always @(posedge clk) begin
+                    r6 <= -(-o11) ? r9[32'd28] % (o11 | 1'b1) ? o12[32'd13:32'd8] ? r7 : i1
+                          : ~|r6[32'd59] : {{32'd3{o12}}, r9 * clk, {clk, o11[32'd28]}};
+                    r7 <= o10;
+                    r8 <= -{32'd3{i3}};
+                    r9 <= r6;
+                end
+            endmodule
+        """)
+        # Exact reproducing stimulus (seed 0 of the grammar-driven fuzzer's
+        # own `_gen_stimulus`, reduced to plain literals here).
+        vectors = [
+            {
+                "clk": 1,
+                "i1": Value(2653, width=16),
+                "i2": Value(2329698900472816436872753636962, width=101),
+                "i3": Value(38, width=7),
+                "i4": Value(137977801063335231949971375, width=87),
+                "i5": Value(0x80, width=8, mask=0x23),
+            },
+            {
+                "clk": Value(0, width=1, mask=1),
+                "i1": Value(16417, width=16),
+                "i2": Value(2036573564372909422497018287890, width=101),
+                "i3": Value(18, width=7),
+                "i4": Value(139088488569565924033970427, width=87),
+                "i5": Value(84, width=8),
+            },
+            {
+                "clk": 0,
+                "i1": Value(20722, width=16),
+                "i2": Value(1423461208831624464189349369788, width=101),
+                "i3": Value(110, width=7),
+                "i4": Value(142125555556951916299783682, width=87),
+                "i5": Value(0, width=8, mask=0xD7),
+            },
+            {
+                "clk": 0,
+                "i1": Value(51448, width=16),
+                "i2": Value(2099037492882965679776570467653, width=101),
+                "i3": Value(31, width=7),
+                "i4": Value(9746353288704512556657387, width=87),
+                "i5": Value(145, width=8),
+            },
+            {
+                "clk": 1,
+                "i1": Value(52637, width=16),
+                "i2": Value(870972744167079373006347824579, width=101),
+                "i3": Value(127, width=7),
+                "i4": Value(85304464772387594979456785, width=87),
+                "i5": Value(31, width=8),
+            },
+        ]
+        results = {}
+        for eng in self.ENGINES:
+            sim = Simulator(mod, engine=eng)
+            for name, value in vectors[0].items():
+                sim.drive(name, Value(0, width=(value.width if isinstance(value, Value) else 1)))
+            sim.drive("clk", Value(0, width=1))
+            sim.settle()
+            out = None
+            for vec in vectors:
+                for name, value in vec.items():
+                    sim.drive(name, value)
+                sim.settle()
+                sim.drive("clk", Value(1, width=1))
+                sim.settle()
+                sim.drive("clk", Value(0, width=1))
+                sim.settle()
+                out = sim.read("o11")
+            results[eng] = out
+        assert results["compiled"] == results["reference"]

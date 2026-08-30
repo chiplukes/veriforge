@@ -423,50 +423,68 @@ edits. Remaining fallback cases still re-emit the full module:
   the full 300-module cross-check's 42 flat modules again -- mismatching
   files dropped from 14 to 4.
 
-  **Follow-up: all 4 residuals triaged, 3 fixed, 1 remains open** (see the
-  three entries immediately below for the fixed ones):
+  **Follow-up: all 4 residuals triaged and fixed** (see the three entries
+  immediately below):
   - `mismatch_10024`, `mismatch_10055` (`vm-fast`) -- fixed, see
     "`vm`/`vm-fast` streaming concatenation exceeding fixed wide-value
     capacity" below.
   - `mismatch_10104` (`compiled`) -- fixed, see "`compiled` bitwise-op
     (`&`/`|`/`^`) mask computation ignored its own combined signedness"
     below.
-  - `mismatch_10096` (`compiled`) -- **still open, extensively
-    characterized but not yet minimized**. `reference` gives `o11` all-x
-    while `compiled` resolves it to a concrete value (the opposite mask
-    direction from every other bug found this round) at vector 4 of a
-    seeded stimulus run (not vector 0 -- state accumulated over several
-    clock cycles matters, not a single combinational evaluation). Original
-    shape:
-    ```verilog
-    assign o10 = ~o12;
-    assign o11 = {r7[4], i1 ? r9[25] : {3{i3}},
-                  {~&{<<{clk, i2[99:23], o12}}, {{2{r6}}, r7 - o12}}};
-    assign o12 = {i1[7] ? {{2{clk}}, {<<2{i2, i1}}, i2} : {3{r9}},
-                  ~|i3[1], !i5};
-    always @(posedge clk) begin
-      r6 <= <some update depending on o11/o12/r6/r7/i1>;
-      r7 <= o10;
-      r9 <= r6;
-    end
-    ```
-    Ruled out (each in isolation, WITHOUT the full context, no divergence):
-    `!i5` alone (an 8-bit value with mask `0x23` but a definite 1 in an
-    unmasked bit resolves identically, correctly, everywhere); `r8`
-    entirely (unused by the divergence); the always block's own update
-    complexity (a trivially simplified `r6 <= i2[64:0]; r7 <= o10[30:0];
-    r9 <= i1;` still reproduces just as reliably). Every attempt to drop
-    ANY ONE piece of `o11`'s or `o12`'s own expression -- the `i1 ? r9 :
-    {3{i3}}` ternary, the `r6`/`r7` term, `o12`'s own ternary+nested-
-    streaming-concat -- made the divergence disappear, even with
-    everything else fully restored; only the complete combination (both
-    `o11` and `o12` at full complexity, `r6`+`r7`+`r9` all present and
-    real, run across several clock cycles) reproduces. This resistance to
-    single-piece reduction suggests either a genuine multi-signal
-    interaction (unlike every other bug this round, which reduced to 3-10
-    lines) or a capacity/threshold effect similar in spirit to the
-    `vm-fast` `WIDE_WORDS` bug above but not yet identified as such for
-    `compiled`. Left as a genuinely open lead for a future session.
+  - `mismatch_10096` (`compiled`) -- fixed, see "`compiled` pre-edge
+    snapshot built from only one pass through continuous assigns" below.
+    Resisted single-piece reduction hard (every attempt to drop any one
+    piece of the module made the divergence disappear, even with
+    everything else fully restored) precisely because the actual bug is
+    about DECLARATION ORDER among `assign` statements, not any one
+    construct -- confirmed by the one reduction that finally worked:
+    simply swapping the order of two `assign` statements (no content
+    change at all) made the divergence vanish completely, which is what
+    pointed at the real root cause below.
+- **`compiled` pre-edge snapshot built from only one pass through
+  continuous assigns — Fixed.** Root cause: `refresh_data_snapshot()` and
+  each of `batch_run()`'s three snapshot points (`sim/compiled/
+  _gen_sections.py`) ran every continuous-assign process (`cont_0()` ...
+  `cont_N()`) exactly ONCE, in DECLARATION order, immediately before
+  copying `ctx.val`/`ctx.mask` into the `sv`/`sm` snapshot a sequential
+  process's NBA reads use. That's only correct when declaration order
+  happens to already match dependency order. Minimal repro pattern:
+  ```verilog
+  assign o10 = ~o12;        // declared FIRST, but READS o12
+  assign o12 = {...};       // declared SECOND, computes the NEW value
+  always @(posedge clk) r7 <= o10;
+  ```
+  In one top-to-bottom pass, `o10`'s own process runs BEFORE `o12`'s, so
+  `o10` computes from `o12`'s STALE (pre-this-settle) value; nothing
+  re-runs `o10` afterward before the snapshot is taken. That stale `o10`
+  then gets baked into `sv[]` itself, so `r7 <= o10;` captures the WRONG
+  value at literally every single clock edge, forever -- not a one-off
+  glitch. Confirmed as exactly a declaration-order issue (not a content
+  issue) by simply swapping the two `assign` statements in the original
+  fuzzer-found module, with zero other changes, which made the divergence
+  disappear entirely.
+
+  Fixed by settling continuous assigns to a genuine FIXED POINT before
+  every snapshot point, not one blind pass: a new shared helper,
+  `_cont_settle_fixpoint_lines`, repeats the full `cont_0()...cont_N()`
+  sequence (bounded by the number of continuous-assign processes -- a safe
+  convergence bound for any acyclic dependency graph among them, same
+  bounded-iteration philosophy as `DELTA_LIMIT` elsewhere) with an
+  early-exit convergence check after each pass, reusing the `conv_val`/
+  `conv_mask`/`conv_wide_val`/`conv_wide_mask` scratch buffers
+  `delta_loop`'s own oscillation-detection check already uses (deliberately
+  NOT `dirty[]`, which `delta_loop`'s own triggering depends on seeing
+  exactly as external drives/events left it -- reusing it here would have
+  corrupted that). The common case (already-correct declaration order)
+  costs exactly one extra full-array compare beyond what a single pass
+  already needed; only a genuinely out-of-order chain pays for additional
+  passes.
+
+  Verified: new regression test
+  (`tests/test_sim/compiled/test_scheduling.py`,
+  `TestContinuousAssignSnapshotConvergence`) using the original
+  fuzzer-found module and its exact reproducing stimulus, confirmed to
+  fail without the fix (fresh, uncached compile) and pass with it.
 - **`vm`/`vm-fast` streaming concatenation exceeding fixed wide-value
   capacity — Fixed (raised + guarded).** Root cause: `vm`/`vm-fast` share
   one compiled bytecode whose wide (>64-bit) values -- signals, constants,
