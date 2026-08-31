@@ -1368,21 +1368,44 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     # ── Signal access (Scheduler-compatible API) ─────────────────
 
+    def _snapshot_before_first_drive(self) -> None:
+        """Snapshot pre-drive state for edge detection in settle(), exactly
+        once per drive batch (i.e. once per `_pending_drives` refill).
+
+        Must run before the FIRST drive of a batch regardless of whether
+        that drive is a plain signal or a memory-array element -- both
+        `drive_signal` branches call this before adding anything to
+        `_pending_drives`. Originally only the plain-signal branch had
+        this logic; a batch whose first drive happened to be a memory
+        element (e.g. `mem_in[0]`, `sim.signal("mem_in[0]").value = ...`)
+        never took this snapshot, since the memory branches didn't mark
+        `_pending_drives` at all -- by the time a LATER plain-signal drive
+        in the same batch ran, `_pending_drives` had already been non-empty
+        since the first memory write (once that branch started seeding it
+        for the whole-array-read-propagation fix), so the check silently
+        skipped ever refreshing `_prev_sig_val`/`_prev_sig_mask`, and a
+        later `settle()` call's edge detection indexed into a stale
+        (potentially too-short) snapshot -- confirmed via
+        `test_whole_array_nba_copy_over_64_elements[vm]`
+        (`IndexError: list index out of range` in `_edge_fired`).
+        """
+        if self._pending_drives:
+            return
+        if self._cy_ctx is not None and self._cy_ctx._procs_setup:
+            self._cy_ctx.take_snapshot()
+            self._cy_ctx.reset_seq_fired()
+        else:
+            self._prev_sig_val = list(self.compiler.sig_val)
+            self._prev_sig_mask = list(self.compiler.sig_mask)
+        self._triggered_seq = set()
+
     def drive_signal(self, name: str, value: Value | int) -> None:
         """Drive a signal from outside (testbench use)."""
         sid = self.compiler.signal_map.get(name)
         if sid is not None:
             if isinstance(value, int):
                 value = Value(value, width=self.compiler.sig_width[sid])
-            if not self._pending_drives:
-                # First drive in this batch — snapshot pre-drive state for edge detection in settle().
-                if self._cy_ctx is not None and self._cy_ctx._procs_setup:
-                    self._cy_ctx.take_snapshot()
-                    self._cy_ctx.reset_seq_fired()
-                else:
-                    self._prev_sig_val = list(self.compiler.sig_val)
-                    self._prev_sig_mask = list(self.compiler.sig_mask)
-                self._triggered_seq = set()
+            self._snapshot_before_first_drive()
             if self._cy_ctx is not None:
                 self._cy_ctx.write_signal(sid, value.val, value.mask)
             else:
@@ -1404,16 +1427,48 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             idx = int(name[bracket + 1 : -1])
             if not 0 <= idx < depth:
                 return
+            self._snapshot_before_first_drive()
             if isinstance(value, int):
                 value = Value(value, width=ew)
             flat = base + idx
             wmask = _mask_for_width(ew)
-            self.compiler.mem_val[flat] = value.val & wmask & ~value.mask
-            self.compiler.mem_mask[flat] = value.mask & wmask
-            if self.interpreter is not None and mid < len(self.compiler.mem_marker_sigs):
-                self.interpreter.dirty.add(self.compiler.mem_marker_sigs[mid])
-            if self._cy_ctx is not None and self.compiler.mem_count > 0:
-                self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
+            new_val = value.val & wmask & ~value.mask
+            new_mask = value.mask & wmask
+            self.compiler.mem_val[flat] = new_val
+            self.compiler.mem_mask[flat] = new_mask
+            if mid < len(self.compiler.mem_marker_sigs):
+                marker_sid = self.compiler.mem_marker_sigs[mid]
+                # Mirrors the plain-signal branch above: settle() seeds its
+                # delta loop from `_pending_drives`, not `interpreter.dirty`
+                # (that set only matters mid-delta-loop) -- omitting this
+                # left settle() returning immediately with `_pending_drives`
+                # still empty, so a drive into a memory-backed signal (an
+                # indexed element here) was applied to storage correctly
+                # but never actually propagated through any continuous
+                # assign/combinational logic reading it. Confirmed via a
+                # minimal repro: `assign leaf.d = mem[i];` fed from a
+                # driven memory-array input read back permanently X on
+                # `vm`/`vm-fast` (shared bytecode/scheduler) while
+                # `reference`/`compiled` were unaffected -- see
+                # notes/known_issues.md.
+                self._pending_drives.add(marker_sid)
+                if self.interpreter is not None:
+                    self.interpreter.dirty.add(marker_sid)
+            if self._cy_ctx is not None:
+                # Targeted single-element write, NOT `sync_mem_from_lists`
+                # (which copies ALL memories' cells from `self.compiler.
+                # mem_val`/`mem_mask` -- those Python-side lists are only
+                # ever updated here, at drive time, and never kept in sync
+                # with whatever `_cy_ctx` has since computed at runtime for
+                # OTHER memories via its own delta-cycle execution. Using
+                # the blanket sync clobbered every other memory's
+                # `_cy_ctx`-side value back to its stale elaboration-time
+                # snapshot on every single drive -- confirmed directly:
+                # driving one memory-backed input reset an unrelated,
+                # already-correctly-computed memory-backed signal back to
+                # X. `write_mem` mirrors `write_signal`'s existing
+                # single-signal pattern just above.
+                self._cy_ctx.write_mem(mid, idx, new_val, new_mask)
             return
         mid = self.compiler.mem_map.get(name)
         if mid is not None:
@@ -1426,21 +1481,37 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             ew, depth, base = self.compiler.mem_info[mid]
             if depth == 0:
                 return
+            self._snapshot_before_first_drive()
             if isinstance(value, int):
                 value = Value(value, width=depth * ew)
             elif value.width != depth * ew:
                 value = value.resize(depth * ew)
             wmask = _mask_for_width(ew)
+            new_elems: list[tuple[int, int]] = []
             for k in range(depth):
                 lsb = k * ew
                 elem = value[lsb + ew - 1 : lsb]
                 flat = base + k
-                self.compiler.mem_val[flat] = elem.val & wmask & ~elem.mask
-                self.compiler.mem_mask[flat] = elem.mask & wmask
-            if self.interpreter is not None and mid < len(self.compiler.mem_marker_sigs):
-                self.interpreter.dirty.add(self.compiler.mem_marker_sigs[mid])
-            if self._cy_ctx is not None and self.compiler.mem_count > 0:
-                self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
+                new_v = elem.val & wmask & ~elem.mask
+                new_m = elem.mask & wmask
+                self.compiler.mem_val[flat] = new_v
+                self.compiler.mem_mask[flat] = new_m
+                new_elems.append((new_v, new_m))
+            if mid < len(self.compiler.mem_marker_sigs):
+                marker_sid = self.compiler.mem_marker_sigs[mid]
+                # See the identical fix/comment on the indexed-element
+                # branch above -- same missing `_pending_drives` seed, same
+                # symptom (settle() silently no-op'd for a whole-array
+                # external drive).
+                self._pending_drives.add(marker_sid)
+                if self.interpreter is not None:
+                    self.interpreter.dirty.add(marker_sid)
+            if self._cy_ctx is not None:
+                # Targeted per-element writes -- see the identical
+                # `sync_mem_from_lists` clobbering fix/comment on the
+                # indexed-element branch above.
+                for k, (new_v, new_m) in enumerate(new_elems):
+                    self._cy_ctx.write_mem(mid, k, new_v, new_m)
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic at the current time."""

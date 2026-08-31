@@ -161,3 +161,87 @@ class TestRangeSelectWideDestinationFromNarrowMemoryElement:
             sim.drive(f"mem2[{i}]", 0)
         sim.run(max_time=0)
         assert int(sim.signal("dout_flat").value) == (0x3FFFF << 54)
+
+
+class TestWholeArrayReadOfGenerateLoopWrittenMemory:
+    """Regression: `vm`/`vm-fast` — a whole-array continuous-assign READ of
+    a memory whose elements are each written by a SEPARATE generate-loop
+    child instance (not one instance driving the whole array port at
+    once, the shape `TestTwoDArrayThroughChildInstance` above already
+    covers) used to read permanently X, on every cycle including the
+    first. `reference`/`compiled` were unaffected. Two distinct bugs, both
+    in `sim/vm/vm_scheduler.py::VMScheduler.drive_signal`:
+
+    1. The memory-array write branches (both the indexed-element and
+       whole-array forms) never added the memory's dirty "marker" signal
+       to `_pending_drives` -- `settle()` seeds its delta loop from
+       `_pending_drives`, not `interpreter.dirty` (that set only matters
+       mid-delta-loop), so `settle()` silently returned immediately
+       without propagating the drive through anything reading the memory
+       at all.
+    2. Once (1) was fixed, driving ANY memory-backed signal on the Cython
+       (`vm-fast`) path called `_cy_ctx.sync_mem_from_lists(self.compiler.
+       mem_val, self.compiler.mem_mask)` -- copying ALL memories' cells
+       from the compiler's OWN Python-side lists, which are only ever
+       populated once at elaboration time and never kept in sync with
+       whatever `_cy_ctx` has since computed at runtime for OTHER
+       memories via its own delta-cycle execution. This clobbered every
+       other, already-correctly-computed memory-backed signal back to its
+       stale elaboration-time value on every single drive. Fixed by using
+       `_cy_ctx.write_mem(mid, idx, val, mask)` for just the elements
+       actually being driven, mirroring the existing single-signal
+       `write_signal` pattern.
+
+    See `notes/known_issues.md` and `notes/roadmap.md` for the full
+    investigation trail.
+    """
+
+    _SRC = """
+    module leaf (input clk, input [17:0] d, input dv, output [17:0] q);
+        logic s1=0; logic [17:0] d1=0;
+        logic s2=0; logic [17:0] d2=0;
+        always_ff @(posedge clk) begin s1 <= dv; d1 <= d; end
+        always_ff @(posedge clk) begin s2 <= s1; d2 <= d1; end
+        assign q = d2;
+    endmodule
+
+    module top #(parameter N = 4) (input clk, input [N-1:0][17:0] d, input dv, output [N-1:0][17:0] q);
+        logic [N-1:0][17:0] gen_q;
+        genvar i;
+        generate
+            for (i = 0; i < N; i++) begin : gen_ch
+                leaf u_leaf (.clk(clk), .d(d[i]), .dv(dv), .q(gen_q[i]));
+            end
+        endgenerate
+        assign q = gen_q;
+    endmodule
+    """
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_whole_array_read_tracks_generate_loop_writes(self, engine, tmp_path):
+        design = _parse_design(self._SRC, tmp_path)
+        top = design.get_module("top")
+        sim = Simulator(top, engine=engine, design=design)
+        lane_pattern = sum((0x1234 & 0x3FFFF) << (18 * lane) for lane in range(4))
+        sim.drive("clk", 0)
+        sim.drive("dv", 0)
+        sim.drive("d", lane_pattern)  # 0x1234 replicated across all 4 lanes
+        sim.settle()
+
+        results = []
+        for cyc in range(6):
+            sim.drive("dv", 1 if cyc < 2 else 0)
+            sim.drive("clk", 1)
+            sim.settle()
+            sim.drive("clk", 0)
+            sim.settle()
+            q = sim.signal("q").value
+            results.append(None if q.mask else int(q))
+
+        # 2-cycle pipeline delay: the leaf's `d1`/`d2` explicit initial
+        # value (0) for cyc 0, then the replicated pattern for every
+        # remaining cycle (`dv` deasserting doesn't change `d`'s value,
+        # only whether it's a "real" beat -- this test only checks the
+        # data path, not validity).
+        assert results[0] == 0
+        assert results[1:] == [lane_pattern] * 5

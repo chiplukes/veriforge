@@ -686,6 +686,114 @@ edits. Remaining fallback cases still re-emit the full module:
 
   Verified: full `tests/test_sim/` suite (5316 passed, 0 failed) after all
   changes; `mypy` clean on all touched files.
+- **`vm`/`vm-fast`: whole-array continuous-assign read of a memory written
+  element-wise by generate-loop child instances read permanently X — Fixed.**
+  Picked up from
+  [[project_axis_pix_correction2_compiled_vm_bugs_2026_08]]'s open item
+  ("vm-fast... every pixel reading exactly 0" on the full-scale production
+  design) -- root-caused this session by building a fast (~seconds, not the
+  ~30-minute full-design elaboration) reduced repro using the exact,
+  unmodified `axis_col_correct.sv`/`axis_col_correct_channel.sv` real RTL
+  source, driven through `Testbench`/`AXIStreamProxy` (manual always-high
+  `tvalid` stimulus never exercised the failing transition, since it
+  requires the valid signal to genuinely PULSE and then dereassert).
+  Reduced further to an 18-line, fully synthetic, engine-independent
+  minimal repro:
+  ```verilog
+  module leaf (input clk, input [17:0] d, input dv, output [17:0] q);
+      logic s1=0; logic [17:0] d1=0;
+      logic s2=0; logic [17:0] d2=0;
+      always_ff @(posedge clk) begin s1 <= dv; d1 <= d; end
+      always_ff @(posedge clk) begin s2 <= s1; d2 <= d1; end
+      assign q = d2;
+  endmodule
+
+  module top #(parameter N = 4) (input clk, input [N-1:0][17:0] d, input dv, output [N-1:0][17:0] q);
+      logic [N-1:0][17:0] gen_q;
+      genvar i;
+      generate
+          for (i = 0; i < N; i++) begin : gen_ch
+              leaf u_leaf (.clk(clk), .d(d[i]), .dv(dv), .q(gen_q[i]));
+          end
+      endgenerate
+      assign q = gen_q;
+  endmodule
+  ```
+  Driving `dv` for 2 cycles then deasserting it: `reference` correctly
+  shows `q` tracking `d` with a 2-cycle pipeline delay
+  (`0x0 0x1234 0x1234 0x1234 ...`); `vm` and `vm-fast` (which share this
+  compiler's bytecode) both show `q` as **fully X on every single cycle,
+  including the very first**, never once reflecting a real value.
+
+  **Root cause, three distinct bugs, all in
+  `sim/vm/vm_scheduler.py::VMScheduler.drive_signal`**:
+  1. Its memory-array write branches (both the indexed-element `mem[i] =
+     ...` form and the whole-array `mem = ...` form) correctly wrote the
+     new value into `mem_val`/`mem_mask` and marked `interpreter.dirty`,
+     but never added the memory's dirty "marker" signal to
+     `_pending_drives`. `settle()` seeds its delta loop from
+     `_pending_drives`, not `interpreter.dirty` (that set only matters
+     *mid*-delta-loop, once a loop is already running) -- so `settle()`
+     saw an empty `_pending_drives` and returned immediately, silently
+     no-op'ing the entire drive for any process reading the memory.
+     Explains `q` reading X from cycle 0: the drive into `d` (also a
+     memory, `input [N-1:0][17:0] d`) never propagated into the child
+     instances at all.
+  2. Fixing (1) surfaced a second bug on the Cython (`vm-fast`) path
+     specifically: driving *any* memory-backed signal called
+     `_cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.
+     mem_mask)` -- copying ALL memories' cells from the compiler's own
+     Python-side lists. Those lists are populated once at elaboration
+     time and never kept in sync with whatever `_cy_ctx` has since
+     computed at runtime for *other* memories via its own delta-cycle
+     execution -- so this blanket sync clobbered every other,
+     already-correctly-computed memory-backed signal back to its stale
+     elaboration-time value on every single drive. Confirmed directly:
+     driving `d` correctly propagated into `gen_q`/`q` (per-element reads
+     matched), but the very next drive of `d` reset `gen_q`/`q` straight
+     back to X. Fixed by using the existing `_cy_ctx.write_mem(mid, idx,
+     val, mask)` (a targeted single-element write, mirroring the
+     already-correct single-signal `write_signal` pattern used for plain
+     scalar drives) for just the elements actually being driven, instead
+     of the blanket `sync_mem_from_lists` call.
+  3. Fixing (1) introduced its own regression, caught by the existing
+     `test_whole_array_nba_copy_over_64_elements[vm]` full-suite run: the
+     "snapshot pre-drive signal state for `settle()`'s edge detection"
+     logic (`_prev_sig_val`/`_prev_sig_mask`, needed so a later
+     `always_ff @(posedge clk)` can tell old-vs-new) only ever lived
+     inside the plain-signal branch, gated on `if not self._pending_
+     drives:` ("first drive in this batch"). Once memory drives started
+     adding their marker to `_pending_drives` (fix 1), a batch whose
+     *first* drive happened to be a memory element (e.g. writing 100
+     `mem_in[i]` elements before any plain-signal drive) made
+     `_pending_drives` non-empty before a later plain-signal drive
+     (`clk`) ever got a chance to see it empty -- so the snapshot never
+     ran at all, and `settle()`'s edge detection later indexed into a
+     stale/undersized `_prev_sig_val` (`IndexError: list index out of
+     range` in `_edge_fired`). Fixed by extracting the snapshot logic
+     into `_snapshot_before_first_drive()` and calling it from all three
+     `drive_signal` branches (plain signal, indexed memory element,
+     whole-array memory), not just the first.
+
+  **Why this mattered**: this was the actual explanation for the original
+  "vm-fast returns a complete frame with every pixel reading exactly 0"
+  symptom -- `axis_pix_correction2`'s row/column-correction and LUT stages
+  all use exactly this "generate-loop-of-per-channel-instances feeding a
+  whole-array continuous assign" shape, fed from a memory-shaped top-level
+  input port. Confirmed the standalone leaf module
+  (`axis_col_correct_channel` alone, no wrapper) behaved correctly on both
+  engines even before the fix; only the wrapper's generate-loop + a driven
+  memory-shaped input triggered it -- any design driving a 2-D-packed/
+  unpacked-array-shaped signal from outside (a top-level input port, or
+  `sim.drive("mem[i]", ...)`/`sim.drive("mem", ...)` directly) under `vm`
+  or `vm-fast` was affected, not just this specific RTL shape.
+
+  Verified: all 4 engines (`reference`/`vm`/`vm-fast`/`compiled`) now agree
+  exactly on the minimal repro across every cycle. New regression test
+  `tests/test_sim/test_2d_array_through_child_instance.py::
+  TestWholeArrayReadOfGenerateLoopWrittenMemory` (no longer needs the
+  `xfail` marks the initial root-cause commit added -- both bugs fixed).
+  `mypy` clean; full `tests/test_sim/` suite re-run after the fix.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native
