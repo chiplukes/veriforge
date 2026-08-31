@@ -12,6 +12,35 @@
 
 ## Open defects
 
+### `vm`/`vm-fast`: loop-bearing combinational block behind a child instance doesn't re-fire on a second settle()
+
+**Status**: Open, root-caused but not fixed. `reference`/`compiled` unaffected
+(`vm` unaffected in the cases checked so far; only `vm-fast` confirmed).
+**Found**: August 2026, during a 2-hour confidence-building fuzzing round
+(seed 5000, `--verilator`).
+
+An `always @(*)` block containing a `for`/`while` loop, instantiated one
+level inside a child module, reads a stale (frozen at its first-ever
+activation) value forever after, once its only input arrives via a
+cross-instance continuous assign and a SECOND `settle()` follows a changed
+top-level drive. Minimal repro and full analysis in `notes/roadmap.md`
+("Long confidence-building fuzzing round" -- root-caused, not fixed entry).
+
+### `vm`/`vm-fast`/Verilator: self-referential combinational reads give oracle-dependent answers (likely not a bug)
+
+**Status**: Investigated, likely not a defect -- simulator-defined behavior
+for an inferred-latch/feedback construct, analogous to the Icarus
+first-activation artifact below. Kept here (rather than the archive) since
+it surfaced as fresh-looking fuzzer noise and a future survey could easily
+mistake it for a live divergence.
+**Found**: August 2026, same fuzzing round as above.
+
+`always @(*) begin o5 = o6; ... o6 = ~something; end` (reading an output
+before its own first write within the same activation) gives a different
+but internally self-consistent answer on `reference`, `vm`/`vm-fast`, AND
+Verilator -- three independent implementations disagreeing, not one oracle
+diverging from a shared answer. Full analysis in `notes/roadmap.md`.
+
 ### Compiled engine: wide (>64-bit) signal posedge/negedge not supported
 
 **Status**: Open, by design (not attempted) — fails loudly, not silently.

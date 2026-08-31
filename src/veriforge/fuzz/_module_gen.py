@@ -507,10 +507,26 @@ class ModuleGenerator:
             if inst_output_wires and self._rng.random() < 0.5:
                 parts: list[Expression] = [w.as_identifier() for w in inst_output_wires]
                 if len(parts) == 1:
-                    parts.append(expr_gen.leaf(self._rng))
+                    # `exclude=out.name` -- see the identical fix/comment
+                    # on the plain-expression branch below (same class of
+                    # bug: `out` was already added to the readable pool by
+                    # `add_output` above, so without this it could pick
+                    # itself, generating `assign o9 = {w7, o9};`).
+                    parts.append(expr_gen.leaf(self._rng, exclude=out.name))
                 rhs: Expression = StreamingConcatenation(parts) if self._rng.random() < 0.3 else Concatenation(parts)
             else:
-                rhs = expr_gen.expr(self._rng, depth=self._rng.randint(1, 3))
+                # `exclude=out.name` matches every other strategy's own
+                # write-target exclusion (see `pick_readable`'s docstring)
+                # -- without it, `out` (already added to the pool by
+                # `add_output` just above) could pick ITSELF as a leaf
+                # operand, generating a degenerate `assign o9 = o9;` with
+                # no other logic driving it at all. Confirmed via fuzzing:
+                # Verilator (correctly) rejects this as unresolvable
+                # circular combinational logic ("Wire inputs its own
+                # output"), which the fuzzer was then miscounting as a
+                # Verilator cross-check mismatch rather than a fuzzer-side
+                # generation bug.
+                rhs = expr_gen.expr(self._rng, depth=self._rng.randint(1, 3), exclude=out.name)
             assigns.append(ContinuousAssign(out.as_identifier(), rhs))
         ctx.continuous_assigns = assigns
 

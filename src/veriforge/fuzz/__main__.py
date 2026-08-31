@@ -11,7 +11,7 @@ import random
 import sys
 from pathlib import Path
 
-from ..codegen.verilog_emitter import emit_module
+from ..codegen.verilog_emitter import emit_design
 from ._module_gen import ModuleGenerator
 from ._runner import FuzzRunner
 
@@ -24,29 +24,28 @@ def _repro_seed(seed: int, *, icarus: bool = True, verilator: bool = False) -> N
     so a saved mismatch that involved one of the external oracles can be
     reproduced with that oracle's own per-vector output shown, not just the
     4 internal engines.
+
+    Uses `ModuleGenerator.generate_design()` (not the single-module
+    `generate()`) to match `FuzzRunner._run_one`'s own generation path
+    exactly -- the `hierarchical` strategy produces a child module plus a
+    parent, and re-parsing/re-simulating only the parent's own text (as
+    `generate()` + `emit_module()` used to here) left the child
+    unresolvable ("Cannot resolve module 'c' for instance") for any
+    hierarchical-strategy seed.
     """
     rng = random.Random(seed)  # noqa: S311
     gen = ModuleGenerator(rng)
-    mod = gen.generate()
-    verilog = emit_module(mod)
+    design = gen.generate_design()
+    top = design.get_module("t")
+    assert top is not None, "generator always names the top module 't'"
+    verilog = emit_design(design)
 
     print(f"=== Seed {seed} ===")
     print(verilog)
     print()
 
     runner = FuzzRunner(output_dir=".", seed=seed, icarus=icarus, verilator=verilator)
-    vectors = runner._gen_stimulus(mod, rng)
-
-    from ..analysis.resolver import link_instances, resolve_port_connections
-    from ..transforms.tree_to_model import tree_to_design
-    from ..verilog_parser import verilog_parser
-
-    vp = verilog_parser(start="source_text")
-    tree = vp.build_tree(verilog)
-    design = tree_to_design(tree, source_file="fuzz.v")
-    link_instances(design)
-    resolve_port_connections(design)
-    top = next(m for m in design.modules if m.name == "t")
+    vectors = runner._gen_stimulus(top, rng)
 
     for engine in runner._engines:
         print(f"--- Engine: {engine} ---")

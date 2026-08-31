@@ -159,3 +159,33 @@ class TestLogicTypedPortsSimulateCorrectly:
 
         assert int(sim.read("o")) == (0b0110 ^ 3)
         assert int(sim.read("r")) == 0b0110
+
+
+class TestHierarchicalStrategyNoSelfReferentialOutput:
+    """Regression: `_gen_hierarchical`'s "parent output woven from instance
+    wires" step could generate a self-referential assign (`assign o9 =
+    o9;` or `assign o9 = {w7, o9};`) since it called `ctx.add_output()`
+    for the new output BEFORE building its own RHS expression, and built
+    that RHS without the `exclude=` parameter every other strategy passes
+    to `pick_readable()`/`expr()`/`leaf()` to prevent exactly this. Not a
+    veriforge simulation bug -- but Verilator (correctly) rejects the
+    resulting degenerate module as unresolvable circular combinational
+    logic, which the fuzzer's Verilator cross-check then miscounted as a
+    simulator mismatch. See `notes/roadmap.md`/`notes/known_issues.md`."""
+
+    def test_no_self_referential_assign_across_many_seeds(self):
+        import re
+
+        from veriforge.codegen import emit_design
+        from veriforge.fuzz._module_gen import ModuleGenerator, Strategy
+
+        for seed in range(500):
+            rng = random.Random(seed)  # noqa: S311
+            gen = ModuleGenerator(rng)
+            design = gen.generate_design(Strategy.HIERARCHICAL)
+            text = emit_design(design)
+            for m in re.finditer(r"assign\s+(\w+)\s*=\s*(.*?);", text, re.DOTALL):
+                lhs, rhs = m.group(1), m.group(2)
+                assert not re.search(rf"\b{re.escape(lhs)}\b", rhs), (
+                    f"seed {seed}: self-referential assign {m.group(0)!r}"
+                )

@@ -794,6 +794,112 @@ edits. Remaining fallback cases still re-emit the full module:
   TestWholeArrayReadOfGenerateLoopWrittenMemory` (no longer needs the
   `xfail` marks the initial root-cause commit added -- both bugs fixed).
   `mypy` clean; full `tests/test_sim/` suite re-run after the fix.
+- **Long confidence-building fuzzing round (task-tracking: fuzzing-round
+  item 34) — 2-hour run, seed 5000, 3025 modules, all engines +
+  `--verilator`**. One genuine fuzzer bug found and fixed; two genuine
+  simulator-divergence classes found, root-caused, and documented (not
+  yet fixed — see `notes/known_issues.md`); the rest were either the
+  already-known `vm`/`vm-fast` wide-value-capacity guard or the
+  already-documented Icarus first-activation artifact (1172 auto-filtered).
+  - **Fixed: `HIERARCHICAL` strategy could generate a self-referential
+    parent output (`assign o9 = o9;` or `assign o9 = {w7, o9};`), which
+    Verilator (correctly) rejects as unresolvable circular combinational
+    logic** ("Wire inputs its own output") -- a fuzzer generation bug, not
+    a simulator bug, but one that flooded the Verilator cross-check with
+    false-positive "mismatches" that were really just Verilator refusing
+    to compile a degenerate module. Root cause: `_module_gen.py::
+    _gen_hierarchical`'s "parent output woven from instance wires" step
+    calls `ctx.add_output()` for the new output *before* building its RHS
+    expression, then builds that RHS via `expr_gen.expr(...)`/
+    `expr_gen.leaf(...)` **without** the `exclude=` parameter every other
+    strategy passes to `pick_readable()` to prevent exactly this
+    (`pick_readable`'s own docstring: "a same-statement self-reference...
+    forms a combinational loop with simulator-implementation-defined
+    behavior") -- so the freshly-added output was eligible to pick
+    itself as an operand of its own definition. Fixed by passing
+    `exclude=out.name` at both call sites (the plain-expression branch and
+    the single-instance-output-wire-needs-a-second-leaf branch). Verified:
+    a targeted sweep of 3000 fresh `HIERARCHICAL`-strategy modules (seeds
+    3000-5999) found zero self-referential assigns after the fix, versus
+    a nonzero rate before it.
+  - **Root-caused, not fixed: `vm`/`vm-fast` — a combinational `always
+    @(*)` block containing a `for`/`while` loop, wrapped one level inside
+    a child instance, does not re-fire on a SECOND `settle()` after only
+    the parent's plain (non-memory) input changes -- `vm-fast` reads a
+    stale, frozen value from the block's first-ever activation forever
+    after; `vm` was unaffected in the two cases checked.** Minimal repro
+    (drive `i2=0`, `settle()`, drive `i2=12345`, `settle()`):
+    ```verilog
+    module c (input [31:0] i2, output logic [79:0] o6);
+        reg [7:0] wc1;
+        logic [7:0] wc2;
+        logic [79:0] w4;
+        always @(*) begin
+            wc1 = 0;
+            while (wc1 < 5) begin
+                wc2 = 0;
+                while (wc2 < 3) begin
+                    w4 = !(|i2[31:23]);
+                    wc2 = wc2 + 1;
+                end
+                wc1 = wc1 + 1;
+            end
+            o6 = {wc2, wc1, i2 ? w4 : wc1};
+        end
+    endmodule
+    module t (input [31:0] i2, output [89:0] o7);
+        wire [79:0] w4;
+        assign o7 = w4;
+        c u6 (.i2(i2), .o6(w4));
+    endmodule
+    ```
+    `reference`/`vm`/`compiled` all give `o7` reflecting the *second*
+    `i2` value (correct); `vm-fast` gives the value from the *first*
+    settle, frozen. Confirmed the loop is essential (removing it, keeping
+    everything else, stops reproducing) and the hierarchy is essential
+    (running `c` standalone with the identical two-settle drive sequence
+    does NOT reproduce it) -- narrows the suspect to something in how
+    `vm-fast`'s delta-cycle re-triggering interacts with a loop-bearing
+    combinational process specifically when its sensitivity signal
+    arrives via a cross-instance continuous assign rather than a direct
+    top-level drive, but this wasn't traced further into the scheduler
+    given time already spent this session. Two real fuzzer-found
+    instances of this exact shape: `mismatch_06451`, `mismatch_07803`
+    (both `vm-fast`-only). Next step for whoever picks this up: trace
+    `sim/vm/vm_scheduler.py`'s `_collect_triggered`/`_edge_fired` and the
+    Cython `_run_delta_loop_core`'s combo-process re-trigger logic for
+    this exact shape.
+  - **Investigated, likely NOT a bug (same family as the existing "Icarus
+    first-activation x-extension artifact"): a combinational `always @(*)`
+    block that reads an output/variable's value BEFORE writing it later in
+    the SAME activation** (a genuine inferred-latch/feedback shape, e.g.
+    `always @(*) begin o5 = o6; ... o6 = ~something; end`) **gives
+    different (but each internally self-consistent) answers across
+    reference, `vm`/`vm-fast`, AND Verilator** -- not just one oracle
+    disagreeing with the rest. `mismatch_07406`/`mismatch_07834`
+    (`reference` vs `vm`/`vm-fast`) and `mismatch_05031` and others
+    (`reference` vs Verilator) all share this exact pattern: an output
+    read before its own first write within one process activation. Since
+    THREE independently-implemented tools (this codebase's own reference
+    engine, `vm`/`vm-fast`, and Verilator) each give a different but
+    self-consistent answer, this looks like genuine simulator-defined
+    behavior for a construct with no well-defined synchronous or
+    combinational semantics (real hardware would synthesize a latch, and
+    which "previous" value a fresh simulation run starts from before the
+    first real activation is implementation-defined), not a bug in any
+    one of them -- analogous to (though a distinct construct from) the
+    already-investigated-and-closed Icarus first-activation artifact in
+    `notes/known_issues.md`. Not reduced to a from-scratch minimal repro
+    (attempts with hand-written simplified versions didn't reproduce,
+    likely due to interaction with `settle()`'s own combinational
+    bootstrap converging past the ambiguous first activation before the
+    value is ever read back) -- flagged here with the real fuzzer-found
+    modules preserved as artifacts rather than chased further given time
+    spent. Possible future improvement: extend the fuzzer's
+    `_is_icarus_first_activation_artifact`-style filtering to recognize
+    this broader "self-referential/latch-forming combinational read"
+    shape across all three oracles, to keep future surveys from
+    re-surfacing it as fresh-looking noise.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native
