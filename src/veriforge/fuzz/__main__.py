@@ -16,8 +16,15 @@ from ._module_gen import ModuleGenerator
 from ._runner import FuzzRunner
 
 
-def _repro_seed(seed: int) -> None:
-    """Re-run a specific seed with detailed per-vector output comparison."""
+def _repro_seed(seed: int, *, icarus: bool = True, verilator: bool = False) -> None:
+    """Re-run a specific seed with detailed per-vector output comparison.
+
+    *icarus*/*verilator* mirror the main run's own `--no-icarus`/
+    `--verilator` flags (`main()` passes the CLI's actual settings through)
+    so a saved mismatch that involved one of the external oracles can be
+    reproduced with that oracle's own per-vector output shown, not just the
+    4 internal engines.
+    """
     rng = random.Random(seed)  # noqa: S311
     gen = ModuleGenerator(rng)
     mod = gen.generate()
@@ -27,7 +34,7 @@ def _repro_seed(seed: int) -> None:
     print(verilog)
     print()
 
-    runner = FuzzRunner(output_dir=".", seed=seed, icarus=False)
+    runner = FuzzRunner(output_dir=".", seed=seed, icarus=icarus, verilator=verilator)
     vectors = runner._gen_stimulus(mod, rng)
 
     from ..analysis.resolver import link_instances, resolve_port_connections
@@ -45,6 +52,28 @@ def _repro_seed(seed: int) -> None:
         print(f"--- Engine: {engine} ---")
         try:
             results = runner._simulate(verilog, engine, vectors)
+            for vi, vec_results in enumerate(results):
+                print(f"  Vector {vi}:")
+                for name, val in sorted(vec_results.items()):
+                    print(f"    {name}: {val}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    if runner._icarus:
+        print("--- Engine: iverilog ---")
+        try:
+            results = runner._simulate_icarus(verilog, vectors, top)
+            for vi, vec_results in enumerate(results):
+                print(f"  Vector {vi}:")
+                for name, val in sorted(vec_results.items()):
+                    print(f"    {name}: {val}")
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    if runner._verilator:
+        print("--- Engine: verilator ---")
+        try:
+            results = runner._simulate_verilator(verilog, vectors, top)
             for vi, vec_results in enumerate(results):
                 print(f"  Vector {vi}:")
                 for name, val in sorted(vec_results.items()):
@@ -106,7 +135,7 @@ def main() -> None:
                 seed = int(seed_str)
         else:
             seed = int(args.repro)
-        _repro_seed(seed)
+        _repro_seed(seed, icarus=not args.no_icarus, verilator=args.verilator)
         return
 
     if args.max_modules is None and args.hours is None:
