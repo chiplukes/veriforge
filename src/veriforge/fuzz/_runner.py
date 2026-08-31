@@ -68,6 +68,14 @@ class FuzzRunner:
         Veriforge engines to test. Default: all available.
     icarus:
         Whether to cross-check with Icarus Verilog (requires iverilog in PATH).
+    verilator:
+        Whether to cross-check with Verilator (requires verilator in PATH).
+        Off by default: Verilator is ~8-10x slower per module than Icarus
+        (compile+link+run vs. a plain interpreted `vvp` run), so it's opt-in
+        like the "compiled" engine rather than on-by-default like Icarus.
+        Verilator is 2-state only (no `x`/`z`), so its comparison is
+        value-only and restricted to vectors/signals the reference engine
+        itself reports as fully defined -- see `_compare_verilator`.
     """
 
     _engine_names = ("reference", "vm", "vm-fast", "compiled")
@@ -79,6 +87,7 @@ class FuzzRunner:
         *,
         engines: Sequence[str] | None = None,
         icarus: bool = True,
+        verilator: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -87,10 +96,16 @@ class FuzzRunner:
         if icarus and not self._icarus:
             print("[fuzz] iverilog not found — Icarus cross-check disabled")
 
+        self._verilator = verilator and bool(shutil.which("verilator"))
+        if verilator and not self._verilator:
+            print("[fuzz] verilator not found — Verilator cross-check disabled")
+
         self._engines = list(engines) if engines else self._detect_engines()
         print(f"[fuzz] engines: {', '.join(self._engines)}")
         if self._icarus:
             print("[fuzz] Icarus cross-check enabled")
+        if self._verilator:
+            print("[fuzz] Verilator cross-check enabled")
 
         # Running counters
         self.total_modules = 0
@@ -224,6 +239,41 @@ class FuzzRunner:
                     self.mismatches_by_engine["iverilog"] = self.mismatches_by_engine.get("iverilog", 0) + 1
             except Exception as exc:
                 result.mismatches.append(f"icarus failed: {exc}")
+
+        # Verilator cross-check -- same testbench Icarus uses (confirmed by
+        # direct testing that it runs correctly under Verilator too), but
+        # compared with `_compare_verilator` rather than `_compare`: since
+        # Verilator has no `x`/`z` state, only vectors/signals the reference
+        # engine itself reports as fully defined (mask=0) are meaningful to
+        # check against it (see `_compare_verilator`'s docstring).
+        #
+        # ALSO skipped for `has_streaming_concat`, for a different reason
+        # than Icarus (which rejects the construct outright): Verilator
+        # accepts `{<<n{...}}` and agrees with veriforge whenever the
+        # combined operand width is an exact multiple of the slice size, but
+        # gives a genuinely different (LRM-nonconformant) result whenever it
+        # isn't -- confirmed directly and independently of both simulators:
+        # `{<<3{8'b11010010}}` hand-derived from IEEE 1800-2017 SS11.4.14.1
+        # (chunk from the MSB, incomplete chunk lands at the LSB end, then
+        # reverse chunk order) gives `10100110`, matching veriforge
+        # (reference/vm/vm-fast all agree) exactly; Verilator instead gives
+        # `01001011` -- the result of chunking from the LSB end instead (so
+        # the incomplete chunk lands at the MSB end pre-reversal). The
+        # evenly-divisible case (`{<<4{...}}` on the same 8-bit operand)
+        # gives identical results in both, isolating the gap to specifically
+        # the ragged/incomplete-final-chunk case. Since fuzzed slice sizes
+        # rarely divide the fuzzed operand width evenly, this needs the same
+        # coarse whole-module skip Icarus already gets rather than a
+        # per-expression static-width check.
+        if self._verilator and not has_streaming_concat:
+            try:
+                verilator_res = self._simulate_verilator(verilog, vectors, top)
+                diffs = self._compare_verilator(oracle, verilator_res, vectors)
+                if diffs:
+                    result.mismatches.extend(diffs)
+                    self.mismatches_by_engine["verilator"] = self.mismatches_by_engine.get("verilator", 0) + 1
+            except Exception as exc:
+                result.mismatches.append(f"verilator failed: {exc}")
 
         if result.mismatches:
             self.total_mismatches += 1
@@ -472,6 +522,117 @@ class FuzzRunner:
         lines.append("endmodule")
         return "\n".join(lines) + "\n"
 
+    # ------------------------------------------------------------------
+    # Verilator
+    # ------------------------------------------------------------------
+
+    def _simulate_verilator(
+        self,
+        source: str,
+        vectors: list[dict[str, Value]],
+        mod: Module,
+    ) -> list[dict[str, Value]]:
+        """Run Verilator and return per-vector output values.
+
+        Reuses `_build_testbench` unchanged -- confirmed by direct testing
+        that the same `$display`-based testbench Icarus consumes also runs
+        correctly under Verilator's `--binary` mode, which compiles AND
+        links a self-contained executable in one step (no hand-written C++
+        harness needed, unlike a plain `verilator --cc` build).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            dut_path = tmp / "dut.v"
+            tb_path = tmp / "tb.v"
+            obj_dir = tmp / "obj_dir"
+
+            dut_path.write_text(source)
+            tb_path.write_text(self._build_testbench(mod, vectors))
+
+            try:
+                subprocess.run(
+                    [
+                        "verilator",
+                        "--binary",
+                        "-Wno-fatal",
+                        "--timing",
+                        "-Mdir",
+                        str(obj_dir),
+                        str(dut_path),
+                        str(tb_path),
+                        "--top-module",
+                        "tb",
+                        "-o",
+                        "sim_exe",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"verilator: {exc.stderr.strip()}") from exc
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("verilator compile timed out") from None
+
+            try:
+                result = subprocess.run(
+                    [str(obj_dir / "sim_exe")],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(tmp),
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("verilator sim timed out (likely unbounded simulation loop)") from None
+            except subprocess.CalledProcessError as exc:
+                raise RuntimeError(f"verilator sim: {exc.stderr.strip()}") from exc
+
+            # Verilator's own status banners ("- Verilator: ...", "- S i m u
+            # l a t i o n   R e p o r t: ...") are always prefixed with
+            # "- " -- never true for a %b-formatted line of stimulus output
+            # (0/1/x/z and spaces only) -- so they're filtered out before
+            # reusing the same fixed-token-count parser Icarus's output uses.
+            stdout = "\n".join(line for line in result.stdout.splitlines() if not line.lstrip().startswith("-"))
+            return self._parse_display_output(stdout, mod)
+
+    def _compare_verilator(
+        self,
+        oracle: list[dict[str, Value]],
+        got: list[dict[str, Value]],
+        vectors: list[dict[str, Value]],
+    ) -> list[str]:
+        """Compare Verilator's *got* values against the reference *oracle*.
+
+        Verilator is a 2-state simulator (confirmed directly: driving
+        `4'bxxxx` into a `logic` net and reading it back gives `0000`, not
+        `x` -- see notes/known_issues.md). Its output is therefore only
+        meaningful where the reference engine itself reports a signal as
+        fully defined (mask=0) -- any `(vector, signal)` pair where the
+        oracle shows ambiguity is skipped rather than compared, since
+        Verilator's answer for a genuinely undefined case is arbitrary and
+        can't be judged right or wrong. This filters per-signal-per-vector,
+        not per-vector, so a vector's other, fully-defined outputs still get
+        checked even when one output is ambiguous. Only `.val` is compared
+        (never `.mask`) for the surviving pairs.
+        """
+        diffs: list[str] = []
+        for vi, (exp_vec, got_vec) in enumerate(zip(oracle, got, strict=True)):
+            for sig in sorted(exp_vec):
+                exp = exp_vec.get(sig)
+                got_val = got_vec.get(sig)
+                if exp is None or got_val is None:
+                    diffs.append(f"[verilator] vector {vi} signal {sig}: missing in one result")
+                    continue
+                if exp.mask:
+                    continue  # oracle itself ambiguous here -- not comparable
+                if exp.val != got_val.val:
+                    diffs.append(
+                        f"[verilator] vector {vi} signal {sig}: expected={_val_repr(exp)} got={_val_repr(got_val)}"
+                    )
+        return diffs
+
     def _parse_display_output(self, stdout: str, mod: Module) -> list[dict[str, Value]]:
         """Parse $display output lines into per-vector Value dicts."""
         output_names = sorted(p.name for p in mod.output_ports())
@@ -537,6 +698,7 @@ class FuzzRunner:
             "rate": self.total_modules / max(elapsed, 0.1),
             "engines": self._engines,
             "icarus_enabled": self._icarus,
+            "verilator_enabled": self._verilator,
             "final_seed": self.seed,
         }
         (self.output_dir / "stats.json").write_text(json.dumps(stats, indent=2))

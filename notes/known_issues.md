@@ -140,3 +140,37 @@ activation of the same process, not just the destination's own prior
 value), which would reduce noise in future surveys — scope this as its
 own small work item if the false-positive rate becomes annoying rather
 than doing it speculatively now.
+
+
+### Verilator ragged streaming-concat chunking gap (investigated, not a bug -- do not replicate)
+
+**Status**: Investigated and closed -- not a simulator bug.
+**Found**: smoke-testing the fuzzer's new `--verilator` cross-check
+(added alongside `logic`-declared signal generation, see `notes/fuzzer.md`),
+seeds 0-40.
+
+Verilator's `{<<n{...}}` streaming concatenation agrees with veriforge
+exactly whenever the combined operand width is an exact multiple of the
+slice size `n`, but computes a genuinely different result whenever it
+isn't (a "ragged"/incomplete-final-chunk operand). Confirmed directly and
+independently of both simulators by hand-deriving IEEE 1800-2017
+SS11.4.14.1's algorithm (split the operand's bit stream into `n`-bit chunks
+starting from the MSB end -- the last, LSB-most chunk is shorter if the
+width isn't a multiple of `n` -- then reassemble the chunks in reverse
+order, each chunk's own bit order preserved): for `{<<3{8'b11010010}}`,
+this gives `10100110`, matching veriforge (`reference`/`vm`/`vm-fast` all
+agree, and this matches `Value.stream_reverse`'s own docstring citation of
+the same LRM section) exactly. Verilator instead gives `01001011` -- the
+result of chunking from the LSB end instead, landing the incomplete chunk
+at the MSB end pre-reversal. The evenly-divisible case (`{<<4{...}}` on the
+identical 8-bit operand) gives `00101101` in both -- isolating the gap
+specifically to the ragged case, not streaming concatenation in general.
+
+Since fuzzed slice sizes rarely divide the fuzzed operand width evenly, the
+fuzzer's `--verilator` cross-check skips the whole module whenever any
+streaming concatenation exists anywhere in the design -- the same coarse
+`has_streaming_concat` skip already used for Icarus (which rejects the
+construct outright, a different reason for the same treatment). **Do not
+attempt to make veriforge match Verilator here** -- veriforge's existing
+behavior is the one that matches the independently-hand-derived LRM
+algorithm.

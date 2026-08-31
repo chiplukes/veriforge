@@ -873,6 +873,7 @@ def _extract_port_declaration(  # noqa: PLR0912
             packed_ranges: list[Range] = []
             signed = False
             data_type: str | None = None
+            net_type: str | None = None
             declared_dims: list[Range] = []
             port_items: list[tuple[str, list[Range], Expression | None]] = []
             loc = _loc_from_tree(child, source_file)
@@ -888,7 +889,14 @@ def _extract_port_declaration(  # noqa: PLR0912
                     elif item.type == "IDENTIFIER":
                         data_type = str(item)
                 elif isinstance(item, Tree):
-                    if item.data == "range":
+                    if item.data == "net_type":
+                        # `input`/`output`/`inout` may carry an explicit
+                        # net_type (`wire`, `logic`, `tri`, ...) -- without
+                        # this branch it was silently dropped, so a port
+                        # declared `input logic clk` re-emitted (and
+                        # re-elaborated) as a bare, typeless `input clk`.
+                        net_type = _net_kind_from_tree(item).value
+                    elif item.data == "range":
                         range_ = _build_range(item, source_file, build_constant_expression)
                         if range_ is not None:
                             packed_ranges.append(range_)
@@ -918,6 +926,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                     Port(
                         name=name,
                         direction=direction,
+                        net_type=net_type,
                         data_type=data_type,
                         width=width,
                         dimensions=[*extra_packed_dims, *declared_dims, *dims],

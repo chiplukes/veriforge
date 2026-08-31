@@ -1,6 +1,6 @@
 """CLI entry point for the Veriforge grammar-driven Verilog fuzzer.
 
-Usage:  uv run -m veriforge.fuzz [--seed N] [--max MODULES] [--hours H] [--output DIR] [--no-icarus]
+Usage:  uv run -m veriforge.fuzz [--seed N] [--max MODULES] [--hours H] [--output DIR] [--no-icarus] [--verilator]
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ def main() -> None:
             "  uv run -m veriforge.fuzz --max 100              # 100 modules\n"
             "  uv run -m veriforge.fuzz --hours 8              # 8 hours\n"
             "  uv run -m veriforge.fuzz --no-icarus            # skip Icarus\n"
+            "  uv run -m veriforge.fuzz --verilator            # also cross-check with Verilator\n"
             "  uv run -m veriforge.fuzz --output my_fuzz       # custom output dir\n"
             "  uv run -m veriforge.fuzz --repro fuzz_output/mismatch_00042\n"
         ),
@@ -71,6 +72,12 @@ def main() -> None:
     parser.add_argument("--hours", type=float, default=None, help="Stop after H hours")
     parser.add_argument("--output", type=str, default="fuzz_output", help="Output directory for mismatch artifacts")
     parser.add_argument("--no-icarus", action="store_true", help="Disable Icarus cross-check")
+    parser.add_argument(
+        "--verilator",
+        action="store_true",
+        help="Enable Verilator cross-check (opt-in: ~8-10x slower per module than Icarus; "
+        "2-state only, so comparison is value-only on reference-defined bits)",
+    )
     parser.add_argument(
         "--engines",
         type=str,
@@ -111,6 +118,7 @@ def main() -> None:
         seed=args.seed,
         engines=args.engines,
         icarus=not args.no_icarus,
+        verilator=args.verilator,
     )
 
     try:

@@ -17,6 +17,10 @@ from ..model.variables import Variable, VariableKind
 _EDGE_WIDTHS = [1, 2, 3, 7, 8, 15, 16, 31, 32, 63, 64, 65, 80, 127, 128]
 _NAME_POOL = [chr(ord("a") + i) for i in range(26)]  # a-z
 
+# Fraction of inputs/outputs/wires/regs generated with SystemVerilog's
+# `logic` type instead of `wire`/`reg` (see `Signal.use_logic`).
+_LOGIC_PROBABILITY = 0.35
+
 
 @dataclass
 class Signal:
@@ -27,6 +31,12 @@ class Signal:
     signed: bool
     kind: str  # "input", "output", "wire", "reg", "local", "parameter"
     value: int | None = None  # constant value, "parameter" kind only
+    # When True, emit this signal with SystemVerilog's `logic` type instead
+    # of `wire`/`reg` -- a single type usable both as a net (continuous
+    # assign target) and a variable (procedurally written), unlike `reg`
+    # which can only ever be the latter. Decided once at creation time by
+    # the `add_*` methods below; consulted by as_net/as_variable/as_port.
+    use_logic: bool = False
 
     def as_identifier(self) -> Identifier:
         return Identifier(self.name)
@@ -35,20 +45,25 @@ class Signal:
         return Range(Literal(self.width - 1), Literal(0))
 
     def as_port(self, direction: PortDirection) -> Port:
+        if self.use_logic:
+            net_type, data_type = "logic", None
+        else:
+            net_type, data_type = None, ("reg" if direction == PortDirection.OUTPUT else None)
         return Port(
             self.name,
             direction,
             width=self.as_range(),
             signed=self.signed,
-            net_type=None,
-            data_type="reg" if direction == PortDirection.OUTPUT else None,
+            net_type=net_type,
+            data_type=data_type,
         )
 
     def as_net(self) -> Net:
-        return Net(self.name, kind=NetKind.WIRE, width=self.as_range(), signed=self.signed)
+        kind = NetKind.LOGIC if self.use_logic else NetKind.WIRE
+        return Net(self.name, kind=kind, width=self.as_range(), signed=self.signed)
 
     def as_variable(self) -> Variable:
-        kind = VariableKind.REG if self.kind in ("reg", "local") else VariableKind.LOGIC
+        kind = VariableKind.LOGIC if self.use_logic else VariableKind.REG
         return Variable(self.name, kind=kind, width=self.as_range(), signed=self.signed)
 
     def as_parameter(self) -> Parameter:
@@ -119,6 +134,7 @@ class SignalContext:
             width=width if width is not None else self.pick_width(rng),
             signed=signed if signed is not None else rng.choice([True, False]),
             kind="input",
+            use_logic=rng.random() < _LOGIC_PROBABILITY,
         )
         self._inputs.append(s)
         return s
@@ -129,6 +145,7 @@ class SignalContext:
             width=width if width is not None else self.pick_width(rng),
             signed=signed if signed is not None else rng.choice([True, False]),
             kind="output",
+            use_logic=rng.random() < _LOGIC_PROBABILITY,
         )
         self._outputs.append(s)
         return s
@@ -139,6 +156,7 @@ class SignalContext:
             width=width if width is not None else self.pick_width(rng),
             signed=signed if signed is not None else rng.choice([True, False]),
             kind="wire",
+            use_logic=rng.random() < _LOGIC_PROBABILITY,
         )
         self._wires.append(s)
         return s
@@ -149,6 +167,7 @@ class SignalContext:
             width=width if width is not None else self.pick_width(rng),
             signed=signed if signed is not None else rng.choice([True, False]),
             kind="reg",
+            use_logic=rng.random() < _LOGIC_PROBABILITY,
         )
         self._regs.append(s)
         return s

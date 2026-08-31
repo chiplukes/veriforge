@@ -625,6 +625,67 @@ edits. Remaining fallback cases still re-emit the full module:
       values task #28 now generates than a real infinite-loop bug; worth
       revisiting if it recurs (e.g. capping generated parameter magnitude,
       or a longer `vvp` timeout) rather than assuming it's a correctness bug.
+- **`logic`-declared signal fuzzing + Verilator cross-check (task-tracking:
+  fuzzing-round item 33) — Done.** Built out the deferral noted in
+  `notes/fuzzer.md`: the fuzzer now generates `logic`-typed inputs/outputs/
+  wires/regs (~35% independent chance per signal,
+  `fuzz/_signal_context.py::Signal.use_logic`), and a new opt-in
+  `--verilator` fuzzer flag cross-checks results against Verilator
+  (`fuzz/_runner.py::_simulate_verilator`/`_compare_verilator`), needed
+  because Icarus's own SystemVerilog support for `logic` is weaker than its
+  Verilog-2005 core.
+
+  **Prerequisite bug found and fixed**: `_extract_port_declaration`
+  (`transforms/_declarations.py`) walked every child of an
+  `input_declaration`/`output_declaration`/`inout_declaration` subtree but
+  had no branch for the grammar's optional `net_type` child at all -- so
+  `input logic clk` / `input wire foo` silently lost the keyword during
+  parsing (`Port.net_type` stayed `None`) even though `Port.net_type` and
+  the emitter's rendering of it already existed and worked correctly.
+  Confirmed directly: parsing `input logic clk` gave a `Port` indistinguishable
+  from a plain untyped `input clk`. Every one of our own 4 engines shares
+  this same extraction path before elaboration, so `logic`-typed ports would
+  have been silently untyped for all internal purposes, making port-level
+  `logic` fuzzing meaningless. Fixed by adding the missing branch (mirrors
+  the existing `_net_kind_from_tree` net-declaration extraction). Verified:
+  `tests/test_sim/test_port_net_type_roundtrip.py` (new file) -- parse/
+  round-trip/re-emit assertions plus a cross-engine simulation check for
+  `logic`-typed ports.
+
+  **Verilator integration**: `_simulate_verilator` reuses the *same*
+  `_build_testbench` Icarus already uses (confirmed directly that the
+  identical `$display`-based testbench runs correctly under Verilator's
+  `--binary` mode, which compiles+links a self-contained executable in one
+  step -- no hand-written C++ harness needed). `_compare_verilator` is
+  value-only and skips any `(vector, signal)` pair where the *reference*
+  engine itself shows ambiguity (`mask != 0`), since Verilator has no
+  `x`/`z` state (confirmed directly: `4'bxxxx` into a `logic` net reads back
+  as `0000`).
+
+  **Verilator oracle limitation found (not a veriforge bug) — documented,
+  worked around**: smoke-testing `--verilator` on the first 40 fuzzer seeds
+  surfaced several apparent mismatches, all traced to one root cause:
+  Verilator's `{<<n{...}}` streaming concatenation disagrees with the LRM
+  (and with veriforge) whenever the combined operand width isn't an exact
+  multiple of the slice size `n` (a "ragged" chunk) -- confirmed by
+  hand-deriving IEEE 1800-2017 §11.4.14.1 independently of both simulators:
+  `{<<3{8'b11010010}}` should give `10100110` (matches veriforge's
+  `reference`/`vm`/`vm-fast`, and `Value.stream_reverse`'s own docstring
+  citation of the same LRM section); Verilator gives `01001011` instead. The
+  evenly-divisible case (`{<<4{...}}}` on the same operand) matches exactly
+  in both, isolating the gap to the ragged case specifically. See
+  `notes/known_issues.md` ("Verilator ragged streaming-concat chunking
+  gap") for the full derivation. Worked around by extending the fuzzer's
+  existing `has_streaming_concat` whole-module skip (already used for
+  Icarus, which rejects the construct outright) to also cover the Verilator
+  cross-check. Re-verified after the fix: 0 Verilator-specific mismatches
+  across a ~110-module combined smoke/extended run (seeds 0-40 and
+  1000-1070), the only 2 logged mismatches being the already-documented,
+  pre-existing `vm`/`vm-fast` wide-value-capacity `NotImplementedError`
+  guard (unrelated to this feature).
+
+  Verified: full `tests/test_sim/` suite (5316 passed, 0 failed) after all
+  changes; `mypy` clean on all touched files.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

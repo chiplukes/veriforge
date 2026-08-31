@@ -18,6 +18,7 @@ from ..model.statements import (
     Statement,
 )
 from ..model.assignments import ContinuousAssign
+from ..model.nets import NetKind
 from ..model.ports import Port, PortDirection
 from ..model.variables import Variable, VariableKind
 
@@ -146,7 +147,12 @@ class ModuleGenerator:
 
         for net in list(mod.nets):
             if net.name in always_nets:
-                mod.variables.append(Variable(net.name, VariableKind.REG, width=net.width, signed=net.signed))
+                # Preserve `logic`-ness across the wire->variable promotion:
+                # a `logic` net written by an always block stays `logic`
+                # (valid SV -- `logic` is usable both as a net and a
+                # variable), it must not silently become plain `reg`.
+                var_kind = VariableKind.LOGIC if net.kind == NetKind.LOGIC else VariableKind.REG
+                mod.variables.append(Variable(net.name, var_kind, width=net.width, signed=net.signed))
                 mod.nets.remove(net)
 
         return mod
