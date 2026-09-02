@@ -900,6 +900,136 @@ edits. Remaining fallback cases still re-emit the full module:
     this broader "self-referential/latch-forming combinational read"
     shape across all three oracles, to keep future surveys from
     re-surfacing it as fresh-looking noise.
+
+    **Follow-up (400-module confirmation run, seed 9000, after the
+    self-referential-output fuzzer fix above landed)**: three more
+    mismatches, all consistent with this same family, none suggesting a
+    genuine new veriforge bug:
+    - `mismatch_09127`: an exact match for the pattern above --
+      `always @(*) begin w7 = i4; o9 = o10[28]; end o10 = i5; end` reads
+      `o10` (a latch-forming self-reference: written only by the LAST
+      statement in the same block) before its own write. Verilator
+      alternates opposite-of-reference on exactly the vectors where the
+      "previous" `o10` value flips sign, i.e. it seeds its own
+      first/previous value for this feedback differently.
+    - `mismatch_09248`/`mismatch_09364`: a **related but distinct**
+      variant, not literally a same-block self-reference this time --
+      `mismatch_09248` is three separate `always @(*)` blocks each
+      unconditionally assigning their own target every activation, with a
+      one-hop dependency chain between them (`r8` -> `w7` -> `o9`); Icarus
+      reports `o9` as fully X where reference computes a real value.
+      `mismatch_09364` is a single large `always @(*)` with several
+      `if`/`else`/`for`/`while` branches where an internal `reg` (`wc2`)
+      is only assigned on SOME code paths (a genuine, legal
+      combinational-latch-retention case: an unassigned-this-activation
+      `reg` correctly keeps its value from whichever earlier vector's
+      activation last wrote it) -- both Icarus AND Verilator show
+      mostly/fully-undefined-looking results here where reference gives a
+      clean, deterministic answer. Ruled out one alternative
+      hypothesis directly: NOT a wide (>64-bit) decimal-literal
+      testbench-stimulus parsing bug (confirmed by hand against `iverilog`
+      directly -- a 103-bit decimal literal truncates bit-for-bit
+      correctly, matching Python's own truncation). The remaining, most
+      plausible explanation is the same broad theme as the already-fixed
+      `compiled` "pre-edge snapshot built from only one pass through
+      continuous assigns" bug earlier in this file and the
+      already-documented Icarus first-activation artifact: **external
+      oracles needing several evaluation passes to converge a multi-hop
+      or partially-latching combinational dependency chain sometimes give
+      a different (often more X/undefined-looking) answer than this
+      codebase's own multi-pass-converging engines specifically on the
+      very first activation** -- not independently re-derived to the same
+      rigor as the two bullets above given time spent this session; flagged
+      here with the real fuzzer-found modules preserved rather than chased
+      to a from-scratch minimal repro.
+- **Compiled engine: bootstrap `settle()` fired the first `posedge` one edge
+  early for clocks that start high** — **Fixed** (`compiled_scheduler.py::settle()`),
+  found via a real user report against `axis_pix_correction2`'s own pysim
+  suite: `test_bypass_survives_sustained_severe_output_backpressure` hung at
+  row 7 of 10 under `vm-fast`; an RTL fix the user had already landed and
+  verified in hardware (`axis_row_correct.sv`'s `inreg_tready` gating
+  `!prog_full` instead of `!fifo_full`) didn't change the symptom at all,
+  pointing at a simulator bug rather than an RTL one. VCD tracing (a
+  hand-picked ~79-signal subset, full-signal tracing being ~40x too slow to
+  reach row 7 at all) caught `m_beat_cnt` incrementing for ~39 consecutive
+  cycles while `m_axis_pixout_tready` read 0 -- a direct violation of the
+  RTL's own guard.
+  - First fix (real, necessary, but not sufficient alone): `_seq_body_to_sv_reads`
+    (`sim/compiled/_gen_sections.py`) rewrites sequential-process reads to the
+    pre-edge snapshot (`sv[]`/`sm[]`) to avoid an NBA-write race between
+    processes -- correct for internally-driven signals, but a top-level
+    `input` port has no internal driver at all (nothing can NBA-race it), so
+    using the snapshot for one is never correct: it goes stale relative to
+    whatever the testbench just drove via `sim.drive()`. Added a fourth
+    exception category (joining the existing async/trigger-signal and
+    func-internal ones), `external_input_sids`, computed from the module's
+    own top-level input ports. Confirmed correct at the generated-code level
+    (`m_axis_tready`'s read flipped from `sv[]`/`sm[]` to live `c.val[]`/
+    `c.mask[]`) but a minimal repro (a 1-deep AXI-Stream skid buffer +
+    beat counter, same shape as the real bug) still showed `compiled`
+    reporting one extra beat versus `reference` even after this fix landed
+    and was verified freshly-compiled -- meaning the real root cause was
+    elsewhere.
+  - Real root cause, found by chasing that residual minimal-repro
+    discrepancy back to its origin (a duplicated *first* beat, not a
+    backpressure-drain artifact -- the frame came back as
+    `[0, 0, 1, 2, ...]` instead of `[0, 1, 2, ...]`, even with **no**
+    backpressure at all): `CompiledScheduler.drive_signal()` takes a full
+    `self._sim.snapshot()` before the very first drive it ever sees, to
+    give edge detection a baseline. When that very first-ever drive is the
+    clock itself being set to its starting level (1, for a clock generator
+    that begins high -- confirmed directly: `clk == 1'b1` before any
+    stepping at all), the snapshot captures the clock's *pre-drive* value:
+    whatever a freshly-constructed signal array defaults to (0), not a real
+    "previous cycle" value, because nothing has run yet. Every later
+    `drive_signal()` call that same cycle (tvalid, tdata, ...) sees
+    `_has_drive_snapshot` already `True` and skips re-snapshotting, and
+    `settle()`'s `refresh_data_snapshot()` deliberately leaves the clock's
+    own snapshot slot untouched (needed so *real* edges keep detecting
+    correctly later) -- so this stale snapshot survives all the way into
+    `settle()`'s one-time `mark_all_dirty()` bootstrap pass. The delta loop
+    that bootstrap pass drives then sees `c.val[clk]==1` (real) against
+    `sv[clk]==0` (stale pre-construction default), reads that as a genuine
+    0→1 transition, and fires every `posedge clk` process a full edge
+    before the actual first clock edge -- a skid buffer that self-fills
+    when empty captures its first beat here, then captures it *again* on
+    the real first edge, permanently shifting every downstream count by
+    one. This is the same broad family as this file's own
+    `batch_run()`-first-call fix above (item 5 of the wide-signal-snapshot
+    entry: "clock assumed to start low when it might already be high"), but
+    in the separate `settle()` bootstrap path rather than `batch_run()`.
+  - **Fix**: on the first-ever `settle()` call, force a fresh, unconditional
+    `self._sim.snapshot()` (overriding whatever `_has_drive_snapshot` says)
+    before `refresh_data_snapshot()`/`step()` run. Since nothing has
+    executed yet at that point, there is no legitimate "previous state" to
+    preserve — snapshotting everything as-is makes current == previous for
+    every signal, so the one-time combinational settle `mark_all_dirty()`
+    exists for can run without spuriously tripping any edge-triggered
+    process.
+  - Verified: the minimal repro (with and without backpressure, single- and
+    multi-frame) now matches `reference` exactly; new regression tests in
+    `tests/test_sim/compiled/test_scheduling.py::TestBootstrapSettleFalsePosedge`
+    (scheduling-level) and
+    `tests/test_sim/test_axis_endpoints.py::test_axis_skid_buffer_does_not_duplicate_first_beat`
+    (end-to-end, all 4 engines). The `external_input_sids` fix above is kept
+    regardless — independently correct and covers a real (if, in this
+    specific bug, non-triggering) staleness gap.
+  - **Fallout, fixed alongside**: five pre-existing tests in
+    `test_cross_validation.py::TestSignedAssignmentCrossEngine` broke —
+    their own `_run()` helper drove `clk` straight from its uninitialized
+    default to `1` with a single `settle()` call and no prior `0`, relying
+    on exactly this bug (an implicit "default/X → 1 counts as a posedge"
+    quirk) to fire their `always @(posedge clk)` DUTs at all, since the
+    test never calls `run()`/steps a real clock otherwise. `reference`/`vm`
+    happen to implement the same X→1-counts-as-an-edge convention for a
+    bare one-shot `drive()`+`settle()` (confirmed: they matched compiled's
+    old, buggy answer), so the tests passed on every engine despite
+    resting on an idiom no real clock generator or Testbench flow actually
+    uses. Fixed the tests themselves rather than the fix: `_run()` now
+    drives `clk` low, settles, then high, giving every engine an
+    unambiguous, explicit 0→1 transition — matching the sibling clock
+    tests already in `test_scheduling.py` and still exercising the exact
+    same signed-NBA-widening logic the tests are actually about.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

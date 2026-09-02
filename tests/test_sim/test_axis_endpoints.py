@@ -4,12 +4,47 @@ import pytest
 
 from veriforge.dsl import Module
 from veriforge.dsl.lib import axi_stream
-from veriforge.sim.bench import Testbench
+from veriforge.sim.bench import PlannerOverrides, Testbench
 from veriforge.sim.endpoints import AXIStreamFrame, AXIStreamSink, AXIStreamSource, EndpointCoordinator, PauseGenerator
 from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 from .engines import ENGINES
+
+_SKID_BUFFER_DUT = """
+module axis_skid_buffer_tb (
+    input clk,
+    input s_axis_tvalid,
+    output s_axis_tready,
+    input [7:0] s_axis_tdata,
+    input s_axis_tlast,
+    output reg m_axis_tvalid,
+    output reg [7:0] m_axis_tdata,
+    output reg m_axis_tlast,
+    input m_axis_tready
+);
+    initial m_axis_tvalid = 0;
+    initial m_axis_tdata = 0;
+    initial m_axis_tlast = 0;
+
+    assign s_axis_tready = !m_axis_tvalid || m_axis_tready;
+
+    always @(posedge clk)
+        if (!m_axis_tvalid || m_axis_tready) begin
+            m_axis_tvalid <= s_axis_tvalid;
+            m_axis_tdata  <= s_axis_tdata;
+            m_axis_tlast  <= s_axis_tlast;
+        end
+endmodule
+"""
+
+
+def _skid_buffer_module():
+    from veriforge.transforms.tree_to_model import tree_to_design
+    from veriforge.verilog_parser import verilog_parser
+
+    tree = verilog_parser(start="module_declaration").build_tree(_SKID_BUFFER_DUT)
+    return tree_to_design(tree).modules[0]
 
 
 def _axis_passthrough_module():
@@ -495,3 +530,31 @@ def test_axis_endpoints_no_tlast_via_bench_iface() -> None:
         for expected in [1, 2, 3]:
             got = m_axis.get(timeout=50)
             assert list(got.data) == [expected]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_axis_skid_buffer_does_not_duplicate_first_beat(engine: str) -> None:
+    """Bug regression: the compiled engine's bootstrap `settle()` call fired
+    the skid buffer's `always @(posedge clk)` process one edge early (its
+    clock starts high, and the bootstrap snapshot mistook that for a real
+    0->1 transition -- see `tests/test_sim/compiled/test_scheduling.py`'s
+    `TestBootstrapSettleFalsePosedge` for the scheduling-level root cause).
+    The buffer self-fills on its first (empty) cycle, so this made the very
+    first beat get captured -- and later reported -- twice, corrupting
+    every downstream beat count from the start of the run onward. Only
+    `compiled` ever showed this; included in every engine's parametrization
+    so a regression on another engine wouldn't go unnoticed either.
+    """
+    dut = _skid_buffer_module()
+    bench = Testbench(
+        dut,
+        overrides=PlannerOverrides(iface_domains={"s_axis": "clk", "m_axis": "clk"}),
+        engine=engine,
+    )
+    with bench.run():
+        s_axis = bench.iface("s_axis")
+        m_axis = bench.iface("m_axis")
+        pixels = list(range(8))
+        s_axis.put(pixels, last=[1 if i == len(pixels) - 1 else 0 for i in range(len(pixels))])
+        frame = m_axis.get(timeout=200)
+        assert list(frame.data) == pixels

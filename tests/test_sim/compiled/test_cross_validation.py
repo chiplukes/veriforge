@@ -2430,11 +2430,27 @@ class TestSignedAssignmentCrossEngine:
     ENGINES = ["reference", "vm", "compiled"]
 
     def _run(self, module_fn, drives: dict, signals_to_check: list):
+        # `clk`, when present, needs a REAL 0->1 transition (not just a
+        # single "drive it straight to 1, then settle()" call) to fire an
+        # `always @(posedge clk)` process per standard Verilog semantics --
+        # a bare drive-to-1 with no prior observed value only *happens* to
+        # fire on `compiled` because of a bootstrap-settle bug (see
+        # `tests/test_sim/compiled/test_scheduling.py`'s
+        # `TestBootstrapSettleFalsePosedge`), now fixed. Driving clk low
+        # first, settling, then driving it high makes the edge explicit and
+        # unambiguous on every engine, matching the sibling clock tests
+        # in `test_scheduling.py`.
+        non_clk_drives = {name: val for name, val in drives.items() if name != "clk"}
+        has_clk = "clk" in drives
         results = {}
         for eng in self.ENGINES:
             sim = Simulator(module_fn(), engine=eng)
-            for name, val in drives.items():
+            for name, val in non_clk_drives.items():
                 sim.drive(name, val)
+            if has_clk:
+                sim.drive("clk", Value(0, width=1))
+                sim.settle()
+                sim.drive("clk", Value(1, width=1))
             sim.settle()
             results[eng] = {name: sim.read(name) for name in signals_to_check}
         ref = results["reference"]

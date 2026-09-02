@@ -292,3 +292,108 @@ class TestContinuousAssignSnapshotConvergence:
                 out = sim.read("o11")
             results[eng] = out
         assert results["compiled"] == results["reference"]
+
+
+class TestBootstrapSettleFalsePosedge:
+    """Bug regression: a clock that starts HIGH (its first-ever drive sets
+    it straight to 1, never 0) made the compiled engine's bootstrap
+    ``settle()`` call fire every `posedge clk` process one full edge early.
+
+    Root cause: ``CompiledScheduler.drive_signal()`` snapshots ALL signals
+    (``self._sim.snapshot()``) before the very first drive it ever sees, so
+    edge detection has a baseline. When that very first drive is the clock
+    itself being set to its starting level (1, for a clock generator that
+    begins high), the snapshot captures the clock's PRE-drive value --
+    whatever the freshly-constructed signal array defaults to (0) -- not a
+    real "previous cycle" value, because nothing has run yet.
+    ``_has_drive_snapshot`` then guards every later drive() this same cycle
+    from re-snapshotting, and ``refresh_data_snapshot()`` deliberately
+    leaves the clock's own snapshot slot untouched (needed so REAL edges
+    detect correctly later) -- so this stale snapshot survives all the way
+    into ``settle()``'s one-time ``mark_all_dirty()`` bootstrap pass. The
+    delta loop it drives then sees ``c.val[clk]==1`` (real) against
+    ``sv[clk]==0`` (stale pre-construction default) and reads that as a
+    genuine 0->1 transition, firing every posedge-triggered process before
+    the actual first clock edge ever happens.
+
+    Confirmed via a minimal AXI-Stream-shaped skid buffer (a 1-deep
+    register that self-fills when empty): its very first accepted beat was
+    captured -- and later double-counted -- one cycle early under
+    `compiled` only, corrupting a downstream beat counter by exactly one
+    for the rest of the run (`tests/test_sim/test_axis_endpoints.py`
+    covers the end-to-end symptom; this class isolates the scheduling
+    mechanism itself).
+    """
+
+    def test_posedge_process_does_not_fire_on_first_settle_with_clock_starting_high(self):
+        mod = _parse("""
+            module t (input clk, output reg [7:0] cnt);
+              initial cnt = 0;
+              always @(posedge clk)
+                cnt <= cnt + 1;
+            endmodule
+        """)
+        sim = Simulator(mod, engine="compiled")
+        # The clock's very first-ever drive sets it straight to 1 -- exactly
+        # what a "starts high" clock generator does before any stepping.
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        assert int(sim.read("cnt")) == 0, "posedge process must not fire on the bootstrap settle() call"
+
+        # A real subsequent edge (1 -> 0 -> 1) must still fire normally.
+        sim.drive("clk", Value(0, width=1))
+        sim.settle()
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        assert int(sim.read("cnt")) == 1, "the real first posedge should still increment cnt exactly once"
+
+    def test_skid_buffer_does_not_double_capture_first_beat(self):
+        """End-to-end shape of the originally-reported symptom: a 1-deep
+        skid buffer that self-fills on its first (empty-buffer) cycle must
+        not report its first captured beat twice.
+        """
+        mod = _parse("""
+            module t (
+                input clk,
+                input s_valid,
+                input [7:0] s_data,
+                output reg m_valid,
+                output reg [7:0] m_data,
+                input m_ready
+            );
+                initial m_valid = 0;
+                always @(posedge clk)
+                    if (!m_valid || m_ready) begin
+                        m_valid <= s_valid;
+                        m_data  <= s_data;
+                    end
+            endmodule
+        """)
+        # Only the compiled engine has the bootstrap-settle bug this guards
+        # against; other engines don't apply `initial` assignments via a
+        # bare drive()/settle() pair the way `compiled`'s mark_all_dirty()
+        # bootstrap does, so a fair cross-engine comparison isn't possible
+        # at this low a level -- see `test_axis_endpoints.py` /
+        # `test_bypass_survives_sustained_severe_output_backpressure`-style
+        # bench tests for the cross-engine end-to-end coverage instead.
+        sim = Simulator(mod, engine="compiled")
+        sim.drive("s_valid", Value(1, width=1))
+        sim.drive("s_data", Value(0x42, width=8))
+        sim.drive("m_ready", Value(0, width=1))
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        assert int(sim.read("m_valid")) == 0, "buffer must still be empty before any real clock edge"
+
+        sim.drive("clk", Value(0, width=1))
+        sim.settle()
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        assert int(sim.read("m_valid")) == 1, "the real first posedge should capture the first beat"
+        assert int(sim.read("m_data")) == 0x42
+
+        # Held (m_ready=0): a second edge must NOT re-capture / advance.
+        sim.drive("clk", Value(0, width=1))
+        sim.settle()
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        assert int(sim.read("m_data")) == 0x42, "buffer must hold, not double-advance"

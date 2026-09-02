@@ -750,6 +750,34 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         if first_settle:
             self._combo_bootstrapped = True
             self._sim.mark_all_dirty()
+            # Force a FRESH, unconditional snapshot here, overriding whatever
+            # `_has_drive_snapshot` currently says. Without this, the clock's
+            # own `_snap_v`/`_snap_m` slot can still hold its stale
+            # pre-initialization default (0) rather than its real starting
+            # level: a clock generator's initial "start high" level is itself
+            # applied through `drive_signal()`, whose own "snapshot before
+            # the first drive" guard fires for THAT drive (capturing clk's
+            # value from BEFORE it was ever set), and every later drive_signal()
+            # call this cycle (tvalid, tdata, ...) sees `_has_drive_snapshot`
+            # already True and skips re-snapshotting. `refresh_data_snapshot()`
+            # below then deliberately preserves the clock's snapshot slot
+            # untouched (see its own comment) so real posedge/negedge
+            # detection keeps working -- but that means it also preserves
+            # THIS stale one. The delta_loop() driven by `self._sim.step()`
+            # a few lines down then sees c.val[clk]==1 (real) vs the stale
+            # sv[clk]==0, reads that as a genuine 0->1 transition, and fires
+            # every `posedge clk` process one full cycle before the actual
+            # first clock edge -- confirmed via a minimal skid-buffer repro
+            # where the first beat was captured (and later double-counted)
+            # a cycle early only under the `compiled` engine. Since this is
+            # the bootstrap pass (nothing has run yet), there is no
+            # legitimate "previous state" worth preserving -- snapshotting
+            # everything as-is here makes current==previous for every
+            # signal, so this pass can run the one-time combinational
+            # settle `mark_all_dirty()` exists for without spuriously
+            # tripping any edge-triggered process.
+            self._sim.snapshot()
+            self._has_drive_snapshot = True
         if not self._has_drive_snapshot and not first_settle:
             return
         # Refresh the data snapshot so non-clock signals driven before the clock

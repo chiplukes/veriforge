@@ -24,6 +24,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _const_int,
 )
 from veriforge.model.expressions import Identifier
+from veriforge.model.ports import PortDirection
 from veriforge.model.statements import BlockingAssign
 from veriforge.sim.compiled._gen_narrow_accessors import _gen_narrow_accessor_code
 from veriforge.sim.compiled._gen_narrow_stage import _gen_narrow_stage_code
@@ -82,7 +83,10 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
 
 
 def _seq_body_to_sv_reads(
-    body_lines: list[str], async_sids: set[int] | None = None, func_internal_sids: set[int] | None = None
+    body_lines: list[str],
+    async_sids: set[int] | None = None,
+    func_internal_sids: set[int] | None = None,
+    external_input_sids: set[int] | None = None,
 ) -> list[str]:
     """Rewrite a seq proc body so that signal reads use sv[]/sm[] (pre-posedge snapshot).
 
@@ -133,6 +137,29 @@ def _seq_body_to_sv_reads(
     which was never written by anything, spuriously reading fully-x garbage regardless
     of the function's own correctly-computed (fully defined) result.
 
+    **Exception** — signals listed in *external_input_sids* (the top-level module's
+    own `input` ports) must also use c.val[]/c.mask[] not sv[]/sm[], because the
+    whole point of the pre-edge snapshot is protecting against an NBA-write RACE
+    between sequential processes *within this design* -- an ordinary top-level
+    input port has no internal driver at all (Verilog forbids a module assigning
+    its own input), so there is no such race to protect against, and using the
+    snapshot is actively wrong: the testbench drives a fresh value onto the port
+    from outside every cycle via `sim.drive()`, and the snapshot only gets
+    refreshed on its own schedule, not necessarily in lockstep with every drive.
+    Confirmed via a minimal repro: `always @(posedge clk) if (m_axis_tvalid &&
+    m_axis_tready) cnt <= cnt + 1;` with `m_axis_tready` a plain top-level input
+    driven low most cycles (a throttled AXI-Stream sink, ~1% ready duty) --
+    `cnt` incremented on cycles where the *stale* `sv[]` snapshot of
+    `m_axis_tready` still showed an earlier `1` even though the signal had
+    long since been driven back to `0`, corrupting the beat count (confirmed
+    against `reference`, which reads the live value and counts correctly).
+    Real-world instance: `axis_pix_correction2`'s own `m_beat_cnt`/`m_row_cnt`
+    bookkeeping (`m_axis_pixout_tready` is exactly this shape) miscounted beats
+    under sustained backpressure, eventually desynchronizing frame boundaries
+    enough that a downstream `tlast` never arrived within a generous timeout --
+    originally suspected to be an RTL bug, root-caused via VCD tracing to this
+    compiled-engine pre-edge-snapshot gap instead.
+
     Substitutions performed (safe because NBA writes use c.nba_val/c.nba_mask/c.nba_dirty):
       c.val[N]                      → sv[N]    (only if N not blocking-written or async here)
       c.mask[N]                     → sm[N]    (only if N not blocking-written or async here)
@@ -180,6 +207,8 @@ def _seq_body_to_sv_reads(
     tainted: set[int] = set(async_sids) if async_sids else set()
     if func_internal_sids:
         tainted.update(func_internal_sids)
+    if external_input_sids:
+        tainted.update(external_input_sids)
     tainted_mem: set[int] = set()
     for line in body_lines:
         m = _BLOCKING_WRITE_RE.match(line)
@@ -982,6 +1011,26 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             self._body_tainted_sids = None
         return self._emit_stmt(block_body, indent=1)
 
+    def _external_input_sids(self) -> set[int]:
+        """Signal IDs for the top-level module's own `input` ports.
+
+        These have no internal driver at all (Verilog forbids a module
+        assigning its own input port) -- see `_seq_body_to_sv_reads`'s
+        `external_input_sids` exception docstring for why they must never
+        be rewritten to the pre-edge snapshot (`sv[]`/`sm[]`) inside a
+        sequential process body.
+        """
+        sids: set[int] = set()
+        if self._module is None:
+            return sids
+        for port in self._module.ports:
+            if port.direction != PortDirection.INPUT:
+                continue
+            sid = self._signal_map.get(port.name)
+            if sid is not None:
+                sids.add(sid)
+        return sids
+
     def _gen_process_functions(self) -> str:
         parts: list[str] = []
 
@@ -1007,6 +1056,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 sid = self._signal_map.get(f"{prefix}.{name}")
                 if sid is not None:
                     func_internal_sids.add(sid)
+        external_input_sids = self._external_input_sids()
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
@@ -1036,7 +1086,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     decls: list[str] = []
                     if use_sv:
                         async_sids = seq_negedge_sids[i] if prefix == "seq" else None
-                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids, func_internal_sids)
+                        body_lines = _seq_body_to_sv_reads(
+                            body_lines, async_sids, func_internal_sids, external_input_sids
+                        )
                     # Hoist inline cdef-with-initializer declarations to function
                     # level so they are never emitted inside if/elif blocks (Cython
                     # forbids cdef inside conditional blocks).
@@ -1129,6 +1181,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 sid = self._signal_map.get(f"{prefix}.{name}")
                 if sid is not None:
                     func_internal_sids.add(sid)
+        external_input_sids = self._external_input_sids()
 
         process_groups = (
             ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
@@ -1162,7 +1215,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     decls: list[str] = []
                     if use_sv:
                         async_sids = seq_negedge_sids[i] if prefix == "seq" else None
-                        body_lines = _seq_body_to_sv_reads(body_lines, async_sids, func_internal_sids)
+                        body_lines = _seq_body_to_sv_reads(
+                            body_lines, async_sids, func_internal_sids, external_input_sids
+                        )
                     hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                     decls.extend(hoisted_cdefs)
                     joined = "\n".join(body_lines)
