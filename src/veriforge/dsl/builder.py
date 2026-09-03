@@ -1100,11 +1100,14 @@ class Module:  # cm:2b9e4c
         *,
         signed: bool = False,
         init: int | Expr | None = None,
+        net_type: str | None = None,
     ) -> Signal:
         """Declare an input port."""
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
-        port = Port(name, PortDirection.INPUT, width=range_obj, signed=signed, default_value=default_expr)
+        port = Port(
+            name, PortDirection.INPUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+        )
         self._flush_pending(port)
         self._ports.append(port)
         return self._declare_signal(name, width)
@@ -1116,11 +1119,14 @@ class Module:  # cm:2b9e4c
         *,
         signed: bool = False,
         init: int | Expr | None = None,
+        net_type: str | None = None,
     ) -> Signal:
         """Declare an output port (wire)."""
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
-        port = Port(name, PortDirection.OUTPUT, width=range_obj, signed=signed, default_value=default_expr)
+        port = Port(
+            name, PortDirection.OUTPUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+        )
         self._flush_pending(port)
         self._ports.append(port)
         return self._declare_signal(name, width)
@@ -1159,11 +1165,14 @@ class Module:  # cm:2b9e4c
         *,
         signed: bool = False,
         init: int | Expr | None = None,
+        net_type: str | None = None,
     ) -> Signal:
         """Declare an inout port."""
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
-        port = Port(name, PortDirection.INOUT, width=range_obj, signed=signed, default_value=default_expr)
+        port = Port(
+            name, PortDirection.INOUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+        )
         self._flush_pending(port)
         self._ports.append(port)
         return self._declare_signal(name, width)

@@ -750,15 +750,21 @@ def _emit_port(lines: list[str], port: Port, v: str) -> None:
     if width == "1":
         width_str = ""
 
+    # Preserve an explicit net_type (`wire`, `logic`, `tri`, ...) so a port
+    # declared e.g. `output wire [7:0] y` doesn't silently round-trip back
+    # as a bare, typeless `output [7:0] y` -- `output_reg` has no net_type
+    # kwarg since a `reg`/`logic`-data_type port can't also carry one.
+    net_type_str = f', net_type="{port.net_type}"' if port.net_type else ""
+
     if port.direction == PortDirection.INPUT:
-        lines.append(f'{name} = {v}.input("{name}"{width_str}{extras})')
+        lines.append(f'{name} = {v}.input("{name}"{width_str}{extras}{net_type_str})')
     elif port.direction == PortDirection.OUTPUT:
         if port.data_type == "reg":
             lines.append(f'{name} = {v}.output_reg("{name}"{width_str}{extras})')
         else:
-            lines.append(f'{name} = {v}.output("{name}"{width_str}{extras})')
+            lines.append(f'{name} = {v}.output("{name}"{width_str}{extras}{net_type_str})')
     elif port.direction == PortDirection.INOUT:
-        lines.append(f'{name} = {v}.inout("{name}"{width_str}{extras})')
+        lines.append(f'{name} = {v}.inout("{name}"{width_str}{extras}{net_type_str})')
 
 
 def _emit_net(lines: list[str], net: Net, v: str) -> None:

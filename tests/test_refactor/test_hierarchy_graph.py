@@ -1749,7 +1749,7 @@ def test_hierarchy_pull_up_rewrites_typical_logic_constructs_and_reparses(tmp_pa
     assert len(payload["edits"]) == 2
     assert "typical_child #(" not in proposed_top
     assert "reg [7:0] data_wire;" in replacement
-    assert "localparam u_logic__MASK = 8'hA5;" in replacement
+    assert "localparam [8 - 1:0] u_logic__MASK = 8'hA5;" in replacement
     assert "wire [8 - 1:0] u_logic__masked;" in replacement
     assert "reg [8 - 1:0] u_logic__state;" in replacement
     assert "reg [1:0] u_logic__mode;" in replacement
@@ -2555,7 +2555,7 @@ def test_extract_submodule_preview_moves_selected_helper_declarations(tmp_path):
         "nets": ["mid"],
         "variables": [],
     }
-    assert "localparam MASK = 8'hf0;" in generated
+    assert "localparam [7:0] MASK = 8'hf0;" in generated
     assert "wire [7:0] mid;" in generated
     assert ".MASK(" not in parent_text
     assert ".mid(" not in parent_text
