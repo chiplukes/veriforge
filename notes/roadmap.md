@@ -207,7 +207,7 @@ edits. Remaining fallback cases still re-emit the full module:
      sites pick the `_sv` variant consistently. Regression-verified: full
      suite 8394 passed / 0 failed (same as before this pair).
      **Likely fixed a second, independently-reported real-world bug as a
-     side effect**: `cineform-fpga`'s `notes/veriforge_bugs_found.md` "Bug 3"
+     side effect**: `cineform-fpga`'s `veriforge_bugs_found.md` "Bug 3"
      (a signed range-select of a wide wire reading corrupted values,
      compiled engine only, only inside a large composed design,
      `bayer_encode_core`, ~190K generated Cython lines) — shape matches this
