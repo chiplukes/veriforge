@@ -1159,3 +1159,53 @@ Proposed markers from [notes/test_taxonomy.md](test_taxonomy.md) not yet applied
 The constructs marked **Partial**, **Limited**, or **Planned** in
 [notes/support_matrix.md](support_matrix.md) represent the known parser/simulation
 coverage frontier.
+
+- **Dangling-else ambiguity resolved to the wrong (outer) `if` — Fixed.**
+  Reported from an external project as a simulation "stall": a bare `if (A)
+  if (B) X; else Y;` -- no `begin`/`end` anywhere -- nested inside a
+  properly-braced outer construct. Building the equivalent logic directly as
+  a DSL object simulated correctly; emitting that exact logic to Verilog
+  text and re-parsing it did not -- the `else` fired regardless of `A`'s
+  value, as if the outer `if` never existed. Root-caused to
+  `conditional_statement`'s grammar rule (`verilog.lark`): a single
+  production with an optional trailing `else` is genuinely ambiguous for
+  `if (a) if (b) x; else y;` (the `else` can be consumed by either `if`, and
+  both are valid derivations of the identical token stream), and the
+  now-fully-redundant `if_else_if_statement` alternative (everything it
+  could produce is already producible by `conditional_statement`'s own
+  recursion through its `else` branch) only compounded it. Lark's Earley
+  parser resolves genuine ambiguity via an internal cost heuristic with no
+  notion of Verilog's actual rule (IEEE 1800-2017 SS12.4: "always associate
+  with the closest"); empirically it picked the wrong, outer-binding parse
+  every time.
+
+  Fixed with the standard "matched/unmatched statement" CFG split: a new
+  `matched_statement`/`matched_statement_or_null` pair of nonterminals,
+  grammatically guaranteed to never end in a still-open (else-less) `if`,
+  used for the then-branch of any `if`/`else` and threaded through every
+  other construct that recurses through a single bare (non-`begin`/`end`)
+  statement and could otherwise leak the same ambiguity one level down --
+  `for`/`while`/`repeat`/`forever` (`matched_loop_statement`), inline
+  delay/event control (`matched_procedural_timing_control_statement`), and
+  `wait` (`matched_wait_statement`). The old `if_else_if_statement`
+  alternative and its dedicated extraction path
+  (`_extract_if_else_if_statement`/`_extract_if_else_if_pair`/
+  `_extract_if_else_final_else` in `transforms/_statements.py`) were removed
+  entirely -- `_extract_conditional_statement` already builds the identical
+  nested `IfStatement` chain from `conditional_statement`'s own recursion,
+  confirmed by the "else if" chain test still passing unchanged. See the
+  grammar's own "Dangling-else disambiguation" comment block (above
+  `statement_or_null` in `verilog.lark`) for the full design rationale.
+
+  Verified: the reported minimal shape (and the DSL-built-vs-reparsed
+  divergence used to confirm it) now match; a battery of additional shapes
+  (else-if chains, triple-nested ifs, a bare if/else as a `for`-loop body
+  itself nested under an outer bare if, and the same for inline
+  `@(...)`/`wait(...)`-prefixed bodies, plus a `begin`/`end`-closed inner
+  `if` correctly still binding its `else` to the *outer* `if`) all produce
+  correct results, both by re-emission and by simulation
+  (`tests/test_sim/test_dangling_else.py`, new). Full regression: `tests/`
+  8460 passed / 0 failed (up from a pre-fix suite that never exercised this
+  shape at all -- no prior test covered a dangling, `begin`/`end`-less
+  nested `if`/`else`), identical pass count on the non-dangling-else parts
+  of the suite before and after.

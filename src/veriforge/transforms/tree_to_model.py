@@ -195,7 +195,6 @@ from ._statements import (
     _extract_for_loop as _extract_for_loop_from_tree,
     _extract_for_variable_declaration as _extract_for_variable_declaration_from_tree,
     _extract_forever_loop as _extract_forever_loop_from_tree,
-    _extract_if_else_if_statement as _extract_if_else_if_statement_from_tree,
     _extract_initial_construct as _extract_initial_construct_from_tree,
     _extract_loop_statement as _extract_loop_statement_from_tree,
     _extract_nonblocking_assignment as _extract_nonblocking_assignment_from_tree,
@@ -1123,14 +1122,6 @@ def _extract_conditional_statement(tree: Tree, source_file: str | None) -> IfSta
                 [+ Token("else") + Tree("statement_or_null")]
     """
     return _extract_conditional_statement_from_tree(tree, source_file, _statement_callbacks())
-
-
-def _extract_if_else_if_statement(tree: Tree, source_file: str | None) -> IfStatement:
-    """Extract IfStatement from if_else_if_statement (chained if-else-if).
-
-    Builds nested IfStatement chain.
-    """
-    return _extract_if_else_if_statement_from_tree(tree, source_file, _statement_callbacks())
 
 
 def _extract_case_statement(tree: Tree, source_file: str | None) -> CaseStatement:

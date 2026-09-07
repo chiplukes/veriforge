@@ -1937,6 +1937,49 @@ return_statement: KW_RETURN expression? ";"
 statement_or_null: statement
     | attribute_instance* ";"
 
+// --- Dangling-else disambiguation -----------------------------------------
+// `conditional_statement`'s optional trailing `else` is the textbook
+// "dangling else" ambiguity: `if (a) if (b) x; else y;` is grammatically
+// derivable either as `if (a) { if (b) x; else y; }` (else binds to the
+// nearest/inner if -- the correct, IEEE 1800-2017 SS12.4 "always associated
+// with the closest" resolution) or as `if (a) { if (b) x; } else { y; }`
+// (else binds to the outer if) -- both are valid parses of the SAME token
+// stream under a naive grammar. Lark's Earley parser resolves genuine
+// ambiguity via an internal cost heuristic that isn't guaranteed to match
+// this rule; empirically it picked the outer-binding parse, silently
+// flipping the meaning of code shaped exactly like the example above.
+//
+// Fixed with the standard "matched/unmatched statement" CFG split: a
+// `matched_statement` is one that is grammatically guaranteed NOT to end in
+// a still-open (else-less) `if` -- i.e. it's always safe to place
+// immediately before a following `else` token without that token being able
+// to bind to a nested `if` instead of the one it's actually written after.
+// Every statement kind except `if` itself is trivially matched (each is
+// delimited by `;`, `end`, `join`, or `endcase`) -- listed again here
+// (rather than reusing `statement`) only so `conditional_statement`,
+// `loop_statement`, `procedural_timing_control_statement`, and
+// `wait_statement` can each swap in their own "matched" self so the
+// closed-ness propagates through the handful of constructs that themselves
+// recurse through a single bare (non-`begin`/`end`) statement.
+matched_statement_or_null: matched_statement
+    | attribute_instance* ";"
+
+matched_statement: attribute_instance* blocking_assignment ";"
+    | attribute_instance* case_statement
+    | matched_conditional_statement
+    | attribute_instance* disable_statement
+    | attribute_instance* event_trigger
+    | matched_loop_statement
+    | attribute_instance* nonblocking_assignment ";"
+    | attribute_instance* par_block
+    | attribute_instance* procedural_continuous_assignments ";"
+    | matched_procedural_timing_control_statement
+    | attribute_instance* seq_block
+    | attribute_instance* system_task_enable
+    | attribute_instance* task_enable
+    | matched_wait_statement
+    | attribute_instance* return_statement
+
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin add = a + b; end
@@ -2027,6 +2070,9 @@ procedural_timing_control: delay_control
 // EXAMPLE: @(posedge clk) q <= d;
 // SUPPORT: YES
 procedural_timing_control_statement: procedural_timing_control statement_or_null
+// Matched variant (see "Dangling-else disambiguation" above
+// `statement_or_null`) for use as an if-then-branch.
+matched_procedural_timing_control_statement: procedural_timing_control matched_statement_or_null
 // BNF: wait_statement ::=
 //     wait ( expression ) statement_or_null
 // PRIORITY: LOW
@@ -2034,6 +2080,9 @@ procedural_timing_control_statement: procedural_timing_control statement_or_null
 // EXAMPLE: wait (ready) data = bus;
 // SUPPORT: YES
 wait_statement: KW_WAIT "(" expression ")" statement_or_null
+// Matched variant (see "Dangling-else disambiguation" above
+// `statement_or_null`) for use as an if-then-branch.
+matched_wait_statement: KW_WAIT "(" expression ")" matched_statement_or_null
 
 // SECTION: A.6.6 Conditional statements
 // BNF: conditional_statement ::=
@@ -2044,17 +2093,29 @@ wait_statement: KW_WAIT "(" expression ")" statement_or_null
 // SYNTHESIZABLE: YES
 // EXAMPLE: if (sel) y = a; else y = b;
 // SUPPORT: YES
-conditional_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE statement_or_null )?
-    | if_else_if_statement
-// BNF: if_else_if_statement ::=
-//     if ( expression ) statement_or_null
-//     { else if ( expression ) statement_or_null }
-//     [ else statement_or_null ]
-// PRIORITY: HIGH
-// SYNTHESIZABLE: YES
-// EXAMPLE: if (a) x=1; else if (b) x=2; else x=3;
-// SUPPORT: YES
-if_else_if_statement: KW_IF "(" expression ")" statement_or_null ( KW_ELSE KW_IF "(" expression ")" statement_or_null )* ( KW_ELSE statement_or_null )?
+//
+// Split into two alternatives (rather than one rule with an optional
+// trailing `else`) to resolve the dangling-else ambiguity: an `if` with no
+// `else` is always "open" (`statement_or_null`, unrestricted -- nothing
+// follows it here to steal), while an `if` *with* an `else` requires its
+// then-branch to be `matched_statement_or_null` (see the "Dangling-else
+// disambiguation" block above `statement_or_null`) so a nested, else-less
+// `if` inside the then-branch can't be mistaken for this `if`'s own `else`.
+// The else-branch itself stays fully general (`statement_or_null`) since
+// it's the rightmost element -- this is also what naturally lets
+// `else if (...) ...` chains fall out of ordinary recursion (the else
+// branch is itself just another `conditional_statement`), making the old,
+// separately-ambiguous `if_else_if_statement` alternative redundant; it has
+// been removed (see `_extract_conditional_statement` in
+// `transforms/_statements.py`, which already builds the same nested
+// IfStatement chain from this recursion).
+conditional_statement: KW_IF "(" expression ")" statement_or_null
+    | KW_IF "(" expression ")" matched_statement_or_null KW_ELSE statement_or_null
+// Matched variant (see "Dangling-else disambiguation" above
+// `statement_or_null`) for use as an if-then-branch -- an `if` is only
+// matched at all when it *has* an `else`, and then both branches must
+// themselves be matched.
+matched_conditional_statement: KW_IF "(" expression ")" matched_statement_or_null KW_ELSE matched_statement_or_null
 
 // SECTION: A.6.7 Case statements
 // BNF: case_statement ::=
@@ -2103,6 +2164,13 @@ loop_statement: KW_FOREVER statement
     | KW_WHILE "(" expression ")" statement
     | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" statement
     | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" statement
+// Matched variant (see "Dangling-else disambiguation" above
+// `statement_or_null`) for use as an if-then-branch.
+matched_loop_statement: KW_FOREVER matched_statement
+    | KW_REPEAT "(" expression ")" matched_statement
+    | KW_WHILE "(" expression ")" matched_statement
+    | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" matched_statement
+    | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" matched_statement
 // SV: for-loop with inline variable declaration
 // EXAMPLE: int unsigned i = 0
 // SUPPORT: YES

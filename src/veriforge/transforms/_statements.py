@@ -45,7 +45,6 @@ ExtractNetAssignmentFn = Callable[[Tree, str | None], ContinuousAssign | None]
 TokenToExpressionFn = Callable[[Token, str | None], Expression]
 
 _ELSE = "else"
-_IF = "if"
 _CASE_TYPES = frozenset({"case", "casex", "casez"})
 _LOOP_TYPES = frozenset({"for", "while", "forever", "repeat"})
 _POSEDGE = "posedge"
@@ -293,19 +292,28 @@ def _classify_sensitivity(edges: list[SensitivityEdge]) -> SensitivityType:
     return SensitivityType.UNKNOWN
 
 
+_UNWRAPPABLE_STATEMENT_KINDS = ("statement", "statement_or_null", "matched_statement", "matched_statement_or_null")
+
+
 def _unwrap_statement(tree: Tree) -> Tree | None:
-    """Unwrap a statement tree to find the inner semantic node."""
-    if tree.data == "statement":
+    """Unwrap a statement tree to find the inner semantic node.
+
+    ``matched_statement``/``matched_statement_or_null`` are the dangling-else
+    disambiguation's "closed" twins of ``statement``/``statement_or_null``
+    (see the grammar's own comment above ``statement_or_null``) -- they wrap
+    exactly the same way, so they're unwrapped exactly the same way.
+    """
+    if tree.data in ("statement", "matched_statement"):
         for child in tree.children:
             if isinstance(child, Tree) and child.data != "attribute_instance":
                 return child
-    elif tree.data == "statement_or_null":
+    elif tree.data in ("statement_or_null", "matched_statement_or_null"):
         for child in tree.children:
-            if isinstance(child, Tree) and child.data == "statement":
+            if isinstance(child, Tree) and child.data in ("statement", "matched_statement"):
                 return _unwrap_statement(child)
             if isinstance(child, Tree):
                 return child
-    return tree if tree.data not in ("statement", "statement_or_null") else None
+    return tree if tree.data not in _UNWRAPPABLE_STATEMENT_KINDS else None
 
 
 def _extract_statement_from_tree(  # noqa: PLR0911, PLR0912
@@ -314,7 +322,7 @@ def _extract_statement_from_tree(  # noqa: PLR0911, PLR0912
     callbacks: _StatementCallbacks,
 ) -> Statement | None:
     """Extract a Statement from a parse tree node."""
-    if tree.data in ("statement", "statement_or_null"):
+    if tree.data in _UNWRAPPABLE_STATEMENT_KINDS:
         inner = _unwrap_statement(tree)
         if inner is None:
             return None
@@ -328,13 +336,17 @@ def _extract_statement_from_tree(  # noqa: PLR0911, PLR0912
         return _extract_seq_block(tree, source_file, callbacks)
     if tree.data == "par_block":
         return _extract_par_block(tree, source_file, callbacks)
-    if tree.data == "conditional_statement":
+    # `matched_conditional_statement`/`matched_loop_statement`/
+    # `matched_procedural_timing_control_statement`/`matched_wait_statement`
+    # are the dangling-else disambiguation's "closed" twins (see the
+    # grammar's comment above `statement_or_null`) -- same shape, so the
+    # same extractor handles both (its internal child-tree-name checks
+    # accept either name; see e.g. `_extract_conditional_statement` below).
+    if tree.data in ("conditional_statement", "matched_conditional_statement"):
         return _extract_conditional_statement(tree, source_file, callbacks)
-    if tree.data == "if_else_if_statement":
-        return _extract_if_else_if_statement(tree, source_file, callbacks)
     if tree.data == "case_statement":
         return _extract_case_statement(tree, source_file, callbacks)
-    if tree.data == "loop_statement":
+    if tree.data in ("loop_statement", "matched_loop_statement"):
         return _extract_loop_statement(tree, source_file, callbacks)
     if tree.data == "system_task_enable":
         return _extract_system_task_enable(tree, source_file, callbacks)
@@ -344,9 +356,9 @@ def _extract_statement_from_tree(  # noqa: PLR0911, PLR0912
         return _extract_disable_statement(tree, source_file, callbacks)
     if tree.data == "event_trigger":
         return _extract_event_trigger(tree, source_file, callbacks)
-    if tree.data == "wait_statement":
+    if tree.data in ("wait_statement", "matched_wait_statement"):
         return _extract_wait_statement(tree, source_file, callbacks)
-    if tree.data == "procedural_timing_control_statement":
+    if tree.data in ("procedural_timing_control_statement", "matched_procedural_timing_control_statement"):
         return _extract_procedural_timing_control_statement(tree, source_file, callbacks)
     if tree.data == "procedural_continuous_assignments":
         return _extract_procedural_continuous_assignment(tree, source_file, callbacks)
@@ -459,7 +471,13 @@ def _extract_conditional_statement(
     source_file: str | None,
     callbacks: _StatementCallbacks,
 ) -> IfStatement:
-    """Extract IfStatement from conditional_statement tree."""
+    """Extract IfStatement from conditional_statement/matched_conditional_statement tree.
+
+    ``else if (...) ...`` chains fall out of ordinary recursion here (the
+    else-branch's ``statement_or_null``/``matched_statement_or_null`` is
+    itself just another ``conditional_statement``/``matched_conditional_statement``
+    when the source has one), so no separate flattening pass is needed.
+    """
     condition: Expression | None = None
     then_body: Statement | None = None
     else_body: Statement | None = None
@@ -472,7 +490,7 @@ def _extract_conditional_statement(
         elif isinstance(child, Tree):
             if child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data == "statement_or_null":
+            elif child.data in ("statement_or_null", "matched_statement_or_null"):
                 stmt = _extract_statement_from_tree(child, source_file, callbacks)
                 if not seen_else:
                     then_body = stmt
@@ -485,77 +503,6 @@ def _extract_conditional_statement(
         else_body=else_body,
         loc=loc,
     )
-
-
-def _extract_if_else_if_statement(
-    tree: Tree,
-    source_file: str | None,
-    callbacks: _StatementCallbacks,
-) -> IfStatement:
-    """Extract IfStatement from if_else_if_statement."""
-    pairs: list[tuple[Expression, Statement | None]] = []
-    final_else: Statement | None = None
-    loc = _loc_from_tree(tree, source_file)
-
-    i = 0
-    children = tree.children
-    while i < len(children):
-        child = children[i]
-        if isinstance(child, Token) and str(child).lower() == _IF:
-            cond, body, i = _extract_if_else_if_pair(children, i, source_file, callbacks)
-            if cond:
-                pairs.append((cond, body))
-        elif isinstance(child, Token) and str(child).lower() == _ELSE:
-            final_else, i = _extract_if_else_final_else(children, i, source_file, callbacks)
-        i += 1
-
-    if not pairs:
-        return IfStatement(condition=Identifier("?"), then_body=None, loc=loc)
-
-    result_else = final_else
-    for cond, body in reversed(pairs[1:]):
-        result_else = IfStatement(condition=cond, then_body=body, else_body=result_else, loc=loc)
-
-    return IfStatement(
-        condition=pairs[0][0],
-        then_body=pairs[0][1],
-        else_body=result_else,
-        loc=loc,
-    )
-
-
-def _extract_if_else_if_pair(
-    children,
-    index: int,
-    source_file: str | None,
-    callbacks: _StatementCallbacks,
-) -> tuple[Expression | None, Statement | None, int]:
-    cond = None
-    body = None
-    if index + 1 < len(children) and isinstance(children[index + 1], Tree):
-        cond = callbacks.build_expression(children[index + 1], source_file)
-        index += 1
-    if index + 1 < len(children) and isinstance(children[index + 1], Tree):
-        body = _extract_statement_from_tree(children[index + 1], source_file, callbacks)
-        index += 1
-    return cond, body, index
-
-
-def _extract_if_else_final_else(
-    children,
-    index: int,
-    source_file: str | None,
-    callbacks: _StatementCallbacks,
-) -> tuple[Statement | None, int]:
-    if index + 1 >= len(children):
-        return None, index
-
-    next_child = children[index + 1]
-    if isinstance(next_child, Token) and str(next_child).lower() == _IF:
-        return None, index
-    if isinstance(next_child, Tree):
-        return _extract_statement_from_tree(next_child, source_file, callbacks), index + 1
-    return None, index
 
 
 def _extract_case_statement(
@@ -678,7 +625,7 @@ def _extract_for_loop(
                 var_assignments.extend(_extract_for_step_assignments(child, source_file, callbacks))
             elif child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data == "statement":
+            elif child.data in ("statement", "matched_statement"):
                 body = _extract_statement_from_tree(child, source_file, callbacks)
 
     init = var_assignments[0] if var_assignments else BlockingAssign(Identifier("?"), Identifier("?"))
@@ -818,7 +765,7 @@ def _extract_while_loop(
         if isinstance(child, Tree):
             if child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data == "statement":
+            elif child.data in ("statement", "matched_statement"):
                 body = _extract_statement_from_tree(child, source_file, callbacks)
 
     return WhileLoop(condition=condition or Identifier("?"), body=body, loc=loc)
@@ -834,7 +781,7 @@ def _extract_forever_loop(
     body: Statement | None = None
 
     for child in tree.children:
-        if isinstance(child, Tree) and child.data == "statement":
+        if isinstance(child, Tree) and child.data in ("statement", "matched_statement"):
             body = _extract_statement_from_tree(child, source_file, callbacks)
 
     return ForeverLoop(body=body, loc=loc)
@@ -854,7 +801,7 @@ def _extract_repeat_loop(
         if isinstance(child, Tree):
             if child.data == "expression" and count is None:
                 count = callbacks.build_expression(child, source_file)
-            elif child.data == "statement":
+            elif child.data in ("statement", "matched_statement"):
                 body = _extract_statement_from_tree(child, source_file, callbacks)
 
     return RepeatLoop(count=count or Identifier("?"), body=body, loc=loc)
@@ -956,7 +903,7 @@ def _extract_wait_statement(
         if isinstance(child, Tree):
             if child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data == "statement_or_null":
+            elif child.data in ("statement_or_null", "matched_statement_or_null"):
                 body = _extract_statement_from_tree(child, source_file, callbacks)
 
     return WaitStatement(condition=condition or Identifier("?"), body=body, loc=loc)
@@ -972,7 +919,7 @@ def _extract_procedural_timing_control_statement(
     body: Statement | None = None
 
     for child in tree.children:
-        if isinstance(child, Tree) and child.data == "statement_or_null":
+        if isinstance(child, Tree) and child.data in ("statement_or_null", "matched_statement_or_null"):
             body = _extract_statement_from_tree(child, source_file, callbacks)
 
     for child in tree.children:
