@@ -1209,3 +1209,33 @@ coverage frontier.
   shape at all -- no prior test covered a dangling, `begin`/`end`-less
   nested `if`/`else`), identical pass count on the non-dangling-else parts
   of the suite before and after.
+
+  **Follow-up: the same defect also silently misbinds a `begin`/`end`-guarded
+  inner `if`'s `else`, not just the bare no-`begin`/`end` case.** A second
+  report from the same external project initially suspected an unrelated
+  "simulator evaluation" bug: a register write nested inside `if (accept) if
+  (~last) begin if (cnt_r == 0) buf_r0 <= data; cnt_r <= cnt_r + 1; end else
+  cnt_r <= 0;` got silently dropped on the cycle immediately after a
+  zero-gap transition through the outer `else` -- and the emitted text
+  looked completely unambiguous to a human reader (`begin`/`end` clearly
+  scopes `if (~last)`'s then-branch, so the trailing `else` obviously
+  belongs to `if (~last)`, not the bare outer `if (accept)`). Root-caused
+  (via `git worktree` bisection of the reporter's own minimal repro against
+  the actual commit history, then confirmed with a further-reduced 3-level
+  shape) to the exact same `if_else_if_statement`-redundancy defect above,
+  already fixed by this same commit: pre-fix, the raw parse tree itself (not
+  just the extracted model) showed the OUTER `if (accept)`'s
+  `conditional_statement` node with 5 children including a spurious
+  `KW_ELSE`, while the INNER `if (~last)`'s node had only 3 (its own `else`
+  gone) -- i.e. the ambiguity the old, redundant grammar alternative
+  introduced could still occasionally misfire even for a construct with no
+  textual ambiguity at all, not only the classic bare-if dangling-else
+  shape. No further code change was needed; this confirms the existing fix
+  (above) already covers this shape too. Added
+  `test_begin_end_guarded_inner_if_still_misbound_pre_fix` (a structural,
+  engine-independent check) and
+  `test_begin_end_guarded_inner_if_simulates_correctly` (the reporter's
+  actual back-to-back-burst FSM shape, all engines) to
+  `tests/test_sim/test_dangling_else.py` to guard against regressing this
+  specific "begin/end doesn't always save you under the old grammar" case
+  going forward.

@@ -40,12 +40,31 @@ statement and could otherwise leak the same ambiguity one level down
 grammar's own "Dangling-else disambiguation" comment block (above
 `statement_or_null` in `verilog.lark`) for the full design rationale, and
 `transforms/_statements.py` for the corresponding extraction-side changes.
+
+A follow-up report from the same external project initially suspected a
+SEPARATE bug (a "simulator evaluation" bug, not a parser one) for a shape
+that looked textually unambiguous: `if (a) if (b) begin s1; s2; end else
+s3;` -- a real `begin`/`end` wraps `if (b)`'s own then-branch, so a human
+reader has no trouble seeing `else` belongs to `if (b)`, not the outer,
+bare `if (a)`. It turned out to be the exact same grammar defect: the OLD,
+redundant `if_else_if_statement` alternative made EVERY `if`/`else`
+construct in the grammar (ambiguous-looking or not) have more than one
+valid parse derivation, and Lark's Earley parser occasionally still picked
+the wrong one even here -- confirmed directly by diffing the raw parse
+tree's `conditional_statement` node shapes before/after the fix: pre-fix,
+the OUTER (`if (a)`)'s node had 5 children including a `KW_ELSE` (i.e. it
+had gained an else it should never have), while the INNER (`if (b)`)'s own
+node had only 3 (no else) -- a real, extraction-independent, tree-level
+misparse despite the `begin`/`end` being right there in the source text and
+the token stream containing no genuine textual ambiguity for a human
+reader. See `test_begin_end_guarded_inner_if_still_misbound_pre_fix` below.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from veriforge.model.statements import IfStatement
 from veriforge.project import parse_file
 from veriforge.sim.testbench import Simulator
 from veriforge.sim.value import Value
@@ -225,8 +244,6 @@ class TestDanglingElseBindsToNearestIf:
         (see `transforms/_statements.py`), so a structural check here is
         equally conclusive for the parser/model side of the fix.
         """
-        from veriforge.model.statements import IfStatement
-
         design = _parse(
             """
             module top (input clk, input a, input b, output reg x, output reg y);
@@ -248,3 +265,106 @@ class TestDanglingElseBindsToNearestIf:
         inner_if = timing_ctrl.body if hasattr(timing_ctrl, "body") else timing_ctrl
         assert isinstance(inner_if, IfStatement)
         assert inner_if.else_body is not None, "inner if(b)'s else must bind to if(b), not if(a)"
+
+    def test_begin_end_guarded_inner_if_still_misbound_pre_fix(self, tmp_path):
+        """`if (a) if (b) begin s1; s2; end else s3;` -- a bare, `else`-less
+        OUTER `if (a)` directly nesting an INNER `if (b)` whose own
+        then-branch (only) is wrapped in `begin`/`end`, with `if (b)`'s own
+        `else` following the closing `end`.
+
+        Textually this is completely unambiguous to a human reader -- the
+        `begin`/`end` around `if (b)`'s then-branch makes it obvious the
+        trailing `else` belongs to `if (b)`, not the outer, bare `if (a)`.
+        It nonetheless reproduced the exact same misparse pre-fix (see the
+        module docstring): confirmed by an external project's real-world
+        "silently dropped register write" bug report, reduced here to a
+        minimal 3-level shape, and confirmed via `git worktree` bisection
+        against the actual pre-fix commit that this reduction reproduces
+        identically (outer `if (a)` spuriously gained the else, inner
+        `if (b)` spuriously lost it) -- not just a shape that happens to
+        look similar.
+        """
+        design = _parse(
+            """
+            module top (input a, input b, output reg x, output reg y, output reg z);
+                always @(*) begin
+                    x = 0; y = 0; z = 0;
+                    if (a)
+                        if (b)
+                        begin
+                            x = 1;
+                            y = 1;
+                        end
+                        else
+                            z = 1;
+                end
+            endmodule
+            """,
+            tmp_path,
+        )
+        outer_if = design.modules[0].always_blocks[0].body.statements[-1]
+        assert isinstance(outer_if, IfStatement)
+        assert outer_if.else_body is None, "outer if(a) must NOT have gained an else"
+        inner_if = outer_if.then_body
+        assert isinstance(inner_if, IfStatement)
+        assert inner_if.else_body is not None, "inner if(b)'s else must bind to if(b), not if(a)"
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_begin_end_guarded_inner_if_simulates_correctly(self, engine, tmp_path):
+        """Simulation-level counterpart of the structural check above,
+        against the reported real-world shape: a 2-beat "latch beat 0 of a
+        burst, reset on the last beat" FSM, driven with a back-to-back
+        (zero-gap) two-burst sequence -- reported as silently dropping the
+        second burst's own beat-0 write."""
+        design = _parse(
+            """
+            module top (
+                input clk, input rst, input accept, input last, input [15:0] data,
+                output reg cnt_r, output reg [15:0] buf_r0
+            );
+                always @(posedge clk)
+                    if (rst)
+                    begin
+                        cnt_r <= 0;
+                        buf_r0 <= 0;
+                    end
+                    else if (accept)
+                        if (~last)
+                        begin
+                            if (cnt_r == 0)
+                                buf_r0 <= data;
+                            cnt_r <= cnt_r + 1;
+                        end
+                        else
+                            cnt_r <= 0;
+            endmodule
+            """,
+            tmp_path,
+        )
+        sim = Simulator(design.modules[0], engine=engine)
+        sim.drive("rst", Value(1, width=1))
+        sim.drive("accept", Value(0, width=1))
+        sim.drive("last", Value(0, width=1))
+        sim.drive("data", Value(0, width=16))
+        sim.drive("clk", Value(0, width=1))
+        sim.settle()
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+
+        def step(accept, last, data):
+            sim.drive("rst", Value(0, width=1))
+            sim.drive("accept", Value(accept, width=1))
+            sim.drive("last", Value(last, width=1))
+            sim.drive("data", Value(data, width=16))
+            sim.drive("clk", Value(0, width=1))
+            sim.settle()
+            sim.drive("clk", Value(1, width=1))
+            sim.settle()
+            return int(sim.read("cnt_r")), int(sim.read("buf_r0"))
+
+        # burst A: beat0=0x1111, beat1(last)=0x9999 -- then IMMEDIATELY
+        # (zero gap) burst B: beat0=0x2222, beat1(last)=0x8888.
+        assert step(1, 0, 0x1111) == (1, 0x1111)
+        assert step(1, 1, 0x9999) == (0, 0x1111)
+        assert step(1, 0, 0x2222) == (1, 0x2222), "burst B's own beat0 write must not be dropped"
+        assert step(1, 1, 0x8888) == (0, 0x2222)
