@@ -1803,6 +1803,35 @@ class _StmtEmittersMixin:
                 return self._emit_wide_mem_zero_lines(
                     mid, idx, marker_sid=marker_sid, indent=indent, is_nba=is_nba, track_change=False
                 )
+        if elem_w > _WORD_BITS:
+            # None of the shape-specific fast paths above matched (RHS is
+            # some arbitrary computed expression, not a bare memory copy,
+            # signal-slice, concat, or literal zero) -- e.g. `mem[i] = (a
+            # << b) ^ c;`. This needs genuine multi-word arithmetic
+            # (shifts/XOR/add propagating correctly across word
+            # boundaries), which the narrow scalar emitter (`_emit_expr`/
+            # `_emit_mask_expr`, used by `_emit_scalar_mem_write_lines`)
+            # cannot do at all above 64 bits -- confirmed directly, it
+            # silently discards everything from bit 64 up
+            # (`narrow_accessors.pxi`'s `wmask()` caps at -1 for any width
+            # >= 64), and even just reaching that narrow path here produced
+            # a hard Cython compile error ("Cannot convert 'SimCtx *' to
+            # Python object") for a 65-bit memory, since `c.mem_{mid}_val`
+            # is a plain scalar `long long[]` that can't hold the element
+            # at all. Route through the same recursive scratch-space
+            # emitter a wide plain-signal assignment already uses
+            # (`_emit_wide_mem_whole_write_lines`), which correctly
+            # computes multi-word results.
+            wide_lines = self._emit_wide_mem_whole_write_lines(
+                mid, idx, rhs, elem_w, marker_sid=marker_sid, indent=indent, is_nba=is_nba
+            )
+            if wide_lines is not None:
+                return wide_lines
+            raise NotImplementedError(
+                f"Compiled engine cannot yet compute this RHS expression shape as a >64-bit "
+                f"whole-memory-element write (memory element width {elem_w}). Use engine='vm' "
+                f"for this construct."
+            )
         rhs_val = self._emit_expr(rhs, elem_w)
         rhs_mask = self._emit_mask_expr(rhs, elem_w)
         return self._emit_scalar_mem_write_lines(

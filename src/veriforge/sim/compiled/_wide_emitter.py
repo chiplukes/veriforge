@@ -490,6 +490,110 @@ class _WideEmitterMixin:
         )
         return lines
 
+    def _emit_wide_mem_whole_write_lines(
+        self,
+        mid: int,
+        idx_expr: str,
+        rhs: Expression,
+        elem_w: int,
+        *,
+        marker_sid: int,
+        indent: int,
+        is_nba: bool,
+    ) -> list[str] | None:
+        """Emit a whole-element write of an arbitrary RHS expression into a
+        >64-bit memory element at a dynamic index, via the same recursive
+        scratch-space emitter a wide PLAIN SIGNAL assignment already uses
+        (`_emit_wide_expr_to_scratch`/`_emit_wide_lhs_write_new`).
+
+        `_emit_mem_write`'s own shape-specific fast paths (bare memory-to-
+        memory copy, signal-slice source, flat identifier concat, literal
+        zero) already cover every RHS shape that's safely representable
+        without genuine wide ARITHMETIC. Anything else -- e.g. `mem[i] =
+        (a << b) ^ c;` -- needs real multi-word computation (shifts/XOR/
+        add propagating correctly across word boundaries), which the
+        narrow scalar emitter (`_emit_expr`/`_emit_mask_expr`) cannot do at
+        all above 64 bits: confirmed directly, it silently discards
+        everything from bit 64 up (`narrow_accessors.pxi`'s `wmask()` caps
+        at -1 for any width >= 64), so the memory's own top word was always
+        computed as zero regardless of the RHS's true value there.
+
+        Returns None if `rhs`'s expression shape isn't yet supported by
+        `_emit_wide_expr_to_scratch` either -- the caller must raise in
+        that case rather than fall back to the narrow emitter, which is
+        confirmed wrong here, not just unimplemented.
+        """
+        words = self._mem_words(mid)
+        expr_words = (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS
+        n_words = max(words, expr_words, self._module_max_wide_words())
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+
+        # See `_emit_wide_lhs_write_new`'s identical save/restore -- the
+        # recursive scratch emitter can itself recurse into the NARROW
+        # emitter (e.g. a FunctionCall argument), which needs its own
+        # fresh `_et_pending` scope.
+        old_et_pending = self._et_pending
+        old_et_count = self._et_count
+        old_et_node_vals = self._et_node_vals
+        old_et_node_masks = self._et_node_masks
+        self._et_pending = []
+        self._et_count = 0
+        self._et_node_vals = {}
+        self._et_node_masks = {}
+        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, elem_w, indent)
+        et_pending = self._et_pending
+        self._et_pending = old_et_pending
+        self._et_count = old_et_count
+        self._et_node_vals = old_et_node_vals
+        self._et_node_masks = old_et_node_masks
+        if scratch_lines is None:
+            self._reset_scratch()
+            return None
+
+        self._needs_wide_helpers = True
+        pad = "    " * indent
+        lines = [f"{pad}{t}" for t in et_pending] + scratch_lines
+        lines.append(f"{pad}_mwi = ({idx_expr}) * {words}")
+        if is_nba:
+            for i in range(words):
+                tail = min(_WORD_BITS, elem_w - i * _WORD_BITS)
+                lines.extend(
+                    [
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = _mwi + {i}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = {tail - 1}",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>(_sc{slot}_v[{i}] & _word_mask64({tail}))",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>(_sc{slot}_m[{i}] & _word_mask64({tail}))",
+                        f"{pad}c.nba_mem_range_count += 1",
+                    ]
+                )
+            lines.append(f"{pad}c.nba_pending = 1")
+        else:
+            lines.append(f"{pad}_mchg = 0")
+            for i in range(words):
+                tail = min(_WORD_BITS, elem_w - i * _WORD_BITS)
+                lines.extend(
+                    [
+                        f"{pad}_mwvu = _sc{slot}_v[{i}] & _word_mask64({tail})",
+                        f"{pad}_mwmu = _sc{slot}_m[{i}] & _word_mask64({tail})",
+                        f"{pad}if c.wide_mem_{mid}_val[_mwi + {i}] != _mwvu or c.wide_mem_{mid}_mask[_mwi + {i}] != _mwmu:",
+                        f"{pad}    c.wide_mem_{mid}_val[_mwi + {i}] = _mwvu",
+                        f"{pad}    c.wide_mem_{mid}_mask[_mwi + {i}] = _mwmu",
+                        f"{pad}    _mchg = 1",
+                    ]
+                )
+            lines.extend(
+                [
+                    f"{pad}if _mchg:",
+                    f"{pad}    c.val[{marker_sid}] ^= 1",
+                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                ]
+            )
+        self._reset_scratch()
+        return lines
+
     def _emit_wide_mem_insert_mem_slice_lines(  # noqa: PLR0913
         self,
         mid: int,

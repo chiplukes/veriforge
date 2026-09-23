@@ -1616,23 +1616,64 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("        # Initial block values")
             # Use a pointer alias so _emit_stmt's c.val[...] syntax works
             lines.append("        cdef SimCtx *c = &self.ctx")
-            if any("_clhs" in ln for ln in self._initial_lines):
+            # `_hoist_inline_cdefs` (see its own docstring) hoists any
+            # `cdef ... = expr` an emitter placed inside a conditional/loop
+            # block up to this function's top -- Cython forbids `cdef`
+            # there. This used to be a hand-maintained whitelist of known
+            # scratch-var markers (`_mwi`/`_mwv`/...), which missed any
+            # NEW inline-`cdef`-using helper added later (confirmed: a
+            # wide, dynamically-indexed whole-memory-element write inside
+            # an `initial`-block `for` loop uses `_emit_wide_mem_dynamic_
+            # range_lines`'s own locals -- `idx`, `range_msb`, ... -- none
+            # of which were on the whitelist, so they survived, nested
+            # inside the loop, straight into the .pyx and failed to
+            # compile: "cdef statement not allowed here"). Reusing the
+            # same general hoisting pass the other process-function
+            # generators already use (`_gen_sections.py`'s other two
+            # `_hoist_inline_cdefs` call sites) fixes this whole class of
+            # bug at once instead of whitelisting one more name. Its own
+            # hoisted lines are always 4-space-indented (matching a
+            # standalone `cdef ...:` function's body); this call site is
+            # nested one level deeper (inside `__init__`), hence the extra
+            # 4-space prefix below.
+            hoisted_cdefs, initial_lines = _hoist_inline_cdefs(self._initial_lines)
+            lines.extend(f"    {ln}" for ln in hoisted_cdefs)
+            if any("_clhs" in ln for ln in initial_lines):
                 lines.append("        cdef long long _clhs")
-            if any("_cdv" in ln for ln in self._initial_lines):
+            if any("_cdv" in ln for ln in initial_lines):
                 lines.append("        cdef long long _cdv")
-            if any("_cdm" in ln for ln in self._initial_lines):
+            if any("_cdm" in ln for ln in initial_lines):
                 lines.append("        cdef long long _cdm")
-            if any("_sfv" in ln for ln in self._initial_lines):
+            if any("_sfv" in ln for ln in initial_lines):
                 lines.append("        cdef long long _sfv")
-            if any("_mchg" in ln for ln in self._initial_lines):
+            if any("_mchg" in ln for ln in initial_lines):
                 lines.append("        cdef int _mchg")
-            if any("_mwi" in ln for ln in self._initial_lines):
+            if any("_mwi" in ln for ln in initial_lines):
                 lines.append("        cdef long long _mwi")
-            if any("_mwv" in ln for ln in self._initial_lines):
+            if any("_mwv" in ln for ln in initial_lines):
                 lines.append("        cdef long long _mwv, _mwm")
-            if any("_mwvu" in ln for ln in self._initial_lines):
+            if any("_mwvu" in ln for ln in initial_lines):
                 lines.append("        cdef unsigned long long _mwvu, _mwmu")
-            lines.extend(self._initial_lines)
+            initial_joined = "\n".join(initial_lines)
+            if "_rmw_msb" in initial_joined:
+                lines.append("        cdef int _rmw_msb, _rmw_lsb")
+                lines.append("        cdef long long _rmw_mask")
+            if "_ps_lsb" in initial_joined:
+                lines.append("        cdef int _ps_lsb")
+                lines.append("        cdef long long _ps_mask")
+            for m in sorted(set(re.findall(r"\b(_lv_\w+)\b", initial_joined))):
+                lines.append(f"        cdef long long {m}")
+            # Scratch arrays (`_emit_wide_expr_to_scratch`'s own recursive
+            # temporaries) -- same reasoning as `_gen_process_functions`'s
+            # identical scan: these are fixed-size C arrays, not simple
+            # scalars, so `_hoist_inline_cdefs` above doesn't cover them.
+            sc_indices = sorted({int(s) for s in re.findall(r"_sc(\d+)_[vm]", initial_joined)})
+            if sc_indices:
+                max_words = self._module_max_wide_words()
+                for sc_i in range(sc_indices[-1] + 1):
+                    lines.append(f"        cdef unsigned long long _sc{sc_i}_v[{max_words}]")
+                    lines.append(f"        cdef unsigned long long _sc{sc_i}_m[{max_words}]")
+            lines.extend(initial_lines)
             lines.append("        self._raise_runtime_error()")
 
         # NOTE: a "bootstrap combinational always blocks once at

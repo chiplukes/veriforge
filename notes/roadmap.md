@@ -1030,6 +1030,61 @@ edits. Remaining fallback cases still re-emit the full module:
     unambiguous, explicit 0→1 transition — matching the sibling clock
     tests already in `test_scheduling.py` and still exercising the exact
     same signed-NBA-widening logic the tests are actually about.
+- **Compiled engine: dynamically-indexed, >64-bit-wide memory whole-element
+  write crashed at Cython-compile time (and would have silently produced
+  wrong data for words beyond the first, had it compiled) — Fixed.** Found
+  while investigating an external report of "dynamically-indexed memory
+  array wider than 32 bits returns corrupted data" against `reference`/`vm`
+  -- extensive reproduction attempts against those two engines (combinational
+  and clocked/NBA reads, `$readmemh`-loaded ROMs, continuous-assign reads,
+  deliberately-top-bit-set patterns, element widths 16 through 128) all
+  matched `iverilog` exactly; that specific report never reproduced (see
+  the "still open" note below). Building the SAME kind of design on
+  `engine="compiled"` specifically, though, surfaced two real, distinct
+  bugs of its own:
+  1. `_emit_mem_write`'s whole-element write dispatch
+     (`compiled/_stmt_emitters.py`) fell through to
+     `_emit_scalar_mem_write_lines` for any RHS shape not specifically
+     recognized (bare memory-to-memory copy, signal-slice source, flat
+     identifier concat, literal zero) regardless of the memory's own
+     element width. That scalar emitter stores into `c.mem_{mid}_val[idx]`,
+     a plain scalar `long long[]` that cannot hold an element wider than 64
+     bits at all, and its own `wmask(elem_w)` call is *also* only valid up
+     to 64 bits (`narrow_accessors.pxi`'s `wmask()` caps at returning -1 for
+     any width >= 64) — confirmed to produce a hard Cython compile error
+     ("Cannot convert 'SimCtx \*' to Python object") for a 65-bit memory,
+     since the generated masking expression's width no longer fit any
+     fixed-size C integer type at all. Fixed by routing this case through
+     a new `_emit_wide_mem_whole_write_lines` (`_wide_emitter.py`), which
+     reuses the SAME recursive scratch-space expression emitter
+     (`_emit_wide_expr_to_scratch`) a wide PLAIN SIGNAL assignment already
+     uses — confirmed correct up through 128-bit elements, both a
+     combinational and a clocked whole-element write, with a genuinely
+     non-trivial (shift/xor/add) initializer expression (not just a
+     copy/slice/concat, which were already correct before this fix).
+  2. Fixing (1) exposed a SECOND, pre-existing gap: the "Initial block
+     values" section of `_gen_sections.py` declared its temporaries via a
+     hand-maintained whitelist of known scratch-var markers, rather than
+     the general `_hoist_inline_cdefs` pass the other two process-function
+     generators in the same file already use. Any emitter using inline
+     `cdef`s or fixed-size scratch arrays (`_sc{n}_v`/`_sc{n}_m`) not on
+     that whitelist — exactly `_emit_wide_expr_to_scratch`'s own locals,
+     reached from inside an `initial`-block `for` loop — produced "cdef
+     statement not allowed here" / "Cannot convert Python object to
+     'unsigned long long \*'" compile errors. Fixed by applying the same
+     general hoisting pass used elsewhere, plus the matching `_sc{n}`
+     scratch-array declaration scan.
+
+  Both fixed together; new regression test:
+  `tests/test_sim/test_wide_mem_dynamic_write.py`. Full `tests/test_sim/
+  compiled/` + `test_memory.py` + related wide/whole-array test files:
+  989 passed / 0 failed.
+
+  **Still open**: the ORIGINAL report (`reference`/`vm`, not `compiled`)
+  never reproduced despite the above effort. If it recurs, get the
+  reporter's own minimal repro directly rather than reconstructing one
+  blind — per [[feedback_parser_dangling_else_bug]]'s own lesson, bisecting
+  or running an exact repro beats guessing at plausible shapes.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native
