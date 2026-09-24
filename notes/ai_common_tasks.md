@@ -19,7 +19,7 @@ work/                       # your project root (outside the veriforge repo)
 ├── pysim/                  # uv project: testbench files, pytest, stimulus
 │   ├── pyproject.toml
 │   └── test_*.py
-└── rtl/                    # (sibling) Verilog/SV source under test
+└── src/                    # (sibling) Verilog/SV source under test
     └── my_dut.v
 ```
 

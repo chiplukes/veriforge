@@ -49,12 +49,12 @@ uv run python -m veriforge --version
 
 At a high level, `veriforge` has these layers:
 
+- **Simulation layer**: execute module behavior, optionally with VM/Cython acceleration
+- **DSL layer**: build RTL directly in Python
+- **Codegen layer**: model back to Verilog text
 - **Parser layer**: grammar + parse tree construction
 - **Model layer**: semantic Python objects (`Design`, `Module`, expressions, statements, etc.)
 - **Analysis layer**: linking and checks (width, constants, lint, clocks/resets)
-- **Codegen layer**: model back to Verilog text
-- **DSL layer**: build RTL directly in Python
-- **Simulation layer**: execute module behavior, optionally with VM/Cython acceleration
 
 The complete code map is documented in [python_overview.md](python_overview.md).
 

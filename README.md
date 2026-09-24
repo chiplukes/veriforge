@@ -7,20 +7,20 @@ A Python library for parsing, analyzing, generating, and simulating Verilog/Syst
 
 ## Features
 
+- **Simulate** — event-driven 4-state simulator (x and z share one representation — see [known issues](notes/known_issues.md)) with three engines (reference, bytecode VM, compiled Cython)
+- **Python DSL** — build hardware with operator-overloaded Python, emit to Verilog or simulate directly
+- **Language Server** — `veriforge-lsp` provides editor diagnostics, symbols, navigation, hover, and custom hierarchy/trace commands (install [Verible](https://github.com/chipsalliance/verible) for fast between-save diagnostics; the server falls back to the built-in Lark parser when Verible is absent)
 - **Parse** Verilog 2005 (with SystemVerilog extensions) into a semantic model
 - **Preprocess** source files (`` `define ``, `` `ifdef ``, `` `include ``, `` `timescale ``, etc.)
 - **Multi-file project** support — parse directories, link cross-module instances
 - **Analyze** designs — width inference, constant folding, clock/reset extraction, lint checks
 - **Emit** formatted Verilog from the model (round-trip, configurable style)
-- **Python DSL** — build hardware with operator-overloaded Python, emit to Verilog or simulate directly
 - **Component library** — FIFO, CDC, codec, AXI-Stream, AXI4-Lite, DSP, RAM, Xilinx inference
 - **Auto-generate testbenches** from any module
 - **Convert** parsed Verilog to DSL code (Verilog → Python translation)
-- **Simulate** — event-driven 4-state simulator (x and z share one representation — see [known issues](notes/known_issues.md)) with three engines (reference, bytecode VM, compiled Cython)
 - **Fuzz** — grammar-driven cross-engine + Icarus differential fuzzing tool ([docs](notes/fuzzer.md))
 - **VCD output** — IEEE 1364-2001 waveform dumps, cross-simulator validation
 - **Inspect** semantic models through lookup helpers and JSON serialization
-- **Language Server** — `veriforge-lsp` provides editor diagnostics, symbols, navigation, hover, and custom hierarchy/trace commands (install [Verible](https://github.com/chipsalliance/verible) for fast between-save diagnostics; the server falls back to the built-in Lark parser when Verible is absent)
 
 ## Documentation
 
