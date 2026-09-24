@@ -1277,8 +1277,26 @@ class Scheduler:  # cm:9a7f2c
         return self.ctx.read_signal(name)
 
     def signal_names(self) -> set[str]:
-        """Return the set of all signal names in the simulation."""
-        return set(self.ctx._signals.keys())
+        """Return the set of all signal names in the simulation.
+
+        Any dimensioned net/var/port (`reg [7:0] mem [3:0];`, or a purely
+        packed multi-dim signal like `logic [3:0][7:0] name;` -- both
+        register into `ctx._memories`, never `ctx._signals`, see
+        `_memory_shape`'s own docstring for why the two can't be told
+        apart downstream) was entirely MISSING here -- confirmed via a
+        real report: a packed-multi-dim port never showed up in a VCD
+        dump at all, since VCD tracing (`trace.py::VcdTraceSession`)
+        enumerates exactly this method's return value. Included now as
+        per-element `name[i]` entries, matching the naming convention
+        `vm`/`vm-fast`/`compiled`'s own `signal_names()` already use for
+        the exact same `_memories` collection -- picking a NEW convention
+        here instead would make the four engines disagree on what a
+        traced design's signal list even looks like.
+        """
+        names = set(self.ctx._signals.keys())
+        for mem_name, (mem_data, _elem_width) in self.ctx._memories.items():
+            names.update(f"{mem_name}[{idx}]" for idx in range(len(mem_data)))
+        return names
 
     def schedule_at(self, time: int, proc: Process) -> None:
         """Schedule a process to run at a specific time."""

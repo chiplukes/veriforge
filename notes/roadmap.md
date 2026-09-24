@@ -1183,6 +1183,43 @@ edits. Remaining fallback cases still re-emit the full module:
   which they hadn't originally tested) now passes on all 4 engines;
   `tests/test_sim/test_wide_rom_unsized_decimal_literal.py` updated to
   cover `vm-fast` too (27/27 passing) rather than excluding it.
+- **A packed multi-dimensional signal (`logic [N-1:0][7:0] name;` -- two
+  packed dims, no trailing unpacked dim) never showed up in a VCD trace at
+  all, on every engine — Fixed.** Reported directly: "don't show up in vcd
+  dumps (it would be nice if they are named nicely for vcd files)".
+  Root cause: any dimensioned net/var/port registers into
+  `EvalContext._memories`, never `ctx._signals` -- `_declarations.py`
+  deliberately treats a pure packed multi-dim declaration's OUTERMOST
+  packed range as an addressable "memory" dimension too, so `name[i]`
+  keeps working as an element-select (see `_memory_shape`'s and
+  `_extract_net_declaration`'s own "borrow-one-dim-for-addressing"
+  docstrings — this classification itself is deliberate, pre-existing,
+  correct behavior, not the bug). `vm`/`vm-fast`/`compiled`'s own
+  `signal_names()` already accounted for this, emitting per-element
+  `name[i]` entries for anything in their memory maps — but `reference`'s
+  `Scheduler.signal_names()` simply returned `set(self.ctx._signals.
+  keys())`, omitting anything memory-registered entirely. Since VCD
+  tracing (`trace.py::VcdTraceSession`) enumerates every design signal via
+  exactly this method, the array never appeared in a VCD dump on
+  `reference` at all — and even on the three engines that already knew
+  about it, their internal `__mem_{mid}_wr` dirty-marker helper signal
+  leaked into the same VCD output right alongside the design's own
+  signals (not what "named nicely" was asking for either).
+
+  Fixed in two places: `Scheduler.signal_names()` (`sim/scheduler.py`) now
+  also emits `name[i]` for every memory-registered signal, matching
+  `vm`/`compiled`'s existing convention exactly rather than inventing a
+  new one (all four engines now agree on what a traced design's signal
+  list looks like); `elaborate.py::is_synthesized_local_name` (already the
+  established filter `VcdTraceSession` uses to exclude synthesized
+  process-local variables) now also recognizes the `__mem_` marker prefix.
+
+  Verified: all four engines now show `inreg_gain_tdata[0..3]` (the
+  reported shape, reduced to a 4-element packed array) in a real VCD
+  trace, with real value changes over time and no `__mem_` leakage. New
+  regression test: `tests/test_sim/test_vcd_packed_multidim_array.py`
+  (8/8 passing). Targeted suite (`test_vcd.py`, `test_memory.py`, and the
+  existing 2-D/packed-array test files): 238 passed / 0 failed.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

@@ -54,6 +54,16 @@ from ..model.variables import Variable, VariableKind
 
 SYNTH_LOCAL_LOOP_PREFIX = "__vt_local_for_"
 SYNTH_LOCAL_BLOCK_PREFIX = "__vt_local_blk_"
+# `vm`/`vm-fast`/`compiler.py`'s and `compiled`/`codegen.py`'s own
+# per-memory dirty-tracking helper signal (`f"__mem_{mid}_wr"`) -- an
+# internal implementation detail, never something a real design declared,
+# but registered as an ordinary signal so it participates in the same
+# sensitivity/dirty machinery as everything else. Excluded here for the
+# same reason as the two prefixes above: VCD tracing
+# (`trace.py::VcdTraceSession`) calls `is_synthesized_local_name` on every
+# name `signal_names()` returns, and this one leaking through named a
+# meaningless internal signal right alongside the design's own.
+SYNTH_MEM_MARKER_PREFIX = "__mem_"
 
 
 def check_signed_declarations(module: Module) -> None:
@@ -121,8 +131,10 @@ def check_input_port_init(module: Module, design: Design | None = None) -> None:
 
 
 def is_synthesized_local_name(name: str) -> bool:
-    """Return True for synthesized process-local loop or block variables."""
-    return name.startswith((SYNTH_LOCAL_LOOP_PREFIX, SYNTH_LOCAL_BLOCK_PREFIX))
+    """Return True for internal, synthesized signals that shouldn't be
+    user-visible in a trace: process-local loop/block variables, or a
+    per-memory dirty-tracking marker signal."""
+    return name.startswith((SYNTH_LOCAL_LOOP_PREFIX, SYNTH_LOCAL_BLOCK_PREFIX, SYNTH_MEM_MARKER_PREFIX))
 
 
 def expand_array_concat_operands(module: Module) -> None:
