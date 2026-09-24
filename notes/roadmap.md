@@ -1129,15 +1129,60 @@ edits. Remaining fallback cases still re-emit the full module:
   every case in their script. New regression test:
   `tests/test_sim/test_wide_rom_unsized_decimal_literal.py`.
 
-  **Found along the way, NOT fixed (separate, unrelated bug, flagged for
-  follow-up)**: `vm-fast` doesn't run this exact DSL shape's `initial`
-  block AT ALL through `Testbench.run()`/`bench.step()` — the memory reads
-  back fully X even before any stimulus is driven, confirmed down to a
-  minimal 2-element memory with two bare `<<=` writes (not a scale issue).
-  This is a "never runs" bug, not a "runs wrong" one, so it's a distinct
-  root cause from the sign-extension fix above; excluded from the new
-  regression test's engine list with an explanatory comment rather than
-  investigated further this round.
+  **Follow-up: `vm-fast` — Fixed.** Found along the way: `vm-fast` didn't
+  run this exact DSL shape's `initial` block at all through
+  `Testbench.run()`/`bench.step()` — the memory read back fully X even
+  before any stimulus was driven, confirmed down to a minimal 2-element
+  memory with two bare `<<=` writes (not a scale issue) — a distinct,
+  unrelated root cause from the sign-extension fix above, in
+  `sim/vm/vm_scheduler.py` rather than `sim/value.py`.
+
+  `_apply_nbas()` used to `return self._cy_ctx.apply_nbas()` the instant a
+  Cython context existed, skipping the pure-Python interpreter's own
+  `nba_queue`/`nba_mem_queue`/`nba_mem_range_queue` entirely — those are
+  populated ONLY by `self.interpreter.execute()` (`initial` blocks via
+  `_execute_initial_direct`, and timing coroutines), never by the Cython
+  delta loop, and are a completely separate store from whatever `_cy_ctx`
+  itself queues internally. Worse, the Cython "fast path"
+  (`_cy_ctx.run_delta_loop(...)`, taken whenever a later real event
+  qualifies) never calls `_apply_nbas()` at all — so an `initial` block's
+  own NBA writes, once queued, sat there permanently unapplied the moment
+  any later event took that fast path, which is the ordinary case for any
+  DSL-built ROM (an `initial`-block memory write immediately followed by a
+  driven clock edge). Plain `vm` was unaffected purely because
+  `_cy_ctx is None` there, so it always takes the Python delta loop, which
+  already called `_apply_nbas()` on every iteration regardless.
+
+  Fixed with a new `_drain_interpreter_nba_queues()`: applies the
+  interpreter's own queues into canonical storage (freshening from
+  `_cy_ctx` first — see the "one more, subtler bug" note below — then
+  syncing the result back into `_cy_ctx`), called both from `_apply_nbas()`
+  itself (making it correctly drain BOTH sources, not choose one) and,
+  critically, right before EVERY fast-path/Python-path branch decision
+  (three call sites: `_run_event_loop`, `run_step`, and the `settle()`-style
+  `_pending_drives` flow) — since the fast path never calls `_apply_nbas()`
+  on its own, flushing pending interpreter NBAs must happen just before
+  that decision, not only inside the function most callers were already
+  reaching.
+
+  **One more, subtler bug found fixing this one**: an EARLIER version of
+  this fix synced `compiler.sig_val`/`mem_val` back into `_cy_ctx`
+  unconditionally at the end of the drain, without first refreshing them
+  FROM `_cy_ctx` — clobbering any OTHER signal `_cy_ctx` had updated
+  directly since the last sync (e.g. `_execute_event`'s `clock_toggle`
+  handler calls `_cy_ctx.write_signal()` straight through, never touching
+  the Python lists at all). Confirmed exactly: a driven clock edge
+  processed in the same event-loop iteration as a pending memory NBA came
+  back reading `x` instead of its just-written value. Fixed by freshening
+  from `_cy_ctx` first, applying the interpreter's own queued NBAs on top
+  of that fresh snapshot, then syncing back — mirrors `_coro_sync_out`'s
+  identical "freshen Python lists from CyContext" reasoning, already
+  established elsewhere in this same file for the same underlying reason.
+
+  Verified: the reporter's own repro (extended to also exercise `vm-fast`,
+  which they hadn't originally tested) now passes on all 4 engines;
+  `tests/test_sim/test_wide_rom_unsized_decimal_literal.py` updated to
+  cover `vm-fast` too (27/27 passing) rather than excluding it.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

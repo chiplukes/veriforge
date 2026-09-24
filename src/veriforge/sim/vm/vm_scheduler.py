@@ -719,6 +719,13 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             changed = set(self.interpreter.dirty)
             self.interpreter.dirty.clear()
 
+            # Flush any NBA an `initial` block/timing coroutine queued via
+            # the pure-Python interpreter BEFORE picking a path below --
+            # the fast path never calls `_apply_nbas()` at all, so this is
+            # the only chance to apply it (see `_drain_interpreter_nba_
+            # queues`'s own docstring).
+            changed |= self._drain_interpreter_nba_queues()
+
             # ── Fast path: C delta loop ──
             if self._cy_ctx is not None and self._cy_ctx._procs_setup and changed:
                 try:
@@ -818,6 +825,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # Signals changed by events
         changed = set(self.interpreter.dirty)
         self.interpreter.dirty.clear()
+
+        # See the identical drain in `_run_event_loop` -- same reasoning.
+        changed |= self._drain_interpreter_nba_queues()
 
         # ── Fast path: C delta loop ──
         if not stopped and self._cy_ctx is not None and self._cy_ctx._procs_setup and changed:
@@ -1243,12 +1253,73 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             interp.display_output.clear()
 
     def _apply_nbas(self) -> set[int]:
-        """Apply non-blocking assignment updates. Returns set of changed signal IDs."""
+        """Apply non-blocking assignment updates. Returns set of changed signal IDs.
+
+        Drains BOTH possible sources, not just one: `_cy_ctx`'s own internal
+        NBA state (populated by whichever process this delta-loop iteration
+        ran through `cy_ctx.execute_procs()`) AND the pure-Python
+        interpreter's separate queues (populated only by
+        `self.interpreter.execute()` — `initial` blocks via
+        `_execute_initial_direct`, and timing coroutines via
+        `_run_initial_coro`/`_start_always_coro` — neither of which ever
+        runs through `_cy_ctx`, regardless of whether one exists). This
+        used to `return` as soon as `_cy_ctx is not None`, silently
+        DROPPING any interpreter-queued NBA whenever a Cython context
+        exists, since nothing else ever looked at the interpreter's queues
+        again — see `_drain_interpreter_nba_queues`'s own docstring for the
+        confirmed real-world symptom this caused.
+        """
+        changed = self._drain_interpreter_nba_queues()
         if self._cy_ctx is not None:
-            return self._cy_ctx.apply_nbas()
+            changed |= self._cy_ctx.apply_nbas()
+        return changed
+
+    def _drain_interpreter_nba_queues(self) -> set[int]:
+        """Apply NBAs queued by the pure-Python interpreter directly into
+        canonical storage, syncing the result into `_cy_ctx` if one exists.
+
+        Must run BEFORE deciding whether to take the Cython "fast path" for
+        an upcoming delta-loop pass, not just from inside `_apply_nbas()`'s
+        own (Python-path-only) callers — the fast path
+        (`_cy_ctx.run_delta_loop(...)`) never calls `_apply_nbas()` at all,
+        so any interpreter-queued NBA still pending at that point would
+        otherwise sit in `interp.nba_queue`/`nba_mem_queue`/
+        `nba_mem_range_queue` forever, invisible to `_cy_ctx`'s own delta
+        loop and never reapplied. Confirmed exactly: a DSL-built ROM's
+        `initial`-block memory writes (`mem[i] <<= ...`, a non-blocking
+        assign, queued into `nba_mem_queue` by `Op.NBA_MEM`) followed
+        immediately by a real driven event (e.g. the first clock edge) that
+        qualifies for the fast path -- the memory read back fully X
+        forever after, only on `vm-fast` (`_cy_ctx` set); plain `vm`
+        (`_cy_ctx is None`) always takes the Python delta loop, which
+        already called `_apply_nbas()` on every iteration, so the bug was
+        invisible there.
+        """
+        interp = self.interpreter
+        if not (interp.nba_queue or interp.nba_mem_queue or interp.nba_mem_range_queue):
+            return set()
+
+        # Freshen the Python lists from `_cy_ctx` FIRST -- `compiler.sig_val`/
+        # `mem_val` are only a mirror kept in sync at the boundaries of an
+        # interpreter-executed process; any OTHER signal `_cy_ctx` itself
+        # updated directly since the last sync (e.g. `_execute_event`'s
+        # `clock_toggle` handler calls `_cy_ctx.write_signal()` straight
+        # through, never touching these Python lists at all) would
+        # otherwise still hold a stale value here. Applying NBAs on top of
+        # a stale snapshot, then syncing the WHOLE snapshot back down at
+        # the end of this method, would silently revert that other
+        # signal's fresh value back to its own stale one -- confirmed
+        # exactly: a driven clock edge processed in the same event-loop
+        # iteration as a pending memory NBA came back reading `x` instead
+        # of its just-written value, because this method's own sync-back
+        # clobbered it. Mirrors `_coro_sync_out`'s identical "freshen
+        # Python lists from CyContext" comment for the same reason.
+        if self._cy_ctx is not None:
+            self._cy_ctx.sync_signals_to_lists(self.compiler.sig_val, self.compiler.sig_mask)
+            if self.compiler.mem_count > 0:
+                self._cy_ctx.sync_mem_to_lists(self.compiler.mem_val, self.compiler.mem_mask)
 
         changed: set[int] = set()
-        interp = self.interpreter
         sig_val = self.compiler.sig_val
         sig_mask = self.compiler.sig_mask
 
@@ -1307,6 +1378,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                     if mem_id < len(mem_marker_sigs):
                         changed.add(mem_marker_sigs[mem_id])
         interp.nba_mem_range_queue.clear()
+
+        # `_cy_ctx`'s own delta loop (if this iteration takes the fast
+        # path) reads/writes exclusively through its own C-level state --
+        # it never sees `self.compiler.sig_val`/`mem_val` again once
+        # constructed. Push what the interpreter just applied there too,
+        # or the fast path would still see the pre-NBA values.
+        if self._cy_ctx is not None:
+            self._cy_ctx.sync_signals_from_lists(sig_val, sig_mask)
+            if self.compiler.mem_count > 0:
+                self._cy_ctx.sync_mem_from_lists(mem_val, mem_mask)
 
         return changed
 
@@ -1593,6 +1674,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             return
         changed = set(self._pending_drives)
         self._pending_drives.clear()
+
+        # See the identical drain in `_run_event_loop` -- same reasoning.
+        changed |= self._drain_interpreter_nba_queues()
 
         if self._cy_ctx is not None and self._cy_ctx._procs_setup:
             try:

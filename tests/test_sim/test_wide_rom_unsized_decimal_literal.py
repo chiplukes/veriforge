@@ -36,6 +36,20 @@ Fixed in `sim/value.py` (`signed_literal_width`, used by
 computing the minimum width that keeps `n`'s own sign bit correct (`n.
 bit_length() + 1` for positive `n`, the standard "signed bit-length"
 formula) instead of `n.bit_length()` alone.
+
+`vm-fast` needed a SEPARATE fix before this test could even run against it:
+`_apply_nbas()` (`sim/vm/vm_scheduler.py`) used to `return` as soon as a
+Cython context existed, entirely skipping the pure-Python interpreter's own
+`nba_queue`/`nba_mem_queue`/`nba_mem_range_queue` -- populated only by
+`initial`-block/timing-coroutine execution, never by the Cython delta loop.
+Worse, the Cython "fast path" (`_cy_ctx.run_delta_loop(...)`) never calls
+`_apply_nbas()` at all, so an `initial` block's own memory writes sat
+queued forever the moment any later real event qualified for that fast
+path -- this DSL-built ROM's `initial`-block writes are exactly that shape.
+Fixed with a new `_drain_interpreter_nba_queues()`, called both from
+`_apply_nbas()` and (critically) right before every fast-path/Python-path
+branch decision, so pending interpreter-side NBAs are always flushed no
+matter which path the delta loop is about to take.
 """
 
 from __future__ import annotations
@@ -65,22 +79,9 @@ def _build_rom(depth: int, width: int, name: str) -> Module:
     return m.build()
 
 
-# `vm-fast` hits a SEPARATE, unrelated, not-yet-investigated gap with this
-# exact DSL shape (a `for`-loop-unrolled `initial` block writing many
-# memory elements, driven through `Testbench.run()`/`bench.step()`): `mem`
-# reads back as all-X even before `bench.reset_all()`, i.e. the `initial`
-# block's own writes never take effect at all -- confirmed down to a
-# 2-element memory with two bare NBA-style `<<=` writes, so it isn't a
-# scale issue either. This is a "never runs" bug, not a "runs wrong" bug,
-# so it can't be conflating with (or masking) the sign-extension fix this
-# file is actually about; flagged in `notes/roadmap.md` for separate
-# follow-up rather than fixed here.
-_ENGINES_FOR_ROM_TEST = [e for e in ENGINES if e != "vm-fast"]
-
-
 class TestWideRomUnsizedDecimalLiteral:
     @pytest.mark.parametrize("depth,width", [(32, 8), (32, 32), (32, 38), (8, 38), (4, 38)])
-    @pytest.mark.parametrize("engine", _ENGINES_FOR_ROM_TEST)
+    @pytest.mark.parametrize("engine", ENGINES)
     def test_reported_shape(self, engine, depth, width):
         """The exact reported repro: values crossing 2**31 must read back
         correctly once the memory element is wider than 32 bits."""
