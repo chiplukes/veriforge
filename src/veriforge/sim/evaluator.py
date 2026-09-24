@@ -32,7 +32,7 @@ from veriforge.model.expressions import (
 )
 
 from .elaborate import match_assignment_pattern_layout
-from .value import Value, _verilog_pow
+from .value import Value, _verilog_pow, signed_literal_width
 
 if TYPE_CHECKING:
     pass
@@ -1339,7 +1339,17 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
         # Numeric value
         if isinstance(lit.value, (int, float)):
-            return Value(int(lit.value), width=width)
+            n = int(lit.value)
+            # Same "unsized signed decimal literal needs a sign-guard bit"
+            # gap as `Value.from_verilog`'s own fix (see
+            # `signed_literal_width`'s docstring) -- only relevant here
+            # when `lit.width` wasn't already explicitly set (an unsized,
+            # signed decimal per IEEE 1800-2017 SS5.7.1; an explicitly
+            # SIZED literal's width is authoritative and must not be
+            # widened here).
+            if lit.width is None and lit.signed:
+                width = signed_literal_width(n)
+            return Value(n, width=width)
 
         # String value in Literal (rare — some parsed number strings)
         if isinstance(lit.value, str):

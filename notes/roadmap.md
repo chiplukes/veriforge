@@ -1080,11 +1080,64 @@ edits. Remaining fallback cases still re-emit the full module:
   compiled/` + `test_memory.py` + related wide/whole-array test files:
   989 passed / 0 failed.
 
-  **Still open**: the ORIGINAL report (`reference`/`vm`, not `compiled`)
-  never reproduced despite the above effort. If it recurs, get the
-  reporter's own minimal repro directly rather than reconstructing one
-  blind — per [[feedback_parser_dangling_else_bug]]'s own lesson, bisecting
-  or running an exact repro beats guessing at plausible shapes.
+  **Follow-up: the original report's own repro was obtained and DID
+  reproduce — Fixed.** The reporter's minimal repro (a DSL-built ROM: an
+  `initial`-block `for` loop writing plain decimal literals into a
+  dynamically-read, >32-bit-wide memory) diverged from every hand-built
+  repro attempted above in one crucial way: this codebase's blind
+  reconstruction always used real Verilog `for`-loop text (parsed from a
+  string), never the DSL's own `m.initial(): mem[i] <<= <python-int>`
+  idiom — and the bug lives specifically in how a bare Python-int-derived
+  literal's width gets computed, not in memory read/write mechanics at
+  all. Root-caused directly from the exact numeric pattern the reporter
+  called out ("addresses 0-2 correct, wrong from address 3 on, right where
+  the expected value crosses 2**31, but width=32 passes across its entire
+  range even past that point"):
+
+  An unsized decimal literal is SIGNED per IEEE 1800-2017 §5.7.1 (`dsl/
+  builder.py::_to_expr_node`/`_to_lit` mark every bare Python int
+  `signed=True` for exactly this reason — see the "Unsized decimal literal
+  treated as unsigned in arithmetic" entry above). `Value.from_verilog`'s
+  bare-integer branch computed this self-determined width as `max(32,
+  n.bit_length())` — for a non-negative `n` whose `bit_length()` already
+  equals 32 (any `n` in `[2**31, 2**32)`), that leaves NO zero guard bit
+  above the value's own top bit. Widening it into a wider context (a >32-
+  bit memory element) via `Value.sign_extend()` then reads that "this
+  magnitude needs every bit" 1 as a genuine sign bit and fills the
+  extension with 1s instead of 0s — confirmed exactly: `n=3000000021`
+  sign-extended to 38 bits gave `273582939669`, not `3000000021`, matching
+  the reporter's own logged mismatch byte-for-byte. `width=32` never
+  triggers this at all, regardless of how large its values get, because
+  equal-width `sign_extend`/`resize` never widens anything — exactly
+  matching the reporter's own "it's not simple 32-bit overflow" observation.
+
+  Fixed with a new `signed_literal_width(n)` (`sim/value.py`): the minimum
+  width that keeps `n`'s own sign bit correct is the standard "signed
+  bit-length" formula, `n.bit_length() + 1` for `n > 0` (not just
+  `n.bit_length()`), `(-n - 1).bit_length() + 1` for `n < 0`, or 1 for
+  `n == 0`. Used by `Value.from_verilog`'s bare-integer branch (the actual
+  reported path — reached via `Literal.original_text`, which the DSL
+  always sets) and, for completeness, by `evaluator.py::_eval_literal`'s
+  numeric-value fallback (reached only when a `Literal` has no
+  `original_text` at all — not exercised by the DSL or parser today, but
+  the identical latent gap, fixed alongside rather than left for a future
+  report to rediscover independently).
+
+  Verified: the reporter's own repro now passes on both `reference` and
+  `vm` (and, checked directly, `compiled`, which was never affected — it
+  doesn't route through this evaluator for synthesizable logic) across
+  every case in their script. New regression test:
+  `tests/test_sim/test_wide_rom_unsized_decimal_literal.py`.
+
+  **Found along the way, NOT fixed (separate, unrelated bug, flagged for
+  follow-up)**: `vm-fast` doesn't run this exact DSL shape's `initial`
+  block AT ALL through `Testbench.run()`/`bench.step()` — the memory reads
+  back fully X even before any stimulus is driven, confirmed down to a
+  minimal 2-element memory with two bare `<<=` writes (not a scale issue).
+  This is a "never runs" bug, not a "runs wrong" one, so it's a distinct
+  root cause from the sign-extension fix above; excluded from the new
+  regression test's engine list with an explanatory comment rather than
+  investigated further this round.
 - **Native timing support in compiled engine** — `#delay` / `@(posedge)` inside
   `initial` / `always` blocks currently fall back to reference coroutines (slow
   path, with a `warnings.warn` diagnostic per falling-back process). A native

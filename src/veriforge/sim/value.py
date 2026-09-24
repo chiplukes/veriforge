@@ -35,6 +35,37 @@ def _mask_for_width(width: int) -> int:
     return m
 
 
+def signed_literal_width(n: int) -> int:
+    """Minimum bit width (>= 32) that keeps `n`'s own sign bit correct.
+
+    An unsized decimal literal is SIGNED per IEEE 1800-2017 SS5.7.1 --
+    callers widen it into a wider context via `Value.sign_extend()`,
+    trusting bit `width-1` to be a genuine sign bit. `n.bit_length()`
+    alone doesn't guarantee that: for a non-negative `n` whose
+    `bit_length()` already fills its own natural width (any `n` in
+    `[2**31, 2**32)`, or more generally whenever `n`'s own top bit occupies
+    the last bit of that width), using exactly that many bits leaves NO
+    zero guard bit above it, so a later `sign_extend()` reads that "this
+    magnitude needs every bit" 1 as a sign bit and fills the extension
+    with 1s instead of 0s -- silently corrupting an otherwise-correct
+    positive value into a huge negative-looking one. Confirmed exactly via
+    a real ROM-initializer report: `n=3000000021` (bit_length 32) sign-
+    extended to 38 bits with the old `max(32, n.bit_length())` formula
+    gave `273582939669`, not `3000000021`.
+
+    This is the standard "signed bit-length" formula: `n.bit_length() + 1`
+    for `n > 0` (e.g. 3000000021 needs 33, not 32, to keep bit 32 at 0),
+    `(-n - 1).bit_length() + 1` for `n < 0` (e.g. -8 needs 4: `0b1000`), or
+    1 for `n == 0` -- `max(32, ...)` keeps the usual >=32-bit default for
+    anything smaller.
+    """
+    if n > 0:
+        return max(32, n.bit_length() + 1)
+    if n < 0:
+        return max(32, (-n - 1).bit_length() + 1)
+    return 32
+
+
 def _verilog_pow(base: int, exp: int) -> int | None:
     """IEEE 1364-2005 Table 5-6 -- integer power-operator special-value rules.
 
@@ -143,8 +174,13 @@ class Value:  # cm:c8a1e6
         # Plain integer
         if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
             n = int(text)
-            width = max(32, n.bit_length())
-            return cls(n, width=width)
+            # See `signed_literal_width`'s own docstring: found via a real
+            # ROM-initializer report (`mem[i] <= <plain decimal>` inside an
+            # `initial` block's `for` loop, memory element width > 32) that
+            # matched Icarus at every address up to where the stored value
+            # first crossed 2**31, then diverged for every subsequent
+            # address whose value also had bit 31 set.
+            return cls(n, width=signed_literal_width(n))
 
         # Verilog-style: <width>'[s]<base><digits>
         m = re.match(r"(\d+)?'([sS])?([bBoOdDhH])([0-9a-fA-FxXzZ?_]+)$", text)
