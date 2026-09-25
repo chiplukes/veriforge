@@ -224,7 +224,7 @@ class TestStreamingConcatenationReversalSimulation:
 
 class TestStreamingConcatenationReversalSensitivity:
     """Regression for a real bug found via the grammar-driven fuzzer's own
-    streaming-concat generation (`notes/roadmap.md`, "the fuzzing round's
+    streaming-concat generation (`notes/developer/roadmap.md`, "the fuzzing round's
     headline finding"): a signal referenced ONLY inside a
     `StreamingConcatenation` was invisible to sensitivity/dependency
     analysis on `reference`/`vm`/`vm-fast` (`sim/scheduler.py`'s
@@ -311,7 +311,7 @@ class TestStreamingConcatenationVmFastWideCapacity:
     the full stream materialized before any truncation, so that combined
     width can exceed the fixed capacity even when every individual operand
     and the final destination are both comfortably narrow. Found via the
-    grammar-driven fuzzer (`notes/roadmap.md`): two real fuzzer-generated
+    grammar-driven fuzzer (`notes/developer/roadmap.md`): two real fuzzer-generated
     modules landed at 397 and 385 combined bits, just over the
     then-current 384-bit (6-word) cap, and silently returned wrong
     (frequently all-zero) results on `vm-fast` only -- `reference`/`vm`

@@ -309,7 +309,7 @@ class _GenWideSectionsMixin:
         # per-bit X propagation (IEEE 1364/1800 semantics): only the sign
         # bit's own (un)knownness determines whether the vacated top bits
         # become x, not "any x in the source -> entire result is x" (see
-        # notes/known_issues.md / notes/plans/work_plan_2026-07.md item 2.4 --
+        # notes/developer/known_issues.md / notes/plans/work_plan_2026-07.md item 2.4 --
         # this used to have a conservative any-x-bails-to-all-x early return
         # to match a since-fixed VM bug; reverted once the VM was made precise).
         L += [
@@ -1209,7 +1209,7 @@ class _GenWideSectionsMixin:
                     # of the live wide_mem_{mid}_val/mask. Redirected into by
                     # _seq_body_to_sv_reads for reads of this memory from a
                     # sequential process that never blocking-writes it itself
-                    # (see notes/roadmap.md "Wide-signal pre-edge snapshot gap"
+                    # (see notes/developer/roadmap.md "Wide-signal pre-edge snapshot gap"
                     # -- a wide 2-D packed array port/wire is modeled as a
                     # memory, not a wide signal, and previously had no
                     # pre-edge snapshot at all, live-reading a value that a
@@ -1307,7 +1307,7 @@ class _GenWideSectionsMixin:
                     # (_emit_const_mem_range_write_lines) only when src_sid
                     # is known not to be blocking-written elsewhere in the
                     # same seq body (self._body_tainted_sids) -- see
-                    # notes/roadmap.md "Wide-signal pre-edge snapshot gap":
+                    # notes/developer/roadmap.md "Wide-signal pre-edge snapshot gap":
                     # confirmed real-world trigger is a mocked
                     # `xpm_fifo_sync`'s `mem[wr_addr] <= din;`, where `din`
                     # is a plain input port fed by a continuous assign from

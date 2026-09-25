@@ -619,3 +619,76 @@ display output, and VCD waveforms.
   straight-line bytecode fast path
 - **Bytecode executes the elaborated / flattened module** — hierarchy and generate
   support lives in elaboration first, then the VM runs the flattened result
+
+---
+
+## Cython Fast Interpreter (`_interp_fast.pyx`)
+
+High-performance Cython replacement for the pure-Python `Interpreter`.
+Compiles to a C extension that runs the bytecode execution loop and full
+delta-cycle loop entirely in C, with no Python object allocations in the
+hot path. ~2,580 lines. This is the `"vm-fast"` engine; see
+`developer_guide.md` §5 for the hand-maintained sync policy between this
+file and `sim/vm/interpreter.py`.
+
+**Build command:**
+```powershell
+uv run python setup_cython.py build_ext --inplace
+```
+
+**Key data structures (C structs):**
+
+| Struct | Purpose |
+|--------|---------|
+| `SVal` | Stack entry: `(val, mask, width)` — 4-state value triple |
+| `NBAEntry` | Non-blocking assignment: `(sig_id, val, mask)` |
+| `NBAMemEntry` | Memory NBA: `(mem_id, addr, val, mask)` |
+| `ExecResult` | Return to Python: `(status, nba_count, dirty_count)` |
+| `DeltaCtx` | Full delta-loop context: signal arrays, programs, sensitivity CSR, edge info, working buffers |
+
+**Core C functions (nogil):**
+
+| Function | Lines | Purpose |
+|----------|-------|---------|
+| `_execute_core()` | ~1,170 | Single process execution — big if/elif dispatch over 70 opcodes. Operates on C arrays, returns status code (0=ok, 1=finish, 2=error) |
+| `_run_delta_loop_core()` | ~230 | Full delta-cycle loop in C — applies NBAs, detects changes, triggers combinational re-eval, iterates until stable. Uses CSR (compressed sparse row) index for sensitivity lookup |
+
+**Inline helpers:**
+- `mask_for_width(w)` — bit mask for a given width
+- `popcount64(x)` — set-bit count via Kernighan's method (O(popcount) iterations)
+
+**Constants (DEF — compiled as C #defines):**
+- `STACK_MAX = 256` — operand stack depth
+- `NBA_MAX = 256` — NBA queue capacity
+- `NBA_MEM_MAX = 64` — memory NBA queue capacity
+- `DISP_BUF_CAP = 4096` — display output buffer slots
+
+**Python-visible class: `CyContext`**
+
+Extension type that owns all C arrays and provides methods called by
+`VMScheduler`. Allocated once at elaboration, reused across all timesteps.
+
+| Method | Purpose |
+|--------|---------|
+| `setup(sig_vals, sig_masks, ..., const_pool, fmt_strings)` | Allocate signal/constant C arrays from Python lists |
+| `setup_memory(mem_vals, mem_masks, mem_info)` | Allocate memory (reg array) C storage |
+| `setup_processes(proc_ops, proc_args, ..., edge_info)` | Flatten process programs + build sensitivity CSR |
+| `execute_procs(proc_indices)` | Run a list of processes, collect NBAs + dirty signals |
+| `apply_nbas()` | Apply queued non-blocking assignments to signal arrays |
+| `run_delta_loop(changed_sids, delta_limit)` | Run full delta-cycle loop in C, return `(status, changed_set, display_lines)` |
+| `write_signal(sid, val, mask)` | Direct signal write from Python |
+| `read_signal(sid)` | Read `(val, mask)` for a signal from C arrays |
+| `set_time(t)` | Update simulation time for `$time` opcode |
+| `sync_signals_from_lists(vals, masks)` / `sync_signals_to_lists(vals, masks)` | Bulk sync between Python lists and C arrays |
+| `sync_mem_from_lists(vals, masks)` / `sync_mem_to_lists(vals, masks)` | Bulk sync memory arrays |
+| `snapshot_signals()` / `take_snapshot()` | Save signal state for edge detection |
+| `reset_seq_fired()` | Clear sequential-process-fired flags for new timestep |
+| `drain_display_buffer()` | Retrieve accumulated `$display`/`$monitor` output lines |
+
+**Memory encoding for STORE_MEM / NBA_MEM:**
+`arg1 = mem_id | (marker_sid << 16)` — marker signal triggers combinational
+re-evaluation when memory is written.
+
+**Display encoding for SYS_DISPLAY / SYS_MONITOR:**
+`arg1 = n_args | (fmt_id << 16)` — format string index packed with argument count.
+`SYS_MONITOR` also uses `arg2 = monitor_id`.

@@ -5,7 +5,7 @@
 > [`work_plan_2026-07_archive.md`](work_plan_2026-07_archive.md) (August
 > 2026 cleanup, per `architecture_review_2026-07.md` item 9). This file now
 > holds only a one-line-per-item completion checklist. See
-> [`notes/roadmap.md`](../roadmap.md) for what's next — items not yet
+> [`notes/developer/roadmap.md`](../developer/roadmap.md) for what's next — items not yet
 > scheduled into a new dated plan live there.
 
 ## Completed (see archive for full detail)
@@ -23,7 +23,7 @@ edge-case suites · 2.3 compiled-only unary/shift codegen bugs fixed ·
 feature · 2.6 cross-engine unary `~` self-determined-width bug fixed ·
 **2.7 remaining compiled-engine correctness gaps — done except one
 narrow, deliberately out-of-scope architectural gap** (wide user-defined
-function port/return; see `notes/known_issues.md`'s open-defects
+function port/return; see `notes/developer/known_issues.md`'s open-defects
 section, not this file, for its current status).
 
 **Tier 3 — CI and engine parity** (all ✅):

@@ -367,7 +367,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         reference oracle) via the grammar-driven fuzzer, and confirmed to
         be exactly this ordering issue by simply swapping the two `assign`
         statements, which made the divergence disappear entirely. See
-        notes/roadmap.md ("mismatch_10096").
+        notes/developer/roadmap.md ("mismatch_10096").
 
         Bounded by the number of continuous-assign processes -- a safe
         convergence bound for any acyclic dependency graph among them (a
@@ -419,7 +419,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         counterparts. Emitted at every point that already snapshots
         `ctx.val`/`ctx.mask` into `sv`/`sm` (`snapshot()`,
         `refresh_data_snapshot()`, and each of `batch_run()`'s three
-        snapshot points) -- see notes/roadmap.md "Wide-signal pre-edge
+        snapshot points) -- see notes/developer/roadmap.md "Wide-signal pre-edge
         snapshot gap" for why a 2-D packed array (elaborated as a `memory`
         for per-element addressing, not a plain signal) needs this too: a
         memory fed by a continuous assign (e.g. a wide port connection) can
@@ -949,7 +949,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         that per-statement emitters needing to choose between a live-reading
         and a pre-edge-snapshot-reading helper for an NBA statement's signal
         RHS source (e.g. ``_wmem{mid}_stage_insert_signal_slice`` vs. its
-        ``_sv``-suffixed twin -- see notes/roadmap.md "Wide-signal pre-edge
+        ``_sv``-suffixed twin -- see notes/developer/roadmap.md "Wide-signal pre-edge
         snapshot gap") can make that decision at emission time instead of via
         `_seq_body_to_sv_reads`'s later text-level substitution, which can't
         safely parse these particular call sites' other (arbitrary-
@@ -2004,7 +2004,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # already 1 is a no-op (no edge detected), silently",
                 "                # dropping the caller's first requested cycle and",
                 "                # shifting every subsequent edge by one (see",
-                '                # notes/roadmap.md "batch_run() first-call clock-state").',
+                '                # notes/developer/roadmap.md "batch_run() first-call clock-state").',
                 *self._cont_settle_fixpoint_lines("                "),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",

@@ -253,7 +253,7 @@ data = axi4.read(0x100, length=2)            # 2-beat INCR burst read
 directly to `AXI4Master.write()` / `.read()` — `data` is an `int` or a
 `list[int]` (one entry per beat), and `**kwargs` covers `strb`, `size`,
 `burst`, `txn_id`, and the sideband signals (`prot`, `cache`, `lock`, `qos`,
-`region`, `user`). See `AXI4Master` in `notes/public_api.md` for the full
+`region`, `user`). See `AXI4Master` in `notes/developer/public_api.md` for the full
 parameter list.
 
 ### DUT-master role: responder + latency/bandwidth/pause

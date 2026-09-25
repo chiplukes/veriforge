@@ -1153,3 +1153,24 @@ Seven simulator/parser bugs were discovered and fixed through cross-validation:
    `max(self.width, other.width)`, truncating products of mixed-width
    operands. IEEE 1364-2005 §5.4.1 says multiply width = sum of
    operand widths. Fixed accordingly.
+
+---
+
+## Simulation classes reference
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `Value` | `sim.value` | 4-state bit vector (val, mask, width) |
+| `EvalContext` | `sim.evaluator` | Signal state dict + memory arrays for evaluation |
+| `ExpressionEvaluator` | `sim.evaluator` | Walk Expression → Value (memory-aware BitSelect) |
+| `StatementExecutor` | `sim.executor` | Walk Statement → mutate state (memory writes, $readmemh, VCD) |
+| `Scheduler` | `sim.scheduler` | Event queue, delta cycles, process management |
+| `Simulator` | `sim.testbench` | Top-level entry point (engine="reference"\|"vm"\|"vm-fast"\|"compiled") |
+| `SignalHandle` | `sim.testbench` | Read/write proxy to a signal |
+| `Clock` | `sim.testbench` | Clock generator utility |
+| `VcdWriter` | `sim.vcd` | VCD waveform file output |
+| `Op` | `sim.vm.opcodes` | IntEnum of 74 bytecode opcodes |
+| `Compiler` | `sim.vm.compiler` | AST → bytecode compiler |
+| `CompiledProcess` | `sim.vm.compiler` | Bytecode program + sensitivity metadata |
+| `Interpreter` | `sim.vm.interpreter` | Stack-based bytecode execution loop |
+| `VMScheduler` | `sim.vm.vm_scheduler` | Event-driven scheduler using compiled processes |

@@ -1497,7 +1497,7 @@ def _walk_expr_reads(expr: Expression, reads: set[str]) -> None:  # noqa: PLR091
         # `__slots__` walk, not a hand-maintained per-node-type dispatch)
         # was unaffected -- this was the root cause of the fuzzing round's
         # dominant "streaming-concat X-propagation divergence" finding
-        # (notes/roadmap.md), not a `compiled`-engine bug as first assumed.
+        # (notes/developer/roadmap.md), not a `compiled`-engine bug as first assumed.
         for part in expr.parts:
             _walk_expr_reads(part, reads)
         if expr.slice_size is not None:

@@ -301,7 +301,7 @@ endmodule""",
         declared range) silently zero-extended instead of sign-extended
         when read into a wider signal, on all four simulation engines,
         found via the grammar-driven fuzzer's own parameter generation
-        (see notes/roadmap.md).
+        (see notes/developer/roadmap.md).
         """
         m = _parse_module(parser, "module m #(parameter signed [63:0] P = 64'sd1) (); endmodule")
         p = m.get_parameter("P")

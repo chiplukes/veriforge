@@ -7,7 +7,7 @@ truthiness fix applied to every `IfStatement`/`ForLoop`/`WhileLoop`/
 `WaitStatement` check in `sim/executor.py` (the "known-1-bit-forces-true"
 precision rule) was applied by pattern-matching against the differentially-
 verified `TernaryOp` fix, NOT verified by an actual differential/Icarus
-check against real `if`/`while` statements -- see `notes/known_issues.md`'s
+check against real `if`/`while` statements -- see `notes/developer/known_issues.md`'s
 fourth-wave entry, which flags this explicitly as "a good target for future
 statement-level differential test coverage."
 

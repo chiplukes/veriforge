@@ -622,7 +622,7 @@ endmodule
 
 
 def test_compiled_wide_concat_in_narrow_context_not_truncated() -> None:
-    """Regression test guarding the `notes/known_issues.md` "residual
+    """Regression test guarding the `notes/developer/known_issues.md` "residual
     gap" note about `_emit_concat`/`_emit_replication`'s narrow-path
     `if shift >= 64: continue` line: a genuinely wide (>64-bit)
     concatenation embedded as a ternary's CONDITION, or inside a

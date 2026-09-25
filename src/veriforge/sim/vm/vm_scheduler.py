@@ -1531,7 +1531,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 # driven memory-array input read back permanently X on
                 # `vm`/`vm-fast` (shared bytecode/scheduler) while
                 # `reference`/`compiled` were unaffected -- see
-                # notes/known_issues.md.
+                # notes/developer/known_issues.md.
                 self._pending_drives.add(marker_sid)
                 if self.interpreter is not None:
                     self.interpreter.dirty.add(marker_sid)

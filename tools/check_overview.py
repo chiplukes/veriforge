@@ -1,5 +1,5 @@
 """
-check_overview.py — verify that notes/python_overview.md matches tracked .py files.
+check_overview.py — verify that notes/developer/files.md matches tracked .py files.
 
 Usage:
     uv run python tools/check_overview.py [--root <repo-root>]
@@ -10,13 +10,13 @@ missing/extra entries when drift is detected.
 What is compared
 ----------------
 * Git-tracked .py files under src/ and veriforge_lsp/.
-* The ```.`` code block(s) in python_overview.md that show the directory
+* The ```.`` code block(s) in files.md that show the directory
   tree.  The parser strips tree-drawing characters (├── └── │) and
   reconstructs approximate full paths from the indentation level.
 
 Limitations
 -----------
-* The tree format in python_overview.md is hand-maintained and can have
+* The tree format in files.md is hand-maintained and can have
   minor structural inconsistencies (e.g. multiple "└──" at the same
   level).  The parser is lenient about these.
 * Files at the same basename in different directories are matched by
@@ -229,7 +229,7 @@ def _resolve_link_target(md_file: Path, target: str) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check that python_overview.md matches tracked .py files.")
+    parser = argparse.ArgumentParser(description="Check that files.md matches tracked .py files.")
     parser.add_argument(
         "--root",
         type=Path,
@@ -245,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root or Path(__file__).resolve().parents[1]
-    doc = root / "notes" / "python_overview.md"
+    doc = root / "notes" / "developer" / "files.md"
 
     if not doc.exists():
         print(f"ERROR: {doc} not found", file=sys.stderr)
@@ -264,19 +264,19 @@ def main(argv: list[str] | None = None) -> int:
 
     ok = True
     if missing:
-        print(f"\n{len(missing)} file(s) tracked by git but MISSING from python_overview.md:")
+        print(f"\n{len(missing)} file(s) tracked by git but MISSING from files.md:")
         for p in missing:
             print(f"  + {p}")
         ok = False
 
     if extra:
-        print(f"\n{len(extra)} path(s) in python_overview.md but NOT in git (stale or wrong path):")
+        print(f"\n{len(extra)} path(s) in files.md but NOT in git (stale or wrong path):")
         for p in extra:
             print(f"  - {p}")
         ok = False
 
     if ok:
-        print(f"python_overview.md is in sync ({len(git_paths)} .py files).")
+        print(f"files.md is in sync ({len(git_paths)} .py files).")
         return 0
 
     return 1

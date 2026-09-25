@@ -620,3 +620,122 @@ SystemVerilog constructs modelled:
 during parsing because of how the Lark grammar tokenizes them. The grammar
 uses anonymous terminals for the `s`/`S` prefix, which are discarded by
 the parser's `keep_all_tokens=False` setting.
+
+## Interface / Modport API
+
+```python
+from veriforge.model import Interface, Modport, ModportPort
+from veriforge.codegen.verilog_emitter import emit_interface
+
+# After parsing source with interfaces:
+for iface in design.interfaces:
+    print(iface.name)
+    for mp in iface.modports:
+        print(f"  modport {mp.name}:")
+        for p in mp.ports:
+            print(f"    {p.direction.value} {p.name}")
+    print(emit_interface(iface))
+```
+
+**Model classes** (in `model/interface.py`):
+- `ModportPort(name, direction)` — single port entry in a modport
+- `Modport(name, ports)` — modport declaration
+- `Interface(name, parameters, nets, variables, continuous_assigns, modports, typedefs)` — interface declaration
+
+Stored in `Design.interfaces` list. Supports:
+- Parameters, nets, variables, continuous assigns, typedefs inside interface
+- Multiple modport declarations with input/output/inout directions
+- Parse → emit → re-parse round-trip
+
+## typedef/enum Model API
+
+```python
+from veriforge.model import EnumMember, EnumType, TypedefDecl
+
+# After parsing a module with typedef enum declarations:
+for td in module.typedefs:
+    print(td.name)           # e.g. "state_t"
+    if td.enum_type:
+        for m in td.enum_type.members:
+            print(f"  {m.name} = {m.value}")
+    if td.type_ref:
+        print(f"  alias for {td.type_ref}")
+```
+
+**Model classes** (in `model/sv_types.py`):
+- `EnumMember(name, value=Expression|None)` — single enum member
+- `EnumType(members, base_type, width, signed)` — enum type specifier
+- `TypedefDecl(name, enum_type, type_ref, loc)` — typedef declaration
+
+Stored in `Module.typedefs` list. Supports grammar forms:
+- `typedef enum {A, B, C} name;`
+- `typedef enum logic [N:0] {A=0, B=1} name;`
+- `typedef <base_type> name;` (type alias)
+- Base types: logic, bit, reg, int, integer, shortint, longint, byte
+- Optional `signed` qualifier and range
+
+## Model Class Hierarchy
+
+All model classes use `__slots__` for memory efficiency / Cython compatibility.
+
+| Class | Module | Key Fields |
+|-------|--------|------------|
+| `VerilogNode` | `model.base` | loc, comments, parent, _parse_tree |
+| `SourceLocation` | `model.base` | file, line, column, end_line, end_column |
+| `Comment` | `model.base` | text, loc, kind, position |
+| `Design` | `model.design` | modules, source_files |
+| `Module` | `model.design` | name, parameters, ports, nets, variables, instances, ... |
+| `Port` | `model.ports` | name, direction, net_type, data_type, width, signed |
+| `Parameter` | `model.parameters` | name, param_type, width, signed, default_value, is_local |
+| `Net` | `model.nets` | name, kind, width, signed, dimensions, initial_value |
+| `Variable` | `model.variables` | name, kind, width, signed, dimensions, initial_value |
+| `ContinuousAssign` | `model.assignments` | lhs, rhs (Expression) |
+| `Instance` | `model.instances` | module_name, instance_name, instance_array, parameter_bindings, port_connections |
+| `PortConnection` | `model.instances` | port_name, expression, is_named, resolved_port |
+| `ParameterBinding` | `model.instances` | name, value |
+| `AlwaysBlock` | `model.behavioral` | sensitivity_list, sensitivity_type, body (Statement) |
+| `InitialBlock` | `model.behavioral` | body (Statement) |
+| `Statement` | `model.statements` | (base class for all statements) |
+| `BlockingAssign` | `model.statements` | lhs, rhs (Expression) |
+| `NonblockingAssign` | `model.statements` | lhs, rhs (Expression) |
+| `IfStatement` | `model.statements` | condition, then_body, else_body |
+| `CaseStatement` | `model.statements` | case_type, expression, items |
+| `CaseItem` | `model.statements` | values, body |
+| `ForLoop` | `model.statements` | init, condition, update, body |
+| `WhileLoop` | `model.statements` | condition, body |
+| `ForeverLoop` | `model.statements` | body |
+| `RepeatLoop` | `model.statements` | count, body |
+| `SeqBlock` | `model.statements` | name, statements |
+| `ParBlock` | `model.statements` | name, statements |
+| `WaitStatement` | `model.statements` | condition, body |
+| `DisableStatement` | `model.statements` | target |
+| `EventTrigger` | `model.statements` | event |
+| `TaskEnable` | `model.statements` | task_name, arguments |
+| `SystemTaskCall` | `model.statements` | task_name, arguments |
+| `DelayControl` | `model.statements` | delay, body |
+| `EventControl` | `model.statements` | event, body |
+| `SensitivityEdge` | `model.statements` | edge, signal |
+| `Expression` | `model.expressions` | (base class) inferred_width |
+| `Identifier` | `model.expressions` | name, hierarchy, resolved |
+| `Literal` | `model.expressions` | value, width, base, signed, is_x, is_z, original_text |
+| `BinaryOp` | `model.expressions` | op, left, right |
+| `UnaryOp` | `model.expressions` | op, operand |
+| `Range` | `model.expressions` | msb, lsb (lightweight, not VerilogNode) |
+| `FunctionDecl` | `model.functions` | name, return_range, return_kind, is_automatic, ports, body |
+| `TaskDecl` | `model.functions` | name, is_automatic, ports, body |
+| `GenerateBlock` | `model.generate` | name, items |
+| `GenerateFor` | `model.generate` | genvar, init_value, condition, update, body |
+| `GenerateIf` | `model.generate` | condition, then_body, else_body |
+| `GenerateCase` | `model.generate` | expression, items |
+| `GenerateCaseItem` | `model.generate` | values, is_default, body |
+| `GenvarDecl` | `model.generate` | names |
+| `SpecifyBlock` | `model.specify` | raw_tree, source_text |
+
+## Enums
+
+| Enum | Values |
+|------|--------|
+| `PortDirection` | INPUT, OUTPUT, INOUT |
+| `NetKind` | WIRE, TRI, WAND, WOR, TRIAND, TRIOR, TRI0, TRI1, SUPPLY0, SUPPLY1, UWIRE, TRIREG |
+| `VariableKind` | REG, INTEGER, REAL, REALTIME, TIME, EVENT |
+| `SensitivityType` | COMBINATIONAL, SEQUENTIAL, LATCH, UNKNOWN |

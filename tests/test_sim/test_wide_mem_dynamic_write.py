@@ -6,7 +6,7 @@ wrong data for any word beyond the first had it compiled at all.
 Found while investigating an unrelated report (a "dynamically-indexed
 memory array wider than 32 bits returns corrupted data" claim against
 `reference`/`vm`, which did not reproduce in extensive testing -- see
-`notes/roadmap.md` for that side of the investigation). Building a >64-bit
+`notes/developer/roadmap.md` for that side of the investigation). Building a >64-bit
 memory with a genuinely computed (not just copied/sliced/concatenated)
 initializer expression, on the `compiled` engine specifically, surfaced two
 real, distinct bugs:

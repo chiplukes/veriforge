@@ -257,7 +257,7 @@ For interface details (roles, `reg=True`, `port_map()`, asymmetric buses):
 | Need | Note |
 |------|------|
 | First steps / install / CLI reference | [getting_started.md](getting_started.md) |
-| Testbench generator flags + Python API | [getting_started.md §8](getting_started.md#8-generate-a-python-testbench) |
+| Testbench generator flags + Python API | [getting_started.md §4](getting_started.md#4-generate-a-python-testbench) |
 | `Testbench` + proxy API (put/get/write/read/pause) | [simulation/bench_usage.md](simulation/bench_usage.md) |
 | Engine-native lowering (`compile_native`, `batch_run`) | [simulation/bench_native_lowering.md](simulation/bench_native_lowering.md) |
 | Engine selection + performance | [simulation_overview.md](simulation_overview.md), [simulation/simulator_engines.md](simulation/simulator_engines.md) |

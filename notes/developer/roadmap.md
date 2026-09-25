@@ -3,7 +3,7 @@
 Known future work items, organized by area.
 
 > **Execution order lives in
-> [notes/plans/work_plan_2026-07.md](plans/work_plan_2026-07.md)** — the
+> [notes/plans/work_plan_2026-07.md](../plans/work_plan_2026-07.md)** — the
 > concrete, ordered plan (quick wins → structural projects) synthesized from
 > the July 2026 architecture and functionality reviews. Work items from that
 > plan supersede overlapping entries below; this file remains the per-area
@@ -627,7 +627,7 @@ edits. Remaining fallback cases still re-emit the full module:
       or a longer `vvp` timeout) rather than assuming it's a correctness bug.
 - **`logic`-declared signal fuzzing + Verilator cross-check (task-tracking:
   fuzzing-round item 33) — Done.** Built out the deferral noted in
-  `notes/fuzzer.md`: the fuzzer now generates `logic`-typed inputs/outputs/
+  `notes/developer/fuzzer.md`: the fuzzer now generates `logic`-typed inputs/outputs/
   wires/regs (~35% independent chance per signal,
   `fuzz/_signal_context.py::Signal.use_logic`), and a new opt-in
   `--verilator` fuzzer flag cross-checks results against Verilator
@@ -674,7 +674,7 @@ edits. Remaining fallback cases still re-emit the full module:
   citation of the same LRM section); Verilator gives `01001011` instead. The
   evenly-divisible case (`{<<4{...}}}` on the same operand) matches exactly
   in both, isolating the gap to the ragged case specifically. See
-  `notes/known_issues.md` ("Verilator ragged streaming-concat chunking
+  `notes/developer/known_issues.md` ("Verilator ragged streaming-concat chunking
   gap") for the full derivation. Worked around by extending the fuzzer's
   existing `has_streaming_concat` whole-module skip (already used for
   Icarus, which rejects the construct outright) to also cover the Verilator
@@ -798,7 +798,7 @@ edits. Remaining fallback cases still re-emit the full module:
   item 34) — 2-hour run, seed 5000, 3025 modules, all engines +
   `--verilator`**. One genuine fuzzer bug found and fixed; two genuine
   simulator-divergence classes found, root-caused, and documented (not
-  yet fixed — see `notes/known_issues.md`); the rest were either the
+  yet fixed — see `notes/developer/known_issues.md`); the rest were either the
   already-known `vm`/`vm-fast` wide-value-capacity guard or the
   already-documented Icarus first-activation artifact (1172 auto-filtered).
   - **Fixed: `HIERARCHICAL` strategy could generate a self-referential
@@ -889,7 +889,7 @@ edits. Remaining fallback cases still re-emit the full module:
     first real activation is implementation-defined), not a bug in any
     one of them -- analogous to (though a distinct construct from) the
     already-investigated-and-closed Icarus first-activation artifact in
-    `notes/known_issues.md`. Not reduced to a from-scratch minimal repro
+    `notes/developer/known_issues.md`. Not reduced to a from-scratch minimal repro
     (attempts with hand-written simplified versions didn't reproduce,
     likely due to interaction with `settle()`'s own combinational
     bootstrap converging past the ambiguous first activation before the
@@ -1247,7 +1247,7 @@ edits. Remaining fallback cases still re-emit the full module:
 
 ## Codebase health
 
-See [notes/plans/architecture_review_2026-07.md](plans/architecture_review_2026-07.md)
+See [notes/plans/architecture_review_2026-07.md](../plans/architecture_review_2026-07.md)
 for the July 2026 architecture review plan (semantic-core unification,
 cross-engine conformance testing, CI sim coverage, cycle removal).
 
@@ -1316,7 +1316,7 @@ file at a time:
 - Leave anything else (loops generating a variable signal count, computed
   names, `m.interface()` expansion, mismatched variable/string names)
   untouched in place — this is inherently the imperative builder's
-  territory (see [dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder))
+  territory (see [dsl_guide.md](../dsl/dsl_guide.md#the-imperative-builder))
   and should not be force-converted. Print a report of what was converted
   vs. left alone (with the reason) rather than silently skipping.
 - Round-trip check: re-emit both the original and converted module and
@@ -1334,7 +1334,7 @@ case is solid, per the "mixing both styles in one module" pattern in
 
 ## Test infrastructure
 
-Grammar-driven fuzzer ([notes/fuzzer.md](fuzzer.md)) — implemented.  Generates
+Grammar-driven fuzzer ([notes/developer/fuzzer.md](fuzzer.md)) — implemented.  Generates
 arbitrary Verilog modules from the parse grammar, cross-checks all engines +
 Icarus, logs mismatches to disk.  Runs as a standalone CLI tool
 (`uv run -m veriforge.fuzz`).
@@ -1347,7 +1347,7 @@ Proposed markers from [notes/test_taxonomy.md](test_taxonomy.md) not yet applied
 ## Parser / SystemVerilog coverage
 
 The constructs marked **Partial**, **Limited**, or **Planned** in
-[notes/support_matrix.md](support_matrix.md) represent the known parser/simulation
+[notes/support_matrix.md](../support_matrix.md) represent the known parser/simulation
 coverage frontier.
 
 - **Dangling-else ambiguity resolved to the wrong (outer) `if` — Fixed.**

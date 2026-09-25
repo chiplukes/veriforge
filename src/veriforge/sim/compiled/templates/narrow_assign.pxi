@@ -6078,7 +6078,7 @@ cdef inline void _whole_stage_signal_sv(SimCtx *c, long long *sv, long long *sm,
     # of the live value. Selected at emission time
     # (_emit_wide_signal_copy_lines, _wide_emitter.py) only when src_sid is
     # known not to be blocking-written elsewhere in the same seq body
-    # (self._body_tainted_sids) -- see notes/roadmap.md "Wide-signal
+    # (self._body_tainted_sids) -- see notes/developer/roadmap.md "Wide-signal
     # pre-edge snapshot gap": confirmed real-world trigger is
     # `axis_regslice.v`'s `m_axis_tdata <= s_axis_tdata;` (a whole-signal,
     # not bit-range, NBA copy -- the ONE code path that class of fix never
@@ -6303,7 +6303,7 @@ cdef inline void _whole_stage_insert_signal_sv(SimCtx *c, long long *sv, long lo
     # _mask_sv (wide_snap_val/sv[]) instead of the live value. Selected at
     # emission time (_stmt_emitters.py's struct/range-select LHS writers)
     # only when src_sid is known not to be blocking-written elsewhere in
-    # the same seq body (self._body_tainted_sids) -- see notes/roadmap.md
+    # the same seq body (self._body_tainted_sids) -- see notes/developer/roadmap.md
     # "Wide-signal pre-edge snapshot gap": same class of bug as
     # _whole_stage_signal_sv, found auditing every other call-site-blind
     # NBA helper that reads a signal source via a runtime sid rather than

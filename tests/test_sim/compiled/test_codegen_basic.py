@@ -1125,7 +1125,7 @@ class TestOrChainTemporaries:
         Each `|` step in `_emit_binary`'s natural-width bitwise-op branch
         re-masks its own result to `bitwise_op_width` even when nested
         inside another `|` at the identical width (where the operand is
-        already provably masked) -- see notes/known_issues.md/
+        already provably masked) -- see notes/developer/known_issues.md/
         known_issues_archive.md for why this is safe-but-verbose rather
         than a correctness bug (masking a signed leaf operand's full-
         register sign-extension is genuinely necessary in general; eliding

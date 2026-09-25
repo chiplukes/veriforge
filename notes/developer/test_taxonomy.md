@@ -68,6 +68,23 @@ to wipe and rebuild from scratch.
 (`NotImplementedError`, by design — see `known_issues.md`). Marked strict
 xfail.
 
+## Test fixtures (conftest.py)
+
+Available fixtures for the parser/grammar test suite:
+
+| Fixture | Description |
+|---------|-------------|
+| `parser` | Full parser starting at 'verilog' rule |
+| `module_parser` | Parser starting at 'module_declaration' |
+| `expression_parser` | Parser starting at 'expression' |
+| `statement_parser` | Parser starting at 'statement' |
+| `grammar_metadata` | Parsed metadata from verilog.lark |
+| `grammar_deps` | Dependency map from JSON |
+| `high_priority_rules` | Rules with PRIORITY: HIGH |
+| `synthesizable_rules` | Rules with SYNTHESIZABLE: YES |
+| `rules_with_examples` | Rules that have EXAMPLE tags |
+| `parse_helper` | Factory for ParseHelper instances |
+
 ## CI policy
 
 `.github\workflows\test.yml` uses a two-job policy:

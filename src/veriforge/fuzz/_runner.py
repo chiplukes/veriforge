@@ -607,7 +607,7 @@ class FuzzRunner:
 
         Verilator is a 2-state simulator (confirmed directly: driving
         `4'bxxxx` into a `logic` net and reading it back gives `0000`, not
-        `x` -- see notes/known_issues.md). Its output is therefore only
+        `x` -- see notes/developer/known_issues.md). Its output is therefore only
         meaningful where the reference engine itself reports a signal as
         fully defined (mask=0) -- any `(vector, signal)` pair where the
         oracle shows ambiguity is skipped rather than compared, since
@@ -721,7 +721,7 @@ class FuzzRunner:
                     # set (`val & ~mask`), so a val-bit-dependent x-vs-z
                     # choice here can never actually select 'x' -- this
                     # simulator's own Value model has no z state distinct
-                    # from x (see notes/known_issues.md, "x and z share one
+                    # from x (see notes/developer/known_issues.md, "x and z share one
                     # representation"), so a masked bit always means x and
                     # must always be emitted as 'x', not 'z' (Icarus DOES
                     # distinguish the two, so emitting 'z' drives a
@@ -736,7 +736,7 @@ class FuzzRunner:
 def _is_icarus_first_activation_artifact(mismatches: list[tuple[int, Value, Value]]) -> bool:
     """Recognize Icarus's own first-activation x-extension quirk.
 
-    See notes/known_issues.md ("Icarus first-activation x-extension
+    See notes/developer/known_issues.md ("Icarus first-activation x-extension
     artifact"): a combinational always block's very first evaluation of an
     ambiguous self-determined-width RHS (comparison/reduction/!/&&/||)
     extended into a wider destination sometimes gives fully-x in Icarus,

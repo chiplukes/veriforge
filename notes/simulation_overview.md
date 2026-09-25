@@ -107,5 +107,5 @@ with bench.run():
 
 The simulation system sits on top of the **parser and model** (`veriforge.project`,
 `veriforge.model`) — it never calls the parser itself, only consumes the
-`Module` AST. See [architecture.md](architecture.md) for the full project map and
+`Module` AST. See [architecture.md](developer/architecture.md) for the full project map and
 [getting_started.md](getting_started.md) for installation and first steps.

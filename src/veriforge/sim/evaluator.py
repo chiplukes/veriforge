@@ -544,7 +544,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # unsigned. The result is then extended separately to `width`
             # using the whole BinaryOp's own combined signedness. Confirmed
             # against a from-scratch IEEE 1364-2005 SS5.5.2 derivation (see
-            # notes/known_issues.md); mirrors the identical fix already
+            # notes/developer/known_issues.md); mirrors the identical fix already
             # applied to the compiled engine's wide emitter.
             elif op in ("&", "|", "^", "~^", "^~"):
                 # Evaluate each operand AT op_width (not the outer `width`):
@@ -883,7 +883,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # the assignment site) -- that's wrong for unsigned operands,
             # since zero-extension doesn't commute with bitwise complement
             # (only sign-extension does), confirmed against Icarus/Verilator
-            # (see notes/known_issues.md).
+            # (see notes/developer/known_issues.md).
             if expr.op in ("~", "+", "-"):
                 # `~` used to be special-cased here: compute at the
                 # operand's own FIXED self-determined width first (when
@@ -899,7 +899,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # (six fixed-self-determined operators x both `~` and
                 # unary `-` x three destination positions -- bare
                 # assignment, signed-uncast destination, ternary branch;
-                # see notes/known_issues.md's seed 2182 entry) found this
+                # see notes/developer/known_issues.md's seed 2182 entry) found this
                 # backwards for `~`: Icarus extends the operand to
                 # context width FIRST (using the operand's own
                 # signedness -- always unsigned for these operators, IEEE
@@ -1037,7 +1037,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # leave those nested operators entirely unresized -- confirmed
             # wrong against Icarus for e.g. `{a, (~(cond ? ~x : y))}` where
             # `~x` needs to be sign-extended to match `y`'s width *before*
-            # the outer `~` runs (see notes/known_issues.md).
+            # the outer `~` runs (see notes/developer/known_issues.md).
             parts = [self.eval(p, ctx, _expr_self_width(p, ctx)) for p in expr.parts]
             result = parts[0]
             for p in parts[1:]:

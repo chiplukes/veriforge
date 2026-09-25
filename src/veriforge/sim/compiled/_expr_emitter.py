@@ -748,7 +748,7 @@ class _ExprEmitterMixin:
             # loop) does not yet support signed_override threading -- keep
             # the previous self-determined-width + post-hoc-wrap
             # approximation here. It is a real, documented residual gap
-            # (see notes/known_issues.md) for a branch that is itself a
+            # (see notes/developer/known_issues.md) for a branch that is itself a
             # context-determined operator whose OWN signedness disagrees
             # with the ternary's combined signedness, evaluated in this
             # specific code path.
@@ -2111,7 +2111,7 @@ class _ExprEmitterMixin:
         # the RESULT afterward) -- that's wrong for unsigned operands, since
         # zero-extension doesn't commute with bitwise complement (only
         # sign-extension does), confirmed against Icarus/Verilator (see
-        # notes/known_issues.md).
+        # notes/developer/known_issues.md).
         if expr.op in ("~", "+", "-"):
             # `~` used to be special-cased here: evaluate at the operand's
             # own FIXED self-determined width first (when the operand is
@@ -2123,7 +2123,7 @@ class _ExprEmitterMixin:
             # below since two's-complement negation of an already-
             # extended value gives the correct modular wraparound
             # regardless. A systematic truth-table sweep (see
-            # notes/known_issues.md's seed 2182 entry) found this
+            # notes/developer/known_issues.md's seed 2182 entry) found this
             # backwards for `~`: Icarus extends the operand to context
             # width FIRST, THEN applies `~` to the WHOLE extended value,
             # exactly like unary `-` already does -- there is no special
@@ -3069,7 +3069,7 @@ class _ExprEmitterMixin:
                 # default) corrupts this into an inflated width estimate,
                 # which then wrongly widens a `~`/`+`/`-` unary operand
                 # nested in the shift's left operand before the operator
-                # runs (see notes/known_issues.md, item 2.6's regression).
+                # runs (see notes/developer/known_issues.md, item 2.6's regression).
                 # `**` (power) shares this SAME row in Table 5-22 (`>> <<
                 # ** >>> <<<` -> `L(i)`, exponent always self-determined) --
                 # verified directly against the primary spec text; mirrors

@@ -13,7 +13,7 @@ one input port list) to keep the number of distinct compiled-engine builds
 bounded regardless of case count.
 
 The "compiled" engine only participates when `VERIFORGE_DIFF_COMPILED=1` is
-set: the compiled engine's known gaps (see `notes/known_issues.md`) would
+set: the compiled engine's known gaps (see `notes/developer/known_issues.md`) would
 otherwise make the default run red, and per-module Cython compilation is too
 slow for the default run's "a few seconds" budget. The default run covers
 reference/vm/vm-fast only; a heavier compiled-enabled run with a larger case

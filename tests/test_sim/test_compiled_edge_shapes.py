@@ -7,7 +7,7 @@ contexts, and dynamic part-selects near word seams. Same cross-engine
 mechanics as item 2.1 (`test_assignment_matrix.py`): every case runs on
 every engine, is checked against a Python oracle *and* the reference
 engine's own result, and known compiled failures are filed in
-`notes/known_issues.md` and pinned with strict xfail rather than weakening
+`notes/developer/known_issues.md` and pinned with strict xfail rather than weakening
 the oracle.
 
 This file is the regression home for future compiled bugs of this shape:
@@ -75,7 +75,7 @@ class EdgeCase:
     """True if the shape needs a posedge clk edge (nonblocking) between drive and read."""
     skip_ref_crosscheck: bool = False
     """True if the reference engine is itself known-wrong for this shape (see
-    notes/known_issues.md) -- the oracle assertion is still authoritative,
+    notes/developer/known_issues.md) -- the oracle assertion is still authoritative,
     only the redundant cross-check against a known-bad reference result is
     skipped so it doesn't manufacture a false failure for engines that are
     actually correct."""
@@ -603,7 +603,7 @@ def _context_determined_unary(op: str, a_val: int, src_w: int, dst_w: int, src_s
     self-determined: the operand is first extended to the full assignment
     context width using its own declared signedness, and only then is the
     operator applied at that width. This was cross-checked against both
-    Icarus Verilog and Verilator (see notes/known_issues.md) -- an earlier
+    Icarus Verilog and Verilator (see notes/developer/known_issues.md) -- an earlier
     assumption in this codebase that these operators are self-determined
     (IEEE Table 5-22 lists them as self-determined only when they are a
     *subexpression* of a larger context-determined expression, not when
@@ -623,7 +623,7 @@ def _unary_self_determined_cases() -> list[EdgeCase]:
     # `~a`/`-a` are context-determined (correct) on all engines -- item 2.6
     # fixed the last gap (unary `~` on an unsigned operand, wrongly
     # self-determined on reference/vm/vm-fast and the compiled engine's
-    # narrow path; see notes/known_issues.md).
+    # narrow path; see notes/developer/known_issues.md).
     cases: list[EdgeCase] = []
     a_val = (1 << 64) | 0x123  # 65-bit value, bit 64 set
     for op, opname in (("~", "not"), ("-", "neg")):
@@ -758,7 +758,7 @@ def _dynamic_part_select_cases() -> list[EdgeCase]:
 
 
 # =====================================================================
-# Known engine bugs (see notes/known_issues.md)
+# Known engine bugs (see notes/developer/known_issues.md)
 # =====================================================================
 
 

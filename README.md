@@ -7,7 +7,7 @@ A Python library for parsing, analyzing, generating, and simulating Verilog/Syst
 
 ## Features
 
-- **Simulate** — event-driven 4-state simulator (x and z share one representation — see [known issues](notes/known_issues.md)) with three engines (reference, bytecode VM, compiled Cython)
+- **Simulate** — event-driven 4-state simulator (x and z share one representation — see [known issues](notes/developer/known_issues.md)) with three engines (reference, bytecode VM, compiled Cython)
 - **Python DSL** — build hardware with operator-overloaded Python, emit to Verilog or simulate directly
 - **Language Server** — `veriforge-lsp` provides editor diagnostics, symbols, navigation, hover, and custom hierarchy/trace commands (install [Verible](https://github.com/chipsalliance/verible) for fast between-save diagnostics; the server falls back to the built-in Lark parser when Verible is absent)
 - **Parse** Verilog 2005 (with SystemVerilog extensions) into a semantic model
@@ -18,37 +18,27 @@ A Python library for parsing, analyzing, generating, and simulating Verilog/Syst
 - **Component library** — FIFO, CDC, codec, AXI-Stream, AXI4-Lite, DSP, RAM, Xilinx inference
 - **Auto-generate testbenches** from any module
 - **Convert** parsed Verilog to DSL code (Verilog → Python translation)
-- **Fuzz** — grammar-driven cross-engine + Icarus differential fuzzing tool ([docs](notes/fuzzer.md))
+- **Fuzz** — grammar-driven cross-engine + Icarus differential fuzzing tool ([docs](notes/developer/fuzzer.md))
 - **VCD output** — IEEE 1364-2001 waveform dumps, cross-simulator validation
 - **Inspect** semantic models through lookup helpers and JSON serialization
 
 ## Documentation
 
-- [Getting Started](notes/getting_started.md) — installation and quick workflows
-- [User Guide](notes/user_guide.md) — detailed guide with API examples
-- [Architecture](notes/architecture.md) — layer overview and links to sub-topics
-- [Developer Guide](notes/developer_guide.md) — setup, testing, contributing
-- [Public API Guide](notes/public_api.md) — recommended imports for user code
+- [Getting Started](notes/getting_started.md) — installation and quick workflows, Simulation and DSL first
+- [Simulation Overview](notes/simulation_overview.md) — engine selection and performance
 - [DSL Reference](notes/dsl/dsl_guide.md) — Python DSL syntax reference
+- [User Guide](notes/user_guide.md) — detailed guide with API examples
+- [Developer Guide](notes/developer_guide.md) — setup, testing, contributing
+- [Architecture](notes/developer/architecture.md) — layer overview and links to sub-topics
+- [Public API Guide](notes/developer/public_api.md) — recommended imports for user code
 - [Support Matrix](notes/support_matrix.md) — practical support status across project surfaces
 - [LSP Server](notes/veriforge_lsp.md) — Verilog/SystemVerilog Language Server Protocol support
-- [Roadmap](notes/roadmap.md) — known future work items
+- [Roadmap](notes/developer/roadmap.md) — known future work items
 - [Grammar Support Status](docs/grammar_support.md) — parser-rule metadata table
 - [Grammar Dependencies (JSON)](docs/grammar_deps.json) — machine-readable rule dependency map
-- [Fuzzer](notes/fuzzer.md) — grammar-driven cross-engine + Icarus differential fuzzing
+- [Fuzzer](notes/developer/fuzzer.md) — grammar-driven cross-engine + Icarus differential fuzzing
 
 ## Quick Start
-
-### Parse a Verilog file
-
-```python
-from veriforge.project import parse_file
-from veriforge.codegen import emit_module
-
-design = parse_file("rtl/counter.v", preprocess=True)
-for mod in design.modules:
-    print(emit_module(mod))
-```
 
 ### Build hardware with the Python DSL
 
@@ -88,6 +78,17 @@ def test(s):
 
 sim.run(test, max_time=200)
 print(sim.read("count"))
+```
+
+### Parse a Verilog file
+
+```python
+from veriforge.project import parse_file
+from veriforge.codegen import emit_module
+
+design = parse_file("rtl/counter.v", preprocess=True)
+for mod in design.modules:
+    print(emit_module(mod))
 ```
 
 ### Analyze a project
@@ -175,7 +176,7 @@ uv run python -m veriforge.lark_file.gen_tree --all --depth 5
 ```
 
 See `veriforge <command> --help` for full flag listings and
-[notes/cli_json_schema.md](notes/cli_json_schema.md) for the `--json` output contract.
+[notes/developer/cli_json_schema.md](notes/developer/cli_json_schema.md) for the `--json` output contract.
 
 ## Running Tests
 
@@ -188,7 +189,7 @@ uv run --extra test pytest tests/ --tb=no -q
 ```
 
 For long-running grammar-driven fuzz testing across all engines (including
-Icarus cross-check), see the standalone fuzzer at [notes/fuzzer.md](notes/fuzzer.md):
+Icarus cross-check), see the standalone fuzzer at [notes/developer/fuzzer.md](notes/developer/fuzzer.md):
 
 ```bash
 uv run -m veriforge.fuzz --max 100 --no-icarus
@@ -230,7 +231,7 @@ veriforge targets RTL-level behavioral simulation and analysis. Before using it,
 - The converter (`export-dsl`) is intentionally conservative. Control-flow-heavy constructs, complex always blocks, and module-level generate blocks often require manual rewriting. See [notes/dsl/dsl_conversion_coverage.md](notes/dsl/dsl_conversion_coverage.md) for the detailed gap list.
 
 **Hierarchy refactor tooling**
-- Structural, behavioral, parameterized, and generate-containing wrappers are detected and classified but collapse is intentionally blocked pending safer transforms. Extract and boundary-move operations cover common direct-wiring cases; complex connectivity patterns fail closed with a diagnostic. See [notes/roadmap.md](notes/roadmap.md) for the backlog.
+- Structural, behavioral, parameterized, and generate-containing wrappers are detected and classified but collapse is intentionally blocked pending safer transforms. Extract and boundary-move operations cover common direct-wiring cases; complex connectivity patterns fail closed with a diagnostic. See [notes/developer/roadmap.md](notes/developer/roadmap.md) for the backlog.
 
 **Performance**
 - Even with the compiled Cython engine, throughput is lower than C-based simulators. For simple sequential testbenches on medium-sized designs, performance is practical. For very large designs or workloads requiring millions of cycles, prefer a dedicated simulator and use veriforge for the analysis and testbench-generation layers.

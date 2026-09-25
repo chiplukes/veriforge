@@ -1,6 +1,6 @@
 """Regression tests for the compiled-engine "latent risks" identified May 2026.
 
-These three areas were flagged in ``notes/known_issues.md`` (search for
+These three areas were flagged in ``notes/developer/known_issues.md`` (search for
 "Compiled engine — latent risks identified May 2026") as plausibly-broken
 behaviors that no existing test exercised. After audit:
 

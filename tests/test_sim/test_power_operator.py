@@ -19,7 +19,7 @@ the IEEE 1364-2005 primary spec text directly:
      implemented at all.
 
 Every case here is verified against Icarus Verilog (see the scratchpad
-bisection scripts referenced in notes/known_issues.md's write-up for this
+bisection scripts referenced in notes/developer/known_issues.md's write-up for this
 wave) before being encoded as a fixed oracle value in this file, following
 the same cross-engine-parametrized pattern as `test_compiled_edge_shapes.py`.
 
@@ -189,7 +189,7 @@ _TABLE_5_6_CASES = [
 # a `_wide_pow_py`/`_wide_spow_py` helper using Python's arbitrary-
 # precision `**`/`pow()` for the actual math). `reference` and `vm`
 # (pure Python, arbitrary-width `int`) were always unaffected. See
-# notes/known_issues.md for the original silent-corruption finding.
+# notes/developer/known_issues.md for the original silent-corruption finding.
 # =====================================================================
 
 _WIDE_DEST_CASES = [

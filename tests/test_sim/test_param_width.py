@@ -701,7 +701,7 @@ class TestSignedParameterSignExtension:
     when read into a wider signal, on every engine.
 
     Regression for a real bug found via the grammar-driven fuzzer's own
-    parameter generation (`notes/roadmap.md`): `_extract_parameters`
+    parameter generation (`notes/developer/roadmap.md`): `_extract_parameters`
     (`transforms/_declarations.py`) only populated `Parameter.signed`/
     `.width` from a `parameter_type` wrapper node -- but
     `parameter_declaration`'s own grammar rule (`KW_PARAMETER KW_SIGNED?

@@ -125,7 +125,7 @@ DEF WIDE_WORDS        = 8       # max 64-bit words per wide value (512-bit max)
 # together, e.g. `{<<{a, b, {c, c, d}}}`) whose combined pre-reversal width
 # lands just over the old 384-bit cap (397/385 bits in the two fuzzer-found
 # cases) despite every individual operand and the final destination both
-# being comfortably narrow -- see notes/roadmap.md and
+# being comfortably narrow -- see notes/developer/roadmap.md and
 # `sim/vm/compiler.py`'s `_VM_FAST_WIDE_WORDS` (must stay in sync with this
 # value, and with `_WIDE_WORDS` in `sim/vm/vm_scheduler.py`) for the full
 # story, including why this was raised a modest amount rather than a large
@@ -1714,7 +1714,7 @@ cdef int _execute_core(
             # base/exponent/destination silently computed a plausible-
             # looking but WRONG answer with no warning (confirmed via
             # valgrind... no, via direct comparison against Icarus/
-            # reference -- see notes/known_issues.md's vm-fast `**` entry
+            # reference -- see notes/developer/known_issues.md's vm-fast `**` entry
             # and tests/test_sim/test_power_operator.py's formerly-xfail
             # `wide_operand_not_yet_supported_on_c_engines` case, now
             # passing).
@@ -3555,7 +3555,7 @@ cdef int _execute_core(
                 # Wide casez: same as wide casex -- see OP_CMP_CASEX above
                 # (casez is treated identically to casex in this 4-state
                 # model, which conflates x and z into one "unknown" mask
-                # bit; see notes/known_issues.md for the documented residual
+                # bit; see notes/developer/known_issues.md for the documented residual
                 # gap this conflation implies for casez's stricter x-must-
                 # match-exactly rule).
                 if not wflag[sp]:
@@ -3951,7 +3951,7 @@ cdef inline int _changed_buf_push(DeltaCtx *dc, int sid, int *p_changed_count) n
     can be re-pushed if a later continuous assign in the SAME pass dirties
     it again) means the same signal ID can appear in changed_buf many
     times over. This was a genuine heap-buffer-overflow crash (confirmed
-    via valgrind, see notes/known_issues.md's vm-fast heap-corruption
+    via valgrind, see notes/developer/known_issues.md's vm-fast heap-corruption
     entry) before this fix: every push site wrote `changed_buf[changed_
     count]` with no bounds check at all, silently corrupting adjacent
     heap memory once a design's continuous-assign dependency shape caused

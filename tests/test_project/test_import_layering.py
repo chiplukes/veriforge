@@ -65,7 +65,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
 #     objects for native lowering, `skeleton.py` generates testbench
 #     wrappers using DSL expression helpers).
 #   - `dsl/testbench.py` is a backward-compatible re-export shim with no
-#     real logic (see notes/architecture.md, "sim ↔ dsl: now acyclic") --
+#     real logic (see notes/developer/architecture.md, "sim ↔ dsl: now acyclic") --
 #     it is the one legitimate `dsl -> sim` edge, restricted to exactly the
 #     module it shims.
 # Anything else (e.g. `sim/evaluator.py` importing `dsl`, or some other

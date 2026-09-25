@@ -34,7 +34,7 @@ Verilog/SV source text
 `preprocessor.py` resolves `` `define ``, `` `ifdef `` / `` `ifndef ``, `` `include ``, and `` `timescale ``
 before the text reaches the parser. Grammar fragments used during preprocessing live in `lark_file/`.
 
-See [notes/pcache.md](pcache.md) for parse cache behaviour.
+See [notes/developer/parsing/pcache.md](parsing/pcache.md) for parse cache behaviour.
 
 ## Parsing
 
@@ -54,7 +54,7 @@ See [notes/semantic_model.md](semantic_model.md) for full type hierarchy and nod
 `analysis/` contains passes that operate on the semantic model: clock/reset extraction,
 expression-width inference, constant folding, and lint checks.
 
-See [notes/support_matrix.md](support_matrix.md) for the full coverage status by language surface.
+See [notes/support_matrix.md](../support_matrix.md) for the full coverage status by language surface.
 
 ## Semantics
 
@@ -97,8 +97,8 @@ unresolvable in some contexts).
 `dsl/` provides a Python builder API (module/port/expression constructors, stdlib in `dsl/lib/`).
 `convert/to_dsl.py` translates parsed Verilog model objects into equivalent Python DSL source.
 
-- [notes/dsl/dsl_guide.md](dsl/dsl_guide.md) — DSL syntax reference
-- [notes/dsl/dsl_conversion_coverage.md](dsl/dsl_conversion_coverage.md) — Verilog→DSL conversion coverage
+- [notes/dsl/dsl_guide.md](../dsl/dsl_guide.md) — DSL syntax reference
+- [notes/dsl/dsl_conversion_coverage.md](../dsl/dsl_conversion_coverage.md) — Verilog→DSL conversion coverage
 
 ## sim ↔ dsl: now acyclic
 
@@ -138,15 +138,15 @@ Three engines with different performance and compatibility trade-offs:
 The testbench framework (`sim/bench/`) auto-detects AXI, Stream, and MemBus port bundles
 and wires them to typed endpoint objects.
 
-- [notes/simulation/simulator_engines.md](simulation/simulator_engines.md) — engine comparison and performance guidance
-- [notes/simulation/simulation_model.md](simulation/simulation_model.md) — execution model
-- [notes/simulation/bench_usage.md](simulation/bench_usage.md) — testbench framework
-- [notes/simulation/bench_native_lowering.md](simulation/bench_native_lowering.md) — compiled/VM engine-native lowering
-- [notes/simulation/endpoint_timing_model.md](simulation/endpoint_timing_model.md) — endpoint tick_pre/sample_pre/tick_post contract
-- [notes/simulation/testbench_phase_contract.md](simulation/testbench_phase_contract.md) — phase contract for endpoints
-- [notes/simulation/cycache.md](simulation/cycache.md) — compiled Cython cache
-- [notes/simulation/wide_signal_coverage.md](simulation/wide_signal_coverage.md) — compiled-engine wide-signal operation coverage
-- [notes/simulation/debug.md](simulation/debug.md) — debugging strategies and Python snippets for simulator issues
+- [notes/simulation/simulator_engines.md](../simulation/simulator_engines.md) — engine comparison and performance guidance
+- [notes/simulation/simulation_model.md](../simulation/simulation_model.md) — execution model
+- [notes/simulation/bench_usage.md](../simulation/bench_usage.md) — testbench framework
+- [notes/simulation/bench_native_lowering.md](../simulation/bench_native_lowering.md) — compiled/VM engine-native lowering
+- [notes/simulation/endpoint_timing_model.md](../simulation/endpoint_timing_model.md) — endpoint tick_pre/sample_pre/tick_post contract
+- [notes/simulation/testbench_phase_contract.md](../simulation/testbench_phase_contract.md) — phase contract for endpoints
+- [notes/simulation/cycache.md](../simulation/cycache.md) — compiled Cython cache
+- [notes/simulation/wide_signal_coverage.md](../simulation/wide_signal_coverage.md) — compiled-engine wide-signal operation coverage
+- [notes/simulation/debug.md](../simulation/debug.md) — debugging strategies and Python snippets for simulator issues
 - [notes/fuzzer.md](fuzzer.md) — grammar-driven cross-engine + Icarus differential fuzzing tool
 
 ## Refactor tooling
@@ -161,5 +161,5 @@ pull-up, and push-down, with LSP integration for in-editor apply.
 `parse-directory`, `export-dsl`, `hierarchy`, `lint`, `format`). The top-level
 `veriforge_lsp/` package implements the `veriforge-lsp` language server on pygls.
 
-- [notes/veriforge_lsp.md](veriforge_lsp.md) — LSP server commands
+- [notes/veriforge_lsp.md](../veriforge_lsp.md) — LSP server commands
 - [notes/public_api.md](public_api.md) — public import surface

@@ -68,7 +68,7 @@ class _StmtEmittersMixin:
         elsewhere in the same seq body (`self._body_tainted_sids`, `None`
         outside seq bodies). *args* is the helper's own arguments after
         `c` (and, for the `_sv` case, after `sv, sm`) -- see
-        notes/roadmap.md "Wide-signal pre-edge snapshot gap": these
+        notes/developer/roadmap.md "Wide-signal pre-edge snapshot gap": these
         `_whole_stage_*` helpers are shared, call-site-blind functions that
         read their signal source via a runtime sid, exactly the class of
         bug fixed there for `_whole_stage_signal`/`_wmem{mid}_stage_insert_

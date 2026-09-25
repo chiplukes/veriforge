@@ -353,7 +353,7 @@ def _extract_parameters(
         # `Parameter.width=None` regardless of its own declaration --
         # confirmed via the fuzzing round's own parameter generation
         # finding a real sign-extension bug that traced back to exactly
-        # this (see notes/roadmap.md).
+        # this (see notes/developer/roadmap.md).
         if isinstance(child, Token) and child.type == "KW_SIGNED":
             signed = True
         elif isinstance(child, Tree) and child.data == "range":

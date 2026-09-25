@@ -65,7 +65,7 @@ Copy the probe and list logic from one existing `_engines()` verbatim
 `_engines()`: delete the local copy and `from .engines import ENGINES` (add
 `STEPPED_ENGINES` where used). Do NOT change any test's engine list contents —
 files with hand-written lists like `["reference", "vm"]` keep them.
-**Also**: register the two markers from `notes/test_taxonomy.md` in
+**Also**: register the two markers from `notes/developer/test_taxonomy.md` in
 `tests/conftest.py` `pytest_configure` (next to the existing `slow` marker):
 `cross_engine` and `compiled`. Applying the markers to tests is item 2.x
 work — here only register them.
@@ -230,12 +230,12 @@ combo — reuse one module for all signedness/stimulus variants of that combo to
 keep compile count ≈ 36, not 500.
 **Accept**: suite passes on reference/vm/vm-fast; run compiled locally with
 `uv run pytest tests/test_sim/test_assignment_matrix.py -n 4 -q`. Any
-compiled failures are real bugs: file them in `notes/known_issues.md` and
+compiled failures are real bugs: file them in `notes/developer/known_issues.md` and
 xfail (strict) with a comment rather than weakening the oracle.
 
 **Result** (July 2026): 648 cases (162 matrix cells × 4 engines); 589
 pass, 59 strict-xfail on compiled (two root causes, both filed in
-`notes/known_issues.md`: narrow-path blocking/nonblocking x-mask loss, and
+`notes/developer/known_issues.md`: narrow-path blocking/nonblocking x-mask loss, and
 wide-emitter sign-extension wrong for the 65→80 width pair specifically).
 The matrix also caught a cross-engine bug in shared elaboration code
 (`elaborate.py::_create_prefixed_signals` dropped `signed` on a child's
@@ -289,7 +289,7 @@ Investigating family 4 turned up that the IEEE reading behind the existing
 `-`/`~` are *context-determined*, not self-determined, when they are an
 assignment's top-level RHS. That reframes the bug into four independent,
 precisely-characterized ones (full detail, repro commands, and truth tables
-in `notes/known_issues.md`): (1) `~` is wrongly self-determined on
+in `notes/developer/known_issues.md`): (1) `~` is wrongly self-determined on
 reference/vm/vm-fast at all widths; (2) compiled's narrow (<=64-bit) path
 has the same `~` bug; (3) compiled's wide (>64-bit) unary path ignores
 declared signedness (always zero-extends before applying `~`/`-`) — this is
@@ -303,7 +303,7 @@ width (64) is a no-op instead of yielding 0, at widths 63/64 (not 65).
 **Goal**: architecture review item 8, rescoped July 2026 after 2.2 found the
 original diagnosis (IEEE self-determined citation) was backwards — see the
 "Unary `-`/`~` are context-determined, not self-determined" entry in
-`notes/known_issues.md` for the full truth table and Icarus/Verilator
+`notes/developer/known_issues.md` for the full truth table and Icarus/Verilator
 verification. This item covers only the two bugs below that are contained
 to the compiled engine (bugs 3 and 4 from 2.2's Result note); the
 cross-engine `~` bug (1/2 from that note) is item **2.6**, not this item —
@@ -335,7 +335,7 @@ so signedness genuinely isn't consulted in this path at all.
 3. Update `tests/test_sim/test_compiled_edge_shapes.py`: remove the
    `_known_engine_bug` entries for `self_det_unary_not_65_to_80_signed` and
    `self_det_unary_neg_65_to_80_signed` (they should now pass un-xfailed).
-4. Update `notes/known_issues.md`: remove bullet 3 ("wide unary path ignores
+4. Update `notes/developer/known_issues.md`: remove bullet 3 ("wide unary path ignores
    declared signedness entirely") from the "Unary `-`/`~` are
    context-determined" entry once green; leave bullets 1/2 (item 2.6's
    scope) in place.
@@ -370,7 +370,7 @@ the operand's width to produce an all-zero result.
 3. Update `tests/test_sim/test_compiled_edge_shapes.py`: remove the
    `_known_engine_bug` entries for `seam63_shl64`, `seam63_shr64`,
    `seam64_shl64`, `seam64_shr64`.
-4. Update `notes/known_issues.md`: remove the "narrow-path shift by exactly
+4. Update `notes/developer/known_issues.md`: remove the "narrow-path shift by exactly
    the word width (64) is a no-op" entry once green.
 
 **Accept**: the 6 now-un-xfailed cases in
@@ -423,14 +423,14 @@ hand-written fast-path template family in
 `$signed(a | b) >>> N`) had the identical conservative bail-out
 independently of `wide_ashr`, invisible until the VM became precise and
 started disagreeing with it. Fixed the same way — see
-`notes/known_issues.md` ("Wide/narrow arithmetic right shift (`>>>`)
+`notes/developer/known_issues.md` ("Wide/narrow arithmetic right shift (`>>>`)
 X-propagation") for the full account, including why `add`/`sub` variants
 of that family were deliberately left alone.
 
 Verifying the VM fix required building the Cython VM extension for the
 first time in this environment, which exposed ~45 additional pre-existing
 `vm-fast`-only failures (confirmed via `git stash` to predate this work) —
-see `notes/known_issues.md` ("Cython VM interpreter drift"), now
+see `notes/developer/known_issues.md` ("Cython VM interpreter drift"), now
 considerably better-characterized than before. That's item 3.3's scope,
 not this item's.
 
@@ -504,10 +504,10 @@ skipped = 4627, exactly matching the original file's own baseline run).
 Updated `pyproject.toml`'s per-file ruff ignore (added `F403`/`F405` for
 the star-import pattern) and every functional/actionable doc reference
 (`tools/validate_compiled_pytest.py`'s 24 hardcoded node IDs,
-`notes/developer_guide.md`, `notes/test_taxonomy.md`, `notes/known_issues.md`,
+`notes/developer_guide.md`, `notes/developer/test_taxonomy.md`, `notes/developer/known_issues.md`,
 `notes/simulation/wide_signal_coverage.md`, `notes/simulation/
 simulator_engines.md`, `notes/simulation/simulator_compile_cython.md`,
-`notes/user_guide.md`, `notes/python_overview.md`) — left historical
+`notes/user_guide.md`, `notes/developer/files.md`) — left historical
 Result notes in this file and the two `*_review_2026-07.md` documents
 untouched, since those describe what was actually run at a past point in
 time before the split existed.
@@ -515,7 +515,7 @@ time before the split existed.
 ### 2.6 Fix cross-engine unary `~` self-determined-width bug (M) ✅
 
 **Goal**: found by item 2.2 (see its Result note and
-`notes/known_issues.md`, "Unary `-`/`~` are context-determined, not
+`notes/developer/known_issues.md`, "Unary `-`/`~` are context-determined, not
 self-determined", bullets 1–2). Appended here out of numeric sequence
 rather than renumbering 2.4/2.5 — do this whenever convenient relative to
 2.4/2.5, there's no ordering dependency between them, but it's riskier than
@@ -597,7 +597,7 @@ compiler, so fixing it fixes both engines):
    `tests/test_sim/test_compiled_edge_shapes.py` (and its
    `skip_ref_crosscheck` flag, now unneeded) once all three engines agree
    with the oracle.
-7. Update `notes/known_issues.md`: remove bullets 1–2 from the "Unary
+7. Update `notes/developer/known_issues.md`: remove bullets 1–2 from the "Unary
    `-`/`~` are context-determined" entry (or the whole entry, if 2.3 has
    also landed by then) once green.
 **Accept**: all three engines match the context-determined oracle for `~`;
@@ -621,7 +621,7 @@ narrow-path fix, all four engines gave the Icarus-correct `252` and the
 whole suite was green. Removed the now-stale `_known_engine_bug` entry and
 `skip_ref_crosscheck` flag in `test_compiled_edge_shapes.py` (371 passed,
 zero xfails left in that file + `test_compiled_latent_risks.py`).
-`notes/known_issues.md`'s "Unary `-`/`~` are context-determined" entry
+`notes/developer/known_issues.md`'s "Unary `-`/`~` are context-determined" entry
 updated to Resolved (all of bugs 1-3 are now fixed, since item 2.3 Part A
 had already landed bug 3 earlier).
 
@@ -652,7 +652,7 @@ green (11606 passed, 61 xfailed).
 
 **Goal**: close out the compiled-engine-specific bugs found (but deliberately
 not fixed) during items 2.1 and 3.4, all currently documented in
-`notes/known_issues.md`. Appended here out of numeric sequence, same as
+`notes/developer/known_issues.md`. Appended here out of numeric sequence, same as
 2.6 — no ordering dependency between the four sub-items below, but each
 changes compiled-engine codegen output, so treat each with the same care
 as 2.6: fix one, run the full fast suite plus the full compiled suite
@@ -669,7 +669,7 @@ as 2.6: fix one, run the full fast suite plus the full compiled suite
    Continuous assigns and anything wider than 64 bits are unaffected
    (different, correctly mask-propagating code paths). Found in item 2.1;
    exercised as a strict `xfail` in `tests/test_sim/test_assignment_matrix.py`
-   — remove the xfail once fixed. See `notes/known_issues.md` for the
+   — remove the xfail once fixed. See `notes/developer/known_issues.md` for the
    exact repro.
 2. **Wide-emitter sign-extension wrong for the (65, 80)-bit width pair
    specifically.** A declared-signed (or `$signed()`-cast) 65-bit value
@@ -716,7 +716,7 @@ sub-item.
 verified via `VERIFORGE_DIFF_COMPILED=1` differential runs with no
 remaining ternary-related divergences (or a narrower, explicitly documented
 residual gap); sub-item 4 either resolved or rescoped into a dedicated
-follow-up item with a concrete plan. `notes/known_issues.md` updated to
+follow-up item with a concrete plan. `notes/developer/known_issues.md` updated to
 Resolved for whichever sub-items land.
 
 **Result (sub-item 1, July 2026)**: Fixed. Root cause:
@@ -737,7 +737,7 @@ a non-Identifier target" fallback paths (`BitSelect`/`RangeSelect`/
 `PartSelect`) that silently defaulted the packed-range base offset to 0
 for a memory-element target instead of calling the already-existing
 `_select_base()` helper the *value*-side code already used. Full detail
-in `notes/known_issues.md`. Full fast suite green (7027 passed), full
+in `notes/developer/known_issues.md`. Full fast suite green (7027 passed), full
 compiled suite green with `--run-slow` (4625 passed, 2 xfailed —
 sub-item 2's cases; one more real bug found and fixed along the way, a
 missing zero-initialization in `TestForLoopCodegen::
@@ -763,13 +763,13 @@ mod-64 behavior), and a new `wide_load_signal_s` primitive in
 recursive scratch-space emitter's `wide_load_signal` had no sign-extension
 concept at all, needed for the `$signed()`/`$unsigned()` cast-form cases
 which reach it instead of the bare-identifier path above). Full detail in
-`notes/known_issues.md`. Full assignment matrix green (648 passed, 0
+`notes/developer/known_issues.md`. Full assignment matrix green (648 passed, 0
 xfailed — the last two known bugs from item 2.1 are now both fixed). Full
 fast suite green (7038 passed), full compiled suite green with
 `--run-slow` (4625 passed, 2 xfailed — unrelated pre-existing xfails).
 
 **Result (sub-item 3, July 2026)**: Substantially fixed — full detail in
-`notes/known_issues.md`'s "Compiled-engine ternary/context-determined-
+`notes/developer/known_issues.md`'s "Compiled-engine ternary/context-determined-
 operator codegen, and a wide family of related width/signedness/x-
 propagation bugs" section. The originally-scoped fix (threading
 `signed_override` through `_wide_emitter.py`'s TernaryOp/UnaryOp/BinaryOp
@@ -810,7 +810,7 @@ compiled engine was already right and reference was wrong for
 should be checked against Icarus, not assumed to be compiled's fault. The
 larger differential run (`VERIFORGE_DIFF_CASES=300` at an alternate seed)
 improved from 8/30 to 13/30 passing batches; full detail (including the
-still-open residual gap) in `notes/known_issues.md`, which now also notes
+still-open residual gap) in `notes/developer/known_issues.md`, which now also notes
 this reference-oracle caveat directly. **Continued (third wave, same day)**: kept bisecting the `VERIFORGE_DIFF_
 CASES=300` failures one at a time (8/30 → 13/30 → 15/30) — found and fixed,
 in both `sim/evaluator.py` and `sim/vm/compiler.py`: the `Literal` hot-path
@@ -1212,7 +1212,7 @@ useful form).
 5. Add the sync policy to `notes/developer_guide.md` §5: any change to
    `sim/vm/interpreter.py` or `sim/vm/opcodes.py` lands with the matching
    `_interp_fast.pyx` change in the same commit.
-6. Update `setup.py`'s docstring and `notes/known_issues.md` (remove/resolve
+6. Update `setup.py`'s docstring and `notes/developer/known_issues.md` (remove/resolve
    the drift entry).
 **Accept**: both runs in step 4 green in CI; known_issues updated.
 
@@ -1286,7 +1286,7 @@ heavier/compiled-enabled run isn't wired into CI yet — deferred to whenever
 Building the harness immediately found ~11 distinct, real, previously
 undetected correctness bugs (verified against Icarus Verilog) spanning
 reference, vm, vm-fast, and the compiled engine — full writeup in
-`notes/known_issues.md` under "Randomized differential harness (work plan
+`notes/developer/known_issues.md` under "Randomized differential harness (work plan
 item 3.4): bugs found and fixed". Highlights: bit-select/part-select
 signedness inheriting the base signal's signedness instead of always being
 unsigned (IEEE 1364-2005 §5.5.1); the conditional operator's own combined
@@ -1321,7 +1321,7 @@ scope, to `if`/`else if`/`else` chains with blocking assignment inside
 (`VERIFORGE_DIFF_STMT_SEED`/`_STMT_CASES`/`_STMT_COMPILED`, same knob
 pattern as `test_differential.py`). This immediately found six more
 distinct bugs, plus two more found mid-investigation while chasing the
-first (all Icarus-confirmed) — full writeup in `notes/known_issues.md`
+first (all Icarus-confirmed) — full writeup in `notes/developer/known_issues.md`
 under "Randomized differential harness (work plan item 3.4): bugs found
 and fixed" → "Twelfth wave". Highlights: nested `$signed($unsigned(x))`
 cast precedence (outermost cast should govern, naive recursion picked
@@ -1358,7 +1358,7 @@ existing combinational form — exercising NBA scheduling/deferred-update
 codegen for the first time. Default-scale runs (40 cases) stayed green
 throughout; stress-testing at 150 cases across two seeds surfaced ten more
 distinct, real bugs, all Icarus-confirmed and/or `git stash`-bisected —
-full writeup in `notes/known_issues.md` under "Randomized differential
+full writeup in `notes/developer/known_issues.md` under "Randomized differential
 harness (work plan item 3.4): bugs found and fixed" → "Thirteenth wave".
 Highlights: a shift-amount sign-extension leak and a genuine
 use-before-define ordering bug in generated Cython (`sim/compiled/
@@ -1403,7 +1403,7 @@ engine's truncation/extension behavior at the comparison boundary.
 Default-scale runs stayed green throughout; stress-testing at 150 cases
 across five seeds surfaced twelve distinct, real bugs, all Icarus-
 confirmed and/or cross-engine-confirmed — full writeup in
-`notes/known_issues.md` under "Randomized differential harness (work
+`notes/developer/known_issues.md` under "Randomized differential harness (work
 plan item 3.4): bugs found and fixed" → "Fourteenth wave". Only two of
 the twelve are actually about case/casex/casez matching itself (`vm-
 fast`'s `OP_CMP_CASEX`/`OP_CMP_CASEZ` ignoring wide operands; compiled
@@ -1457,7 +1457,7 @@ ONCE per always-block evaluation. Default-scale runs stayed green
 throughout; stress-testing at 150 cases across 14 seeds (the five from
 phase 3 plus nine fresh ones) surfaced ten distinct bug findings, all
 Icarus-confirmed and/or cross-engine-confirmed — full writeup in
-`notes/known_issues.md` under "Randomized differential harness (work
+`notes/developer/known_issues.md` under "Randomized differential harness (work
 plan item 3.4): bugs found and fixed" → "Fifteenth wave". The first
 three are a genuine hard crash (a real stack buffer overflow, not a
 wrong-answer bug): `wide_mul`'s fixed 16-word scratch buffer was written
@@ -1593,7 +1593,7 @@ for existing callers; (2) add `_SeqState`/`_gen_seq_stmt`, wire into
 (4) stress-test at 150 cases across the phase-3/4 seed rotation plus 2-3
 fresh seeds, fix/verify per the established Icarus + cross-engine +
 full-batch-regression methodology; (5) full fast-suite regression; (6)
-document results in `notes/known_issues.md` ("Sixteenth wave") and here,
+document results in `notes/developer/known_issues.md` ("Sixteenth wave") and here,
 matching the existing per-phase format.
 **Accept**: default-scale run green; 150-case stress run green across
 5+ seeds; no regressions in the full fast suite; both docs updated with
@@ -1640,7 +1640,7 @@ example (only caught by the closing full-suite run) by discarding real
 address bits whenever the `>>` result was immediately narrowed by an
 outer cast — corrected to mask by `max(outer width, the operand's own
 natural width)` instead. Full detail (root cause, Icarus repro, fix
-location) for each in `notes/known_issues.md`'s "Sixteenth wave" entry.
+location) for each in `notes/developer/known_issues.md`'s "Sixteenth wave" entry.
 
 Verified via all 14 statement-fuzzer seeds (150 cases each, 8/8 batches,
 `VERIFORGE_DIFF_STMT_COMPILED=1`), all 8 expression-tree fuzzer seeds
@@ -1759,7 +1759,7 @@ default-scale run green for both fuzzers; (4) stress-test at 150 cases
 across the full seed rotation plus 2-3 fresh seeds, fix/verify per the
 established Icarus + cross-engine + full-batch-regression methodology;
 (5) full fast-suite regression; (6) document results in
-`notes/known_issues.md` ("Seventeenth wave") and here.
+`notes/developer/known_issues.md` ("Seventeenth wave") and here.
 **Accept**: default-scale run green; 150-case stress run green across
 5+ seeds; no regressions in the full fast suite; both docs updated with
 results.
@@ -1807,7 +1807,7 @@ pre-existing gap unrelated to function calls, whose fix itself exposed
 two further pre-existing wide-emitter bookkeeping gaps: `_dynamic_max_
 wide_words` and `_needs_wide_helpers` both never updated when the wide
 emitter is reached from a narrow calling context). Full detail (root
-cause, Icarus repro, fix location) for each in `notes/known_issues.md`'s
+cause, Icarus repro, fix location) for each in `notes/developer/known_issues.md`'s
 "Seventeenth wave" entry.
 
 Two of the compiled-engine bugs found (the `*`/`/`/`%` mask rule and the
@@ -1884,7 +1884,7 @@ fixed (ports fell back to body-declaration order instead of the
 header's `list_of_ports` order, breaking positional instantiation for
 any old-style module whose body isn't already in header order). Both
 fixed; two new regression tests added in `tests/test_model/
-test_module.py`. Full detail in `notes/known_issues.md`'s Seventeenth
+test_module.py`. Full detail in `notes/developer/known_issues.md`'s Seventeenth
 wave entry. Verified: `tests/test_model/`/`tests/test_verilog_parser/`
 (951 passed) and a full fast-suite regression (7894 passed, the same
 16 pre-existing failures as the baseline — confirmed via `git stash`
@@ -1921,7 +1921,7 @@ what this wave's three fixes (reduction, `TernaryOp` condition, this
 one) cover; making the compiled engine's narrow emitter correctly
 route EVERY node type through the wide emitter remains a larger,
 more systematic undertaking, mirroring item 2.7 sub-item 4's framing.
-Full detail in `notes/known_issues.md`'s Seventeenth wave entry.
+Full detail in `notes/developer/known_issues.md`'s Seventeenth wave entry.
 Verified: `test_differential.py`/`test_differential_statements.py`
 (unaffected, fully green), `test_function_task.py` (29 passed),
 `test_power_operator.py` (60 passed, 1 xfail), and a full fast-suite
@@ -2022,7 +2022,7 @@ matching `sim/evaluator.py`'s TernaryOp handling exactly; the design
 this replaced was a previously-deliberate fix for a different case that
 turned out to be coincidentally-correct there rather than necessary,
 so no regression resulted. Four new regression tests. Full detail in
-`notes/known_issues.md`'s Eighteenth wave entry. Verified: 9-seed x
+`notes/developer/known_issues.md`'s Eighteenth wave entry. Verified: 9-seed x
 300-case sweep fully green across all 9 seeds (down from 26 failures
 at the start of this wave); `test_differential.py`/`test_differential_
 statements.py`/`test_function_task.py`/`test_power_operator.py`/
@@ -2076,7 +2076,7 @@ finished, fixed with the missing `if expr.positional:` guard. Verified
 after the guard: full fast-suite regression (7906 passed, 6 more than
 this wave's prior 7900 matching the 6 new tests added, same 16
 pre-existing failures, `-n 8`, ~34.5 min, zero new failures). Full
-detail in `notes/known_issues.md`.
+detail in `notes/developer/known_issues.md`.
 
 **Nineteenth wave (August 2026): the 12 `TestWideSignalMemory`
 pre-existing failures — carried as an accepted baseline through this
@@ -2101,7 +2101,7 @@ passing); `test_memories.py`/`test_wide_ops.py`/`test_memory.py` (295
 passed); full fast-suite regression (7921 passed — 15 more than the
 prior wave, matching exactly — down to just 1 pre-existing failure,
 `test_or_chain_max_line_length`, unrelated; `-n 8`, ~33 min, zero new
-failures). Full detail in `notes/known_issues.md`.
+failures). Full detail in `notes/developer/known_issues.md`.
 
 **Twentieth wave (August 2026): the last remaining documented gap —
 `AssignmentPattern`'s "theoretical" `signed_override` handling — was
@@ -2128,7 +2128,7 @@ issues.md`.
 
 This closes every compiled-engine and cross-engine correctness gap
 this multi-session bug-hunt set out to chase — the only items left in
-`notes/known_issues.md` are the `vm-fast` `**` (power) over a >64-bit
+`notes/developer/known_issues.md` are the `vm-fast` `**` (power) over a >64-bit
 operand gap (a genuine architectural limitation needing real feature
 work in `_interp_fast.pyx`, not a bug fix, already pinned as strict
 xfail) and `test_or_chain_max_line_length` (an unrelated codegen
@@ -2151,7 +2151,7 @@ line-length formatting check, not a correctness issue).
    compiled-infra file): a module with `#5` inside `always` reports ≥1
    fallback process on the compiled engine, and zero on reference.
 3. Document in `notes/simulation/simulator_engines.md` (timing-fallback
-   section) and `notes/public_api.md`.
+   section) and `notes/developer/public_api.md`.
 **Accept**: test green; docs updated.
 
 **Result** (July 2026): Done as specified. Added `Simulator.engine_report()`
@@ -2195,8 +2195,8 @@ Documented in both `simulator_engines.md` and `public_api.md`.
    first and re-export exactly those). Move `dsl/testbench_deps.py` the same
    way if it only serves the moved module (check its importers). Fix relative
    imports inside the moved file. Update the "sim ↔ dsl import cycle" section
-   of `notes/architecture.md` — the invariant paragraph becomes a description
-   of the now-acyclic structure. Update `notes/python_overview.md` tree.
+   of `notes/developer/architecture.md` — the invariant paragraph becomes a description
+   of the now-acyclic structure. Update `notes/developer/files.md` tree.
 3. **Layering test**: new `tests/test_project/test_import_layering.py` that
    walks `src/veriforge/**/*.py` with `ast`, extracts intra-package imports at
    module level (skip imports inside function bodies — those are the
@@ -2316,7 +2316,7 @@ table; no engine data structures leak into semantics.
 4. **Phase G** — add a guard test (extend the layering test or a new one)
    asserting `grep`-equivalent via AST: no function named `_const_int`,
    `_range_width`, or `_var_width` is *defined* outside `semantics.py`.
-**Accept**: phases land green individually; `notes/architecture.md` gains a
+**Accept**: phases land green individually; `notes/developer/architecture.md` gains a
 "Semantics" paragraph; architecture review item 1 exit criteria met.
 **Explicit non-goal**: do not merge `_expr_width` of the VM/compiled
 *emitters* in the first pass — those mix width computation with codegen slot
@@ -2448,7 +2448,7 @@ similarly lost its own `_const_int`/`_range_width` wrappers — its call
 sites now call `const_fold.const_int`/`const_range_width` directly (the
 public, non-underscore names, exempt from the guard since they're
 `const_fold.py`'s own documented public API per the plan's Phase C-F note).
-`notes/architecture.md` gained a "Semantics" paragraph. Full gate (ruff,
+`notes/developer/architecture.md` gained a "Semantics" paragraph. Full gate (ruff,
 mypy, check_overview) and the affected test suites (`test_analysis/`,
 `test_import_layering.py`, `test_sim/test_scheduler.py`) green; item 4.2 is
 complete — all phases (A-G) landed.
@@ -2472,7 +2472,7 @@ complete — all phases (A-G) landed.
    and keep the user's file unless `--force-plan`.
 4. CLI: wire `--emit-plan` / `--force-plan` flags through
    `__main__.py generate-python-testbench`; document in
-   `notes/cli_json_schema.md` and `notes/simulation/generator_tb.md`.
+   `notes/developer/cli_json_schema.md` and `notes/simulation/generator_tb.md`.
 **Accept**: existing scaffold tests updated and green
 (`uv run pytest tests/test_sim/test_generator_endpoint.py tests/test_dsl/ -q`
 plus the scaffold-specific tests — locate with
@@ -2487,8 +2487,8 @@ since the other confidences are reproducible from the DUT alone. The
 once, then diffs-and-keeps on regeneration rather than silently
 overwriting a possibly hand-edited file. CLI flags wired through
 `__main__.py generate-python-testbench`; documented in
-`notes/cli_json_schema.md`, `notes/getting_started.md`, and
-`notes/public_api.md`.
+`notes/developer/cli_json_schema.md`, `notes/getting_started.md`, and
+`notes/developer/public_api.md`.
 
 ### 4.4 LSP: typed payloads, then split (M/L) ✅
 
@@ -2511,7 +2511,7 @@ overwriting a possibly hand-edited file. CLI flags wired through
    (tree/graph/trace), `handlers/refactor.py` (preview/apply + legacy
    adapters), keeping `extended.py` as the `register()` aggregator.
 5. Document the payload schemas in `notes/veriforge_lsp.md` (same table style
-   as `notes/cli_json_schema.md`).
+   as `notes/developer/cli_json_schema.md`).
 **Accept**: `uv run pytest tests/test_lsp/ -q` green throughout; mypy green on
 `payloads.py`; docs updated.
 

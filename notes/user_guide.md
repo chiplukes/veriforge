@@ -1,27 +1,35 @@
 # `veriforge` User Guide
 
-A detailed guide to the main capabilities of this project:
+A detailed guide to the main capabilities of this project, leading with the
+two most-used features — simulation and the Python DSL — then continuing
+on to parsing, analysis, and the rest:
 
 1. Installation and environment
-2. Architecture and layers
-3. CLI and Python parsing workflows
-4. Preprocessor support
-5. Semantic model
-6. Analysis (linking, widths, constants, lint, clocks/resets)
-7. Emission and formatting
-8. Python DSL for building RTL
-9. Reusable component libraries and RAM patterns
-10. Testbench generation
-11. Verilog-to-DSL conversion
-12. Simulation (reference, VM, compiled engines)
-13. VCD waveform output and cross-simulator validation
-14. Model introspection and JSON serialization
-15. Grammar and language coverage visibility
+2. Core concepts and architecture
+3. Simulation (reference, VM, compiled engines)
+4. Backpressure / bandwidth throttling (PauseGenerator)
+5. Testbench access levels
+6. VCD waveform output and cross-simulator validation
+7. Python DSL for building RTL
+8. Reusable component libraries and RAM patterns
+9. Testbench generation
+10. Verilog-to-DSL conversion
+11. CLI and Python parsing workflows
+12. Python API: parsing source files
+13. Preprocessor support
+14. Semantic model
+15. Analysis (linking, widths, constants, lint, clocks/resets)
+16. Emission and formatting
+17. Model introspection and JSON serialization
+18. Grammar and language coverage visibility
+19. Typical end-to-end workflows
+20. Testing guidance
+21. Pointers to related docs
+22. Practical tips
 
 This guide is intentionally practical and example-driven.
 
 ---
-
 ## 1. Installation and environment
 
 ### Prerequisites
@@ -56,300 +64,689 @@ At a high level, `veriforge` has these layers:
 - **Model layer**: semantic Python objects (`Design`, `Module`, expressions, statements, etc.)
 - **Analysis layer**: linking and checks (width, constants, lint, clocks/resets)
 
-The complete code map is documented in [python_overview.md](python_overview.md).
+The complete file listing is documented in [files.md](developer/files.md).
 
 ---
 
-## 3. CLI parsing workflow
+## 3. Simulation workflow
 
-The CLI entry point is `python -m veriforge`.
-
-### Print parse tree
-
-```bash
-uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
-```
-
-### Parse tree + reconstructed source
-
-```bash
-uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t -r
-```
-
-### Useful flags
-- `-f`, `--file`: file to parse
-- `-t`, `--tree`: show parse tree
-- `-r`, `--reconstruct`: reconstruct source text
-- `-d`, `--debug`: parser debug
-- `--parser {earley,lalr}`: parser backend
-- `-log`: logging level
-
----
-
-## 4. Python API: parsing source files
-
-### Parse a single file
+### Basic usage
 
 ```python
-from veriforge.project import parse_file
+from veriforge.sim import Simulator, Clock
 
-design = parse_file(
-    "rtl/top.v",
-    comments=True,
-    preprocess=True,
-    defines={"SYNTHESIS": "1"},
-    include_paths=["rtl/include"],
-)
+sim = Simulator(module)  # default engine="reference"
+sim.fork(Clock(sim.signal("clk"), period=10))  # auto-toggling clock
 
-print(len(design.modules), len(design.interfaces), len(design.packages))
+def test(s):
+    s.drive("rst", 1)           # drive signal by name
+    # test_fn is called before the event loop runs
+
+sim.run(test, max_time=200)
+print(sim.read("count"))        # read signal value
+print(sim.time)                 # current simulation time
+print(sim.display_output)       # collected $display strings
 ```
 
-### Parse explicit file list
+### Signal handles
 
 ```python
-from veriforge.project import parse_files
+clk_h = sim.signal("clk")      # returns SignalHandle
+print(clk_h.value)              # current Value
+clk_h.value = 1                 # drive from testbench
 
-design = parse_files(
-    ["rtl/top.v", "rtl/core.v", "rtl/alu.sv"],
-    comments=True,
-    analyze=True,
-    preprocess=True,
-)
-
-print([m.name for m in design.modules])
+# List all signals (optional prefix filter)
+all_sigs = sim.signals()        # sorted list of all names
+clk_sigs = sim.signals("clk")   # only names starting with "clk"
 ```
 
-### Parse directory recursively
+### Engine options
+
+```python
+sim_ref  = Simulator(module, engine="reference")   # tree-walking (default)
+sim_vm   = Simulator(module, engine="vm")           # bytecode VM, pure Python
+sim_fast = Simulator(module, engine="vm-fast")      # bytecode VM, Cython (falls back to "vm")
+sim_cyc  = Simulator(module, engine="compiled")     # design-specific Cython codegen
+```
+
+- `"reference"`: easiest to debug, slowest
+- `"vm"`: ~3–5x faster via bytecode compiler/interpreter
+- `"vm-fast"`: same bytecode as `"vm"` with Cython interpreter; falls back to pure Python if extension not built
+- `"compiled"`: fastest; generates design-specific Cython extension
+
+The compiled engine also supports batch mode:
+
+```python
+sim_cyc.batch_run(cycles=1000, clock_name="clk", clock_period=10)
+```
+
+### Multi-module / hierarchical simulation
+
+Pass `design=` to resolve instances across modules:
 
 ```python
 from veriforge.project import parse_directory
 
-design = parse_directory(
-    "rtl",
-    recursive=True,
-    extensions=(".v", ".sv", ".vh", ".svh"),
-    exclude=["*_tb.v", "sim/*"],
-    preprocess=True,
-    include_paths=["rtl/include"],
-)
+design = parse_directory("rtl")
+top = design.get_top_modules()[0]
+sim = Simulator(top, design=design)
+
+# Inspect hierarchy
+print(sim.hierarchy())  # {"u1": "inverter", "u_mid.u_leaf": "leaf", ...}
 ```
 
-### Notes
-- Parsing returns a unified `Design` object.
-- With `analyze=True`, instance references are linked after merge.
-- Duplicate names are deduplicated (first definition wins).
+### Simulation capabilities
+- 4-state value representation (`Value` type with val/mask int-pair encoding)
+- event queue + delta cycle scheduling
+- generate elaboration and hierarchy flattening
+- blocking and non-blocking assignment semantics
+- memory arrays and `$readmemh`/`$readmemb`
+- SystemVerilog constructs (enum, struct, package imports)
+- `$display`, `$write`, `$monitor`, `$finish`, `$stop` system tasks
+- VCD waveform dumping
+
+### Simulator API summary
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `Simulator(module, engine=..., design=...)` | Create and elaborate |
+| `sim.signal(name)` | Get `SignalHandle` |
+| `sim.signals(prefix)` | List signal names |
+| `sim.drive(name, value)` | Drive signal |
+| `sim.read(name)` | Read signal |
+| `sim.fork(Clock(...))` | Start clock generator |
+| `sim.run(test_fn, max_time=N)` | Run simulation |
+| `sim.run_step()` | Advance one time step |
+| `sim.batch_run(cycles, clock_name, clock_period, events)` | Compiled engine batch |
+| `sim.time` | Current simulation time |
+| `sim.display_output` | Collected `$display` output |
+| `sim.hierarchy()` | Instance path → module name |
+| `IcarusCosim(...)` | Cross-check against Icarus Verilog (see §6) |
+
+### Performance: compiled engine batch mode
+
+The compiled engine's `batch_run()` runs the entire clock toggle + delta-loop
+cycle in a C loop with `nogil`. This is **500x faster** than the event-loop
+path for long simulations. However, the speedup depends heavily on how the
+testbench is structured.
+
+**Key principle**: every `initial` block with timing controls (e.g. `#delay`,
+`@(posedge clk)`) runs as a Python coroutine. Each coroutine resume requires
+a full Python→C signal sync round-trip. A clock generator written as
+`initial while(1) #5 CLK = !CLK` forces **every clock edge** through the
+Python event loop — defeating the entire purpose of compiled simulation.
+
+#### Slow pattern (avoid)
+
+```verilog
+// This runs as a Python coroutine — every edge goes through Python!
+initial while(1) #5 CLK = !CLK;
+
+initial begin
+    #1000 RES = 0;    // Also a coroutine, but only fires once
+end
+```
+
+This forces the simulator into step mode (~170K cycles/s) even with the
+compiled engine, because the clock generator is an infinite coroutine.
+
+#### Fast pattern (recommended)
+
+Drive clock and reset from Python using `batch_run()`:
+
+```python
+sim = Simulator(top, engine="compiled", design=design)
+sim.run(max_time=0)  # execute $readmemh, settle combinational logic
+
+# Schedule reset at cycle 100 (= 1000 time units)
+events = [(100, "RES", 0)]
+sim.batch_run(50000, "CLK", clock_period=10, events=events)
+```
+
+This runs the **entire simulation in C** (~10M cycles/s). The Verilog
+testbench should have no `initial` blocks with timing — just wire declarations
+and module instantiation:
+
+```verilog
+module testbench;
+    reg CLK = 0;
+    reg RES = 1;
+    // No initial blocks with timing!
+    // Clock and reset driven by batch_run() from Python.
+    my_design dut(.clk(CLK), .rst(RES));
+endmodule
+```
+
+#### Performance comparison (DarkRISCV, 500K time units)
+
+| Approach | Time | Speedup |
+|---|---|---|
+| Event loop (original testbench) | 163s | 1x |
+| Event loop + VCD fast path | 5.7s | 29x |
+| **batch_run (no Verilog timing)** | **0.3s** | **512x** |
+
+#### When to use each approach
+
+| Approach | Use when |
+|---|---|
+| `sim.run()` with Verilog `initial` | Need VCD, complex stimulus timing, `$monitor` |
+| `sim.batch_run()` no events | Free-running design, external stimulus from Python |
+| `sim.batch_run()` with events | Clock + scheduled signal changes (reset, interrupts) |
+
+### Engine-native bench lowering
+
+For AXI-Stream, AXI-Lite, and AXI4 testbenches with fixed (known-at-test-time)
+stimulus, `compile_native` wraps the DUT **and** the bench logic together into
+a single compiled module. This gives compiled-engine speeds without the
+coroutine overhead of the Python `Testbench`.
+
+```python
+from veriforge.sim.bench import (
+    Testbench, compile_native,
+    AXIStreamSourceLowering, AXIStreamSinkLowering,
+    AXILiteMasterLowering, AXILiteOp,
+    AXI4SlaveLowering,
+)
+
+bench = Testbench(dut)
+lowered = compile_native(
+    bench,
+    lowerings={
+        # Drive 4 AXIS beats into DUT's slave port
+        "s_axis": AXIStreamSourceLowering(beats=[0xA1, 0xB2, 0xC3, 0xD4], data_width=8),
+        # Capture 4 beats from DUT's master port
+        "m_axis": AXIStreamSinkLowering(n_beats=4, data_width=8),
+    },
+)
+
+sim = Simulator(lowered.wrapper, design=lowered.design, engine="compiled")
+sim.fork(Clock(sim.signal("clk"), period=10))
+sim.signal("rst_n").value = 0
+sim.run(max_time=40)
+sim.signal("rst_n").value = 1
+sim.run(max_time=10 * 60)
+
+# Read captured beats
+for i in range(4):
+    print(f"cap[{i}] = {int(sim.signal(f'm_axis_cap_{i}').value):#04x}")
+assert int(sim.signal("m_axis_snk_done").value) == 1
+```
+
+Supported lowerings:
+
+| Class | DUT-side role | Purpose |
+|---|---|---|
+| `AXIStreamSourceLowering(beats, data_width)` | AXI-Stream slave | Fixed-beat source |
+| `AXIStreamSinkLowering(n_beats, data_width)` | AXI-Stream master | Beat capture |
+| `AXILiteMasterLowering(operations, ...)` | AXI-Lite slave | Scripted write/read |
+| `AXILiteSlaveLowering(memory_depth, ...)` | AXI-Lite master | Memory-backed slave responder |
+| `AXI4SlaveLowering(memory_depth, ...)` | AXI4 master | Memory-backed INCR-burst responder |
+| `AXI4MasterLowering(operations, ...)` | AXI4 slave | Scripted single-beat write/read master |
+| `MemBusMasterLowering(operations, ...)` | MemBus slave | Scripted synchronous-bus write/read master |
+| `MemBusResponderLowering(memory_depth, ...)` | MemBus master | Memory-backed synchronous-bus slave responder |
+
+See [bench_native_lowering.md](simulation/bench_native_lowering.md) for full
+API, examples, signal naming, and performance guidance.
+
+For the full Python `Testbench` proxy API reference (all proxy types,
+backpressure, multi-domain, overrides, error handling) see
+[bench_usage.md](simulation/bench_usage.md).
 
 ---
 
-## 5. Preprocessor support
+## 4. Backpressure / bandwidth throttling (PauseGenerator)
 
-### Via parse APIs
+Any endpoint's `pause` attribute accepts either a plain `bool` or a callable
+`PauseGenerator`. When callable, the generator is invoked **exactly once per
+clock cycle** in `tick_pre`, so the RNG state advances at the correct rate
+regardless of how many tick phases run per cycle.
 
-Pass `preprocess=True` to any `parse_*` function:
+### What gets gated
 
-```python
-from veriforge.project import parse_directory
+| Endpoint | What `pause=True` asserts |
+|---|---|
+| `AXIStreamSource` / `StreamSource` | `tvalid` / `valid` held low |
+| `AXIStreamSink` / `StreamSink` | `tready` / `ready` held low |
+| `AXILiteResponder` (always_ready) | `awready` + `wready` + `arready` held low |
+| `AXI4Responder` (always_ready) | `awready` + `wready` + `arready` held low; also settable independently via `.pause_aw`/`.pause_w`/`.pause_ar` (and `.pause_b`/`.pause_r`, which delay *starting* a new response) |
 
-design = parse_directory(
-    "rtl",
-    preprocess=True,
-    defines={"FPGA": "1", "DATA_W": "32"},
-    include_paths=["rtl", "rtl/include", "ip/common"],
-)
-```
-
-Direct `verilog_parser.build_tree()` calls and the default `parse_file()` path
-now tolerate parser-blocking directive lines like `` `timescale `` by blanking
-those lines before grammar parsing. Full preprocessing is still required for
-macro expansion, `` `include ``, and conditional compilation.
-
-### Standalone preprocessor
+### PauseGenerator
 
 ```python
-from veriforge.preprocessor import preprocess, preprocess_file
+from veriforge.sim.endpoints import PauseGenerator
 
-# Preprocess a string
-output = preprocess(source_text, defines={"SIMULATION": ""})
+# Pause 1 in every 4 cycles — ~75% throughput, random.
+gen = PauseGenerator(1, 4)
 
-# Preprocess a file (file's directory auto-added to include search path)
-output = preprocess_file("rtl/top.v", defines={"__ICARUS__": ""})
+# Same bandwidth with a fixed seed (reproducible sequences).
+gen = PauseGenerator(1, 4, seed=42)
 
-# Get final defines back for chaining to the next file
-output, final_defs = preprocess_file(
-    "rtl/top.v",
-    defines={"SYNTH": ""},
-    return_defines=True,
-)
+# Factory shortcuts.
+gen = PauseGenerator.never()           # always False — full bandwidth
+gen = PauseGenerator.always()          # always True  — zero bandwidth
+gen = PauseGenerator.duty(0.3)         # ~30% pause rate
+gen = PauseGenerator.duty(0.3, seed=7) # seeded
 ```
 
-### Supported directives
+### Direct endpoint usage
 
-`` `define ``, `` `undef ``, `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif ``,
-`` `include ``, `` `timescale ``, `` `resetall ``, `` `default_nettype ``, `` `pragma ``,
-`` `line ``, `` `celldefine ``, `` `endcelldefine ``, `` `unconnected_drive ``, `` `nounconnected_drive ``
+```python
+from veriforge.sim.endpoints import (
+    AXIStreamSource, AXIStreamSink, EndpointCoordinator, PauseGenerator,
+)
+
+source = AXIStreamSource(sim, "s_axis")
+sink   = AXIStreamSink(sim, "m_axis")
+coord  = EndpointCoordinator(sim, [source, sink])
+
+# Throttle source to ~50% bandwidth.
+source.pause = PauseGenerator(1, 2, seed=0)
+
+# Apply backpressure on the sink side instead.
+sink.pause = PauseGenerator.duty(0.25)
+
+# Plain bool still works as before.
+source.pause = True   # stall permanently
+source.pause = False  # clear (default)
+```
+
+### Via proxy (Testbench / bench-style)
+
+All four proxy classes (`AXIStreamProxy`, `AXILiteProxy`, `AXI4Proxy`,
+`StreamProxy`) expose a `pause` property that forwards to the underlying
+endpoint:
+
+```python
+bench = Testbench(dut)
+# ...
+m_axis = bench.iface("m_axis")  # AXIStreamProxy, role="master" (sink)
+s_axis = bench.iface("s_axis")  # AXIStreamProxy, role="slave" (source)
+
+# Throttle the source during a burst.
+s_axis.pause = PauseGenerator(1, 3, seed=1)
+s_axis.put([1, 2, 3, 4, 5, 6])
+bench.step(20)
+s_axis.pause = False
+
+# Backpressure on the sink while draining.
+m_axis.pause = PauseGenerator.duty(0.4)
+bench.step(30)
+```
+
+### AXI-Lite / AXI4 responder throttle
+
+For DUT-master paths, pausing the responder randomly withholds the
+`awready`/`wready`/`arready` handshake, stressing the DUT's ability to handle
+delayed acknowledgements:
+
+```python
+axi_lite = bench.iface("m_axi_lite")  # AXILiteProxy, role="master"
+axi_lite.pause = PauseGenerator(1, 4, seed=99)
+bench.step(200)
+axi_lite.pause = False
+```
+
+`AXI4Proxy` (role="master") additionally supports independent per-channel
+pause (`.pause_aw`, `.pause_w`, `.pause_ar`, `.pause_b`, `.pause_r`) and a
+DDR/HBM-style latency/bandwidth model (`.rd_latency_cycles`,
+`.wr_latency_cycles`, `.max_bw_percent`, `.wr_max_bw_percent`) instead of
+just the combined `.pause` — see
+[bench_usage.md#axi4proxy](simulation/bench_usage.md#axi4proxy) for the
+full API and examples.
 
 ---
 
-## 6. Working with the semantic model
+## 5. Testbench access levels
 
-After parsing, you can inspect the model directly.
+Every testbench interaction falls into one of three access levels. Understanding
+which level applies to a given port determines both the API you use and the timing
+rules that apply.
+
+### Level 1 — Proxy API (recognized interfaces)
+
+`build_testbench` auto-detects AXI-Stream, AXI-Lite, and AXI4 interface bundles by
+scanning port names. Each detected bundle gets a **proxy object** with a high-level
+API. All timing is managed internally; you never call tick_pre/sample_pre/tick_post.
 
 ```python
-design = parse_file("rtl/top.v")
+bench = build_testbench(DUT_PATH)
+with bench.run():
+    bench.reset_all()
+    src  = bench.iface("s_axis")   # AXIStreamProxy — put/wait_drain/get
+    axil = bench.iface("axil")     # AXILiteProxy   — read/write
+    ram  = bench.iface("ram")      # AXI4Proxy      — read/write
 
-for mod in design.modules:
-    print("module:", mod.name)
-    print("ports:", [p.name for p in mod.ports])
-    print("parameters:", [p.name for p in mod.parameters])
+    src.put([0x10, 0x20, 0x30])
+    axil.write(0x00, 0xDEAD_BEEF)
+    src.wait_drain()
+    pkt = src.get()               # blocks (advances clock) until frame arrives
 ```
 
-The model includes:
-- **Declarations**: `Port`, `Net`, `Variable`, `Parameter` (with `is_local` for localparams)
-- **Expressions**: `Identifier`, `Literal`, `StringLiteral`, `BinaryOp`, `UnaryOp`, `TernaryOp`, `Concatenation`, `Replication`, `BitSelect`, `RangeSelect`, `PartSelect`, `FunctionCall`, `Mintypmax`, `Range`
-- **Statements**: `BlockingAssign`, `NonblockingAssign`, `IfStatement`, `CaseStatement`, `ForLoop`, `WhileLoop`, `ForeverLoop`, `RepeatLoop`, `SeqBlock`, `ParBlock`, `WaitStatement`, `DisableStatement`, `EventTrigger`, `TaskEnable`, `SystemTaskCall`, `DelayControl`, `EventControl`
-- **Behavioral**: `AlwaysBlock`, `InitialBlock`, `SensitivityType`
-- **Structural**: `Instance`, `PortConnection`, `ParameterBinding`, `ContinuousAssign`
-- **Generate**: `GenerateFor`, `GenerateIf`, `GenerateCase`, `GenvarDecl`
-- **Functions/Tasks**: `FunctionDecl`, `TaskDecl`
-- **SystemVerilog**: `Interface`, `Modport`, `ModportPort`, `Package`, `ImportDecl`, `TypedefDecl`, `EnumType`, `StructType`, `UnionType`
-- **Other**: `SpecifyBlock`, `Comment`, `SourceLocation`
-- **Containers**: `Design` (top-level), `Module` (with lookup helpers)
+Recognized interface types:
+
+| Port pattern | Proxy class | Role |
+|---|---|---|
+| `<prefix>_tdata`, `_tvalid`, `_tready`, `_tlast` | `AXIStreamProxy` | source / sink |
+| `<prefix>_awaddr`, `_awvalid`, … | `AXILiteProxy` | master / slave |
+| `<prefix>_awaddr`, `_awlen`, `_awsize`, `_awburst`, `_wlast`, … (full AW/W/B + AR/R, or just one side for a read-only/write-only DUT) | `AXI4Proxy` | master / slave |
+| `<prefix>_valid`, `<prefix>_ready` (no `_t`-prefix) | `StreamProxy` | plain handshake source / sink |
+| `<prefix>_addr`, `_wen`/`_we`, `_wdata`, `_rdata` | `MemBusProxy` | synchronous SRAM-style master / slave |
+
+### Level 2 — Raw signal access (non-interface ports)
+
+Any port that does not match a recognized interface pattern — status flags, FIFO
+depth counters, interrupt lines, custom config registers, enable bits — must be
+accessed directly via `bench.sim.signal()` / `bench.sim.drive()` / `bench.step()`.
+
+```python
+with bench.run():
+    bench.reset_all()
+
+    # Configure DUT before traffic
+    bench.sim.drive("cfg_threshold", 8)
+    bench.sim.drive("enable", 1)
+    bench.step(2)                          # settle the config
+
+    # Run normal proxy traffic
+    src = bench.iface("s_axis")
+    src.put(list(range(16)))
+    src.wait_drain()
+
+    # Read non-interface status signals after proxy work has finished
+    overflow = int(bench.sim.signal("s_status_overflow").value)
+    depth    = int(bench.sim.signal("s_status_depth").value)
+    assert overflow == 0, f"FIFO overflowed: depth={depth}"
+```
+
+**Timing rule for Level 2**: reading a signal after `wait_drain()`, `bench.step()`,
+or any proxy method that advances the clock is safe — you are reading between clock
+cycles, after all NBA updates have settled. What is unsafe is reading a registered
+signal in the same moment a clock edge fires (i.e. inside a `tick_post()` callback).
+Since Level 2 code runs between proxy calls, not inside callbacks, this hazard
+normally does not arise.
+
+`bench.step(n)` advances exactly `n` clock cycles without driving any interfaces —
+useful for adding gaps, settling config signals, or waiting for a DUT pipeline to
+flush.
+
+### Level 3 — Custom endpoint class (new reusable protocol drivers)
+
+Only needed when implementing a **new protocol** that the auto-detector does not
+recognise (SPI, I2C, custom memory bus, etc.) and you want it to participate in the
+`EndpointCoordinator` tick lifecycle.
+
+Implement three hooks and register the class with the coordinator:
+
+```python
+class MySPIMaster:
+    def tick_pre(self) -> None:
+        """Drive output signals for this clock cycle (before clock edge)."""
+        self.sim.drive("sck", self._next_sck)
+        self.sim.drive("mosi", self._next_mosi)
+
+    def sample_pre(self) -> None:
+        """Snapshot DUT outputs — stable pre-edge values (D-input state)."""
+        self._sampled_miso = int(self.sim.signal("miso").value)
+
+    def tick_post(self) -> None:
+        """Act on the snapshot taken in sample_pre (NOT on live signal values)."""
+        if self._sampled_miso:
+            self._rx_buffer.append(self._sampled_miso)
+
+coord = EndpointCoordinator(sim, [MySPIMaster(sim)], clock_name="clk")
+coord.run_until(lambda: done, max_steps=1000, message="SPI transfer timeout")
+```
+
+**Critical rule**: read registered DUT outputs in `sample_pre()`, never in
+`tick_post()`. `tick_post()` runs after `run_step()` has applied all Non-Blocking
+Assignments — signal values there reflect the *next* cycle's state, not the clock
+edge just observed. See
+[endpoint_timing_model.md](simulation/endpoint_timing_model.md) for a full
+explanation and the concrete bug example that motivated this rule.
+
+### Summary
+
+| Situation | Level | API |
+|---|---|---|
+| AXI-Stream, AXI-Lite, AXI4 ports | 1 | `bench.iface("prefix")` → proxy |
+| Status flags, config regs, custom ports | 2 | `bench.sim.signal()` / `bench.sim.drive()` / `bench.step()` |
+| Multi-domain CDC (separate clock pins) | 2 | `Simulator` + `MultiDomainRunner` directly |
+| New reusable protocol driver | 3 | Implement tick_pre / sample_pre / tick_post |
 
 ---
 
-## 7. Analysis workflow
+## 6. VCD waveform output
 
-### Core analysis (4-pass, in-place)
+The `VcdWriter` generates IEEE 1364-2001 compliant VCD files for GTKWave or similar viewers.
 
-`analyze_design` runs four passes that populate cross-references on model objects **in-place**.
-It returns `None`.
+For simulator-driven tracing, the shared helper is `attach_vcd(...)` from
+`veriforge.sim`. This is the reusable API behind the current PULP AXI pytest
+waveform flow.
+
+### Standalone VCD writing
 
 ```python
-from veriforge.analysis import analyze_design
+from veriforge.sim import VcdWriter, Value
 
-analyze_design(design)  # mutates model objects, returns None
+with VcdWriter("output.vcd", timescale="1ns") as vcd:
+    vcd.add_signal("clk", width=1)
+    vcd.add_signal("count", width=8, scope="counter")
+    vcd.write_header()
 
-# After analysis, cross-references are populated:
-# - Instance.resolved_module → Module
-# - Identifier.resolved → Port / Net / Variable / Parameter
-# - PortConnection.resolved_port → Port
-# - Net.drivers / Net.loads, Variable.drivers / Variable.loads
-for mod in design.modules:
-    for inst in mod.instances:
-        target = inst.resolved_module
-        print(f"{inst.name} → {target.name if target else '?'}")
+    vcd.set_time(0)
+    vcd.change("clk", Value(0, width=1))
+    vcd.change("count", Value(0, width=8))
+
+    vcd.set_time(5)
+    vcd.change("clk", Value(1, width=1))
+    vcd.change("count", Value(1, width=8))
 ```
 
-### Additional analysis passes
+### VCD API
 
-Each can be run independently after `analyze_design`:
+| Method | Description |
+|--------|-------------|
+| `add_signal(name, width, scope)` | Register signal for tracing |
+| `write_header()` | Emit VCD header (call after all `add_signal`) |
+| `set_time(t)` | Advance VCD time |
+| `change(name, value)` | Record value change (auto-deduplicates) |
+| `dump_all(time, signals_dict)` | Dump all signals at once |
+| `write_initial(signals_dict)` | Write `$dumpvars` section |
+| `finalize()` | Flush and close |
+
+Supports context manager (`with VcdWriter(...) as vcd:`).
+
+### Capturing VCDs from AXI pytest regressions
+
+The PULP AXI regression file `tests/test_sim/test_pulp_axi_examples.py` supports
+copy-paste waveform capture through the pytest option `--vcd-dir`.
+
+#### AXI-Lite regs example
+
+Reference engine:
+
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
+```
+
+VM engine:
+
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
+```
+
+Generated files:
+
+```text
+.\vcd_out\axi_lite_regs_basic_reference.vcd
+.\vcd_out\axi_lite_regs_prot_reference.vcd
+```
+
+The `basic` waveform covers the normal read/write path. The `prot` waveform covers
+the protected-access checks.
+
+#### AXI-Lite DW converter example
+
+Reference engine:
+
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
+```
+
+VM engine:
+
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
+```
+
+Generated files include:
+
+```text
+.\vcd_out\axi_lite_dw_down_manual_reference.vcd
+.\vcd_out\axi_lite_dw_up_reference.vcd
+.\vcd_out\axi_lite_dw_same_reference.vcd
+```
+
+#### Inspect the output
+
+List the written files:
+
+```powershell
+Get-ChildItem .\vcd_out
+```
+
+Open a waveform in GTKWave:
+
+```powershell
+gtkwave .\vcd_out\axi_lite_dw_down_manual_reference.vcd
+```
+
+#### Notes
+
+- Run commands from the repository root.
+- `--vcd-dir` creates the directory if needed.
+- Without `--vcd-dir`, the tests run normally but do not emit `.vcd` files.
+- On Windows, this test module currently targets the `reference` and `vm` engines.
+
+### Attaching a VCD recorder from Python
+
+If you are driving the simulator directly from Python, use `attach_vcd(...)` as a
+context manager around the portion of the simulation you want to trace.
 
 ```python
-from veriforge.analysis import (
-    infer_widths,               # IEEE 1364-2005 expression width rules
-    fold_constants,             # evaluate constant / parameter expressions
-    lint_design, lint_module,   # lint-style checks
-    extract_clocks_resets_from_design,  # clock/reset extraction
+from veriforge.sim import Clock, Simulator, attach_vcd
+
+sim = Simulator(mod, engine="reference")
+sim.fork(Clock(sim.signal("clk"), period=10))
+
+with attach_vcd(sim, "waves.vcd"):
+    sim.run(max_time=100)
+```
+
+This records initial values immediately, appends changes after each time step,
+and restores any existing scheduler callback when the context exits.
+
+### Cross-simulator validation
+
+The `vcd_compare` module can parse and diff VCD files for cross-simulator validation.
+Validation-oriented tests are in `tests/test_validation/`.
+
+### IcarusCosim — cross-check against Icarus Verilog
+
+The `IcarusCosim` class automates running Icarus Verilog alongside our simulator
+and comparing results. It handles finding Icarus, compiling, running, parsing VCD,
+and comparing signals — all in one API call.
+
+**Requirements:** Icarus Verilog (`iverilog` + `vvp`) installed and on PATH,
+or at `C:\iverilog\bin` on Windows.
+
+#### Single-file usage
+
+```python
+from veriforge.sim import IcarusCosim
+
+verilog = r"""
+module test;
+    reg clk = 0;
+    reg [7:0] count = 0;
+    always #5 clk = ~clk;
+    always @(posedge clk) count <= count + 1;
+    initial begin
+        $dumpfile("test.vcd");
+        $dumpvars(0, test);
+        #100 $finish;
+    end
+endmodule
+"""
+
+cosim = IcarusCosim(verilog_src=verilog)
+result = cosim.run(engine="reference", max_time=100)
+assert not result.diffs, "\n".join(result.diffs)
+```
+
+#### Multi-file project
+
+```python
+from veriforge.sim import IcarusCosim
+
+cosim = IcarusCosim(
+    files=["rtl/top.v", "rtl/sub.v", "sim/testbench.v"],
+    top_module="testbench",
+    defines={"SIM": "1"},
+    work_dir="sim/",  # cwd for $readmemh etc.
+)
+result = cosim.run(engine="reference", max_time=5000, verbose=True)
+for d in result.diffs:
+    print(d)
+```
+
+#### Cycle-by-cycle comparison
+
+For targeted debugging, `run_cycle_by_cycle()` steps both simulators
+one clock at a time and reports the first cycle with signal mismatches:
+
+```python
+cosim = IcarusCosim(
+    files=["rtl/cpu.v", "sim/testbench.v"],
+    top_module="testbench",
+    defines={"SIM": "1"},
+    work_dir="sim/",
 )
 
-infer_widths(design)              # populates inferred_width on expressions
-fold_constants(design)            # resolves parameter-dependent expressions
-
-warnings = lint_design(design)    # returns list[LintWarning]
-for w in warnings:
-    print(f"[{w.code.name}] {w.message}  signal={w.signal}")
-
-cr_info = extract_clocks_resets_from_design(design)
-for mod_name, info in cr_info.items():
-    print(mod_name, info.clocks, info.resets)
-```
-
-### Lint codes
-
-| Code | Meaning |
-|------|-------- |
-| `UNDRIVEN` | Signal has no drivers |
-| `UNUSED` | Signal has no loads |
-| `MULTI_DRIVEN` | Signal driven from multiple sources |
-| `LATCH_INFERRED` | Combinational block with incomplete assignments |
-| `WIDTH_MISMATCH` | Port connection or assign width differs |
-| `MIXED_BLOCKING` | Blocking assign in sequential always block |
-| `MIXED_NONBLOCKING` | Non-blocking assign in combinational always block |
-| `UNCONNECTED_PORT` | Instance port left open |
-
-### Lower-level pass functions
-
-For fine-grained control:
-
-```python
-from veriforge.analysis import (
-    link_instances,             # pass 1: resolve Instance.resolved_module
-    resolve_names,              # pass 2: build symbol tables
-    resolve_port_connections,   # pass 3: resolve PortConnection.resolved_port
-    analyze_connectivity,       # pass 4: populate drivers/loads
-    infer_widths_in_module,     # per-module width inference
-    fold_constants_in_module,   # per-module constant folding
-    const_fold, const_int,      # expression-level folding
+mismatch = cosim.run_cycle_by_cycle(
+    engine="reference",
+    max_cycles=300,
+    reset_cycles=10,
+    clock_name="clk",
+    reset_name="rst",
+    verbose=True,
 )
+
+if mismatch:
+    print(f"First mismatch at cycle {mismatch.cycle}:")
+    for sig, icarus_val, our_val in mismatch.signals:
+        print(f"  {sig}: icarus={icarus_val} ours={our_val}")
 ```
+
+#### IcarusCosim API
+
+| Method / Constructor | Description |
+|---------------------|-------------|
+| `IcarusCosim(verilog_src=..., files=..., top_module=..., defines=..., work_dir=...)` | Set up cosim |
+| `cosim.run(engine, max_time, signals, ignore_signals, verbose)` | VCD-based full comparison |
+| `cosim.run_icarus()` | Run Icarus only, return VCD text |
+| `cosim.run_cycle_by_cycle(engine, max_cycles, reset_cycles, clock_name, ...)` | Cycle-level comparison |
+| `find_icarus("iverilog")` | Locate Icarus executables |
+| `record_vcd(sim, max_time)` | Run simulator and capture VCD as string |
+
+| Return type | Description |
+|-------------|-------------|
+| `CosimResult` | `.diffs` (list of strings), `.icarus_signal_count`, `.ref_signal_count`, `.compared_signal_count`, `.icarus_vcd` |
+| `CycleMismatch` | `.cycle` (int), `.signals` (list of `(name, icarus_val, our_val)`) |
 
 ---
 
-## 8. Emission and formatting
-
-### Emit model to Verilog text
-
-The emitter converts model objects to Verilog source:
-
-```python
-from veriforge.codegen import emit_design, emit_module, emit_package, emit_interface
-
-# Emit an entire design (modules + interfaces + packages)
-verilog_text = emit_design(design)
-
-# Emit a single module
-print(emit_module(design.modules[0]))
-
-# Emit a single expression (useful for debugging)
-from veriforge.codegen import emit_expression
-print(emit_expression(some_expr))
-```
-
-### Format with configurable style
-
-The formatter works on **model objects** (not raw text strings) and applies
-configurable brace placement, indentation, and port alignment:
-
-```python
-from veriforge.codegen import FormatStyle, VerilogFormatter, fmt_module, fmt_design
-
-# Convenience functions (shortest path)
-print(fmt_module(design.modules[0], FormatStyle.allman()))
-print(fmt_design(design, FormatStyle.knr()))
-
-# Or create a formatter instance with custom settings
-style = FormatStyle(
-    indent_width=2,
-    begin_end_style="allman",    # "knr", "allman", or "gnu"
-    end_else_same_line=False,
-    align_ports=True,
-    column_limit=80,
-)
-formatter = VerilogFormatter(style)
-print(formatter.format_module(design.modules[0]))
-```
-
-### Style presets
-
-| Preset | `begin` placement | `end else` |
-|--------|-------------------|-------------|
-| `FormatStyle.knr()` | same line as keyword | same line |
-| `FormatStyle.allman()` | next line, indented | separate lines |
-| `FormatStyle.gnu()` | next line, keyword indent | separate lines |
-
----
-
-## 9. DSL workflow (build RTL in Python)
+## 7. DSL workflow (build RTL in Python)
 
 The DSL is useful when you want:
 - generator patterns
@@ -600,7 +997,7 @@ For a full DSL reference and advanced patterns, see [dsl_guide.md](dsl/dsl_guide
 
 ---
 
-## 10. DSL component libraries
+## 8. DSL component libraries
 
 The project includes reusable DSL components in `veriforge.dsl.lib`:
 
@@ -635,13 +1032,13 @@ Runnable examples:
 
 ---
 
-## 11. Testbench generation
+## 9. Testbench generation
 
 `veriforge` can inspect a DUT and emit a ready-to-run Python testbench.  The
 most common use case is a DUT with one or more AXI-Stream interfaces; the
 walkthrough below uses an AXI-Stream register slice (skid buffer) as the
 concrete example.  For the CLI flag reference see
-[getting_started.md §8](getting_started.md#8-generate-a-python-testbench).
+[getting_started.md §4](getting_started.md#4-generate-a-python-testbench).
 
 A complete, runnable example lives in `examples/axis_skid_buffer/`.
 
@@ -825,7 +1222,7 @@ print(emit_module(tb))
 
 ---
 
-## 12. Convert Verilog to DSL
+## 10. Convert Verilog to DSL
 
 This project can translate parsed model objects back into DSL source.
 
@@ -852,685 +1249,296 @@ This is useful for migration workflows and design introspection.
 
 ---
 
-## 13. Simulation workflow
+## 11. CLI parsing workflow
 
-### Basic usage
+The CLI entry point is `python -m veriforge`.
 
-```python
-from veriforge.sim import Simulator, Clock
+### Print parse tree
 
-sim = Simulator(module)  # default engine="reference"
-sim.fork(Clock(sim.signal("clk"), period=10))  # auto-toggling clock
-
-def test(s):
-    s.drive("rst", 1)           # drive signal by name
-    # test_fn is called before the event loop runs
-
-sim.run(test, max_time=200)
-print(sim.read("count"))        # read signal value
-print(sim.time)                 # current simulation time
-print(sim.display_output)       # collected $display strings
+```bash
+uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
 ```
 
-### Signal handles
+### Parse tree + reconstructed source
 
-```python
-clk_h = sim.signal("clk")      # returns SignalHandle
-print(clk_h.value)              # current Value
-clk_h.value = 1                 # drive from testbench
-
-# List all signals (optional prefix filter)
-all_sigs = sim.signals()        # sorted list of all names
-clk_sigs = sim.signals("clk")   # only names starting with "clk"
+```bash
+uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t -r
 ```
 
-### Engine options
+### Useful flags
+- `-f`, `--file`: file to parse
+- `-t`, `--tree`: show parse tree
+- `-r`, `--reconstruct`: reconstruct source text
+- `-d`, `--debug`: parser debug
+- `--parser {earley,lalr}`: parser backend
+- `-log`: logging level
+
+---
+
+## 12. Python API: parsing source files
+
+### Parse a single file
 
 ```python
-sim_ref  = Simulator(module, engine="reference")   # tree-walking (default)
-sim_vm   = Simulator(module, engine="vm")           # bytecode VM, pure Python
-sim_fast = Simulator(module, engine="vm-fast")      # bytecode VM, Cython (falls back to "vm")
-sim_cyc  = Simulator(module, engine="compiled")     # design-specific Cython codegen
+from veriforge.project import parse_file
+
+design = parse_file(
+    "rtl/top.v",
+    comments=True,
+    preprocess=True,
+    defines={"SYNTHESIS": "1"},
+    include_paths=["rtl/include"],
+)
+
+print(len(design.modules), len(design.interfaces), len(design.packages))
 ```
 
-- `"reference"`: easiest to debug, slowest
-- `"vm"`: ~3–5x faster via bytecode compiler/interpreter
-- `"vm-fast"`: same bytecode as `"vm"` with Cython interpreter; falls back to pure Python if extension not built
-- `"compiled"`: fastest; generates design-specific Cython extension
-
-The compiled engine also supports batch mode:
+### Parse explicit file list
 
 ```python
-sim_cyc.batch_run(cycles=1000, clock_name="clk", clock_period=10)
+from veriforge.project import parse_files
+
+design = parse_files(
+    ["rtl/top.v", "rtl/core.v", "rtl/alu.sv"],
+    comments=True,
+    analyze=True,
+    preprocess=True,
+)
+
+print([m.name for m in design.modules])
 ```
 
-### Multi-module / hierarchical simulation
-
-Pass `design=` to resolve instances across modules:
+### Parse directory recursively
 
 ```python
 from veriforge.project import parse_directory
 
-design = parse_directory("rtl")
-top = design.get_top_modules()[0]
-sim = Simulator(top, design=design)
-
-# Inspect hierarchy
-print(sim.hierarchy())  # {"u1": "inverter", "u_mid.u_leaf": "leaf", ...}
-```
-
-### Simulation capabilities
-- 4-state value representation (`Value` type with val/mask int-pair encoding)
-- event queue + delta cycle scheduling
-- generate elaboration and hierarchy flattening
-- blocking and non-blocking assignment semantics
-- memory arrays and `$readmemh`/`$readmemb`
-- SystemVerilog constructs (enum, struct, package imports)
-- `$display`, `$write`, `$monitor`, `$finish`, `$stop` system tasks
-- VCD waveform dumping
-
-### Simulator API summary
-
-| Method / Property | Description |
-|-------------------|-------------|
-| `Simulator(module, engine=..., design=...)` | Create and elaborate |
-| `sim.signal(name)` | Get `SignalHandle` |
-| `sim.signals(prefix)` | List signal names |
-| `sim.drive(name, value)` | Drive signal |
-| `sim.read(name)` | Read signal |
-| `sim.fork(Clock(...))` | Start clock generator |
-| `sim.run(test_fn, max_time=N)` | Run simulation |
-| `sim.run_step()` | Advance one time step |
-| `sim.batch_run(cycles, clock_name, clock_period, events)` | Compiled engine batch |
-| `sim.time` | Current simulation time |
-| `sim.display_output` | Collected `$display` output |
-| `sim.hierarchy()` | Instance path → module name |
-| `IcarusCosim(...)` | Cross-check against Icarus Verilog (see §14) |
-
-### Performance: compiled engine batch mode
-
-The compiled engine's `batch_run()` runs the entire clock toggle + delta-loop
-cycle in a C loop with `nogil`. This is **500x faster** than the event-loop
-path for long simulations. However, the speedup depends heavily on how the
-testbench is structured.
-
-**Key principle**: every `initial` block with timing controls (e.g. `#delay`,
-`@(posedge clk)`) runs as a Python coroutine. Each coroutine resume requires
-a full Python→C signal sync round-trip. A clock generator written as
-`initial while(1) #5 CLK = !CLK` forces **every clock edge** through the
-Python event loop — defeating the entire purpose of compiled simulation.
-
-#### Slow pattern (avoid)
-
-```verilog
-// This runs as a Python coroutine — every edge goes through Python!
-initial while(1) #5 CLK = !CLK;
-
-initial begin
-    #1000 RES = 0;    // Also a coroutine, but only fires once
-end
-```
-
-This forces the simulator into step mode (~170K cycles/s) even with the
-compiled engine, because the clock generator is an infinite coroutine.
-
-#### Fast pattern (recommended)
-
-Drive clock and reset from Python using `batch_run()`:
-
-```python
-sim = Simulator(top, engine="compiled", design=design)
-sim.run(max_time=0)  # execute $readmemh, settle combinational logic
-
-# Schedule reset at cycle 100 (= 1000 time units)
-events = [(100, "RES", 0)]
-sim.batch_run(50000, "CLK", clock_period=10, events=events)
-```
-
-This runs the **entire simulation in C** (~10M cycles/s). The Verilog
-testbench should have no `initial` blocks with timing — just wire declarations
-and module instantiation:
-
-```verilog
-module testbench;
-    reg CLK = 0;
-    reg RES = 1;
-    // No initial blocks with timing!
-    // Clock and reset driven by batch_run() from Python.
-    my_design dut(.clk(CLK), .rst(RES));
-endmodule
-```
-
-#### Performance comparison (DarkRISCV, 500K time units)
-
-| Approach | Time | Speedup |
-|---|---|---|
-| Event loop (original testbench) | 163s | 1x |
-| Event loop + VCD fast path | 5.7s | 29x |
-| **batch_run (no Verilog timing)** | **0.3s** | **512x** |
-
-#### When to use each approach
-
-| Approach | Use when |
-|---|---|
-| `sim.run()` with Verilog `initial` | Need VCD, complex stimulus timing, `$monitor` |
-| `sim.batch_run()` no events | Free-running design, external stimulus from Python |
-| `sim.batch_run()` with events | Clock + scheduled signal changes (reset, interrupts) |
-
-### Engine-native bench lowering
-
-For AXI-Stream, AXI-Lite, and AXI4 testbenches with fixed (known-at-test-time)
-stimulus, `compile_native` wraps the DUT **and** the bench logic together into
-a single compiled module. This gives compiled-engine speeds without the
-coroutine overhead of the Python `Testbench`.
-
-```python
-from veriforge.sim.bench import (
-    Testbench, compile_native,
-    AXIStreamSourceLowering, AXIStreamSinkLowering,
-    AXILiteMasterLowering, AXILiteOp,
-    AXI4SlaveLowering,
+design = parse_directory(
+    "rtl",
+    recursive=True,
+    extensions=(".v", ".sv", ".vh", ".svh"),
+    exclude=["*_tb.v", "sim/*"],
+    preprocess=True,
+    include_paths=["rtl/include"],
 )
-
-bench = Testbench(dut)
-lowered = compile_native(
-    bench,
-    lowerings={
-        # Drive 4 AXIS beats into DUT's slave port
-        "s_axis": AXIStreamSourceLowering(beats=[0xA1, 0xB2, 0xC3, 0xD4], data_width=8),
-        # Capture 4 beats from DUT's master port
-        "m_axis": AXIStreamSinkLowering(n_beats=4, data_width=8),
-    },
-)
-
-sim = Simulator(lowered.wrapper, design=lowered.design, engine="compiled")
-sim.fork(Clock(sim.signal("clk"), period=10))
-sim.signal("rst_n").value = 0
-sim.run(max_time=40)
-sim.signal("rst_n").value = 1
-sim.run(max_time=10 * 60)
-
-# Read captured beats
-for i in range(4):
-    print(f"cap[{i}] = {int(sim.signal(f'm_axis_cap_{i}').value):#04x}")
-assert int(sim.signal("m_axis_snk_done").value) == 1
 ```
 
-Supported lowerings:
-
-| Class | DUT-side role | Purpose |
-|---|---|---|
-| `AXIStreamSourceLowering(beats, data_width)` | AXI-Stream slave | Fixed-beat source |
-| `AXIStreamSinkLowering(n_beats, data_width)` | AXI-Stream master | Beat capture |
-| `AXILiteMasterLowering(operations, ...)` | AXI-Lite slave | Scripted write/read |
-| `AXILiteSlaveLowering(memory_depth, ...)` | AXI-Lite master | Memory-backed slave responder |
-| `AXI4SlaveLowering(memory_depth, ...)` | AXI4 master | Memory-backed INCR-burst responder |
-| `AXI4MasterLowering(operations, ...)` | AXI4 slave | Scripted single-beat write/read master |
-| `MemBusMasterLowering(operations, ...)` | MemBus slave | Scripted synchronous-bus write/read master |
-| `MemBusResponderLowering(memory_depth, ...)` | MemBus master | Memory-backed synchronous-bus slave responder |
-
-See [bench_native_lowering.md](simulation/bench_native_lowering.md) for full
-API, examples, signal naming, and performance guidance.
-
-For the full Python `Testbench` proxy API reference (all proxy types,
-backpressure, multi-domain, overrides, error handling) see
-[bench_usage.md](simulation/bench_usage.md).
+### Notes
+- Parsing returns a unified `Design` object.
+- With `analyze=True`, instance references are linked after merge.
+- Duplicate names are deduplicated (first definition wins).
 
 ---
 
-## 13b. Backpressure / bandwidth throttling (PauseGenerator)
+## 13. Preprocessor support
 
-Any endpoint's `pause` attribute accepts either a plain `bool` or a callable
-`PauseGenerator`. When callable, the generator is invoked **exactly once per
-clock cycle** in `tick_pre`, so the RNG state advances at the correct rate
-regardless of how many tick phases run per cycle.
+### Via parse APIs
 
-### What gets gated
-
-| Endpoint | What `pause=True` asserts |
-|---|---|
-| `AXIStreamSource` / `StreamSource` | `tvalid` / `valid` held low |
-| `AXIStreamSink` / `StreamSink` | `tready` / `ready` held low |
-| `AXILiteResponder` (always_ready) | `awready` + `wready` + `arready` held low |
-| `AXI4Responder` (always_ready) | `awready` + `wready` + `arready` held low; also settable independently via `.pause_aw`/`.pause_w`/`.pause_ar` (and `.pause_b`/`.pause_r`, which delay *starting* a new response) |
-
-### PauseGenerator
+Pass `preprocess=True` to any `parse_*` function:
 
 ```python
-from veriforge.sim.endpoints import PauseGenerator
+from veriforge.project import parse_directory
 
-# Pause 1 in every 4 cycles — ~75% throughput, random.
-gen = PauseGenerator(1, 4)
-
-# Same bandwidth with a fixed seed (reproducible sequences).
-gen = PauseGenerator(1, 4, seed=42)
-
-# Factory shortcuts.
-gen = PauseGenerator.never()           # always False — full bandwidth
-gen = PauseGenerator.always()          # always True  — zero bandwidth
-gen = PauseGenerator.duty(0.3)         # ~30% pause rate
-gen = PauseGenerator.duty(0.3, seed=7) # seeded
-```
-
-### Direct endpoint usage
-
-```python
-from veriforge.sim.endpoints import (
-    AXIStreamSource, AXIStreamSink, EndpointCoordinator, PauseGenerator,
+design = parse_directory(
+    "rtl",
+    preprocess=True,
+    defines={"FPGA": "1", "DATA_W": "32"},
+    include_paths=["rtl", "rtl/include", "ip/common"],
 )
-
-source = AXIStreamSource(sim, "s_axis")
-sink   = AXIStreamSink(sim, "m_axis")
-coord  = EndpointCoordinator(sim, [source, sink])
-
-# Throttle source to ~50% bandwidth.
-source.pause = PauseGenerator(1, 2, seed=0)
-
-# Apply backpressure on the sink side instead.
-sink.pause = PauseGenerator.duty(0.25)
-
-# Plain bool still works as before.
-source.pause = True   # stall permanently
-source.pause = False  # clear (default)
 ```
 
-### Via proxy (Testbench / bench-style)
+Direct `verilog_parser.build_tree()` calls and the default `parse_file()` path
+now tolerate parser-blocking directive lines like `` `timescale `` by blanking
+those lines before grammar parsing. Full preprocessing is still required for
+macro expansion, `` `include ``, and conditional compilation.
 
-All four proxy classes (`AXIStreamProxy`, `AXILiteProxy`, `AXI4Proxy`,
-`StreamProxy`) expose a `pause` property that forwards to the underlying
-endpoint:
+### Standalone preprocessor
 
 ```python
-bench = Testbench(dut)
-# ...
-m_axis = bench.iface("m_axis")  # AXIStreamProxy, role="master" (sink)
-s_axis = bench.iface("s_axis")  # AXIStreamProxy, role="slave" (source)
+from veriforge.preprocessor import preprocess, preprocess_file
 
-# Throttle the source during a burst.
-s_axis.pause = PauseGenerator(1, 3, seed=1)
-s_axis.put([1, 2, 3, 4, 5, 6])
-bench.step(20)
-s_axis.pause = False
+# Preprocess a string
+output = preprocess(source_text, defines={"SIMULATION": ""})
 
-# Backpressure on the sink while draining.
-m_axis.pause = PauseGenerator.duty(0.4)
-bench.step(30)
+# Preprocess a file (file's directory auto-added to include search path)
+output = preprocess_file("rtl/top.v", defines={"__ICARUS__": ""})
+
+# Get final defines back for chaining to the next file
+output, final_defs = preprocess_file(
+    "rtl/top.v",
+    defines={"SYNTH": ""},
+    return_defines=True,
+)
 ```
 
-### AXI-Lite / AXI4 responder throttle
+### Supported directives
 
-For DUT-master paths, pausing the responder randomly withholds the
-`awready`/`wready`/`arready` handshake, stressing the DUT's ability to handle
-delayed acknowledgements:
-
-```python
-axi_lite = bench.iface("m_axi_lite")  # AXILiteProxy, role="master"
-axi_lite.pause = PauseGenerator(1, 4, seed=99)
-bench.step(200)
-axi_lite.pause = False
-```
-
-`AXI4Proxy` (role="master") additionally supports independent per-channel
-pause (`.pause_aw`, `.pause_w`, `.pause_ar`, `.pause_b`, `.pause_r`) and a
-DDR/HBM-style latency/bandwidth model (`.rd_latency_cycles`,
-`.wr_latency_cycles`, `.max_bw_percent`, `.wr_max_bw_percent`) instead of
-just the combined `.pause` — see
-[bench_usage.md#axi4proxy](simulation/bench_usage.md#axi4proxy) for the
-full API and examples.
+`` `define ``, `` `undef ``, `` `ifdef ``, `` `ifndef ``, `` `elsif ``, `` `else ``, `` `endif ``,
+`` `include ``, `` `timescale ``, `` `resetall ``, `` `default_nettype ``, `` `pragma ``,
+`` `line ``, `` `celldefine ``, `` `endcelldefine ``, `` `unconnected_drive ``, `` `nounconnected_drive ``
 
 ---
 
-## 13c. Testbench access levels
+## 14. Working with the semantic model
 
-Every testbench interaction falls into one of three access levels. Understanding
-which level applies to a given port determines both the API you use and the timing
-rules that apply.
-
-### Level 1 — Proxy API (recognized interfaces)
-
-`build_testbench` auto-detects AXI-Stream, AXI-Lite, and AXI4 interface bundles by
-scanning port names. Each detected bundle gets a **proxy object** with a high-level
-API. All timing is managed internally; you never call tick_pre/sample_pre/tick_post.
+After parsing, you can inspect the model directly.
 
 ```python
-bench = build_testbench(DUT_PATH)
-with bench.run():
-    bench.reset_all()
-    src  = bench.iface("s_axis")   # AXIStreamProxy — put/wait_drain/get
-    axil = bench.iface("axil")     # AXILiteProxy   — read/write
-    ram  = bench.iface("ram")      # AXI4Proxy      — read/write
+design = parse_file("rtl/top.v")
 
-    src.put([0x10, 0x20, 0x30])
-    axil.write(0x00, 0xDEAD_BEEF)
-    src.wait_drain()
-    pkt = src.get()               # blocks (advances clock) until frame arrives
+for mod in design.modules:
+    print("module:", mod.name)
+    print("ports:", [p.name for p in mod.ports])
+    print("parameters:", [p.name for p in mod.parameters])
 ```
 
-Recognized interface types:
-
-| Port pattern | Proxy class | Role |
-|---|---|---|
-| `<prefix>_tdata`, `_tvalid`, `_tready`, `_tlast` | `AXIStreamProxy` | source / sink |
-| `<prefix>_awaddr`, `_awvalid`, … | `AXILiteProxy` | master / slave |
-| `<prefix>_awaddr`, `_awlen`, `_awsize`, `_awburst`, `_wlast`, … (full AW/W/B + AR/R, or just one side for a read-only/write-only DUT) | `AXI4Proxy` | master / slave |
-| `<prefix>_valid`, `<prefix>_ready` (no `_t`-prefix) | `StreamProxy` | plain handshake source / sink |
-| `<prefix>_addr`, `_wen`/`_we`, `_wdata`, `_rdata` | `MemBusProxy` | synchronous SRAM-style master / slave |
-
-### Level 2 — Raw signal access (non-interface ports)
-
-Any port that does not match a recognized interface pattern — status flags, FIFO
-depth counters, interrupt lines, custom config registers, enable bits — must be
-accessed directly via `bench.sim.signal()` / `bench.sim.drive()` / `bench.step()`.
-
-```python
-with bench.run():
-    bench.reset_all()
-
-    # Configure DUT before traffic
-    bench.sim.drive("cfg_threshold", 8)
-    bench.sim.drive("enable", 1)
-    bench.step(2)                          # settle the config
-
-    # Run normal proxy traffic
-    src = bench.iface("s_axis")
-    src.put(list(range(16)))
-    src.wait_drain()
-
-    # Read non-interface status signals after proxy work has finished
-    overflow = int(bench.sim.signal("s_status_overflow").value)
-    depth    = int(bench.sim.signal("s_status_depth").value)
-    assert overflow == 0, f"FIFO overflowed: depth={depth}"
-```
-
-**Timing rule for Level 2**: reading a signal after `wait_drain()`, `bench.step()`,
-or any proxy method that advances the clock is safe — you are reading between clock
-cycles, after all NBA updates have settled. What is unsafe is reading a registered
-signal in the same moment a clock edge fires (i.e. inside a `tick_post()` callback).
-Since Level 2 code runs between proxy calls, not inside callbacks, this hazard
-normally does not arise.
-
-`bench.step(n)` advances exactly `n` clock cycles without driving any interfaces —
-useful for adding gaps, settling config signals, or waiting for a DUT pipeline to
-flush.
-
-### Level 3 — Custom endpoint class (new reusable protocol drivers)
-
-Only needed when implementing a **new protocol** that the auto-detector does not
-recognise (SPI, I2C, custom memory bus, etc.) and you want it to participate in the
-`EndpointCoordinator` tick lifecycle.
-
-Implement three hooks and register the class with the coordinator:
-
-```python
-class MySPIMaster:
-    def tick_pre(self) -> None:
-        """Drive output signals for this clock cycle (before clock edge)."""
-        self.sim.drive("sck", self._next_sck)
-        self.sim.drive("mosi", self._next_mosi)
-
-    def sample_pre(self) -> None:
-        """Snapshot DUT outputs — stable pre-edge values (D-input state)."""
-        self._sampled_miso = int(self.sim.signal("miso").value)
-
-    def tick_post(self) -> None:
-        """Act on the snapshot taken in sample_pre (NOT on live signal values)."""
-        if self._sampled_miso:
-            self._rx_buffer.append(self._sampled_miso)
-
-coord = EndpointCoordinator(sim, [MySPIMaster(sim)], clock_name="clk")
-coord.run_until(lambda: done, max_steps=1000, message="SPI transfer timeout")
-```
-
-**Critical rule**: read registered DUT outputs in `sample_pre()`, never in
-`tick_post()`. `tick_post()` runs after `run_step()` has applied all Non-Blocking
-Assignments — signal values there reflect the *next* cycle's state, not the clock
-edge just observed. See
-[endpoint_timing_model.md](simulation/endpoint_timing_model.md) for a full
-explanation and the concrete bug example that motivated this rule.
-
-### Summary
-
-| Situation | Level | API |
-|---|---|---|
-| AXI-Stream, AXI-Lite, AXI4 ports | 1 | `bench.iface("prefix")` → proxy |
-| Status flags, config regs, custom ports | 2 | `bench.sim.signal()` / `bench.sim.drive()` / `bench.step()` |
-| Multi-domain CDC (separate clock pins) | 2 | `Simulator` + `MultiDomainRunner` directly |
-| New reusable protocol driver | 3 | Implement tick_pre / sample_pre / tick_post |
+The model includes:
+- **Declarations**: `Port`, `Net`, `Variable`, `Parameter` (with `is_local` for localparams)
+- **Expressions**: `Identifier`, `Literal`, `StringLiteral`, `BinaryOp`, `UnaryOp`, `TernaryOp`, `Concatenation`, `Replication`, `BitSelect`, `RangeSelect`, `PartSelect`, `FunctionCall`, `Mintypmax`, `Range`
+- **Statements**: `BlockingAssign`, `NonblockingAssign`, `IfStatement`, `CaseStatement`, `ForLoop`, `WhileLoop`, `ForeverLoop`, `RepeatLoop`, `SeqBlock`, `ParBlock`, `WaitStatement`, `DisableStatement`, `EventTrigger`, `TaskEnable`, `SystemTaskCall`, `DelayControl`, `EventControl`
+- **Behavioral**: `AlwaysBlock`, `InitialBlock`, `SensitivityType`
+- **Structural**: `Instance`, `PortConnection`, `ParameterBinding`, `ContinuousAssign`
+- **Generate**: `GenerateFor`, `GenerateIf`, `GenerateCase`, `GenvarDecl`
+- **Functions/Tasks**: `FunctionDecl`, `TaskDecl`
+- **SystemVerilog**: `Interface`, `Modport`, `ModportPort`, `Package`, `ImportDecl`, `TypedefDecl`, `EnumType`, `StructType`, `UnionType`
+- **Other**: `SpecifyBlock`, `Comment`, `SourceLocation`
+- **Containers**: `Design` (top-level), `Module` (with lookup helpers)
 
 ---
 
-## 14. VCD waveform output
+## 15. Analysis workflow
 
-The `VcdWriter` generates IEEE 1364-2001 compliant VCD files for GTKWave or similar viewers.
+### Core analysis (4-pass, in-place)
 
-For simulator-driven tracing, the shared helper is `attach_vcd(...)` from
-`veriforge.sim`. This is the reusable API behind the current PULP AXI pytest
-waveform flow.
-
-### Standalone VCD writing
+`analyze_design` runs four passes that populate cross-references on model objects **in-place**.
+It returns `None`.
 
 ```python
-from veriforge.sim import VcdWriter, Value
+from veriforge.analysis import analyze_design
 
-with VcdWriter("output.vcd", timescale="1ns") as vcd:
-    vcd.add_signal("clk", width=1)
-    vcd.add_signal("count", width=8, scope="counter")
-    vcd.write_header()
+analyze_design(design)  # mutates model objects, returns None
 
-    vcd.set_time(0)
-    vcd.change("clk", Value(0, width=1))
-    vcd.change("count", Value(0, width=8))
-
-    vcd.set_time(5)
-    vcd.change("clk", Value(1, width=1))
-    vcd.change("count", Value(1, width=8))
+# After analysis, cross-references are populated:
+# - Instance.resolved_module → Module
+# - Identifier.resolved → Port / Net / Variable / Parameter
+# - PortConnection.resolved_port → Port
+# - Net.drivers / Net.loads, Variable.drivers / Variable.loads
+for mod in design.modules:
+    for inst in mod.instances:
+        target = inst.resolved_module
+        print(f"{inst.name} → {target.name if target else '?'}")
 ```
 
-### VCD API
+### Additional analysis passes
 
-| Method | Description |
-|--------|-------------|
-| `add_signal(name, width, scope)` | Register signal for tracing |
-| `write_header()` | Emit VCD header (call after all `add_signal`) |
-| `set_time(t)` | Advance VCD time |
-| `change(name, value)` | Record value change (auto-deduplicates) |
-| `dump_all(time, signals_dict)` | Dump all signals at once |
-| `write_initial(signals_dict)` | Write `$dumpvars` section |
-| `finalize()` | Flush and close |
-
-Supports context manager (`with VcdWriter(...) as vcd:`).
-
-### Capturing VCDs from AXI pytest regressions
-
-The PULP AXI regression file `tests/test_sim/test_pulp_axi_examples.py` supports
-copy-paste waveform capture through the pytest option `--vcd-dir`.
-
-#### AXI-Lite regs example
-
-Reference engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
-```
-
-VM engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
-```
-
-Generated files:
-
-```text
-.\vcd_out\axi_lite_regs_basic_reference.vcd
-.\vcd_out\axi_lite_regs_prot_reference.vcd
-```
-
-The `basic` waveform covers the normal read/write path. The `prot` waveform covers
-the protected-access checks.
-
-#### AXI-Lite DW converter example
-
-Reference engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
-```
-
-VM engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
-```
-
-Generated files include:
-
-```text
-.\vcd_out\axi_lite_dw_down_manual_reference.vcd
-.\vcd_out\axi_lite_dw_up_reference.vcd
-.\vcd_out\axi_lite_dw_same_reference.vcd
-```
-
-#### Inspect the output
-
-List the written files:
-
-```powershell
-Get-ChildItem .\vcd_out
-```
-
-Open a waveform in GTKWave:
-
-```powershell
-gtkwave .\vcd_out\axi_lite_dw_down_manual_reference.vcd
-```
-
-#### Notes
-
-- Run commands from the repository root.
-- `--vcd-dir` creates the directory if needed.
-- Without `--vcd-dir`, the tests run normally but do not emit `.vcd` files.
-- On Windows, this test module currently targets the `reference` and `vm` engines.
-
-### Attaching a VCD recorder from Python
-
-If you are driving the simulator directly from Python, use `attach_vcd(...)` as a
-context manager around the portion of the simulation you want to trace.
+Each can be run independently after `analyze_design`:
 
 ```python
-from veriforge.sim import Clock, Simulator, attach_vcd
-
-sim = Simulator(mod, engine="reference")
-sim.fork(Clock(sim.signal("clk"), period=10))
-
-with attach_vcd(sim, "waves.vcd"):
-    sim.run(max_time=100)
-```
-
-This records initial values immediately, appends changes after each time step,
-and restores any existing scheduler callback when the context exits.
-
-### Cross-simulator validation
-
-The `vcd_compare` module can parse and diff VCD files for cross-simulator validation.
-Validation-oriented tests are in `tests/test_validation/`.
-
-### IcarusCosim — cross-check against Icarus Verilog
-
-The `IcarusCosim` class automates running Icarus Verilog alongside our simulator
-and comparing results. It handles finding Icarus, compiling, running, parsing VCD,
-and comparing signals — all in one API call.
-
-**Requirements:** Icarus Verilog (`iverilog` + `vvp`) installed and on PATH,
-or at `C:\iverilog\bin` on Windows.
-
-#### Single-file usage
-
-```python
-from veriforge.sim import IcarusCosim
-
-verilog = r"""
-module test;
-    reg clk = 0;
-    reg [7:0] count = 0;
-    always #5 clk = ~clk;
-    always @(posedge clk) count <= count + 1;
-    initial begin
-        $dumpfile("test.vcd");
-        $dumpvars(0, test);
-        #100 $finish;
-    end
-endmodule
-"""
-
-cosim = IcarusCosim(verilog_src=verilog)
-result = cosim.run(engine="reference", max_time=100)
-assert not result.diffs, "\n".join(result.diffs)
-```
-
-#### Multi-file project
-
-```python
-from veriforge.sim import IcarusCosim
-
-cosim = IcarusCosim(
-    files=["rtl/top.v", "rtl/sub.v", "sim/testbench.v"],
-    top_module="testbench",
-    defines={"SIM": "1"},
-    work_dir="sim/",  # cwd for $readmemh etc.
-)
-result = cosim.run(engine="reference", max_time=5000, verbose=True)
-for d in result.diffs:
-    print(d)
-```
-
-#### Cycle-by-cycle comparison
-
-For targeted debugging, `run_cycle_by_cycle()` steps both simulators
-one clock at a time and reports the first cycle with signal mismatches:
-
-```python
-cosim = IcarusCosim(
-    files=["rtl/cpu.v", "sim/testbench.v"],
-    top_module="testbench",
-    defines={"SIM": "1"},
-    work_dir="sim/",
+from veriforge.analysis import (
+    infer_widths,               # IEEE 1364-2005 expression width rules
+    fold_constants,             # evaluate constant / parameter expressions
+    lint_design, lint_module,   # lint-style checks
+    extract_clocks_resets_from_design,  # clock/reset extraction
 )
 
-mismatch = cosim.run_cycle_by_cycle(
-    engine="reference",
-    max_cycles=300,
-    reset_cycles=10,
-    clock_name="clk",
-    reset_name="rst",
-    verbose=True,
-)
+infer_widths(design)              # populates inferred_width on expressions
+fold_constants(design)            # resolves parameter-dependent expressions
 
-if mismatch:
-    print(f"First mismatch at cycle {mismatch.cycle}:")
-    for sig, icarus_val, our_val in mismatch.signals:
-        print(f"  {sig}: icarus={icarus_val} ours={our_val}")
+warnings = lint_design(design)    # returns list[LintWarning]
+for w in warnings:
+    print(f"[{w.code.name}] {w.message}  signal={w.signal}")
+
+cr_info = extract_clocks_resets_from_design(design)
+for mod_name, info in cr_info.items():
+    print(mod_name, info.clocks, info.resets)
 ```
 
-#### IcarusCosim API
+### Lint codes
 
-| Method / Constructor | Description |
-|---------------------|-------------|
-| `IcarusCosim(verilog_src=..., files=..., top_module=..., defines=..., work_dir=...)` | Set up cosim |
-| `cosim.run(engine, max_time, signals, ignore_signals, verbose)` | VCD-based full comparison |
-| `cosim.run_icarus()` | Run Icarus only, return VCD text |
-| `cosim.run_cycle_by_cycle(engine, max_cycles, reset_cycles, clock_name, ...)` | Cycle-level comparison |
-| `find_icarus("iverilog")` | Locate Icarus executables |
-| `record_vcd(sim, max_time)` | Run simulator and capture VCD as string |
+| Code | Meaning |
+|------|-------- |
+| `UNDRIVEN` | Signal has no drivers |
+| `UNUSED` | Signal has no loads |
+| `MULTI_DRIVEN` | Signal driven from multiple sources |
+| `LATCH_INFERRED` | Combinational block with incomplete assignments |
+| `WIDTH_MISMATCH` | Port connection or assign width differs |
+| `MIXED_BLOCKING` | Blocking assign in sequential always block |
+| `MIXED_NONBLOCKING` | Non-blocking assign in combinational always block |
+| `UNCONNECTED_PORT` | Instance port left open |
 
-| Return type | Description |
-|-------------|-------------|
-| `CosimResult` | `.diffs` (list of strings), `.icarus_signal_count`, `.ref_signal_count`, `.compared_signal_count`, `.icarus_vcd` |
-| `CycleMismatch` | `.cycle` (int), `.signals` (list of `(name, icarus_val, our_val)`) |
+### Lower-level pass functions
+
+For fine-grained control:
+
+```python
+from veriforge.analysis import (
+    link_instances,             # pass 1: resolve Instance.resolved_module
+    resolve_names,              # pass 2: build symbol tables
+    resolve_port_connections,   # pass 3: resolve PortConnection.resolved_port
+    analyze_connectivity,       # pass 4: populate drivers/loads
+    infer_widths_in_module,     # per-module width inference
+    fold_constants_in_module,   # per-module constant folding
+    const_fold, const_int,      # expression-level folding
+)
+```
 
 ---
 
-## 15. Model introspection and serialization
+## 16. Emission and formatting
+
+### Emit model to Verilog text
+
+The emitter converts model objects to Verilog source:
+
+```python
+from veriforge.codegen import emit_design, emit_module, emit_package, emit_interface
+
+# Emit an entire design (modules + interfaces + packages)
+verilog_text = emit_design(design)
+
+# Emit a single module
+print(emit_module(design.modules[0]))
+
+# Emit a single expression (useful for debugging)
+from veriforge.codegen import emit_expression
+print(emit_expression(some_expr))
+```
+
+### Format with configurable style
+
+The formatter works on **model objects** (not raw text strings) and applies
+configurable brace placement, indentation, and port alignment:
+
+```python
+from veriforge.codegen import FormatStyle, VerilogFormatter, fmt_module, fmt_design
+
+# Convenience functions (shortest path)
+print(fmt_module(design.modules[0], FormatStyle.allman()))
+print(fmt_design(design, FormatStyle.knr()))
+
+# Or create a formatter instance with custom settings
+style = FormatStyle(
+    indent_width=2,
+    begin_end_style="allman",    # "knr", "allman", or "gnu"
+    end_else_same_line=False,
+    align_ports=True,
+    column_limit=80,
+)
+formatter = VerilogFormatter(style)
+print(formatter.format_module(design.modules[0]))
+```
+
+### Style presets
+
+| Preset | `begin` placement | `end else` |
+|--------|-------------------|-------------|
+| `FormatStyle.knr()` | same line as keyword | same line |
+| `FormatStyle.allman()` | next line, indented | separate lines |
+| `FormatStyle.gnu()` | next line, keyword indent | separate lines |
+
+---
+
+## 17. Model introspection and serialization
 
 Model objects provide lookup methods and JSON serialization:
 
@@ -1560,7 +1568,7 @@ print(json_str[:500])
 
 ---
 
-## 16. Grammar and language support visibility
+## 18. Grammar and language support visibility
 
 Use grammar tooling to inspect parser coverage, but treat the generated grammar
 docs as **parser metadata**, not as a complete runtime compatibility matrix.
@@ -1608,7 +1616,7 @@ subset:
 | Compiled `>64`-bit internals | Partial support only | Wide compiled regressions in `tests/test_sim/compiled/test_wide_ops.py` |
 | Compiled raw-codegen limits | Wide internals and some multi-dimensional subarray semantics remain partial | Focused regressions in `tests/test_sim/compiled/` |
 
-See `notes/known_issues.md` for the maintained issue list and current status.
+See `notes/developer/known_issues.md` for the maintained issue list and current status.
 
 ### Generate grammar dependency tree
 
@@ -1622,7 +1630,7 @@ Also see:
 
 ---
 
-## 17. Typical end-to-end workflows
+## 19. Typical end-to-end workflows
 
 ### A) Analyze an existing RTL repository
 1. Parse with `parse_directory(..., preprocess=True)`
@@ -1643,7 +1651,7 @@ Also see:
 
 ---
 
-## 18. Testing guidance
+## 20. Testing guidance
 
 Run focused tests when working in a specific area:
 
@@ -1666,12 +1674,12 @@ Project notes document additional testing conventions.
 
 ---
 
-## 19. Pointers to related docs
+## 21. Pointers to related docs
 
 - Quick path: [getting_started.md](getting_started.md)
 - DSL reference: [dsl_guide.md](dsl/dsl_guide.md)
-- Architecture map: [python_overview.md](python_overview.md)
-- Semantic model notes: [semantic_model.md](semantic_model.md)
+- Project file listing: [files.md](developer/files.md)
+- Semantic model notes: [semantic_model.md](developer/semantic_model.md)
 - Simulation notes: [simulator_python.md](simulation/simulator_python.md),
   [simulator_bytecode_vm.md](simulation/simulator_bytecode_vm.md),
   [simulator_compile_cython.md](simulation/simulator_compile_cython.md)
@@ -1679,7 +1687,7 @@ Project notes document additional testing conventions.
 
 ---
 
-## 20. Practical tips
+## 22. Practical tips
 
 - Prefer `uv run ...` commands in this repository.
 - Start with focused tests for the area you changed.

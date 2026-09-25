@@ -1,5 +1,10 @@
 # Developer Guide
 
+Deeper internals reference — architecture, semantic model, the full
+project file listing, public API, roadmap, known issues, CLI JSON
+schema/tools, test taxonomy, and parser internals (`lark_file.md`,
+`pcache.md`) — lives under [`notes/developer/`](developer/).
+
 ## 1. Development environment
 
 ```bash
@@ -45,7 +50,7 @@ worker processes. Each worker gets its own isolated compiled-engine cache via
 the autouse fixture in `tests/conftest.py` — see [notes/simulation/cycache.md](simulation/cycache.md)
 for details on how cache growth is bounded.
 
-See [notes/test_taxonomy.md](test_taxonomy.md) for test directory layout and pytest marker definitions.
+See [notes/developer/test_taxonomy.md](developer/test_taxonomy.md) for test directory layout and pytest marker definitions.
 
 ## 3. CI
 
@@ -86,7 +91,7 @@ GitHub Actions runs three workflows:
 
 ## 4. Project structure
 
-See [notes/python_overview.md](python_overview.md) for the module-by-module file listing.
+See [notes/developer/files.md](developer/files.md) for the module-by-module file listing.
 
 Key entry points:
 
@@ -99,7 +104,11 @@ Key entry points:
 | `src/veriforge/__main__.py` | CLI entry point (`veriforge` subcommands) |
 | `veriforge_lsp/` | `veriforge-lsp` language server (top-level package, pygls-based) |
 
-The package `__init__.py` re-exports the most common names — see [notes/public_api.md](public_api.md).
+The package `__init__.py` re-exports the most common names — see [notes/developer/public_api.md](developer/public_api.md).
+
+Developer/internals CLI tools (grammar tree visualization, hierarchy
+refactor inspection, grammar metadata) are documented in
+[notes/developer/cli_tools.md](developer/cli_tools.md).
 
 ## 5. Adding a new language construct
 
@@ -112,7 +121,7 @@ When adding support for a new Verilog/SystemVerilog construct:
 5. **Simulation** (`sim/evaluator.py`, `sim/executor.py`) — handle evaluation/execution
 6. **VM compiler** (`sim/vm/compiler.py`) — emit bytecode (used by both `"vm"` and `"vm-fast"`)
 7. **Compiled codegen** (`sim/compiled/codegen.py`) — emit Cython C code (may fallback to reference)
-8. **Tests** — add to the appropriate test directory (see [notes/test_taxonomy.md](test_taxonomy.md))
+8. **Tests** — add to the appropriate test directory (see [notes/developer/test_taxonomy.md](developer/test_taxonomy.md))
 
 When writing simulation tests, parametrize over all relevant engines. For pure
 VM behaviour use `["vm", "vm-fast"]`; for broader cross-validation use
@@ -129,7 +138,7 @@ generated from it. Any change to `sim/vm/interpreter.py` or `sim/vm/opcodes.py`
 `_interp_fast.pyx` change in the *same commit*. CI builds the extension and
 runs the VM test selection twice — once with it built, once with
 `VERIFORGE_DISABLE_CYTHON_VM=1` — and requires both green, so a missed sync
-fails the build rather than silently drifting (see `notes/known_issues.md`
+fails the build rather than silently drifting (see `notes/developer/known_issues.md`
 for the history of drift this caught).
 
 ## 6. Cross-simulator validation (cosim)
@@ -172,7 +181,7 @@ The auto-detection system in `endpoints/detect.py` matches port bundles to endpo
 - **Line length**: 120 characters (`ruff` enforced)
 - **Type annotations**: required on all public functions and class attributes; `mypy` runs in CI
 - **Comments**: only where clarification is genuinely needed — don't comment obvious code
-- **Test naming**: see [notes/test_taxonomy.md](test_taxonomy.md)
+- **Test naming**: see [notes/developer/test_taxonomy.md](developer/test_taxonomy.md)
 
 ## 9. Refactor tool invariants
 
@@ -234,7 +243,7 @@ to per-test temp directories and cleaned up after each test, so `.cycache`
 does not grow during test runs. Set `VERILOG_TOOLS_COMPILE_CACHE` in your
 shell to opt out of this and use a persistent cache instead.
 
-See [notes/pcache.md](pcache.md) and [notes/simulation/cycache.md](simulation/cycache.md) for details.
+See [notes/developer/parsing/pcache.md](developer/parsing/pcache.md) and [notes/simulation/cycache.md](simulation/cycache.md) for details.
 
 ## Fuzzing
 
@@ -249,10 +258,10 @@ uv run -m veriforge.fuzz --max 100 --no-icarus
 It is **not** a pytest test — it runs as a long-lived background process
 and logs mismatches to `fuzz_output/`. When a mismatch is found, reduce it
 to a minimal repro, add a deterministic test in `tests/test_sim/`, fix the
-bug, and (if it cannot be fixed yet) document it in `notes/known_issues.md`.
+bug, and (if it cannot be fixed yet) document it in `notes/developer/known_issues.md`.
 
 The CI differential tests (`tests/test_sim/test_differential*.py`) are fast,
 bounded regression tests that prevent known bug shapes from recurring.  The
 fuzzer discovers new patterns that then feed into those tests.
 
-See [notes/fuzzer.md](fuzzer.md) for full usage and architecture.
+See [notes/developer/fuzzer.md](developer/fuzzer.md) for full usage and architecture.

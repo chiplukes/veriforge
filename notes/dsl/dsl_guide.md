@@ -231,7 +231,7 @@ write-time:
   [Interfaces](#interfaces-signal-bus-grouping)), which is inherently a
   procedural, prefix-driven expansion.
 - You're converting parsed Verilog to DSL code (`design_to_dsl` — see
-  [python_overview.md](../python_overview.md)), which emits one `m.input(...)`-style
+  [files.md](../developer/files.md)), which emits one `m.input(...)`-style
   call per signal it found, matching the source 1:1.
 - You just want a throwaway script/REPL module without defining a class.
 

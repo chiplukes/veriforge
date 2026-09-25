@@ -1,6 +1,6 @@
 # Cython Compiled Cache (.cycache)
 
-See also: [pcache.md](../pcache.md) for the parse-time pickle cache — a separate, unrelated cache.
+See also: [pcache.md](../developer/parsing/pcache.md) for the parse-time pickle cache — a separate, unrelated cache.
 
 ## Problem
 

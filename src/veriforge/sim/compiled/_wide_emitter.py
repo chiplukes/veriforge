@@ -3978,7 +3978,7 @@ class _WideEmitterMixin:
 
             # Bitwise invert / negate — operator applies at the context
             # (dst_width) width per IEEE 1364-2005 (context-determined, not
-            # self-determined — see notes/known_issues.md): the operand must
+            # self-determined — see notes/developer/known_issues.md): the operand must
             # be extended to the FULL dst_width *before* wide_not/wide_neg
             # runs, not computed at its own self-width and patched up
             # afterward -- computing `~x` at x's own narrow self-width then
@@ -4009,7 +4009,7 @@ class _WideEmitterMixin:
                 # path below since two's-complement negation of an
                 # already-extended value gives the correct modular
                 # wraparound regardless. A systematic truth-table sweep
-                # (see notes/known_issues.md's seed 2182 entry) found this
+                # (see notes/developer/known_issues.md's seed 2182 entry) found this
                 # backwards for `~`: Icarus extends the operand to context
                 # width FIRST, THEN applies `~` to the WHOLE extended
                 # value, exactly like `-` already does -- there is no
@@ -4929,7 +4929,7 @@ class _WideEmitterMixin:
             # the `<unsigned long long>` cast below -- a condition wider
             # than 64 bits can only be evaluated this way, not fully
             # word-by-word (a documented residual gap, see
-            # notes/known_issues.md).
+            # notes/developer/known_issues.md).
             cond_w = self._expr_width(expr.condition)
             cond_mask_bits = f"wmask({min(cond_w, 64)})"
             # `_emit_expr`'s raw C `long long` result is only meaningful
@@ -5347,7 +5347,7 @@ class _WideEmitterMixin:
         # is itself wrapped in `$signed(...)` (signed_override True) and the
         # destination context is wider than that natural width, those upper
         # bits must be sign-filled from the replicated value's own top bit
-        # instead -- confirmed against Icarus (see notes/known_issues.md).
+        # instead -- confirmed against Icarus (see notes/developer/known_issues.md).
         if et is Replication:
             count = _const_int(expr.count, self._param_env)
             if count is None or count <= 0:

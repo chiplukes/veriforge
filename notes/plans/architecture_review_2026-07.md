@@ -63,7 +63,7 @@ only in local validation tests.
    a longer randomized run can be nightly.
 2. When Icarus is available, include it as the oracle via `IcarusCosim`.
 3. Apply the `cross_engine` / `compiled` pytest markers from
-   `notes/test_taxonomy.md` (currently defined but unused) so the harness and
+   `notes/developer/test_taxonomy.md` (currently defined but unused) so the harness and
    existing cross-engine tests are selectable.
 
 ## 3. Decide the fate of the Cython VM (`_interp_fast.pyx`)
@@ -71,7 +71,7 @@ only in local validation tests.
 **Problem.** `setup.py`'s docstring records that the Cython VM has drifted from
 the pure-Python interpreter (~18 failures in `test_bench_native.py`,
 memory read-after-write divergence). The fallback is silent, the issue was
-documented only in `setup.py` (now also in `notes/known_issues.md`), and no CI
+documented only in `setup.py` (now also in `notes/developer/known_issues.md`), and no CI
 job builds the extension — so the shipped-when-built artifact is effectively
 untested.
 
@@ -172,7 +172,7 @@ width BEFORE the operator runs — masking the primitive's result at
 into at `dst_width` (which `_wide_emitter.py`'s `_emit_wide_expr_to_scratch`
 already does — see its own extensive comment at the `if op in {"~", "-"}:`
 branch). This was conclusively established by a much later, more
-rigorous investigation (see `notes/known_issues.md`'s seed 2182 entry: a
+rigorous investigation (see `notes/developer/known_issues.md`'s seed 2182 entry: a
 systematic truth-table sweep across six fixed-self-determined operators
 and both `~`/unary `-`, which found Icarus extends-then-applies in every
 case, never the reverse). The current code already implements the correct

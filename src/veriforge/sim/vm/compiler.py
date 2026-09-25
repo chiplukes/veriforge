@@ -1070,7 +1070,7 @@ class Compiler:  # cm:8c1e4a
             # extension, is unsigned). The combined result is then extended
             # separately to `width` using the whole BinaryOp's own combined
             # signedness. Mirrors the identical fix in `sim/evaluator.py`
-            # (see notes/known_issues.md).
+            # (see notes/developer/known_issues.md).
             elif expr.op in ("&", "|", "^", "~^", "^~"):
                 # `signed_override` must NEVER be forwarded into either
                 # operand's own recursive `_compile_expr` call, nor govern
@@ -1332,7 +1332,7 @@ class Compiler:  # cm:8c1e4a
             # extend the RESULT afterward) -- that's wrong for unsigned
             # operands, since zero-extension doesn't commute with bitwise
             # complement (only sign-extension does), confirmed against
-            # Icarus/Verilator (see notes/known_issues.md).
+            # Icarus/Verilator (see notes/developer/known_issues.md).
             if expr.op in ("~", "+", "-"):
                 # `~` used to be special-cased here: compile at the
                 # operand's own FIXED self-determined width first (when
@@ -1344,7 +1344,7 @@ class Compiler:  # cm:8c1e4a
                 # at context width FIRST, then apply" path below since
                 # two's-complement negation of an already-extended value
                 # gives the correct modular wraparound regardless. A
-                # systematic truth-table sweep (see notes/known_issues.md's
+                # systematic truth-table sweep (see notes/developer/known_issues.md's
                 # seed 2182 entry) found this backwards for `~`: Icarus
                 # extends the operand to context width FIRST, THEN applies
                 # `~` to the WHOLE extended value, exactly like unary `-`
@@ -1493,7 +1493,7 @@ class Compiler:  # cm:8c1e4a
             # context-determined operator (~, arithmetic, a nested ternary)
             # within it. Compiling with width=0 (the default) would leave
             # those nested operators entirely unresized -- confirmed wrong
-            # against Icarus (see notes/known_issues.md), and matches the
+            # against Icarus (see notes/developer/known_issues.md), and matches the
             # identical fix in `sim/evaluator.py`'s reference engine.
             for part in expr.parts:
                 self._compile_expr(part, program, self._expr_width(part))
@@ -3242,7 +3242,7 @@ class Compiler:  # cm:8c1e4a
             # `_walk_expr_reads` for the reference-engine counterpart of
             # this same bug (confirmed cross-engine: this was the root
             # cause of the fuzzing round's dominant "streaming-concat
-            # X-propagation divergence" finding, notes/roadmap.md -- not a
+            # X-propagation divergence" finding, notes/developer/roadmap.md -- not a
             # `compiled`-engine bug as first assumed. vm-fast shares this
             # gap too, since it executes the same bytecode this compiler
             # produces.)

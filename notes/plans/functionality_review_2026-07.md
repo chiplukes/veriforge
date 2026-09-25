@@ -190,7 +190,7 @@ Suggestions:
    dataclasses (or TypedDicts) per command request/response and convert at the
    handler boundary. This is the highest-value LSP change: the payload shapes
    are the de-facto editor API and currently exist only implicitly.
-   `notes/cli_json_schema.md` already does this for the CLI — extend the same
+   `notes/developer/cli_json_schema.md` already does this for the CLI — extend the same
    contract style to LSP commands.
 2. **Split `extended.py`** by operation (hierarchy/trace/collapse/extract/
    boundary-move) once payloads are typed; the legacy-payload adapters

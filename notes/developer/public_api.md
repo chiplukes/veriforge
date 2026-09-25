@@ -120,6 +120,36 @@ Recommended public imports:
 | `lint_design`, `lint_module` | Run lint checks. |
 | `extract_clocks_resets` | Extract clock/reset information. |
 
+## Hierarchy refactor
+
+Use `veriforge.refactor` for hierarchy-graph analysis and wrapper-collapse
+edit planning. The surface is analysis/preview-only — see `developer_guide.md`
+§9 for the fail-closed invariants any new rewrite path must obey.
+
+```python
+from veriforge.analysis import analyze_design
+from veriforge.project import parse_directory
+from veriforge.refactor import build_hierarchy_graph
+
+design = parse_directory("rtl/")
+analyze_design(design)
+
+graph = build_hierarchy_graph(design, top="top")
+payload = graph.to_dict()
+wrappers = payload["wrappers"]
+```
+
+It builds hierarchy trees with stable slash-separated instance paths such as
+`top/u_wrapper/u_core`, classifies wrapper candidates, and serializes JSON
+payloads that can be consumed by CLI tools or the Peovim Verilog LSP plugin. It
+also previews pure pass-through wrapper collapse edits and supports guarded CLI
+write mode plus LSP `WorkspaceEdit` payloads for editor-applied refactors.
+Extract-module preview currently supports complete continuous assignments
+selected by source line range, computes input/output/internal boundaries, and
+generates a child module plus replacement instance without writing files.
+
+See [cli_tools.md](cli_tools.md) for the `veriforge hierarchy` CLI commands.
+
 ## DSL construction
 
 Use `veriforge.dsl` for Python hardware construction.
@@ -202,7 +232,7 @@ path; `fallback_reasons` holds the corresponding diagnostic strings. On
 fallback fields are always `0`/`[]`.
 
 Compiled-simulator details and limitations are documented in
-`notes/simulation/simulator_compile_cython.md` and `notes/known_issues.md`.
+`notes/simulation/simulator_compile_cython.md` and `notes/developer/known_issues.md`.
 
 ## Simulation endpoints
 

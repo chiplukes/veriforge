@@ -1,11 +1,13 @@
 # Getting Started with `veriforge`
 
-This guide walks through the major workflows in this repository, from parsing existing RTL to building, analyzing,
-converting, and simulating designs in Python.
+This guide walks through the major workflows in this repository, starting
+with the two most-used features — simulation and the Python DSL — then
+continuing on to parsing, analyzing, converting, and formatting existing
+RTL.
 
 For a deep dive, see [user_guide.md](user_guide.md).
 
-For the machine-readable CLI contract, see [cli_json_schema.md](cli_json_schema.md).
+For the machine-readable CLI contract, see [cli_json_schema.md](developer/cli_json_schema.md).
 
 ## 1) Install
 
@@ -14,206 +16,91 @@ For the machine-readable CLI contract, see [cli_json_schema.md](cli_json_schema.
 uv sync
 ```
 
-## 2) Parse Verilog from the CLI
-
-The CLI now prefers subcommands in its top-level help. The older flag-based forms
-shown below still work for compatibility.
-
-Parse and print a syntax tree:
-
-```bash
-uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
-```
-
-The installed console script is equivalent:
-
-```bash
-uv run veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
-```
-
-Preferred subcommand form:
-
-```bash
-uv run veriforge tree --file tests/test_verilog_parser/verilog/verilog_all.v
-```
-
-Reconstruct Verilog text from the parse tree:
-
-```bash
-uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t -r
-```
-
-Preferred subcommand form:
-
-```bash
-uv run veriforge reconstruct --file tests/test_verilog_parser/verilog/verilog_all.v
-```
-
-Generate a Python testbench skeleton from a parsed RTL file (see
-[section 8](#8-generate-a-python-testbench) for the full recommended workflow):
-
-```bash
-# Recommended: enhanced bench-style scaffold with auto dependency detection
-uv run veriforge generate-python-testbench \
-    --file rtl/my_dut.v --enhanced --style=bench --auto-deps \
-    --output tb/test_my_dut.py
-
-# Quick check — print the inferred plan without generating code:
-uv run veriforge generate-python-testbench \
-    --file rtl/my_dut.v --explain-plan
-```
-
-JSON responses use a common envelope:
-
-```json
-{
-    "command": "generate-python-testbench",
-    "success": true,
-    "result": {
-        "module_name": "regs",
-        "output_path": "tb_regs.py",
-        "written": true
-    }
-}
-```
-
-JSON-capable commands also use a structured error shape on runtime failures:
-
-```json
-{
-    "command": "parse-file",
-    "success": false,
-    "error": {
-        "type": "FileNotFoundError",
-        "message": "[Errno 2] No such file or directory: 'rtl/missing.v'"
-    }
-}
-```
-
-Invalid command lines on JSON-capable subcommands use the same error envelope and
-exit with code `2`.
-
-## 3) Parse Verilog from Python
-
-CLI summary for a single RTL file:
-
-```bash
-uv run veriforge parse-file --file rtl/top.v
-```
-
-Machine-readable summary:
-
-```bash
-uv run veriforge parse-file --file rtl/top.v --json
-```
+## 2) Simulate designs
 
 ```python
-from veriforge.project import parse_file
+from veriforge.sim import Simulator, Clock
 
-# Parse one file into a Design model
-# (supports comments and optional preprocessing)
-design = parse_file("rtl/top.v", comments=True, preprocess=True)
+sim = Simulator(mod)                          # default engine="reference"
+sim.fork(Clock(sim.signal("clk"), period=10))  # auto-toggling clock
 
-print([m.name for m in design.modules])
+def test(s):
+    s.drive("rst", 1)       # drive signal by name
+    # test_fn runs before event loop — set up initial state here
+
+sim.run(test, max_time=200)
+print(sim.read("count"))    # read signal by name
+print(sim.time)             # current sim time
+print(sim.display_output)   # collected $display strings
 ```
 
-## 4) Parse multi-file projects
+Engine options: `"reference"` (tree-walking), `"vm"` (bytecode, pure Python), `"vm-fast"` (bytecode, Cython-accelerated), `"compiled"` (design-specific Cython).
 
-CLI summary for a project directory:
+Simulation supports:
+- 4-state logic values
+- event scheduling and delta cycles
+- blocking/non-blocking semantics
+- memory arrays and `$readmemh`/`$readmemb`
+- VCD waveform dumping (`VcdWriter`)
+- generate elaboration and hierarchy flattening
+- SystemVerilog constructs (enum, struct, package imports)
 
-```bash
-uv run veriforge parse-directory rtl --preprocess --include-path rtl/include
+### Run AXI simulations and capture VCDs
+
+The PULP AXI regressions under `tests/test_sim/test_pulp_axi_examples.py` support
+writing VCD waveforms directly from pytest with `--vcd-dir`.
+
+From the repository root, run one AXI-Lite regs simulation on the reference engine:
+
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
 ```
 
-Machine-readable summary:
+This writes:
 
-```bash
-uv run veriforge parse-directory rtl --json
+```text
+.\vcd_out\axi_lite_regs_basic_reference.vcd
+.\vcd_out\axi_lite_regs_prot_reference.vcd
 ```
 
-CLI export to Python DSL files:
+Run the same regs simulation on the VM engine:
 
-```bash
-uv run veriforge export-dsl rtl out_dsl --single-file
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
 ```
 
-Machine-readable export result:
+Run the AXI-Lite DW converter regression on the reference engine:
 
-```bash
-uv run veriforge export-dsl rtl out_dsl --json
+```powershell
+uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
 ```
 
-```python
-from veriforge.project import parse_directory
+That writes files such as:
 
-# Recursively parse .v/.sv/.vh/.svh files
-# and link instances across modules
-design = parse_directory("rtl", preprocess=True, include_paths=["rtl/include"])
-
-top_modules = design.get_top_modules()
-print([m.name for m in top_modules])
+```text
+.\vcd_out\axi_lite_dw_down_manual_reference.vcd
+.\vcd_out\axi_lite_dw_up_reference.vcd
+.\vcd_out\axi_lite_dw_same_reference.vcd
 ```
 
-## 5) Analyze design connectivity and semantics
+List the generated waveforms:
 
-`analyze_design` runs four passes **in-place** (link instances → resolve names → resolve port connections → analyze connectivity):
-
-```python
-from veriforge.analysis import analyze_design
-
-analyze_design(design)  # mutates model objects in-place, returns None
-
-# After analysis, cross-references are populated:
-for mod in design.modules:
-    for inst in mod.instances:
-        print(inst.name, "→", inst.resolved_module.name if inst.resolved_module else "?")
+```powershell
+Get-ChildItem .\vcd_out
 ```
 
-Additional analysis passes (run independently after `analyze_design`):
+Open one in GTKWave:
 
-```python
-from veriforge.analysis import infer_widths, fold_constants, lint_design
-from veriforge.analysis import extract_clocks_resets_from_design
-
-infer_widths(design)              # IEEE 1364-2005 expression width rules
-fold_constants(design)            # evaluate constant / parameter expressions
-warnings = lint_design(design)    # lint-style checks (returns list[LintWarning])
-for w in warnings:
-    print(f"[{w.code.name}] {w.message}")
-
-cr = extract_clocks_resets_from_design(design)  # clock/reset extraction
+```powershell
+gtkwave .\vcd_out\axi_lite_regs_basic_reference.vcd
 ```
 
-Lint codes: `UNDRIVEN`, `UNUSED`, `MULTI_DRIVEN`, `LATCH_INFERRED`, `WIDTH_MISMATCH`, `MIXED_BLOCKING`, `MIXED_NONBLOCKING`, `UNCONNECTED_PORT`.
+Notes:
+- On Windows, this test file currently runs `reference` and `vm`.
+- `--vcd-dir` is optional; without it, the tests still run but no waveforms are written.
+- The regs test produces two VCDs because it exercises both the normal path and the protected-access path.
 
-## 6) Emit and format Verilog
-
-The emitter converts model objects to Verilog source text:
-
-```python
-from veriforge.codegen import emit_design, emit_module
-
-text = emit_design(design)         # all modules, interfaces, packages
-print(emit_module(design.modules[0]))  # single module
-```
-
-The formatter adds style-configurable layout (brace placement, indentation, port alignment):
-
-```python
-from veriforge.codegen import FormatStyle, fmt_design, fmt_module
-
-# Using convenience functions (shortest path)
-print(fmt_module(design.modules[0], FormatStyle.allman()))
-
-# Or with a VerilogFormatter instance
-from veriforge.codegen import VerilogFormatter
-formatter = VerilogFormatter(FormatStyle(indent_width=2, begin_end_style="knr"))
-print(formatter.format_module(design.modules[0]))
-```
-
-Style presets: `FormatStyle.knr()`, `FormatStyle.allman()`, `FormatStyle.gnu()`.
-
-## 7) Build RTL using the Python DSL
+## 3) Build RTL using the Python DSL
 
 The recommended style declares ports/registers as class attributes — a
 `ModuleSpec` subclass — so a signal's name is never typed twice:
@@ -319,7 +206,7 @@ print(emit_module(mod))
 
 Runnable examples are in `examples/`.
 
-## 8) Generate a Python testbench
+## 4) Generate a Python testbench
 
 `veriforge` can inspect a DUT and emit a ready-to-run Python testbench that
 wires up clocks, resets, and every detected AXI-Stream / AXI-Lite / AXI4 / MemBus
@@ -521,9 +408,208 @@ uv run python examples/axis_skid_buffer/test_axis_skid_buf.py --vcd build/skid.v
 
 For a step-by-step explanation of each part see
 `examples/axis_skid_buffer/README.md` and
-[user_guide.md §11](user_guide.md#11-testbench-generation).
+[user_guide.md §9](user_guide.md#9-testbench-generation).
 
-## 9) Convert parsed Verilog into DSL code
+## 5) Parse Verilog from the CLI
+
+The CLI now prefers subcommands in its top-level help. The older flag-based forms
+shown below still work for compatibility.
+
+Parse and print a syntax tree:
+
+```bash
+uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
+```
+
+The installed console script is equivalent:
+
+```bash
+uv run veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t
+```
+
+Preferred subcommand form:
+
+```bash
+uv run veriforge tree --file tests/test_verilog_parser/verilog/verilog_all.v
+```
+
+Reconstruct Verilog text from the parse tree:
+
+```bash
+uv run python -m veriforge -f tests/test_verilog_parser/verilog/verilog_all.v -t -r
+```
+
+Preferred subcommand form:
+
+```bash
+uv run veriforge reconstruct --file tests/test_verilog_parser/verilog/verilog_all.v
+```
+
+Generate a Python testbench skeleton from a parsed RTL file (see
+[section 4](#4-generate-a-python-testbench) for the full recommended workflow):
+
+```bash
+# Recommended: enhanced bench-style scaffold with auto dependency detection
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --enhanced --style=bench --auto-deps \
+    --output tb/test_my_dut.py
+
+# Quick check — print the inferred plan without generating code:
+uv run veriforge generate-python-testbench \
+    --file rtl/my_dut.v --explain-plan
+```
+
+JSON responses use a common envelope:
+
+```json
+{
+    "command": "generate-python-testbench",
+    "success": true,
+    "result": {
+        "module_name": "regs",
+        "output_path": "tb_regs.py",
+        "written": true
+    }
+}
+```
+
+JSON-capable commands also use a structured error shape on runtime failures:
+
+```json
+{
+    "command": "parse-file",
+    "success": false,
+    "error": {
+        "type": "FileNotFoundError",
+        "message": "[Errno 2] No such file or directory: 'rtl/missing.v'"
+    }
+}
+```
+
+Invalid command lines on JSON-capable subcommands use the same error envelope and
+exit with code `2`.
+
+## 6) Parse Verilog from Python
+
+CLI summary for a single RTL file:
+
+```bash
+uv run veriforge parse-file --file rtl/top.v
+```
+
+Machine-readable summary:
+
+```bash
+uv run veriforge parse-file --file rtl/top.v --json
+```
+
+```python
+from veriforge.project import parse_file
+
+# Parse one file into a Design model
+# (supports comments and optional preprocessing)
+design = parse_file("rtl/top.v", comments=True, preprocess=True)
+
+print([m.name for m in design.modules])
+```
+
+## 7) Parse multi-file projects
+
+CLI summary for a project directory:
+
+```bash
+uv run veriforge parse-directory rtl --preprocess --include-path rtl/include
+```
+
+Machine-readable summary:
+
+```bash
+uv run veriforge parse-directory rtl --json
+```
+
+CLI export to Python DSL files:
+
+```bash
+uv run veriforge export-dsl rtl out_dsl --single-file
+```
+
+Machine-readable export result:
+
+```bash
+uv run veriforge export-dsl rtl out_dsl --json
+```
+
+```python
+from veriforge.project import parse_directory
+
+# Recursively parse .v/.sv/.vh/.svh files
+# and link instances across modules
+design = parse_directory("rtl", preprocess=True, include_paths=["rtl/include"])
+
+top_modules = design.get_top_modules()
+print([m.name for m in top_modules])
+```
+
+## 8) Analyze design connectivity and semantics
+
+`analyze_design` runs four passes **in-place** (link instances → resolve names → resolve port connections → analyze connectivity):
+
+```python
+from veriforge.analysis import analyze_design
+
+analyze_design(design)  # mutates model objects in-place, returns None
+
+# After analysis, cross-references are populated:
+for mod in design.modules:
+    for inst in mod.instances:
+        print(inst.name, "→", inst.resolved_module.name if inst.resolved_module else "?")
+```
+
+Additional analysis passes (run independently after `analyze_design`):
+
+```python
+from veriforge.analysis import infer_widths, fold_constants, lint_design
+from veriforge.analysis import extract_clocks_resets_from_design
+
+infer_widths(design)              # IEEE 1364-2005 expression width rules
+fold_constants(design)            # evaluate constant / parameter expressions
+warnings = lint_design(design)    # lint-style checks (returns list[LintWarning])
+for w in warnings:
+    print(f"[{w.code.name}] {w.message}")
+
+cr = extract_clocks_resets_from_design(design)  # clock/reset extraction
+```
+
+Lint codes: `UNDRIVEN`, `UNUSED`, `MULTI_DRIVEN`, `LATCH_INFERRED`, `WIDTH_MISMATCH`, `MIXED_BLOCKING`, `MIXED_NONBLOCKING`, `UNCONNECTED_PORT`.
+
+## 9) Emit and format Verilog
+
+The emitter converts model objects to Verilog source text:
+
+```python
+from veriforge.codegen import emit_design, emit_module
+
+text = emit_design(design)         # all modules, interfaces, packages
+print(emit_module(design.modules[0]))  # single module
+```
+
+The formatter adds style-configurable layout (brace placement, indentation, port alignment):
+
+```python
+from veriforge.codegen import FormatStyle, fmt_design, fmt_module
+
+# Using convenience functions (shortest path)
+print(fmt_module(design.modules[0], FormatStyle.allman()))
+
+# Or with a VerilogFormatter instance
+from veriforge.codegen import VerilogFormatter
+formatter = VerilogFormatter(FormatStyle(indent_width=2, begin_end_style="knr"))
+print(formatter.format_module(design.modules[0]))
+```
+
+Style presets: `FormatStyle.knr()`, `FormatStyle.allman()`, `FormatStyle.gnu()`.
+
+## 10) Convert parsed Verilog into DSL code
 
 ```python
 from veriforge.convert.to_dsl import design_to_dsl
@@ -539,90 +625,6 @@ from veriforge.scaffold import export_dsl_project
 
 export_dsl_project(design, "out_dsl")
 ```
-
-## 10) Simulate designs
-
-```python
-from veriforge.sim import Simulator, Clock
-
-sim = Simulator(mod)                          # default engine="reference"
-sim.fork(Clock(sim.signal("clk"), period=10))  # auto-toggling clock
-
-def test(s):
-    s.drive("rst", 1)       # drive signal by name
-    # test_fn runs before event loop — set up initial state here
-
-sim.run(test, max_time=200)
-print(sim.read("count"))    # read signal by name
-print(sim.time)             # current sim time
-print(sim.display_output)   # collected $display strings
-```
-
-Engine options: `"reference"` (tree-walking), `"vm"` (bytecode, pure Python), `"vm-fast"` (bytecode, Cython-accelerated), `"compiled"` (design-specific Cython).
-
-Simulation supports:
-- 4-state logic values
-- event scheduling and delta cycles
-- blocking/non-blocking semantics
-- memory arrays and `$readmemh`/`$readmemb`
-- VCD waveform dumping (`VcdWriter`)
-- generate elaboration and hierarchy flattening
-- SystemVerilog constructs (enum, struct, package imports)
-
-### Run AXI simulations and capture VCDs
-
-The PULP AXI regressions under `tests/test_sim/test_pulp_axi_examples.py` support
-writing VCD waveforms directly from pytest with `--vcd-dir`.
-
-From the repository root, run one AXI-Lite regs simulation on the reference engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
-```
-
-This writes:
-
-```text
-.\vcd_out\axi_lite_regs_basic_reference.vcd
-.\vcd_out\axi_lite_regs_prot_reference.vcd
-```
-
-Run the same regs simulation on the VM engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_regs_cross_engine[vm] --vcd-dir .\vcd_out --tb=no -q
-```
-
-Run the AXI-Lite DW converter regression on the reference engine:
-
-```powershell
-uv run pytest tests/test_sim/test_pulp_axi_examples.py::test_axi_lite_dw_converter_cross_engine[reference] --vcd-dir .\vcd_out --tb=no -q
-```
-
-That writes files such as:
-
-```text
-.\vcd_out\axi_lite_dw_down_manual_reference.vcd
-.\vcd_out\axi_lite_dw_up_reference.vcd
-.\vcd_out\axi_lite_dw_same_reference.vcd
-```
-
-List the generated waveforms:
-
-```powershell
-Get-ChildItem .\vcd_out
-```
-
-Open one in GTKWave:
-
-```powershell
-gtkwave .\vcd_out\axi_lite_regs_basic_reference.vcd
-```
-
-Notes:
-- On Windows, this test file currently runs `reference` and `vm`.
-- `--vcd-dir` is optional; without it, the tests still run but no waveforms are written.
-- The regs test produces two VCDs because it exercises both the normal path and the protected-access path.
 
 ## 11) Use the preprocessor standalone
 
@@ -685,5 +687,5 @@ For architecture details, see [veriforge_lsp.md](veriforge_lsp.md).
 
 - Detailed guide: [user_guide.md](user_guide.md)
 - DSL deep dive: [dsl_guide.md](dsl/dsl_guide.md)
-- Architecture index: [python_overview.md](python_overview.md)
+- Project file listing: [files.md](developer/files.md)
 - Example designs: ../examples/

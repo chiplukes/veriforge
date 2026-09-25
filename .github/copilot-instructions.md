@@ -12,7 +12,7 @@ Verilog 2005 specification has BNF grammar which has been hand translated to EBN
 
 ### Documentation
 - Check `/notes` folder for technical documentation before starting work
-- See `notes/python_overview.md` for file listing to avoid duplicating functionality
+- See `notes/developer/files.md` for file listing to avoid duplicating functionality
 - Keep notes focused on technical information, not process documentation
 - keep documentation up to date with code changes
 

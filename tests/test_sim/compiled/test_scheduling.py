@@ -177,7 +177,7 @@ class TestContinuousAssignSnapshotConvergence:
     into the snapshot, so `r7 <= o10;` captured the wrong value at every
     single clock edge, forever. Confirmed by simply swapping the two
     `assign` statements, which made the divergence disappear entirely (see
-    `notes/roadmap.md`, "mismatch_10096"). Fixed by settling continuous
+    `notes/developer/roadmap.md`, "mismatch_10096"). Fixed by settling continuous
     assigns to a genuine fixed point (bounded by the number of continuous
     processes, mirroring `delta_loop`'s own oscillation-detection scratch
     buffers) before every snapshot point, not just one blind pass.

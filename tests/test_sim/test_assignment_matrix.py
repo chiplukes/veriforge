@@ -334,7 +334,7 @@ CASES = _build_cases()
 
 
 # =====================================================================
-# Known compiled-engine bugs (see notes/known_issues.md)
+# Known compiled-engine bugs (see notes/developer/known_issues.md)
 #
 # Discovered by this matrix (item 2.1) and fixed in item 2.7 sub-items 1-2
 # -- no known bugs left here. Kept as an explicit no-args-needed hook

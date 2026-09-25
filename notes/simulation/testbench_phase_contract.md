@@ -127,4 +127,4 @@ responsible for writing single-edge logic correctly. See
 - `src/veriforge/sim/endpoints/axis_sink.py` — reference implementation
 - `tests/test_dsl/test_taxi_axis_async_fifo_dualclk.py` — truly-async coverage
 - `tests/test_sim/test_multi_domain_runner.py` — combinational multi-domain
-- `notes/known_issues.md` — broader catalogue of simulator latent risks
+- `notes/developer/known_issues.md` — broader catalogue of simulator latent risks

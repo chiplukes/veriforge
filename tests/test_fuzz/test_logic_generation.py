@@ -2,8 +2,8 @@
 (`Signal.use_logic`, `fuzz/_signal_context.py`) and its Verilator cross-check
 plumbing (`fuzz/_runner.py`).
 
-See `notes/roadmap.md` ("`logic`-declared signal fuzzing + Verilator
-cross-check") and `notes/fuzzer.md` for the design this exercises.
+See `notes/developer/roadmap.md` ("`logic`-declared signal fuzzing + Verilator
+cross-check") and `notes/developer/fuzzer.md` for the design this exercises.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class TestHierarchicalStrategyNoSelfReferentialOutput:
     veriforge simulation bug -- but Verilator (correctly) rejects the
     resulting degenerate module as unresolvable circular combinational
     logic, which the fuzzer's Verilator cross-check then miscounted as a
-    simulator mismatch. See `notes/roadmap.md`/`notes/known_issues.md`."""
+    simulator mismatch. See `notes/developer/roadmap.md`/`notes/developer/known_issues.md`."""
 
     def test_no_self_referential_assign_across_many_seeds(self):
         import re

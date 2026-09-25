@@ -439,7 +439,7 @@ class ModuleGenerator:
         Targets the "wide concatenation feeding a module port" shape that
         caused several real compiled-engine bugs this session
         (`axis_regslice.v`'s `{tuser,tlast,tdata}` skid buffer, see
-        `notes/roadmap.md`): some fraction of the child's input port
+        `notes/developer/roadmap.md`): some fraction of the child's input port
         connections are forced to be a `Concatenation`/`StreamingConcatenation`
         built from the parent's own signals, and some fraction of the
         parent's own outputs are woven from the instance's output wires the

@@ -23,7 +23,7 @@ An `always @(*)` block containing a `for`/`while` loop, instantiated one
 level inside a child module, reads a stale (frozen at its first-ever
 activation) value forever after, once its only input arrives via a
 cross-instance continuous assign and a SECOND `settle()` follows a changed
-top-level drive. Minimal repro and full analysis in `notes/roadmap.md`
+top-level drive. Minimal repro and full analysis in `notes/developer/roadmap.md`
 ("Long confidence-building fuzzing round" -- root-caused, not fixed entry).
 
 ### `vm`/`vm-fast`/Verilator: self-referential combinational reads give oracle-dependent answers (likely not a bug)
@@ -39,7 +39,7 @@ mistake it for a live divergence.
 before its own first write within the same activation) gives a different
 but internally self-consistent answer on `reference`, `vm`/`vm-fast`, AND
 Verilator -- three independent implementations disagreeing, not one oracle
-diverging from a shared answer. Full analysis in `notes/roadmap.md`.
+diverging from a shared answer. Full analysis in `notes/developer/roadmap.md`.
 
 ### Compiled engine: wide (>64-bit) signal posedge/negedge not supported
 
@@ -146,7 +146,7 @@ combinational block's first activation — also shows up in a
 filter's own heuristic is specifically about a signal reading its own
 prior value; these don't). Rigorously derived from first principles for
 `mismatch_03212` (kept as the clearest repro; see
-`notes/known_issues_archive.md` if this needs revisiting): `o4 = {i1[1],
+`notes/developer/known_issues_archive.md` if this needs revisiting): `o4 = {i1[1],
 o5, i2};` reads `o5` — a sibling signal in the SAME always block that
 hasn't been assigned yet this activation (still X, first-ever
 evaluation) — and our engines correctly propagate that into a
@@ -175,7 +175,7 @@ than doing it speculatively now.
 
 **Status**: Investigated and closed -- not a simulator bug.
 **Found**: smoke-testing the fuzzer's new `--verilator` cross-check
-(added alongside `logic`-declared signal generation, see `notes/fuzzer.md`),
+(added alongside `logic`-declared signal generation, see `notes/developer/fuzzer.md`),
 seeds 0-40.
 
 Verilator's `{<<n{...}}` streaming concatenation agrees with veriforge

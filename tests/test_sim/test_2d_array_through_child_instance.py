@@ -192,7 +192,7 @@ class TestWholeArrayReadOfGenerateLoopWrittenMemory:
        actually being driven, mirroring the existing single-signal
        `write_signal` pattern.
 
-    See `notes/known_issues.md` and `notes/roadmap.md` for the full
+    See `notes/developer/known_issues.md` and `notes/developer/roadmap.md` for the full
     investigation trail.
     """
 

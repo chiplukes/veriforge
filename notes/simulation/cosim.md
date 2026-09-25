@@ -240,7 +240,7 @@ module, so you don't need to repeat it on every test function.
 Tests in `test_iverilog_validation.py` use only a module-level
 `pytestmark = pytest.mark.skipif(find_icarus(...) is None, ...)`.
 There is no separate `requires_iverilog` marker in `conftest.py`.
-See `notes/test_taxonomy.md` for the full marker list.
+See `notes/developer/test_taxonomy.md` for the full marker list.
 
 ## Generated Testbench Integration
 

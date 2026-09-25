@@ -82,7 +82,7 @@ ports must bind to a net). Every child *input* port connects to a parent-side
 expression that's forced to be a concat/streaming-concat roughly half the
 time -- targeting "wide concatenation feeding a module port", the shape that
 caused several real compiled-engine bugs found via `axis_pix_correction2`
-(see `notes/roadmap.md`) before this fuzzing round existed. Some of the
+(see `notes/developer/roadmap.md`) before this fuzzing round existed. Some of the
 parent's own outputs are, in turn, woven from the instance's output wires
 via concat/streaming-concat ("concat *out of* a port"). No width-matching is
 forced on port-connection actuals beyond the output side -- Verilog's own

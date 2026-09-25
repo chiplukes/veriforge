@@ -85,7 +85,7 @@ cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long
         # Wide signal: read from the pre-edge wide snapshot (wide_snap_val),
         # populated by snapshot()/refresh_data_snapshot()/batch_run() at the
         # same points that populate sv[]/sm[] for narrow signals below --
-        # see notes/roadmap.md "Wide-signal pre-edge snapshot gap in the
+        # see notes/developer/roadmap.md "Wide-signal pre-edge snapshot gap in the
         # compiled engine" for the bug this replaces (previously fell
         # through to the LIVE value here, breaking any wide signal feeding
         # a conditionally-gated always_ff re-derived from a register
