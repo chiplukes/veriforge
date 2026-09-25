@@ -1213,7 +1213,7 @@ To generate a Verilog-language testbench wrapper (DUT instantiation + clock +
 reset + VCD dump) instead of a Python scaffold:
 
 ```python
-from veriforge.dsl.testbench import generate_testbench
+from veriforge.sim.bench.skeleton import generate_testbench
 from veriforge.codegen import emit_module
 
 tb = generate_testbench(mod)   # accepts a built model Module

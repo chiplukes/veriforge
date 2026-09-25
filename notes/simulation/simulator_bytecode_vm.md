@@ -39,7 +39,7 @@ of the design. Our bytecode VM adopts several Verilator-inspired techniques:
 |--------|-----------|-------------|
 | Reference (CPython 3.12) | 16,333 cyc/s | 1.0× |
 | VM + Cython | 161,480 cyc/s | 9.9× |
-| Icarus Verilog 13.0 | 308,372 cyc/s | 18.9× |
+| Icarus Verilog 12.0 | 308,372 cyc/s | 18.9× |
 | Verilator 5.x | 14,600,000 cyc/s | 894× |
 
 The VM eliminates the three biggest costs in the reference engine, and the
@@ -76,7 +76,7 @@ inner loop. See `notes/benchmarks.md` for full methodology and results.
 ├──────────────────────────┤                                     │
 │  Opcodes                 │                                     │
 │  (vm/opcodes.py)         │                                     │
-│  83 instruction defs     │                                     │
+│  85 instruction defs     │                                     │
 └──────────────────────────┴─────────────────────────────────────┘
 ```
 
@@ -85,15 +85,15 @@ inner loop. See `notes/benchmarks.md` for full methodology and results.
 ```
 src/veriforge/sim/vm/
 ├── __init__.py          # Public API exports
-├── opcodes.py           # Op IntEnum, 83 opcodes (151 lines)
-├── compiler.py          # AST → bytecode compilation (2,601 lines)
-├── interpreter.py       # Python bytecode interpreter (1,026 lines)
-├── vm_scheduler.py      # VM-aware scheduler + coroutine fallback (1,566 lines)
-├── _interp_fast.pyx     # Cython C interpreter + CyContext (4,588 lines)
+├── opcodes.py           # Op IntEnum, 85 opcodes (155 lines)
+├── compiler.py          # AST → bytecode compilation (3,606 lines)
+├── interpreter.py       # Python bytecode interpreter (1,074 lines)
+├── vm_scheduler.py      # VM-aware scheduler + coroutine fallback (1,884 lines)
+├── _interp_fast.pyx     # Cython C interpreter + CyContext (5,666 lines)
 └── _interp_fast.c       # Generated C from Cython (build artifact)
 ```
 
-Total VM engine: ~9,932 lines.
+Total VM engine: ~12,400 lines.
 
 ### Signal Storage
 
@@ -154,7 +154,7 @@ The VM is **stack-based**: expression evaluation pushes/pops `Value` objects
 (Python interpreter) or `SVal` structs `{val, mask, width}` (Cython). Statement
 execution consumes values from the stack to update signals.
 
-**83 opcodes** organized into 13 categories:
+**85 opcodes** organized into 13 categories:
 
 ### Instruction Format
 
@@ -180,10 +180,11 @@ In Cython: flattened into `int *all_ops` and `int *all_a1` arrays per program.
 | `NBA_RANGE` | sig_id | val, msb, lsb → | Range-select NBA |
 | `RESIZE` | width | val → val' | Resize top-of-stack to given width |
 
-### Arithmetic (8 opcodes)
+### Arithmetic (9 opcodes)
 
 `ADD`, `SUB`, `MUL`, `DIV`, `MOD`, `POW` — unsigned binary, pop 2, push 1.
 `SDIV`, `SMOD` — signed division/modulus (truncates toward zero).
+`SPOW` — signed power (IEEE 1364-2005 Table 5-6 special-value rules).
 
 ### Bitwise (9 opcodes)
 
@@ -205,7 +206,7 @@ Signed: `CMP_SLT`, `CMP_SLE`, `CMP_SGT`, `CMP_SGE`.
 
 `NEG`, `UPLUS`, `RED_AND`, `RED_OR`, `RED_XOR`, `RED_NAND`, `RED_NOR`, `RED_XNOR`.
 
-### Special Expression (8 opcodes)
+### Special Expression (9 opcodes)
 
 | Opcode | Args | Stack Effect | Description |
 |--------|------|-------------|-------------|
@@ -217,6 +218,7 @@ Signed: `CMP_SLT`, `CMP_SLE`, `CMP_SGT`, `CMP_SGE`.
 | `REPLICATE` | | count, value → result | {count{value}} |
 | `TERNARY` | | cond, true, false → result | x-merge on x/z condition |
 | `SIGN_EXT` | target_width | val → val' | Sign-extend TOS to target_width bits |
+| `STREAM_REVERSE` | slice_size | val → val' | Chunk-reverse TOS bits (streaming concat `{<<N{...}}`) |
 
 ### Control Flow (6 opcodes)
 
@@ -267,7 +269,7 @@ ID (1-indexed) is encoded in the upper 16 bits of `arg1`.
 
 ---
 
-## Compiler Design (`compiler.py`, 2,601 lines)
+## Compiler Design (`compiler.py`, 3,606 lines)
 
 ### Overview
 
@@ -355,7 +357,7 @@ the VMScheduler (see Coroutine Fallback below).
 
 ---
 
-## Cython Interpreter (`_interp_fast.pyx`, 4,588 lines)
+## Cython Interpreter (`_interp_fast.pyx`, 5,666 lines)
 
 ### Overview
 
@@ -378,15 +380,23 @@ The core function signature:
 ```c
 cdef int _execute_core(
     const int *prog_ops,  const int *prog_a1,  int prog_len,
-    long long *sig_val,   long long *sig_mask,  const int *sig_width,
-    const long long *const_val, const long long *const_mask, const int *const_width,
+    long long *sig_val,   long long *sig_mask,  const int *sig_width, int sig_count,
+    const long long *const_val, const long long *const_mask, const int *const_width, int const_count,
     NBAEntry *nba_buf,    int *nba_count,
     int *dirty_buf,       int *dirty_count,
     long long sim_time,
-    long long *mem_val,   long long *mem_mask,    // memory arrays
-    long long *disp_buf,  int *disp_pos, int disp_cap,   // display output
+    long long *mem_val,   long long *mem_mask,                          // memory arrays (flat)
+    const int *mem_elem_width, const int *mem_depth, const int *mem_base, int mem_count,
+    NBAMemEntry *nba_mem_buf, int *nba_mem_count,                       // memory NBA buffer (optional)
+    long long *disp_buf,  int *disp_pos, int disp_cap,                  // display output
+    WideCtx   *wctx,                                                    // wide (>64-bit) signal context, NULL-safe
 ) noexcept nogil
 ```
+
+`wctx` is the entry point for >64-bit signal support: when non-NULL, wide
+arithmetic opcodes (`_wide_mul_py`/`_wide_div_py`/`_wide_mod_py`/
+`_wide_pow_py`/`_wide_spow_py`) operate on the `WideCtx`-owned wide value
+pool instead of the fixed-width `SVal` stack.
 
 Key design decisions:
 - **`noexcept nogil`**: No Python exceptions, no GIL — pure C execution
@@ -412,7 +422,11 @@ CyContext fields:
   all_ops/all_a1                 # Flattened program arrays
   prog_offset/prog_length        # Per-process index into all_ops
   nba_buf, dirty_buf, disp_buf   # Output buffers
-  mem_val/mem_mask/mem_info      # Memory arrays
+  mem_val/mem_mask/mem_elem_width/mem_depth/mem_base  # Memory arrays (flat)
+  wide_sig_val/wide_sig_mask/wide_sig_offset          # Wide (>64-bit) signal pool
+  wide_const_val/wide_const_mask/wide_const_offset    # Wide constant pool
+  wide_nba_*, wide_part_nba_*                         # Wide NBA buffers
+  wctx_c                                              # WideCtx handed to _execute_core
 ```
 
 #### Setup Methods
@@ -482,7 +496,7 @@ reference executor, signal state must be synced between C arrays and Python:
 
 ---
 
-## VM Scheduler Design (`vm_scheduler.py`, 1,566 lines)
+## VM Scheduler Design (`vm_scheduler.py`, 1,884 lines)
 
 ### Overview
 
@@ -601,7 +615,7 @@ display output, and VCD waveforms.
 
 ## Testing
 
-- **191 VM unit tests** (`tests/test_sim/test_vm.py`): Cover all opcodes,
+- **195 VM unit tests** (`tests/test_sim/test_vm.py`): Cover all opcodes,
   statement types, edge cases, memory arrays, file I/O, $monitor
 - **41 cross-validation tests** (`tests/test_validation/test_vm_vs_reference.py`): Run
   the same test on both engines and compare results

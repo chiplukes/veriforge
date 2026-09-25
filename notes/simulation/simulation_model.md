@@ -228,36 +228,37 @@ class Simulator:
         """Advance simulation by one time step. Returns False when finished."""
 ```
 
-### Trigger Classes
+### Edge Detection
 
-Trigger classes exist as data structures with `check(old, new)` methods
-for edge detection. They are used internally by the scheduler for
-sensitivity matching, not as awaitable objects.
+There is no Trigger object hierarchy (no `RisingEdge`/`FallingEdge`/`Edge`/
+`Timer` classes) — sensitivity and edge matching are plain functions
+operating on signal names and string edge tags.
+
+`_always_sensitivity(block)` in `scheduler.py` determines what an always
+block reacts to:
 
 ```python
-class RisingEdge:
-    """Detects 0→1 transition."""
-    def __init__(self, signal: SignalHandle): ...
-    def check(self, old: Value, new: Value) -> bool: ...
+def _always_sensitivity(block: AlwaysBlock) -> tuple[set[str], dict[str, str]]:
+    """Determine sensitivity set and edge types for an always block.
 
-class FallingEdge:
-    """Detects 1→0 transition."""
-    def __init__(self, signal: SignalHandle): ...
-
-class Edge:
-    """Detects any value change."""
-    def __init__(self, signal: SignalHandle): ...
-
-class Timer:
-    """Time delay marker."""
-    def __init__(self, time: int): ...
-
-class ReadOnly:
-    """Marker for read-only region (stub)."""
-
-class NextTimeStep:
-    """Marker for next time step (stub)."""
+    Returns (signal_names, edge_dict) where edge_dict maps
+    name → "posedge"/"negedge". For @(*), reads AND writes in the body
+    are both added to the sensitivity set.
+    """
 ```
+
+- **`@(*)`** (combinational): `signal_names` is every signal read or
+  written in the body; `edge_dict` is empty (level-sensitive).
+- **Explicit sensitivity list** (`@(posedge clk, negedge rst_n)`): each
+  `SensitivityEdge` contributes its signal name to `signal_names`, and
+  `"posedge"`/`"negedge"` entries additionally populate `edge_dict`.
+
+The scheduler re-fires a process when a signal in its sensitivity set
+changes; for entries in `edge_dict` it additionally checks the transition
+direction against the signal's previous value before triggering. `#delay`/
+`@(event)` waits inside `initial` blocks use the same `edge_dict` shape
+(built in `_exec_event_control`) via a `(process, edge_dict)` waiting-list
+entry, checked by `_event_edge_fired()`.
 
 ### Clock Generator
 
@@ -378,19 +379,30 @@ signals the block reads. This is done by walking the statement tree
 and collecting all `Identifier` nodes used in read contexts:
 
 ```python
-def _infer_sensitivity(block: AlwaysBlock) -> set[str]:
-    """Collect all signal names read by this always block."""
-    reads: set[str] = set()
-    for node in block.body.walk():
-        if isinstance(node, Identifier):
-            # Skip LHS of assignments (those are writes)
-            if not _is_lhs_target(node):
-                reads.add(node.name)
-    return reads
+def _always_sensitivity(block: AlwaysBlock) -> tuple[set[str], dict[str, str]]:
+    """Determine sensitivity set and edge types for an always block.
+
+    Returns (signal_names, edge_dict) where edge_dict maps
+    name → "posedge"/"negedge". For @(*), reads AND writes in the body
+    are both added to the sensitivity set.
+    """
 ```
 
-The existing analysis pass (Layer 3) already populates `Identifier.resolved`,
-so signal lookup is a direct pointer dereference — no name lookup at runtime.
+The real implementation (in `scheduler.py`) is module-level, not a method,
+and delegates to `_collect_stmt_reads`/`_collect_stmt_writes` helpers rather
+than a single `walk()` + `_is_lhs_target()` pass. It's also not restricted
+to reads: for `@(*)` both reads *and* writes in the body are added to the
+sensitivity set (a write-only signal in a combinational block can still be
+a legitimate re-trigger source, e.g. through a downstream continuous
+assign).
+
+In the **reference engine**, signal lookup is still a string-keyed dict
+lookup — `ctx._signals.get(name)` in `evaluator.py`'s hot Identifier-eval
+path — not a pointer dereference via `Identifier.resolved`. `resolved` is
+populated by the Layer 3 analysis pass and used for connectivity/lint
+queries, not by the simulator's signal read path. Only the VM and compiled
+engines get O(1) integer-indexed signal access (see
+`simulator_bytecode_vm.md`).
 
 ---
 
@@ -779,9 +791,9 @@ the target's declared width. This prevents unsized literals (e.g.,
 concatenation and assignment:
 
 ```python
-def _write_target(self, target, value, ctx, *, nba=False):
-    if isinstance(target, Identifier):
-        current = ctx.eval_ctx.read_signal(target.name)
+def _write_target(self, lhs: Expression, value: Value, ctx: EvalContext, *, immediate: bool) -> None:
+    if isinstance(lhs, Identifier):
+        current = ctx.eval_ctx.read_signal(lhs.name)
         if current.width != value.width:
             value = value.resize(current.width)
         ...
@@ -821,14 +833,28 @@ sim.run(test_counter, max_time=500)
 ### VCD Waveform Output
 
 The `VcdWriter` is a standalone utility for writing IEEE 1364-2001
-compliant VCD files. It is not currently integrated into the Simulator
-directly — it must be wired manually via the scheduler's `_on_time_step`
-callback:
+compliant VCD files. `sim/trace.py`'s `attach_vcd()` is the one-call
+integration with a `Simulator` — this is what `bench.run(vcd=...)` and
+`Simulator`'s own VCD support use under the hood:
+
+```python
+from veriforge.sim.trace import attach_vcd
+
+with attach_vcd(sim, "dump.vcd", timescale="1ns") as trace:
+    sim.run(test_counter, max_time=500)
+# VCD is finalized (footer/close) automatically on exit.
+
+# Limit to specific signals:
+with attach_vcd(sim, "dump.vcd", signal_names=["clk", "count"]):
+    sim.run(test_counter, max_time=500)
+```
+
+For custom sinks or full manual control, `VcdWriter` is still available
+directly:
 
 ```python
 from veriforge.sim import VcdWriter
 
-# Standalone usage
 with VcdWriter("dump.vcd", timescale="1ns") as vcd:
     vcd.add_signal("clk", width=1)
     vcd.add_signal("count", width=8)
@@ -839,9 +865,6 @@ with VcdWriter("dump.vcd", timescale="1ns") as vcd:
     vcd.set_time(5)
     vcd.change("clk", Value(1, width=1))
     ...
-
-# Integration via _on_time_step callback (used by validation harness)
-scheduler._on_time_step = lambda sched: record_signals(sched)
 ```
 
 ### VCD Comparison Utility
@@ -955,7 +978,7 @@ def _eval_expression(self, expr, ctx):
 
 The simulation speedup is achieved through the **bytecode VM** rather than
 Cython-compiling the tree-walking evaluator. The VM compiles the AST to a
-compact 74-opcode stack instruction set, then runs it in a tight C loop via
+compact 85-opcode stack instruction set, then runs it in a tight C loop via
 `_interp_fast.pyx`. This yields ~9.9× over the reference engine.
 
 The design patterns that make the VM Cython-ready:
@@ -991,11 +1014,14 @@ with Module("counter") as m:
         with m.else_():
             count <<= count + 1
 
+module = m.build()
+
 # Emit Verilog for synthesis
-print(emit_verilog(m))
+from veriforge.codegen import emit_module
+print(emit_module(module))
 
 # Or simulate directly — no Verilog round-trip needed
-sim = Simulator(m.build())
+sim = Simulator(module)
 sim.run(test_counter)
 ```
 
@@ -1052,6 +1078,12 @@ Located in `tests/test_validation/test_iverilog_validation.py`:
 - Case equality (`===`/`!==`)
 - Arithmetic shifts (`<<<`/`>>>`)
 - Unary plus, mixed-width arithmetic
+
+**Signed Arithmetic (9 tests):**
+- Signed comparison, signed widening, mixed signed/unsigned comparison
+- Signed arithmetic widening, signed arithmetic shift right
+- Signed multiplication, signed division
+- Signed ternary, signed unary negation
 
 **Sequential Logic (3 tests):**
 - D flip-flop with reset (posedge clk, posedge rst)

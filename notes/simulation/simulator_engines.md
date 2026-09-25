@@ -59,7 +59,7 @@ src/veriforge/sim/
 ├── testbench.py            # Simulator API (shared entry point, engine selection)
 ├── event_queue.py          # Shared primitives: TimedEvent, EventQueueMixin, CoroutineMixin, SignalDictBase
 ├── vm/
-│   ├── opcodes.py          # 83-opcode instruction set
+│   ├── opcodes.py          # 85-opcode instruction set
 │   ├── compiler.py         # AST → bytecode compiler
 │   ├── interpreter.py      # Stack-based bytecode interpreter
 │   ├── vm_scheduler.py     # VM event-driven scheduler

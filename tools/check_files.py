@@ -1,8 +1,8 @@
 """
-check_overview.py — verify that notes/developer/files.md matches tracked .py files.
+check_files.py — verify that notes/developer/files.md matches tracked .py files.
 
 Usage:
-    uv run python tools/check_overview.py [--root <repo-root>]
+    uv run python tools/check_files.py [--root <repo-root>]
 
 Exits 0 when the overview is in sync with git; exits 1 and lists
 missing/extra entries when drift is detected.

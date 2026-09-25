@@ -75,7 +75,7 @@ with bench.run():
 | Note | What you learn |
 |------|---------------|
 | [simulation/simulator_python.md](simulation/simulator_python.md) | Reference tree-walking engine: `EvalContext`, `ExpressionEvaluator`, `StatementExecutor`, `Scheduler`, dirty-set tracking, optimization history |
-| [simulation/simulator_bytecode_vm.md](simulation/simulator_bytecode_vm.md) | Bytecode VM: 83-opcode instruction set, compiler, stack-based interpreter, Cython fast path (`_interp_fast.pyx`) |
+| [simulation/simulator_bytecode_vm.md](simulation/simulator_bytecode_vm.md) | Bytecode VM: opcode-based instruction set, compiler, stack-based interpreter, Cython fast path (`_interp_fast.pyx`) |
 | [simulation/simulator_compile_cython.md](simulation/simulator_compile_cython.md) | Compiled engine: AST → design-specific `.pyx` codegen, generated code structure, expression/statement emitters, `batch_run()` |
 
 ### Debugging and validation
@@ -106,6 +106,9 @@ with bench.run():
 ## Where this fits in the project
 
 The simulation system sits on top of the **parser and model** (`veriforge.project`,
-`veriforge.model`) — it never calls the parser itself, only consumes the
-`Module` AST. See [architecture.md](developer/architecture.md) for the full project map and
+`veriforge.model`) — the four simulation engines never call the parser
+themselves, only consume the `Module` AST. (The one exception is the
+`IcarusCosim` cross-validation helper in `sim/cosim.py`, which calls the
+parser directly to build a `Simulator` from raw source for comparison
+against Icarus Verilog.) See [architecture.md](developer/architecture.md) for the full project map and
 [getting_started.md](getting_started.md) for installation and first steps.

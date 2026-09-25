@@ -6,7 +6,7 @@ produce incorrect results. This is the most important timing contract to underst
 when writing custom endpoint logic (Level 3 in the testbench access-level model).
 
 For an overview of all three access levels — proxy API, raw signal access, and custom
-endpoints — see `notes/user_guide.md §13c`.
+endpoints — see `notes/user_guide.md §5`.
 
 ---
 

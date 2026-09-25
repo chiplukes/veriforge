@@ -57,7 +57,7 @@ See [notes/developer/test_taxonomy.md](developer/test_taxonomy.md) for test dire
 GitHub Actions runs three workflows:
 
 - **`ci.yml`** — runs on every push/PR to `main`:
-  - **lint** job: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src/veriforge/ veriforge_lsp/`, `uv run python tools/check_overview.py`
+  - **lint** job: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy src/veriforge/ veriforge_lsp/`, `uv run python tools/check_files.py`
   - **test** job (needs lint): fast test slice (parser/model/analysis/preprocessor/formatter) on Python 3.10/3.11/3.12/3.13
   - **sim-smoke** job (needs lint): runs `tests/test_sim/` minus
     `compiled/` and a handful of large cross-engine hardware-example suites

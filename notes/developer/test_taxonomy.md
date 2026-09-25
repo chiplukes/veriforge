@@ -87,12 +87,17 @@ Available fixtures for the parser/grammar test suite:
 
 ## CI policy
 
-`.github\workflows\test.yml` uses a two-job policy:
+`.github\workflows\ci.yml` runs on every `push`/`pull_request` to `main`,
+with four jobs:
 
-**`fast` job** — runs on every `push` and `pull_request`:
+**`lint`** — `ruff check .`, `ruff format --check .`,
+`mypy src/veriforge/ veriforge_lsp/`, `python tools/check_files.py`.
+
+**`test`** (needs `lint`) — the fast parser/model/analysis/preprocessor/
+formatter slice, on a Python 3.10/3.11/3.12/3.13 matrix:
 
 ```
-uv run --extra test pytest
+uv run pytest
   tests/test_verilog_parser/test_all.py
   tests/test_model/test_module.py
   tests/test_model/test_instances.py
@@ -105,16 +110,31 @@ uv run --extra test pytest
   --tb=short -q
 ```
 
-Also runs: `mypy src/veriforge/ veriforge_lsp/`, `ruff check .`, and `python tools/check_overview.py`.
+**`sim-smoke`** (needs `lint`) — `tests/test_sim/` minus `compiled/` and a
+handful of large cross-engine hardware-example suites (`test_ibex_examples.py`,
+`test_darkriscv_constructs.py`, `test_structural_patterns.py`,
+`test_differential.py`, `test_pulp_*_examples.py`) that each run every test
+across multiple engines including a fresh per-test Cython "compiled" build —
+those, plus `tests/test_dsl/`, pushed the job well past a smoke test's
+~10-minute budget. Not covered by any other CI job — run them locally, or
+add a dedicated job if they need CI coverage.
 
-**`full` job** — runs on `workflow_dispatch` only, Python 3.10/3.11/3.12 matrix:
+**`vm-equivalence`** (needs `lint`) — builds the `_interp_fast` Cython
+extension, then runs `tests/test_sim/test_vm.py` +
+`tests/test_sim/test_bench_native.py` twice: once with the extension built,
+once with `VERIFORGE_DISABLE_CYTHON_VM=1`. Both must pass — this is the
+drift gate for the hand-maintained `_interp_fast.pyx` sync policy (see
+`developer_guide.md` §5).
 
-```
-uv run --extra test pytest tests/
-  --ignore=tests/test_sim/test_bench_native.py
-  --ignore=tests/test_sim/compiled
-  --ignore=tests/test_sim/test_sim_sv.py
-  --tb=short -q
-```
+`.github\workflows\weekly.yml` runs on a Monday 06:00 UTC schedule plus
+`workflow_dispatch`, with two jobs not exercised by `ci.yml`:
 
-The three ignored files are the heaviest compiled-engine and SV regressions; run them locally with `--run-slow` as needed.
+**`compiled`** — the full `tests/test_sim/compiled/` suite
+(`--run-slow`, ~4600 tests), with `.cycache/` cached on a hash of
+`src/veriforge/sim/compiled/**`.
+
+**`icarus`** — `tests/test_validation/`, cross-checking the VM/reference
+engines against Icarus Verilog as an external oracle.
+
+`.github\workflows\publish.yml` builds and publishes to PyPI on `v*` tags
+or `workflow_dispatch`, via OIDC trusted publishing.

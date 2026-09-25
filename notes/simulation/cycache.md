@@ -98,11 +98,11 @@ elaborate(module, source_files):
   2. Check for _elab_<hash>.json  (Layer 2)
      HIT  → load .pyd by keyed_name (Layer 1), restore metadata → done
      MISS → continue to step 3
-  3. Run CythonCodegen.generate(module) → .pyx source
-  4. Compute pyx cache key from .pyx source + versions
+  3. Run CythonCodegen.generate_to_files(module, tmp_dir, ...) → .pyx/.h source files
+  4. Compute pyx cache key from generated source + versions
   5. Check for <keyed_name>.pyd  (Layer 1)
      HIT  → load existing .pyd → done
-     MISS → compile .pyx → .pyd, save to cache
+     MISS → CythonCompiler.compile_pyx_files(...) → .pyd, save to cache
   6. Save _elab_<hash>.json with keyed_name + metadata  (Layer 2)
 ```
 
@@ -125,15 +125,19 @@ the Layer 1 compilation cache applies.
 The compilation cache (Layer 1) is always active unless disabled via:
 
 ```bash
-VERILOG_TOOLS_NO_COMPILE_CACHE=1
+VERIFORGE_NO_COMPILE_CACHE=1
 ```
+
+(The legacy `VERILOG_TOOLS_*` prefix still works as a fallback for both env
+vars below — see `src/veriforge/_env.py` — but emits a `DeprecationWarning`;
+use the `VERIFORGE_*` names in new code.)
 
 ## Cache Location Override
 
 The cache directory can be overridden via environment variable:
 
 ```bash
-VERILOG_TOOLS_COMPILE_CACHE=/path/to/cache
+VERIFORGE_COMPILE_CACHE=/path/to/cache
 ```
 
 Or programmatically:
@@ -162,7 +166,7 @@ files, and `.pyd` files.
 ### Per-test cache isolation (automatic)
 
 `tests/conftest.py` contains an autouse fixture that redirects
-`VERILOG_TOOLS_COMPILE_CACHE` to a per-test `tmp_path`-based directory for
+`VERIFORGE_COMPILE_CACHE` to a per-test `tmp_path`-based directory for
 every test in the suite. After each test the fixture calls `clear_cache()` to
 delete the build artefacts (generated `.c` files, `build/` directories,
 `setup.py`). These are the bulk of the disk usage.
@@ -177,16 +181,16 @@ The fixture is xdist-safe: each worker is a separate process with its own
 
 ### Developer override
 
-If `VERILOG_TOOLS_COMPILE_CACHE` is already set in your shell environment the
+If `VERIFORGE_COMPILE_CACHE` is already set in your shell environment the
 autouse fixture is a no-op — your persistent cache is used as-is. Set it in
 your shell profile to preserve cross-run caching during iterative development:
 
 ```bash
 # bash / zsh
-export VERILOG_TOOLS_COMPILE_CACHE=$HOME/.cache/veriforge/cycache
+export VERIFORGE_COMPILE_CACHE=$HOME/.cache/veriforge/cycache
 
 # PowerShell
-$env:VERILOG_TOOLS_COMPILE_CACHE = "$HOME\.cache\veriforge\cycache"
+$env:VERIFORGE_COMPILE_CACHE = "$HOME\.cache\veriforge\cycache"
 ```
 
 ### Session-level wipe

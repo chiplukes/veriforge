@@ -24,12 +24,12 @@ the code easy to reason about and debug.
 ```
 src/veriforge/sim/
 ├── __init__.py         # Package exports: Simulator, Clock, Value, Scheduler, ...
-├── testbench.py        # Simulator, SignalHandle, Clock (489 lines)
-├── scheduler.py        # Scheduler, Process types, EventQueue (1,485 lines)
-├── evaluator.py        # ExpressionEvaluator, EvalContext (888 lines)
-├── executor.py         # StatementExecutor, NbaEntry (1,342 lines)
-├── elaborate.py        # flatten_module, signal width resolution (2,460 lines)
-├── value.py            # Value (4-state bit-vector), operators (605 lines)
+├── testbench.py        # Simulator, SignalHandle, Clock (557 lines)
+├── scheduler.py        # Scheduler, Process types, EventQueue (1,738 lines)
+├── evaluator.py        # ExpressionEvaluator, EvalContext (2,020 lines)
+├── executor.py         # StatementExecutor, NbaEntry (1,511 lines)
+├── elaborate.py        # flatten_module, signal width resolution (2,568 lines)
+├── value.py            # Value (4-state bit-vector), operators (760 lines)
 ├── event_queue.py      # EventQueueMixin, TimedEvent — shared by VM + compiled (266 lines)
 ├── trace.py            # attach_vcd — live VCD tracing
 ├── vcd.py              # VcdWriter — waveform dump
@@ -37,7 +37,7 @@ src/veriforge/sim/
 └── cosim.py            # IcarusCosim — Icarus Verilog cross-validation
 ```
 
-Total reference engine core: ~4,320 lines (evaluator + executor + scheduler + value).
+Total reference engine core: ~6,030 lines (evaluator + executor + scheduler + value).
 
 ---
 
@@ -112,6 +112,7 @@ class EvalContext:
     _memory_names:    set[str]                   # fast membership test
     _memory_bases:    dict[str, int]             # non-zero LSB offsets for memories
     _signal_bases:    dict[str, int]             # non-zero LSB offsets for signals
+    _functions:       dict[str, object]          # user-defined function registry (name → FunctionDecl)
 ```
 
 **Dirty tracking**: The scheduler sets `_originals` before running a region.
@@ -131,14 +132,15 @@ dispatch (pointer compare, no MRO walk) with the hottest types first:
 4. **UnaryOp** — recursive eval, then `_eval_unary_op`
 5. **TernaryOp** — condition determines branch; x-condition merges both
 6. **Concatenation** — eval all parts, `concat()` them
-7. **BitSelect** — eval target + index, then `target[index]`
-8. **RangeSelect** — eval target + msb + lsb, then `target[msb:lsb]`
-9. **Replication** — eval count + value, then `value.replicate(count)`
-10. **AssignmentPattern** — named or positional struct/array literal (`'{...}`)
-11. **PartSelect** — eval base + width, compute effective msb:lsb
-12. **FunctionCall** — built-in system functions (`$clog2`, `$signed`, etc.)
-13. **StringLiteral** — char bytes → integer
-14. **Mintypmax** — evaluate typ value
+7. **StreamingConcatenation** — eval `{<<{...}}` / `{<<N{...}}` operands, apply bit/chunk-reversal streaming, then optional right-justify
+8. **BitSelect** — eval target + index, then `target[index]`
+9. **RangeSelect** — eval target + msb + lsb, then `target[msb:lsb]`
+10. **Replication** — eval count + value, then `value.replicate(count)`
+11. **AssignmentPattern** — named or positional struct/array literal (`'{...}`)
+12. **PartSelect** — eval base + width, compute effective msb:lsb
+13. **FunctionCall** — built-in system functions (`$clog2`, `$signed`, etc.)
+14. **StringLiteral** — char bytes → integer
+15. **Mintypmax** — evaluate typ value
 
 ### Literal Caching
 
@@ -194,7 +196,7 @@ Uses the same `type(stmt) is X` dispatch pattern as the evaluator.
 | `DisableStatement` | Raise `DisableBlock` (caught by named SeqBlock) |
 | `EventTrigger` | Toggle event signal value |
 | `SystemTaskCall` | Route to `_exec_system_task` |
-| `TaskEnable` | No-op (user-defined tasks not simulated) |
+| `TaskEnable` | Executes a user-defined task's body in the caller's scope; binds input/output/inout ports, copies output args back on return |
 
 ### Non-Blocking Assignment (NBA) Queue
 
@@ -203,20 +205,24 @@ Non-blocking assignments (`<=`) do not update signals immediately. Instead,
 to `nba_queue`. The scheduler applies all NBAs at the end of the Active region
 via `apply_nba(ctx)`, which returns the set of signal names that actually changed.
 
-### LHS Target Types (4)
+### LHS Target Types (5)
 
-`_write_target(lhs, value, ctx, immediate)` handles:
+`_write_target(lhs, value, ctx, *, immediate)` handles:
 
 1. **Identifier** — simple signal write (with width resize)
 2. **BitSelect** — eval index, `set_bit` on current value
 3. **RangeSelect** — eval msb/lsb, `set_range` on current value
-4. **Concatenation** — decompose RHS by part widths, recursive `_write_target`
+4. **PartSelect** — eval base + width, compute effective msb:lsb, `set_range` on current value
+5. **Concatenation** — decompose RHS by part widths, recursive `_write_target`
 
 ### System Tasks
 
 - `$display`, `$write` — format arguments, append to `display_output`
 - `$monitor` — same as `$display` (re-fire handled by scheduler)
 - `$finish`, `$stop` — raise `StopExecution`
+- `$readmemh`, `$readmemb` — bulk-load a memory array from a hex/binary file
+- `$dumpfile`, `$dumpvars` — wire up a `VcdWriter` for waveform tracing
+- `$time`, `$realtime`, `$stime` — no-ops as statements (handled as expressions by the evaluator)
 
 ---
 
@@ -242,7 +248,7 @@ via `apply_nba(ctx)`, which returns the set of signal names that actually change
 builds the sensitivity index (`_sig_to_procs: dict[str, list[Process]]`).
 
 Signal widths are computed from Range objects (nets/ports) and VariableKind
-(INTEGER=32, REAL/TIME=64).
+(INTEGER=32, REAL/REALTIME/TIME=64, BYTE=8, SHORTINT=16, INT=32, LONGINT=64).
 
 Sensitivity for `@(*)` blocks is inferred by walking the AST body to collect
 all Identifier reads. Explicit sensitivity lists extract signal names and
@@ -298,12 +304,14 @@ same pass — handling multi-stage combinational chains.
 
 ### Simulator
 
-Top-level entry point. Wraps either the reference `Scheduler` or the VM
-`VMScheduler` behind a unified API:
+Top-level entry point. Wraps the reference `Scheduler`, the VM
+`VMScheduler`, or the compiled `CompiledScheduler` behind a unified API:
 
 ```python
 sim = Simulator(module, engine="reference")   # tree-walking (default)
 sim = Simulator(module, engine="vm")          # bytecode VM
+sim = Simulator(module, engine="vm-fast")     # Cython-accelerated VM
+sim = Simulator(module, engine="compiled")    # design-specific Cython
 ```
 
 Key methods:
@@ -339,7 +347,6 @@ The reference engine has been through two optimization rounds:
   instead of MRO walk. Hottest types (Identifier, Literal, BinaryOp) tested first
 - **Inlined signal reads**: `ctx._signals.get(name)` inlined in `eval()` and
   `_write_target()` to skip method-call overhead
-- **Local variable caching**: `stack_append = stack.append` pattern in interpreter
 - **Width mask cache**: `_WIDTH_CACHE` and `_X_CACHE` for `Value` construction
 
 ### Round 2: Scheduler-Level Optimizations

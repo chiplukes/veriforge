@@ -138,7 +138,7 @@ src/veriforge/
 │       └── axi_lite_response_driver.py # AXILiteResponseDriver — low-level B/R driver
 │   └── vm/               # Bytecode VM engine (high-performance alternative)
 │       ├── __init__.py   # Public API: Compiler, Interpreter, VMScheduler, Op
-│       ├── opcodes.py        # Op enum (74 opcodes) + instr() helper
+│       ├── opcodes.py        # Op enum (85 opcodes) + instr() helper
 │       ├── compiler.py       # AST → bytecode compiler (expression/statement/LHS, struct fields)
 │       ├── interpreter.py    # Pure-Python stack-based bytecode interpreter (deferred NBA_RANGE)
 │       ├── vm_scheduler.py   # Event-driven scheduler (EventQueueMixin, cascaded CA propagation)

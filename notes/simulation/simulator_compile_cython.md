@@ -110,7 +110,7 @@ The bytecode VM eliminates Python dispatch but still pays for:
    instruction, even though the instruction sequence is fixed per design
 2. **Stack machine overhead** — every expression pushes/pops `SVal` structs
    through a value stack, adding memory traffic
-3. **Generic code** — the interpreter handles all 83 opcodes for all designs;
+3. **Generic code** — the interpreter handles all 85 opcodes for all designs;
    the C compiler cannot specialize or inline across instruction boundaries
 
 A compiled approach eliminates all three. The generated C code is a direct

@@ -295,7 +295,7 @@ def validate_with_icarus(module, *, max_time: int = 1000) -> None:
         tb_path = str(Path(tmpdir) / (tb_model.name + ".v"))
         Path(tb_path).write_text(tb_verilog, encoding="utf-8")
         cosim = IcarusCosim(
-            files=[_DUT_PATH, tb_path],
+            files=[*_DEPS, _DUT_PATH, tb_path],
             top_module=tb_model.name,
         )
         results = cosim.run_all_engines(max_time=max_time)
