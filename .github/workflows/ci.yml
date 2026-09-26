@@ -3,7 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'notes/**'
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - 'notes/**'
+      - '**.md'
 
 permissions:
   contents: read
