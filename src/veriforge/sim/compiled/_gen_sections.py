@@ -135,6 +135,38 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool
     return lines
 
 
+def _emit_no_dirty_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
+    """Return lines that ``break`` unless some sid in *sorted_sids* is dirty.
+
+    Used by :func:`_gen_delta_loop`'s early-exit: once none of the sids any
+    process could possibly react to (``interesting_sids``) are dirty, no
+    further iteration can do anything, so stop immediately instead of
+    paying for one more iteration just to rediscover that via the normal
+    dirty[]->trigger[] top-of-loop bookkeeping.
+
+    Emitted as a flat sequence of simple ``if c.dirty[s]: _any_int = 1``
+    statements rather than one large ``or``-chained boolean expression
+    (however line-wrapped): a single expression is one left-deep AST node
+    per term regardless of how many display lines it's spread across, and
+    a real design's ``interesting_sids`` (a union across every process,
+    unlike any one process's own small sensitivity set) got large enough
+    to blow Cython's own parser recursion limit --
+    ``RecursionError: maximum recursion depth exceeded`` from inside
+    ``cythonize()`` itself, confirmed on ``ibex_cs_registers`` (a real,
+    large RTL module). A flat statement sequence has no such limit: each
+    ``if`` is its own shallow statement, however many there are.
+    """
+    if not sorted_sids:
+        return [f"{indent}break"]
+    lines = [f"{indent}_any_interesting_dirty = 0"]
+    for s in sorted_sids:
+        lines.append(f"{indent}if c.dirty[{s}]:")
+        lines.append(f"{indent}    _any_interesting_dirty = 1")
+    lines.append(f"{indent}if not _any_interesting_dirty:")
+    lines.append(f"{indent}    break")
+    return lines
+
+
 def _seq_body_to_sv_reads(
     body_lines: list[str],
     async_sids: set[int] | None = None,
@@ -1383,9 +1415,21 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     def _gen_delta_loop(self) -> str:  # noqa: PLR0912, PLR0915
         has_seq = bool(self._seq_processes)
+        # Every sid some cont/combo process's sensitivity check tests, plus
+        # every seq process's own edge-trigger sid (needed so a delayed
+        # clock edge -- propagated through several cont-assign hops -- still
+        # gets another iteration to be detected, even if nothing else reads
+        # that sid combinationally). A dirty sid outside this set can never
+        # cause anything to happen: nothing ever inspects it. See the
+        # early-exit check after the cont/combo dispatch below.
+        interesting_sids = sorted(
+            {s for sens, _b in self._processes for s in sens}
+            | {s for sens, _b in self._combo_processes for s in sens}
+            | {s for edges, _sens, _body in self._seq_processes for s in edges}
+        )
         lines = [
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
-            "    cdef int it, i, changed, _j, _stable",
+            "    cdef int it, i, changed, _j, _stable, _any_interesting_dirty",
             "    cdef long long _nbaw",
             f"    cdef int trigger[{max(self._n_sigs, 1)}]",
         ]
@@ -1578,10 +1622,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
 
-        # Invoke combinational always blocks guarded by trigger flags
+        # Invoke combinational always blocks guarded by trigger flags.
+        # also_dirty=True for the same reason cont gets it above: a combo
+        # block reading a signal a cont assign just wrote earlier THIS
+        # iteration should fire immediately rather than waiting for that
+        # write to appear in trigger[] next iteration.
         for i, (sens, _body) in enumerate(self._combo_processes):
             if sens:
-                lines.extend(_emit_sens_check_lines(sorted(sens), "        "))
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
                 lines.append(f"            combo_{i}(c)")
                 lines.append("            if c.finished:")
                 lines.append("                return it")
@@ -1593,6 +1641,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("            return it")
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
+
+        # Early exit: if this iteration's dispatch left no dirty flag on any
+        # sid anything could ever react to (interesting_sids), no further
+        # iteration can do anything -- stop now instead of paying for one
+        # more iteration (dirty[]->trigger[] copy, then the sens re-checks
+        # above finding nothing) to rediscover that. Safe: interesting_sids
+        # is the exact set of sids any process's own sensitivity check ever
+        # tests, not an approximation, so this can never skip a real
+        # re-trigger. A genuine combinational loop keeps some interesting
+        # sid dirty forever, so this never fires for one -- DELTA_LIMIT and
+        # the value-convergence check below remain the safety net for that.
+        lines.extend(_emit_no_dirty_check_lines(interesting_sids, "        "))
 
         # Dirty flags produced by the cont/combo functions in this
         # iteration will be consumed at the TOP of the NEXT iteration

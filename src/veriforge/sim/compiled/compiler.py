@@ -540,8 +540,7 @@ from Cython.Build import cythonize
 
 setup(
     ext_modules=cythonize(
-        [Extension("{module_name}", [{sources_repr}],
-                   extra_compile_args=["-O0"])],
+        [Extension("{module_name}", [{sources_repr}])],
         compiler_directives={{
             "language_level": "3",
             "boundscheck": False,
