@@ -69,13 +69,24 @@ def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     """
     n = len(processes)
     writes = [{int(m) for line in body for m in _DIRTY_WRITE_RE.findall(line)} for _sens, body in processes]
+    # Reverse index: signal id -> processes sensitive to it, so edges are
+    # found in O(total writes + total sensitivity-set size) rather than
+    # O(n^2) -- the naive all-pairs scan is fine for a handful of cont
+    # processes but becomes the dominant codegen cost past a few hundred.
+    readers: dict[int, list[int]] = {}
+    for j, (sens, _body) in enumerate(processes):
+        for sid in sens:
+            readers.setdefault(sid, []).append(j)
     succ: list[list[int]] = [[] for _ in range(n)]
     indeg = [0] * n
     for i in range(n):
-        for j in range(n):
-            if i != j and writes[i] & set(processes[j][0]):
-                succ[i].append(j)
-                indeg[j] += 1
+        seen_j: set[int] = set()
+        for sid in writes[i]:
+            for j in readers.get(sid, ()):
+                if j != i and j not in seen_j:
+                    seen_j.add(j)
+                    succ[i].append(j)
+                    indeg[j] += 1
     import heapq
 
     ready = [i for i in range(n) if indeg[i] == 0]
