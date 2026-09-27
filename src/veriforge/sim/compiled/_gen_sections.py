@@ -1550,7 +1550,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # Emitted in dependency order and also gated on dirty[] (set by an
         # earlier cont this iteration), so a multi-hop chain settles in one
         # pass instead of one hop per delta iteration.
-        cont_order, cont_acyclic = _cont_dependency_order(self._processes)
+        cont_order, _cont_acyclic = _cont_dependency_order(self._processes)
         for i in cont_order:
             sens, _body = self._processes[i]
             if sens:
@@ -1566,19 +1566,6 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("            return it")
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
-
-        # With only conts (no combos, none unconditional) in a dependency-ordered
-        # acyclic pass, every reader of a dirty flag has already run after
-        # every writer, so the flags are fully consumed: clear them (except
-        # seq clock/reset edge signals, whose edges are detected at the top of
-        # the next iteration) to avoid a redundant confirm iteration.
-        if self._processes and cont_acyclic and not self._combo_processes and all(sens for sens, _b in self._processes):
-            keep = sorted({sid for edges, _s, _b in self._seq_processes for sid in edges})
-            lo = 0
-            for k in [*keep, self._n_sigs]:
-                if k > lo:
-                    lines.append(f"        memset(&c.dirty[{lo}], 0, {k - lo} * sizeof(int))")
-                lo = k + 1
 
         # Invoke combinational always blocks guarded by trigger flags
         for i, (sens, _body) in enumerate(self._combo_processes):

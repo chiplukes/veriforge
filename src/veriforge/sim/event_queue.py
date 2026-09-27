@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+from typing import NamedTuple
 
 from .executor import StopExecution
 from .value import Value
@@ -10,24 +11,18 @@ from .value import Value
 __all__ = ["CoroutineMixin", "EventQueueMixin", "SignalDictBase", "TimedEvent"]
 
 
-class TimedEvent:  # cm:5a3c7e
+class TimedEvent(NamedTuple):  # cm:5a3c7e
     """An event scheduled for a specific simulation time.
 
-    Ordering: (time, seq) ensures FIFO within the same time step.
-    The ``payload`` field is untyped so all engines can reuse this.
+    A tuple ordered by ``(time, seq)`` so ``heapq`` compares natively in C;
+    ``seq`` is unique per queue, so ``payload`` is never compared and FIFO
+    order holds within the same time step.  The ``payload`` field is untyped
+    so all engines can reuse this.
     """
 
-    __slots__ = ("payload", "seq", "time")
-
-    def __init__(self, time: int, payload: object, seq: int) -> None:
-        self.time = time
-        self.payload = payload
-        self.seq = seq
-
-    def __lt__(self, other: TimedEvent) -> bool:
-        if self.time != other.time:
-            return self.time < other.time
-        return self.seq < other.seq
+    time: int
+    seq: int
+    payload: object
 
 
 class EventQueueMixin:  # cm:8b6f1d
@@ -43,7 +38,7 @@ class EventQueueMixin:  # cm:8b6f1d
     def _schedule_event(self, time: int, payload: object) -> None:
         """Schedule an event at the given time."""
         self._event_seq += 1
-        heapq.heappush(self._event_queue, TimedEvent(time, payload, self._event_seq))
+        heapq.heappush(self._event_queue, TimedEvent(time, self._event_seq, payload))
 
     def _pop_events_at(self, time: int) -> list[object]:
         """Pop all events at exactly the given time, return payloads."""
