@@ -454,6 +454,56 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             f"{indent}        break",
         ]
 
+    def _negedge_block_lines(self, sn: int) -> list[str]:
+        """batch_run's clk-fall step.  When nothing can react to a falling
+        edge of ``clk_sid`` (no negedge-triggered seq process on it, no
+        cont/combo sensitive to it, no always-run cont/combo), the snapshot
+        and delta_loop() are skipped -- only the clk value is updated; the
+        next posedge re-snapshots anyway."""
+        body = [
+            "                # Snapshot before negedge (delta_loop above converged)",
+            f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
+            f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
+            "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+            "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+            *self._mem_snap_memcpy_lines("                "),
+            "                # Negedge: drive clk low",
+            "                self.ctx.val[clk_sid] = 0",
+            "                self.ctx.mask[clk_sid] = 0",
+            "                self.ctx.dirty[clk_sid] = 1",
+            "                delta_loop(&self.ctx, sv, sm)",
+            "                if self.ctx.error_code != ERR_NONE:",
+            "                    cycles_run = i + 1",
+            "                    break",
+            "                if self.ctx.finished:",
+            "                    cycles_run = i + 1",
+            "                    break",
+        ]
+        procs = [*self._processes, *self._combo_processes]
+        if any(not sens for sens, _b in procs):
+            return body
+        sids = {sid for sens, _b in procs for sid in sens}
+        sids |= {sid for edges, _s, _b in self._seq_processes for sid, et in edges.items() if et != "posedge"}
+        if not sids:
+            cond = "0"
+        else:
+            terms = [f"clk_sid == {sid}" for sid in sorted(sids)]
+            chunks = [" or ".join(terms[i : i + 6]) for i in range(0, len(terms), 6)]
+            cond = (
+                ("\n" + " " * 24).join(f"{c} or" for c in chunks[:-1])
+                + (("\n" + " " * 24) if len(chunks) > 1 else "")
+                + chunks[-1]
+            )
+            if len(chunks) > 1:
+                cond = "(" + cond + ")"
+        return [
+            f"                if {cond}:",
+            *("    " + ln for ln in body),
+            "                else:",
+            "                    self.ctx.val[clk_sid] = 0",
+            "                    self.ctx.mask[clk_sid] = 0",
+        ]
+
     def _cont_settle_first_cycle_lines(self, indent: str) -> list[str]:
         """`_cont_settle_fixpoint_lines`, guarded to loop iteration 0 only."""
         body = self._cont_settle_fixpoint_lines(indent + "    ")
@@ -2133,23 +2183,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                if self.ctx.finished:",
                 "                    cycles_run = i + 1",
                 "                    break",
-                "                # Snapshot before negedge (delta_loop above converged)",
-                f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-                f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-                "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
-                *self._mem_snap_memcpy_lines("                "),
-                "                # Negedge: drive clk low",
-                "                self.ctx.val[clk_sid] = 0",
-                "                self.ctx.mask[clk_sid] = 0",
-                "                self.ctx.dirty[clk_sid] = 1",
-                "                delta_loop(&self.ctx, sv, sm)",
-                "                if self.ctx.error_code != ERR_NONE:",
-                "                    cycles_run = i + 1",
-                "                    break",
-                "                if self.ctx.finished:",
-                "                    cycles_run = i + 1",
-                "                    break",
+                *self._negedge_block_lines(sn),
                 "        self._raise_runtime_error()",
                 "        return cycles_run",
             ]
