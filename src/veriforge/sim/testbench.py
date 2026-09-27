@@ -126,7 +126,7 @@ class Simulator:  # cm:a5c8f4
                  ``"vm-fast"`` — bytecode VM, Cython interpreter (falls back to pure-Python if unavailable).
     """
 
-    __slots__ = ("_clocks", "_engine", "_module", "_sched", "_signal_cache")
+    __slots__ = ("_clocks", "_engine", "_module", "_run_cycles_clock_ready", "_sched", "_signal_cache")
 
     def __init__(
         self,
@@ -139,6 +139,7 @@ class Simulator:  # cm:a5c8f4
         self._engine = engine
         self._signal_cache: dict[str, SignalHandle] = {}
         self._clocks: list[Clock] = []
+        self._run_cycles_clock_ready = False
 
         # Flatten hierarchy if instances or generate blocks are present
         if module.generate_blocks or module.instances:
@@ -511,6 +512,90 @@ class Simulator:  # cm:a5c8f4
 
         sched = self._sched
         assert isinstance(sched, _CSched)  # noqa: S101
+        return sched.batch_run(cycles, clock_name, clock_period, events=events)
+
+    def run_cycles(
+        self,
+        cycles: int,
+        clock_name: str | None = None,
+        clock_period: int | None = None,
+        events: list[tuple[int, str, int]] | None = None,
+    ) -> int:
+        """Run *cycles* full clock cycles at C speed (compiled engine only).
+
+        A convenience wrapper over :meth:`batch_run` for interactive,
+        decision-driven testbenches: unlike ``run()``/``run_step()``, which
+        cross into Python once per clock edge (posedge and negedge each pay
+        a full event-loop round trip), this runs the whole block of cycles
+        inside one ``nogil`` C loop and returns once. Call it repeatedly,
+        interleaved with :meth:`drive`/:meth:`read`/:meth:`settle` between
+        calls, when a testbench needs to inspect state and choose the next
+        stimulus every *N* cycles rather than every single edge -- trading
+        per-cycle visibility for throughput (there is no VCD tracing and no
+        per-edge callback during the run itself).
+
+        If *clock_name*/*clock_period* are omitted, they are taken from the
+        sole :meth:`fork`-ed :class:`Clock` -- this method drives the clock
+        itself (like ``batch_run``), so it doesn't work with ``run()``'s own
+        clock-toggle event scheduling. Do not call ``run()``/``run_step()``
+        and ``run_cycles()`` against the same clock signal in the same
+        simulation: ``run()`` pre-schedules its own toggle events, which
+        would race with the toggling done here.
+
+        On the very first call, this also runs any pending t=0 ``initial``
+        blocks (matching what ``run()`` does on its own first call) and
+        initializes the clock signal to a known 0 before its first posedge.
+
+        Args:
+            cycles: Number of full clock cycles to execute.
+            clock_name: Name of the clock signal to toggle. Inferred from
+                the sole forked clock if not given.
+            clock_period: Period of one full clock cycle in time units.
+                Inferred from the sole forked clock if not given.
+            events: Optional list of ``(cycle, signal_name, value)`` tuples.
+                Applied before the posedge of the given cycle. Must be
+                sorted by cycle number.
+
+        Returns:
+            Number of cycles actually completed (less than *cycles* if
+            ``$finish`` fired partway through, including during a still-
+            pending t=0 ``initial`` block).
+
+        Raises:
+            NotImplementedError: If the engine is not ``"compiled"``.
+            ValueError: If *clock_name*/*clock_period* are omitted and zero
+                or more than one clock has been forked.
+        """
+        if self._engine != "compiled":
+            raise NotImplementedError(f"run_cycles() requires engine='compiled', got {self._engine!r}")
+        from .compiled.compiled_scheduler import CompiledScheduler as _CSched
+
+        sched = self._sched
+        assert isinstance(sched, _CSched)  # noqa: S101
+
+        if clock_name is None or clock_period is None:
+            if len(self._clocks) != 1:
+                raise ValueError(
+                    "run_cycles() needs clock_name/clock_period given explicitly when "
+                    f"{len(self._clocks)} clocks are forked (needs exactly 1 to infer them from)"
+                )
+            clock = self._clocks[0]
+            if clock_name is None:
+                clock_name = clock.signal.name
+            if clock_period is None:
+                clock_period = clock.high_time + clock.low_time
+
+        if not self._run_cycles_clock_ready:
+            # Mirror `_schedule_clock_events()`'s own initialization of the
+            # clock signal to a known 0 before its first toggle. batch_run's
+            # "clock was left high" recovery handles a LATER call finding
+            # clk driven high by something else -- not a never-driven (X)
+            # clock signal on this, the very first call.
+            sched.drive_signal(clock_name, Value(0, width=self.signal(clock_name).width))
+            self._run_cycles_clock_ready = True
+
+        if sched.ensure_bootstrapped():
+            return 0
         return sched.batch_run(cycles, clock_name, clock_period, events=events)
 
     def _schedule_clock_events(self, clock: Clock, max_time: int) -> None:

@@ -1010,19 +1010,35 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
     # ── Simulation control ───────────────────────────────────────
 
+    def ensure_bootstrapped(self) -> bool:
+        """Run t=0 ``initial`` blocks and schedule timing-control ``always``
+        blocks as coroutines, exactly once per scheduler instance.
+
+        Callers that drive the design and step it (``run()``) or that skip
+        the event queue entirely in favor of ``batch_run()`` (see
+        ``Simulator.run_cycles()``) both need this to happen before the
+        first real activity -- factored out here so both paths share one
+        implementation instead of duplicating the bootstrap sequence.
+
+        Returns:
+            ``True`` if ``$finish``/``$fatal`` fired during initial-block
+            execution (the caller should stop immediately, matching
+            ``run()``'s own early-return on this same condition).
+        """
+        if self._bootstrapped:
+            return False
+        if self._execute_initial_blocks():
+            return True
+        self._schedule_always_with_timing()
+        self._bootstrapped = True
+        return False
+
     def run(self, *, max_time: int = 1_000_000) -> None:
         """Run the full event loop to completion."""
         self._stopped = False
 
-        if not self._bootstrapped:
-            # Execute initial blocks at t=0 BEFORE bootstrap
-            if self._execute_initial_blocks():
-                return
-
-            # Schedule always blocks with timing as coroutines
-            self._schedule_always_with_timing()
-
-            self._bootstrapped = True
+        if self.ensure_bootstrapped():
+            return
 
         # Bootstrap / re-bootstrap: run delta loop to settle continuous assigns.
         # This must run on every run() call so that external drive() changes
