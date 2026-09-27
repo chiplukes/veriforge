@@ -57,7 +57,7 @@ _MAX_INLINE_SENS = 6
 _DIRTY_WRITE_RE = re.compile(r"\bdirty\[(\d+)\]\s*=")
 
 
-def _cont_dependency_order(processes: list) -> list[int]:
+def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     """Indices of continuous-assign processes in dependency (topological) order.
 
     Edge ``i -> j`` when ``i`` writes a signal in ``j``'s sensitivity set.
@@ -65,7 +65,7 @@ def _cont_dependency_order(processes: list) -> list[int]:
     body.  This only affects *ordering* (performance): ``delta_loop`` still
     iterates to a fixpoint, so an imprecise write set can never change
     results.  Ties keep declaration order; nodes on a combinational cycle are
-    appended in declaration order.
+    appended in declaration order.  Returns ``(order, acyclic)``.
     """
     n = len(processes)
     writes = [{int(m) for line in body for m in _DIRTY_WRITE_RE.findall(line)} for _sens, body in processes]
@@ -88,10 +88,11 @@ def _cont_dependency_order(processes: list) -> list[int]:
             indeg[j] -= 1
             if indeg[j] == 0:
                 heapq.heappush(ready, j)
-    if len(order) < n:
+    acyclic = len(order) == n
+    if not acyclic:
         seen = set(order)
         order.extend(i for i in range(n) if i not in seen)
-    return order
+    return order, acyclic
 
 
 def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool = False) -> list[str]:
@@ -582,7 +583,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "# cython: language_level=3, boundscheck=False, wraparound=False\n"
             "# cython: cdivision=True, initializedcheck=False, nonecheck=False\n"
             "\n"
-            "from libc.string cimport memcpy\n"
+            "from libc.string cimport memcpy, memset\n"
             "from libc.math cimport pow\n"
             "from libc.stdio cimport snprintf"
         )
@@ -1395,11 +1396,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
         # Copy dirty ΓåÆ trigger, then clear dirty
         lines.append("        changed = 0")
+        lines.append("        memcpy(trigger, c.dirty, N_SIGS * sizeof(int))")
+        lines.append("        memset(c.dirty, 0, N_SIGS * sizeof(int))")
         lines.append("        for i in range(N_SIGS):")
-        lines.append("            trigger[i] = c.dirty[i]")
-        lines.append("            if trigger[i]:")
-        lines.append("                changed = 1")
-        lines.append("            c.dirty[i] = 0")
+        lines.append("            changed |= trigger[i]")
+        lines.append("        changed = changed != 0")
         lines.append("")
         # On the very first iteration, if nothing was externally dirtied
         # we still need to run all assigns once (bootstrap).
@@ -1549,7 +1550,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # Emitted in dependency order and also gated on dirty[] (set by an
         # earlier cont this iteration), so a multi-hop chain settles in one
         # pass instead of one hop per delta iteration.
-        for i in _cont_dependency_order(self._processes):
+        cont_order, cont_acyclic = _cont_dependency_order(self._processes)
+        for i in cont_order:
             sens, _body = self._processes[i]
             if sens:
                 lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
@@ -1564,6 +1566,19 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("            return it")
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
+
+        # With only conts (no combos, none unconditional) in a dependency-ordered
+        # acyclic pass, every reader of a dirty flag has already run after
+        # every writer, so the flags are fully consumed: clear them (except
+        # seq clock/reset edge signals, whose edges are detected at the top of
+        # the next iteration) to avoid a redundant confirm iteration.
+        if self._processes and cont_acyclic and not self._combo_processes and all(sens for sens, _b in self._processes):
+            keep = sorted({sid for edges, _s, _b in self._seq_processes for sid in edges})
+            lo = 0
+            for k in [*keep, self._n_sigs]:
+                if k > lo:
+                    lines.append(f"        memset(&c.dirty[{lo}], 0, {k - lo} * sizeof(int))")
+                lo = k + 1
 
         # Invoke combinational always blocks guarded by trigger flags
         for i, (sens, _body) in enumerate(self._combo_processes):
