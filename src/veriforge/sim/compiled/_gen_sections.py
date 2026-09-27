@@ -54,7 +54,47 @@ _WMEM_EXTRACT_MASK_RE = re.compile(r"_wmem(\d+)_extract_mask\(c,")
 _MAX_INLINE_SENS = 6
 
 
-def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
+_DIRTY_WRITE_RE = re.compile(r"\bdirty\[(\d+)\]\s*=")
+
+
+def _cont_dependency_order(processes: list) -> list[int]:
+    """Indices of continuous-assign processes in dependency (topological) order.
+
+    Edge ``i -> j`` when ``i`` writes a signal in ``j``'s sensitivity set.
+    Writes are recovered from the ``dirty[N] = ...`` stores in the generated
+    body.  This only affects *ordering* (performance): ``delta_loop`` still
+    iterates to a fixpoint, so an imprecise write set can never change
+    results.  Ties keep declaration order; nodes on a combinational cycle are
+    appended in declaration order.
+    """
+    n = len(processes)
+    writes = [{int(m) for line in body for m in _DIRTY_WRITE_RE.findall(line)} for _sens, body in processes]
+    succ: list[list[int]] = [[] for _ in range(n)]
+    indeg = [0] * n
+    for i in range(n):
+        for j in range(n):
+            if i != j and writes[i] & set(processes[j][0]):
+                succ[i].append(j)
+                indeg[j] += 1
+    import heapq
+
+    ready = [i for i in range(n) if indeg[i] == 0]
+    heapq.heapify(ready)
+    order: list[int] = []
+    while ready:
+        i = heapq.heappop(ready)
+        order.append(i)
+        for j in succ[i]:
+            indeg[j] -= 1
+            if indeg[j] == 0:
+                heapq.heappush(ready, j)
+    if len(order) < n:
+        seen = set(order)
+        order.extend(i for i in range(n) if i not in seen)
+    return order
+
+
+def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool = False) -> list[str]:
     """Return one or more Cython if-condition lines for a sensitivity check.
 
     For small sensitivity sets emits a single inline ``if`` line.  For large
@@ -62,14 +102,15 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str) -> list[str]:
     short lines using parenthesised continuation so that no single generated
     line exceeds roughly 120 characters.
     """
+    term = (lambda s: f"trigger[{s}] or c.dirty[{s}]") if also_dirty else (lambda s: f"trigger[{s}]")
     if len(sorted_sids) <= _MAX_INLINE_SENS:
-        cond = " or ".join(f"trigger[{s}]" for s in sorted_sids)
+        cond = " or ".join(term(s) for s in sorted_sids)
         return [f"{indent}if {cond}:"]
     cont = indent + "        "
     chunks = [sorted_sids[i : i + _MAX_INLINE_SENS] for i in range(0, len(sorted_sids), _MAX_INLINE_SENS)]
     lines: list[str] = []
     for ci, chunk in enumerate(chunks):
-        terms = " or ".join(f"trigger[{s}]" for s in chunk)
+        terms = " or ".join(term(s) for s in chunk)
         is_last = ci == len(chunks) - 1
         if ci == 0 and is_last:
             lines.append(f"{indent}if {terms}:")
@@ -413,6 +454,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             f"{indent}        break",
         ]
 
+    def _cont_settle_first_cycle_lines(self, indent: str) -> list[str]:
+        """`_cont_settle_fixpoint_lines`, guarded to loop iteration 0 only."""
+        body = self._cont_settle_fixpoint_lines(indent + "    ")
+        return [f"{indent}if i == 0:", *body] if body else []
+
     def _mem_snap_memcpy_lines(self, indent: str) -> list[str]:
         """Lines that copy every memory's live val/mask arrays into their
         pre-edge snapshot (`mem_{mid}_snap_val`/`wide_mem_{mid}_snap_val`)
@@ -646,7 +692,6 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    unsigned long long conv_wide_val[N_WIDE_WORDS]",
             "    unsigned long long conv_wide_mask[N_WIDE_WORDS]",
             "    long long sim_time",
-            "    char      out_buf[OUT_BUF_MAX]",
             "    int       out_count",
             "    int       finished",
             "    int       error_code",
@@ -683,6 +728,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "    long long nba_mem_range_mask[NBA_MEM_RANGE_MAX]",
                 ]
             )
+        # Cold, large output buffer last so hot state stays packed together.
+        lines.append("    char      out_buf[OUT_BUF_MAX]")
         return lines
 
     def _gen_struct(self) -> str:
@@ -1449,9 +1496,13 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("            c.nba_pending = 0")
 
         # Invoke each continuous assign guarded by trigger flags
-        for i, (sens, _body) in enumerate(self._processes):
+        # Emitted in dependency order and also gated on dirty[] (set by an
+        # earlier cont this iteration), so a multi-hop chain settles in one
+        # pass instead of one hop per delta iteration.
+        for i in _cont_dependency_order(self._processes):
+            sens, _body = self._processes[i]
             if sens:
-                lines.extend(_emit_sens_check_lines(sorted(sens), "        "))
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
                 lines.append(f"            cont_{i}(c)")
                 lines.append("            if c.finished:")
                 lines.append("                return it")
@@ -2061,8 +2112,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # always_ff its garbage/stale pre-drive input forever,",
                 "                # vs. the same stimulus working correctly via ordinary",
                 "                # bench.step()/settle().",
-                "                # Snapshot before posedge",
-                *self._cont_settle_fixpoint_lines("                "),
+                "                # Snapshot before posedge.  Only the first cycle can",
+                "                # enter with un-settled continuous assigns (reactive",
+                "                # drives before this call); every later cycle follows a",
+                "                # delta_loop() that already ran to convergence.",
+                *self._cont_settle_first_cycle_lines("                "),
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
@@ -2079,8 +2133,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                if self.ctx.finished:",
                 "                    cycles_run = i + 1",
                 "                    break",
-                "                # Snapshot before negedge",
-                *self._cont_settle_fixpoint_lines("                "),
+                "                # Snapshot before negedge (delta_loop above converged)",
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
