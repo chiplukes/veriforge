@@ -302,6 +302,45 @@ Events are applied before the posedge of the specified cycle, inside the
 C loop. They must be sorted by cycle number. This allows driving reset
 sequences, interrupt pulses, and other one-shot stimulus without leaving C.
 
+### `run_cycles`: when stimulus depends on a value read back mid-run
+
+`batch_run`'s `events=` list must be fully known before the call — it can't
+express "read a signal, decide what to drive next, repeat." That pattern
+traditionally forces `fork(Clock(...))` + `run_step()`, paying a full Python
+round trip per clock **edge**.
+
+`sim.run_cycles(cycles, clock_name=None, clock_period=None, events=None)`
+is a thin wrapper over `batch_run` for exactly this case: it runs a whole
+block of full cycles in the same C loop, then returns once, so the round
+trip is paid once per **block** instead of once per **edge**. Call it
+repeatedly, interleaved with `drive()`/`read()`/`settle()`:
+
+```python
+sim = Simulator(top, engine="compiled", design=design)
+sim.fork(Clock(sim.signal("CLK"), period=10))
+sim.drive("RES", 1)
+sim.run_cycles(4)          # reset for 4 cycles; also bootstraps + inits CLK
+sim.drive("RES", 0)
+
+while not done:
+    sim.run_cycles(10)     # advance 10 cycles at C speed
+    if sim.read("status") == NEEDS_MORE_DATA:
+        sim.drive("data_in", next_word())
+```
+
+`clock_name`/`clock_period` are inferred from the sole forked `Clock` if
+omitted. Measured on a representative DUT: `run_step()` ran ~209K cycles/s;
+`run_cycles(1)` (a decision every cycle) was already ~2.6x faster at ~539K
+(one round trip per full cycle instead of per edge); `run_cycles(10)`
+reached ~2.4M (~11.6x); larger chunks approach `batch_run`'s own ceiling.
+Pick the largest chunk size your decision logic tolerates.
+
+No VCD tracing or per-edge callback fires during the `nogil` loop itself —
+waveform capture only sees the chunk boundaries. Don't mix `run()`/
+`run_step()` and `run_cycles()` against the same clock signal: `run()`
+pre-schedules its own clock-toggle events, which would race with the
+toggling `run_cycles()` does internally.
+
 ## Engine-Native Bench Lowering
 
 `batch_run` works when clock and reset are the only testbench externals.

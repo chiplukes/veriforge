@@ -66,7 +66,7 @@ with bench.run():
 
 | Note | What you learn |
 |------|---------------|
-| [simulation/simulator_engines.md §Testbench Performance Patterns](simulation/simulator_engines.md) | `batch_run()` vs step mode, the 500× gap from `initial`-block clock generators, recommended testbench structure |
+| [simulation/simulator_engines.md §Testbench Performance Patterns](simulation/simulator_engines.md) | `batch_run()` vs step mode, the 500× gap from `initial`-block clock generators, recommended testbench structure, `run_cycles()` for reactive/decision-driven stimulus |
 | [simulation/bench_native_lowering.md](simulation/bench_native_lowering.md) | `compile_native()` — runs AXI/Stream/MemBus stimulus inside the compiled C loop, no Python overhead per cycle |
 | [simulation/cycache.md](simulation/cycache.md) | How the two-layer `.cycache/` system avoids recompiling unchanged designs; env vars; test isolation |
 

@@ -120,6 +120,11 @@ The compiled engine also supports batch mode:
 sim_cyc.batch_run(cycles=1000, clock_name="clk", clock_period=10)
 ```
 
+For an interactive testbench that wants batch-mode speed but still needs to
+read signals and drive new stimulus partway through, `run_cycles()` wraps
+`batch_run()` with clock/bootstrap bookkeeping — see "Performance:
+`run_cycles()` for interactive stepping" below.
+
 ### Multi-module / hierarchical simulation
 
 Pass `design=` to resolve instances across modules:
@@ -158,6 +163,7 @@ print(sim.hierarchy())  # {"u1": "inverter", "u_mid.u_leaf": "leaf", ...}
 | `sim.run(test_fn, max_time=N)` | Run simulation |
 | `sim.run_step()` | Advance one time step |
 | `sim.batch_run(cycles, clock_name, clock_period, events)` | Compiled engine batch |
+| `sim.run_cycles(cycles, clock_name=None, clock_period=None, events=None)` | Compiled engine batch, callable repeatedly between `drive()`/`read()` |
 | `sim.time` | Current simulation time |
 | `sim.display_output` | Collected `$display` output |
 | `sim.hierarchy()` | Instance path → module name |
@@ -232,6 +238,56 @@ endmodule
 | `sim.run()` with Verilog `initial` | Need VCD, complex stimulus timing, `$monitor` |
 | `sim.batch_run()` no events | Free-running design, external stimulus from Python |
 | `sim.batch_run()` with events | Clock + scheduled signal changes (reset, interrupts) |
+| `sim.run_cycles()` | Stimulus depends on values read back mid-run (see below) |
+
+### Performance: `run_cycles()` for interactive stepping
+
+`batch_run()`'s `events=` list must be fully known before the call — it can't
+express a testbench that reads a signal, decides what to drive next, and
+repeats (a scoreboard, a handshake-following driver, anything reactive).
+The traditional way to write that kind of testbench is `sim.fork(Clock(...))`
++ `sim.run_step()`, advancing one clock edge (posedge or negedge) per call —
+but every single edge pays a full Python round trip.
+
+`run_cycles()` runs a whole block of full clock cycles inside one `nogil` C
+loop (the same C loop `batch_run()` uses), then returns once, so you pay that
+round-trip cost once per **block** instead of once per **edge**. Call it
+repeatedly, interleaved with `drive()` / `read()` / `settle()`, and choose
+your own chunk size to trade decision granularity for speed:
+
+```python
+sim = Simulator(top, engine="compiled", design=design)
+sim.fork(Clock(sim.signal("clk"), period=10))
+sim.drive("rst", 1)
+sim.run_cycles(4)          # reset for 4 cycles
+sim.drive("rst", 0)
+
+while not done:
+    sim.run_cycles(10)     # advance 10 cycles at C speed
+    status = sim.read("status")
+    if status == NEEDS_MORE_DATA:
+        sim.drive("data_in", next_word())
+```
+
+`clock_name`/`clock_period` are inferred from the sole `fork()`-ed `Clock` if
+omitted — pass them explicitly only if you need to override them or have
+forked more than one clock. On its first call, `run_cycles()` also runs any
+pending t=0 `initial` blocks and initializes the clock signal, so you don't
+need a separate `sim.run(max_time=0)` bootstrap call first.
+
+Measured on a representative DUT: `run_step()` (per-edge) ran at ~209K
+cycles/s; `run_cycles(1)` (a decision every single cycle) was already ~2.6x
+faster at ~539K cycles/s just from batching the posedge+negedge pair into one
+call; `run_cycles(10)` (a decision every 10 cycles) reached ~2.4M cycles/s
+(~11.6x); larger chunks approach `batch_run()`'s own ceiling. Pick the
+largest chunk size your decision logic can tolerate.
+
+**Tradeoffs vs. `run_step()`/`run()`:** no VCD tracing and no per-edge
+callback fire during the `nogil` C loop itself — waveform capture only sees
+state at the chunk boundaries where you call back into Python. Don't mix
+`run()`/`run_step()` and `run_cycles()` against the *same* clock signal in
+one simulation: `run()` pre-schedules its own clock-toggle events, which
+would race with the toggling `run_cycles()` does internally.
 
 ### Engine-native bench lowering
 

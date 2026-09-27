@@ -219,8 +219,14 @@ Recommended public imports:
 
 `Simulator` compiled-engine-only methods: `load_memory(name, data)` to bulk-write
 a DSL memory before `batch_run`, `dump_memory(name, count)` to read it back, and
-`memory_names` property to list available memories.  All three raise
-`NotImplementedError` on non-compiled engines.
+`memory_names` property to list available memories.  Also `run_cycles(cycles,
+clock_name=None, clock_period=None, events=None)`, a thin wrapper over
+`batch_run` that infers the clock from the sole `fork()`-ed `Clock`, bootstraps
+on first use, and is meant to be called repeatedly interleaved with
+`drive()`/`read()` for a decision-driven testbench that still wants C-speed
+batching (see `notes/user_guide.md`, "Performance: `run_cycles()` for
+interactive stepping").  All four raise `NotImplementedError` on non-compiled
+engines.
 
 `Simulator.engine_report()` works on every engine: returns
 `{"engine": str, "native_processes": int, "fallback_processes": int,
