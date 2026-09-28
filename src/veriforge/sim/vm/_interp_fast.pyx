@@ -6,7 +6,7 @@ Operates on flat C arrays — no Python objects in the hot loop.
 All 4-state logic is done inline with (val, mask, width) triples.
 """
 
-from libc.stdlib cimport malloc, free, realloc
+from libc.stdlib cimport malloc, free, realloc, qsort
 from libc.stdlib cimport rand as c_rand
 from libc.string cimport memcpy, memset
 
@@ -328,6 +328,10 @@ cdef struct DeltaCtx:
     int        cont_count
     int       *cont_sens_offset
     int       *cont_sens_sigs
+    int       *cont_rev_offset   # signal → continuous-assignment indices
+    int       *cont_rev_indices
+    char      *cont_ready        # deduplicate current-pass candidates
+    int       *cont_work         # candidate indices, sorted before execution
     # Edge info CSR: proc → (sig_id, edge_type)
     int       *edge_offset
     int       *edge_sigs
@@ -3984,91 +3988,94 @@ cdef inline int _changed_buf_push(DeltaCtx *dc, int sid, int *p_changed_count) n
     return 0
 
 
+cdef int _compare_ca_indices(const void *a, const void *b) noexcept nogil:
+    """Keep each propagation pass in the original continuous-assign order."""
+    cdef int left = (<int *>a)[0]
+    cdef int right = (<int *>b)[0]
+    return (left > right) - (left < right)
+
+
 cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept nogil:
     """Propagate continuous assigns to convergence using a worklist.
 
-    Iterates until no new signals are dirtied.  Uses dc.is_work as the
-    "current-pass input" bitset and dc.is_changed for cumulative dedup.
-
-    Invariant: dc.is_work is zero on entry and restored to zero on return.
+    The reverse sensitivity index selects only assignments that read a signal
+    changed in the current pass. Candidates execute in their original order;
+    newly changed signals form the next pass, preserving diamond reactivation.
 
     Returns 0 = converged, 1 = $finish, 2 = buffer overflow.
     *p_changed_count is updated with the final changed count.
     """
     cdef int changed_count = p_changed_count[0]
     cdef int ca_new_start, ca_iter
-    cdef int j, c, pid, sid, off, plen, status, hit
+    cdef int j, c, pid, sid, off, plen, status, candidate_count
     cdef int dirty_room, nba_room
     cdef int work_lo = 0, work_hi = changed_count
 
-    # Initialise is_work from the full current changed set
-    for j in range(changed_count):
-        dc.is_work[dc.changed_buf[j]] = 1
-
     for ca_iter in range(dc.delta_limit):
         ca_new_start = changed_count
+        candidate_count = 0
+
+        # The per-signal lists are already sorted. If a pass has several
+        # changed signals, sort the merged candidates to preserve the old
+        # declaration-order execution and last-assignment behavior.
+        for j in range(work_lo, work_hi):
+            sid = dc.changed_buf[j]
+            for c in range(dc.cont_rev_offset[sid], dc.cont_rev_offset[sid + 1]):
+                pid = dc.cont_rev_indices[c]
+                if not dc.cont_ready[pid]:
+                    dc.cont_ready[pid] = 1
+                    dc.cont_work[candidate_count] = pid
+                    candidate_count += 1
+        if work_hi - work_lo > 1 and candidate_count > 1:
+            qsort(dc.cont_work, candidate_count, sizeof(int), _compare_ca_indices)
+        for j in range(candidate_count):
+            dc.cont_ready[dc.cont_work[j]] = 0
 
         # Clear is_changed for the current work batch BEFORE firing CAs so that
-        # a signal already in is_work can be re-queued if a later CA in this same
-        # iteration updates it again (multi-path / diamond propagation).
+        # a signal already in this pass can be re-queued if a later CA
+        # updates it again in the same pass (multi-path / diamond propagation).
         for j in range(work_lo, work_hi):
             dc.is_changed[dc.changed_buf[j]] = 0
 
-        for c in range(dc.cont_count):
-            pid = dc.cont_indices[c]
-            hit = 0
-            for j in range(dc.cont_sens_offset[c], dc.cont_sens_offset[c + 1]):
-                if dc.is_work[dc.cont_sens_sigs[j]]:
-                    hit = 1
-                    break
-            if hit:
-                off = dc.prog_offset[pid]
-                plen = dc.prog_length[pid]
-                dirty_room = dc.dirty_cap
-                nba_room = 0
-                status = _execute_core(
-                    &dc.all_ops[off], &dc.all_a1[off], plen,
-                    dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
-                    dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
-                    dc.nba_buf, &nba_room,
-                    dc.dirty_buf, &dirty_room,
-                    dc.sim_time,
-                    dc.mem_val, dc.mem_mask, dc.mem_elem_width,
-                    dc.mem_depth, dc.mem_base, dc.mem_count,
-                    NULL, NULL,
-                    dc.disp_buf, dc.disp_pos, dc.disp_cap,
-                    &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
-                )
-                for j in range(dirty_room):
-                    sid = dc.dirty_buf[j]
-                    if not dc.is_changed[sid]:
-                        dc.is_changed[sid] = 1
-                        status = _changed_buf_push(dc, sid, &changed_count)
-                        if status != 0:
-                            break
-                if status != 0:
-                    # Restore is_work to zero before returning
-                    for j in range(work_lo, work_hi):
-                        dc.is_work[dc.changed_buf[j]] = 0
-                    for j in range(ca_new_start, changed_count):
-                        dc.is_work[dc.changed_buf[j]] = 0
-                    p_changed_count[0] = 0
-                    return status
+        for c in range(candidate_count):
+            pid = dc.cont_indices[dc.cont_work[c]]
+            off = dc.prog_offset[pid]
+            plen = dc.prog_length[pid]
+            dirty_room = dc.dirty_cap
+            nba_room = 0
+            status = _execute_core(
+                &dc.all_ops[off], &dc.all_a1[off], plen,
+                dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
+                dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
+                dc.nba_buf, &nba_room,
+                dc.dirty_buf, &dirty_room,
+                dc.sim_time,
+                dc.mem_val, dc.mem_mask, dc.mem_elem_width,
+                dc.mem_depth, dc.mem_base, dc.mem_count,
+                NULL, NULL,
+                dc.disp_buf, dc.disp_pos, dc.disp_cap,
+                &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
+            )
+            if status != 0:
+                p_changed_count[0] = 0
+                return status
+            for j in range(dirty_room):
+                sid = dc.dirty_buf[j]
+                if not dc.is_changed[sid]:
+                    dc.is_changed[sid] = 1
+                    status = _changed_buf_push(dc, sid, &changed_count)
+                    if status != 0:
+                        break
+            if status != 0:
+                p_changed_count[0] = 0
+                return status
 
         if changed_count == ca_new_start:
             break  # converged — no new signals dirtied this pass
 
-        # Advance is_work to the new batch only.
-        for j in range(work_lo, work_hi):
-            dc.is_work[dc.changed_buf[j]] = 0
-        for j in range(ca_new_start, changed_count):
-            dc.is_work[dc.changed_buf[j]] = 1
+        # Advance the work range to signals changed by this pass.
         work_lo = ca_new_start
         work_hi = changed_count
-
-    # Cleanup: clear the last active is_work batch
-    for j in range(work_lo, work_hi):
-        dc.is_work[dc.changed_buf[j]] = 0
 
     p_changed_count[0] = changed_count
     return 0
@@ -4702,6 +4709,10 @@ cdef class CyContext:
     cdef int        cont_count
     cdef int       *cont_sens_offset  # [cont_count + 1]
     cdef int       *cont_sens_sigs    # [total_entries]
+    cdef int       *cont_rev_offset
+    cdef int       *cont_rev_indices
+    cdef char      *cont_ready
+    cdef int       *cont_work
     cdef int       *edge_offset       # [n_procs + 1]
     cdef int       *edge_sigs         # [total_entries]
     cdef int       *edge_types        # [total_entries]
@@ -4777,6 +4788,10 @@ cdef class CyContext:
         self.cont_count = 0
         self.cont_sens_offset = NULL
         self.cont_sens_sigs = NULL
+        self.cont_rev_offset = NULL
+        self.cont_rev_indices = NULL
+        self.cont_ready = NULL
+        self.cont_work = NULL
         self.edge_offset = NULL
         self.edge_sigs = NULL
         self.edge_types = NULL
@@ -4852,25 +4867,30 @@ cdef class CyContext:
             free(self.nba_mem_buf)
             free(self.disp_buf)
             free(self.dirty_buf)
-        if self._procs_setup:
-            free(self.proc_is_combo)
-            free(self.proc_is_seq)
-            free(self.sens_offset)
-            free(self.sens_procs)
-            free(self.cont_indices)
-            free(self.cont_sens_offset)
-            free(self.cont_sens_sigs)
-            free(self.edge_offset)
-            free(self.edge_sigs)
-            free(self.edge_types)
-            free(self.snap_val)
-            free(self.snap_mask)
-            free(self.seq_fired)
-            free(self.is_changed)
-            free(self.is_work)
-            free(self.changed_buf)
-            free(self.trig_flag)
-            free(self.triggered_buf)
+        # The pointers are NULL until allocated, so this also releases a
+        # partially constructed process table if setup raises.
+        free(self.proc_is_combo)
+        free(self.proc_is_seq)
+        free(self.sens_offset)
+        free(self.sens_procs)
+        free(self.cont_indices)
+        free(self.cont_sens_offset)
+        free(self.cont_sens_sigs)
+        free(self.cont_rev_offset)
+        free(self.cont_rev_indices)
+        free(self.cont_ready)
+        free(self.cont_work)
+        free(self.edge_offset)
+        free(self.edge_sigs)
+        free(self.edge_types)
+        free(self.snap_val)
+        free(self.snap_mask)
+        free(self.seq_fired)
+        free(self.is_changed)
+        free(self.is_work)
+        free(self.changed_buf)
+        free(self.trig_flag)
+        free(self.triggered_buf)
         if self._mem_allocated:
             free(self.mem_val)
             free(self.mem_mask)
@@ -5464,6 +5484,31 @@ cdef class CyContext:
                 offset += 1
         self.cont_sens_offset[self.cont_count] = offset
 
+        # Reverse index: signal → continuous-assignment indices in the
+        # original order. This avoids scanning unrelated assignments on
+        # every clock edge or NBA propagation pass.
+        cont_rev_lists = [[] for _ in range(self.sig_count)]
+        for i in range(self.cont_count):
+            for sid in cont_sens_lists[i]:
+                cont_rev_lists[sid].append(i)
+        self.cont_rev_offset = <int *>malloc((self.sig_count + 1) * sizeof(int))
+        self.cont_rev_indices = <int *>malloc(max(total, 1) * sizeof(int))
+        self.cont_ready = <char *>malloc(max(self.cont_count, 1) * sizeof(char))
+        self.cont_work = <int *>malloc(max(self.cont_count, 1) * sizeof(int))
+        if (self.cont_rev_offset == NULL or self.cont_rev_indices == NULL or
+                self.cont_ready == NULL or self.cont_work == NULL):
+            raise MemoryError("VM Cython interpreter: out of memory building continuous-assign index")
+        offset = 0
+        for i in range(self.sig_count):
+            self.cont_rev_offset[i] = offset
+            lst = cont_rev_lists[i]
+            for j in range(len(lst)):
+                self.cont_rev_indices[offset] = <int>lst[j]
+                offset += 1
+        self.cont_rev_offset[self.sig_count] = offset
+        for i in range(self.cont_count):
+            self.cont_ready[i] = 0
+
         # ── Edge info CSR: proc → (sig_id, edge_type) ──
         total = 0
         for i in range(self.n_procs):
@@ -5547,6 +5592,10 @@ cdef class CyContext:
         dc.cont_count = self.cont_count
         dc.cont_sens_offset = self.cont_sens_offset
         dc.cont_sens_sigs = self.cont_sens_sigs
+        dc.cont_rev_offset = self.cont_rev_offset
+        dc.cont_rev_indices = self.cont_rev_indices
+        dc.cont_ready = self.cont_ready
+        dc.cont_work = self.cont_work
         dc.edge_offset = self.edge_offset
         dc.edge_sigs = self.edge_sigs
         dc.edge_types = self.edge_types
@@ -5658,7 +5707,8 @@ cdef class CyContext:
 
     def batch_run(self, long long cycles, int clk_sid, long long clock_period,
                   const long long[::1] ev_cycles, const int[::1] ev_sids,
-                  const unsigned long long[::1] ev_vals, int delta_limit):
+                  const unsigned long long[::1] ev_vals, int delta_limit,
+                  bint quiet_clock_fall=False):
         """Clock a prepared design in C; return completed cycles, stop flag, output.
 
         Events settle before the posedge. Posedges occur at start + i*period,
@@ -5699,6 +5749,13 @@ cdef class CyContext:
                             continue
                         if phase == 2:
                             dc.sim_time += high_time
+                            if quiet_clock_fall:
+                                # No process or assign can observe clk falling.
+                                # Keep the externally readable clock state and
+                                # time correct without a snapshot/delta pass.
+                                dc.sig_val[clk_sid] = 0
+                                dc.sig_mask[clk_sid] = 0
+                                continue
                         memcpy(dc.snap_val, dc.sig_val, dc.sig_count * sizeof(long long))
                         memcpy(dc.snap_mask, dc.sig_mask, dc.sig_count * sizeof(long long))
                         memset(dc.seq_fired, 0, self.n_procs * sizeof(char))

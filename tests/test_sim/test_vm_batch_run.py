@@ -309,3 +309,62 @@ def test_finish_status_is_preserved_in_ordinary_vm_event_loop():
     sim.run(max_time=100)
     assert sim.time == 0
     assert sim.read("done").val == 1
+
+
+def test_reverse_ordered_diamond_propagation_matches_reference_and_vm():
+    src = """module diamond(input clk, output reg [7:0] q, output wire [7:0] y);
+    wire [7:0] a, b, c, d, e;
+    assign e = c ^ d;
+    assign c = a + b;
+    assign d = a + 8'd2;
+    assign b = q + 8'd1;
+    assign a = q + 8'd3;
+    assign y = e;
+    initial q = 0;
+    always @(posedge clk) q <= q + 1;
+    endmodule"""
+    batch = _sim(src)
+    assert batch.batch_run(40, "clk") == 40
+    for engine in ("reference", "vm", "vm-fast"):
+        step = _sim(src, engine)
+        step.fork(Clock(step.signal("clk"), period=10))
+        step.run(max_time=395)
+        assert _state(batch, ["q", "a", "b", "c", "d", "e", "y"]) == _state(step, ["q", "a", "b", "c", "d", "e", "y"])
+
+
+@pytest.mark.parametrize(
+    "src,names",
+    [
+        (
+            "module p(input clk, output reg [7:0] q); initial q=0; always @(posedge clk) q<=q+1; endmodule",
+            ["q", "clk"],
+        ),
+        (
+            "module n(input clk, output reg [7:0] q); initial q=0; always @(negedge clk) q<=q+1; endmodule",
+            ["q", "clk"],
+        ),
+        (
+            "module c(input clk, output wire out); assign out=clk; endmodule",
+            ["out", "clk"],
+        ),
+        (
+            """module d(input clk, input rst, output reg [7:0] q);
+            wire inv; assign inv = ~clk;
+            initial q=0;
+            always @(posedge inv) if (rst) q<=0; else q<=q+1;
+            endmodule""",
+            ["q", "inv", "clk"],
+        ),
+    ],
+)
+def test_batch_falling_edge_activity_matches_event_loop(src, names):
+    step, batch = _sim(src), _sim(src)
+    events = None
+    if "rst" in step._sched.compiler.signal_map:
+        step.drive("rst", 1)
+        step._sched.schedule_at(10, ("clock_toggle", "rst", Value(0)))
+        events = [(0, "rst", 1), (1, "rst", 0)]
+    step.fork(Clock(step.signal("clk"), period=10))
+    step.run(max_time=95)
+    assert batch.batch_run(10, "clk", events=events) == 10
+    assert _state(batch, names) == _state(step, names)

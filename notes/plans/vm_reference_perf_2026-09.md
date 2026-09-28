@@ -50,19 +50,20 @@ builds `_sig_to_procs` but does not use it to select runtime work.
 - [x] Add a reproducible VM batch benchmark, report initialization separately from
       execution, compare final state, and record results here.
 
-The first increment keeps both clock edges and the existing propagation algorithm.
-No falling-edge skip or scheduling reordering until correctness and performance
-are measured independently. Never silently discard unsupported callbacks/events.
+The first increment kept both clock edges and the existing propagation algorithm.
+Phase 2 measures changes separately. Never silently discard unsupported
+callbacks/events.
 
 ## Phase 2 — VM propagation and synchronization
 
-- Profile the native runner on larger sparse designs, lowered protocols, and
+- [x] Profile the native runner on larger sparse designs, lowered protocols, and
   memory-heavy designs as well as the small benchmark.
-- Replace continuous-assignment scans with indexed candidate queues; preserve
+- [x] Replace continuous-assignment scans with indexed candidate queues; preserve
   deterministic ordering, diamond reactivation, feedback convergence, and limits.
-- Evaluate dependency ordering with same-pass propagation for acyclic regions.
-- Consider edge-only snapshots and selective coroutine signal/memory syncing.
-- Measure before considering a safe falling-edge skip.
+- [ ] Evaluate dependency ordering with same-pass propagation for acyclic regions.
+- [ ] Consider edge-only snapshots and selective coroutine signal/memory syncing.
+- [x] Measure and add a falling-edge shortcut only when no process or continuous
+  assignment can observe the falling clock edge.
 
 ## Phase 3 — VM instruction execution
 
@@ -135,6 +136,38 @@ reported separately; execution includes initialization and clock/event setup.
 Measured speedup: **5.96x** on this DUT. Construction was approximately 3.5–3.7 ms
 for both modes. An earlier 20,002-cycle, three-repeat run measured 5.36x. This is a workload-specific result, not a speedup guarantee.
 
-Next: Phase 2 profiling on larger designs and lowered protocol workloads before
-changing propagation order or adding a falling-edge skip. Reference engine work
-remains in Phase 4.
+## Phase 2 results to date
+
+Native continuous-assignment propagation now has a reverse signal-to-assignment
+index. It gathers only assignments affected by the current changed-signal set,
+deduplicates them, and executes them in the original declaration order. The
+existing reactivation loop still handles diamonds and feedback. A second change
+skips the clock's falling-edge delta pass only when every process that observes
+the clock is explicitly posedge-triggered. Designs with negedge logic, a
+combinational clock read, or a derived clock keep the full falling-edge pass.
+
+The reproducible workload suite is
+`python benchmarks/vm_propagation.py --cycles 10000 --repeat 3 --assigns 256`.
+It checks final signal and memory state against the event-driven VM. The numbers
+below are medians from the same host; construction and parsing are excluded.
+
+| Workload | Batch execution | Batch cycles/second | Batch vs. step |
+| --- | ---: | ---: | ---: |
+| Sparse 256 assignments | 0.0018 s | 5,449,618 | 28.23x |
+| Active 256 assignments | 0.1099 s | 91,032 | 1.68x |
+| 256-entry memory | 0.0012 s | 8,306,779 | 38.69x |
+| Lowered AXI-Stream loopback | 0.0027 s | 3,744,839 | 39.94x |
+
+Before the reverse index, the sparse 256-assignment microbenchmark took
+approximately 0.0127 s for 10,000 cycles; after indexing, approximately
+0.0025 s before the falling-edge shortcut and 0.0018 s with it. The active
+case went from approximately 0.1138 s to 0.1099 s, as expected when nearly
+every assignment runs. The original ALU/register-file/FSM benchmark reached
+approximately 1.09 million batch cycles/second in a 100,000-cycle run,
+versus 1.02 million in Phase 1. These are workload-specific measurements.
+
+A reverse-ordered dependent chain still takes multiple delta passes; a 64-stage
+chain took approximately 0.035 s for 10,000 cycles. Same-pass dependency
+ordering may help, but needs careful treatment of feedback, multi-path updates,
+assignment ordering, and delta limits before implementation. Reference engine
+work remains in Phase 4.

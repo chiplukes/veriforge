@@ -777,8 +777,13 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 self.settle()
             if self._batch_stopped:
                 return 0
+            quiet_clock_fall = all(
+                proc.process_type == ProcessType.SEQUENTIAL and proc.edge_signals.get(clk_sid) == "posedge"
+                for proc in self.compiler.processes
+                if clk_sid in proc.sensitivity or clk_sid in proc.edge_signals
+            )
             completed, stopped, output = cy.batch_run(
-                cycles, clk_sid, clock_period, ev_cycles, ev_sids, ev_vals, self.delta_limit
+                cycles, clk_sid, clock_period, ev_cycles, ev_sids, ev_vals, self.delta_limit, quiet_clock_fall
             )
             self._batch_stopped = stopped
             for time, display_events in output:

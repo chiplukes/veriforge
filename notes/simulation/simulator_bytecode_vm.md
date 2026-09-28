@@ -71,11 +71,12 @@ sim.run_cycles(100, "clk", 10)
 `run_cycles()` can infer the clock name and period from a single forked `Clock`.
 Both APIs execute untimed initial blocks once, settle external drives, and then
 run the clock and delta loops in C. The clock starts low; each cycle applies its
-events and settles them before the posedge, then settles the falling edge.
+events and settles them before the posedge, then sets the clock low again.
 Posedges occur at `start_time + cycle * period`, falling edges at
 `start_time + cycle * period + period // 2`. A completed batch ends low at
-`start_time + cycles * period`. Both edges are processed, including derived
-clock activity handled by the existing delta loop.
+`start_time + cycles * period`. The falling-edge delta pass is skipped only
+when no process or continuous assignment can observe that edge. Negedge,
+combinational clock, and derived-clock activity uses the full delta loop.
 
 Events are sorted `(cycle, signal_name, integer_value)` tuples, relative to each
 call. Equal-cycle events preserve input order; repeated targets take the last
@@ -519,11 +520,20 @@ for (j = sens_offset[sid]; j < sens_offset[sid + 1]; j++)
     triggered[sens_procs[j]] = 1;
 ```
 
-Continuous assigns have a separate CSR:
+Continuous assigns have a separate process-to-sensitivity CSR and a reverse
+signal-to-assignment CSR:
 ```
 cont_sens_offset: int[cont_count + 1]
 cont_sens_sigs:   int[total_entries]   # Signal IDs
+cont_rev_offset:  int[sig_count + 1]
+cont_rev_indices: int[total_entries]   # Continuous-assignment indices
 ```
+
+Each propagation pass gathers assignments touched by changed signals through
+the reverse index, deduplicates them, and executes them in original declaration
+order. A later change can reactivate an assignment in the next pass, preserving
+diamond and feedback behavior. This avoids scanning unrelated assignments on
+sparse designs.
 
 ### `run_delta_loop()` — C Delta Loop
 
