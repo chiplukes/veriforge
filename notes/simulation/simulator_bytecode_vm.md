@@ -25,7 +25,7 @@ of the design. Our bytecode VM adopts several Verilator-inspired techniques:
 
 | Technique | Verilator | Our VM |
 |-----------|-----------|--------|
-| Static ordering | Topological sort → C++ | Topological sort → bytecode order |
+| Static ordering | Topological sort → C++ | Guarded dependency ordering in native batches |
 | Flat signal storage | C struct of uint32 | C `long long` arrays indexed by signal ID |
 | Activity gating | Skip unchanged modules | Skip processes with clean inputs (CSR index) |
 | Module flattening | Inline all hierarchy | Single flat signal namespace |
@@ -108,6 +108,23 @@ The lowered VM batch API requires one clock domain. Its default engine remains
 for measurements and subsequent optimization work. Run
 `python benchmarks/vm_batch.py --cycles 50000 --repeat 3` to compare both VM
 execution paths and check their final signal and memory state.
+
+Native batches also use dependency ordering for pure, single-writer acyclic
+continuous-assignment networks whose destinations do not trigger procedural
+blocks. Affected assignments run after their affected predecessors, avoiding
+repeated evaluation of reconvergent paths. The planner verifies bytecode reads
+and rejects side effects, partial writes, memory accesses, feedback, and
+procedural observers. Independent assignments and single-input chains/fanout
+keep the existing worklist because dependency scheduling adds overhead without
+removing repeated evaluations. Ineligible designs also use that worklist.
+The optimization also falls back if the configured delta limit is below the
+network's dependency depth. Ordinary event-driven execution retains its
+existing ordering.
+
+Run `uv run python benchmarks/vm_propagation.py --cycles 10000 --repeat 5 --compare-legacy`
+to measure sparse, active, shallow-fanout, chain, reconvergent, memory, and lowered AXI-Stream
+workloads against both the event loop and batch execution without dependency
+ordering. Every comparison checks final signal and memory state.
 
 ---
 

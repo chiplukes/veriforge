@@ -332,6 +332,12 @@ cdef struct DeltaCtx:
     int       *cont_rev_indices
     char      *cont_ready        # deduplicate current-pass candidates
     int       *cont_work         # candidate indices, sorted before execution
+    int       *cont_topo_rank    # declaration index → dependency rank
+    int       *cont_topo_procs   # dependency rank → process ID
+    int        cont_topo_depth   # zero disables dependency scheduling
+    unsigned long long *cont_topo_words
+    unsigned long long *cont_topo_groups
+    int        cont_topo_group_count
     # Edge info CSR: proc → (sig_id, edge_type)
     int       *edge_offset
     int       *edge_sigs
@@ -3995,6 +4001,100 @@ cdef int _compare_ca_indices(const void *a, const void *b) noexcept nogil:
     return (left > right) - (left < right)
 
 
+cdef inline int _first_set_bit64(unsigned long long value) noexcept nogil:
+    """Index of the least significant set bit; caller supplies a nonzero word."""
+    cdef int bit = 0
+    if (value & <unsigned long long>0xffffffff) == 0:
+        bit += 32
+        value >>= 32
+    if (value & 0xffff) == 0:
+        bit += 16
+        value >>= 16
+    if (value & 0xff) == 0:
+        bit += 8
+        value >>= 8
+    if (value & 0xf) == 0:
+        bit += 4
+        value >>= 4
+    if (value & 0x3) == 0:
+        bit += 2
+        value >>= 2
+    if (value & 0x1) == 0:
+        bit += 1
+    return bit
+
+
+cdef inline void _enqueue_cont_topo(DeltaCtx *dc, int sid, int *first, int *last) noexcept nogil:
+    """Mark dependency ranks in a two-level bitset; OR deduplicates candidates."""
+    cdef int j, rank, word, group
+    for j in range(dc.cont_rev_offset[sid], dc.cont_rev_offset[sid + 1]):
+        rank = dc.cont_topo_rank[dc.cont_rev_indices[j]]
+        word = rank >> 6
+        group = word >> 6
+        dc.cont_topo_words[word] |= (<unsigned long long>1) << (rank & 63)
+        dc.cont_topo_groups[group] |= (<unsigned long long>1) << (word & 63)
+        if group < first[0]:
+            first[0] = group
+        if group > last[0]:
+            last[0] = group
+
+
+cdef int _propagate_cont_topo(DeltaCtx *dc, int *p_changed_count) noexcept nogil:
+    """Evaluate each affected assignment once, after all affected predecessors.
+
+    Only enabled for proven-pure DAGs with no procedural observers of their
+    destinations. The same bytecode executor retains width and X/Z semantics.
+    """
+    cdef int changed_count = p_changed_count[0]
+    cdef int group = dc.cont_topo_group_count, last = -1
+    cdef int rank, word, bit, pid, off, sid, j
+    cdef int dirty_room, nba_room, status = 0
+    for j in range(changed_count):
+        _enqueue_cont_topo(dc, dc.changed_buf[j], &group, &last)
+    while group <= last:
+        if dc.cont_topo_groups[group] == 0:
+            group += 1
+            continue
+        bit = _first_set_bit64(dc.cont_topo_groups[group])
+        word = (group << 6) + bit
+        rank = (word << 6) + _first_set_bit64(dc.cont_topo_words[word])
+        dc.cont_topo_words[word] &= dc.cont_topo_words[word] - 1
+        if dc.cont_topo_words[word] == 0:
+            dc.cont_topo_groups[group] &= ~((<unsigned long long>1) << bit)
+        pid = dc.cont_topo_procs[rank]
+        off = dc.prog_offset[pid]
+        dirty_room = dc.dirty_cap
+        nba_room = 0
+        status = _execute_core(
+            &dc.all_ops[off], &dc.all_a1[off], dc.prog_length[pid],
+            dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
+            dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
+            dc.nba_buf, &nba_room, dc.dirty_buf, &dirty_room, dc.sim_time,
+            dc.mem_val, dc.mem_mask, dc.mem_elem_width,
+            dc.mem_depth, dc.mem_base, dc.mem_count, NULL, NULL,
+            dc.disp_buf, dc.disp_pos, dc.disp_cap,
+            &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
+        )
+        if status != 0:
+            break
+        for j in range(dirty_room):
+            sid = dc.dirty_buf[j]
+            if not dc.is_changed[sid]:
+                dc.is_changed[sid] = 1
+                status = _changed_buf_push(dc, sid, &changed_count)
+                if status != 0:
+                    break
+            _enqueue_cont_topo(dc, sid, &group, &last)
+        if status != 0:
+            break
+    # Successful execution consumes all bits. Clear pending work on errors too.
+    if status != 0:
+        memset(dc.cont_topo_words, 0, ((dc.cont_count + 63) // 64) * sizeof(unsigned long long))
+        memset(dc.cont_topo_groups, 0, dc.cont_topo_group_count * sizeof(unsigned long long))
+    p_changed_count[0] = changed_count if status == 0 else 0
+    return status
+
+
 cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept nogil:
     """Propagate continuous assigns to convergence using a worklist.
 
@@ -4010,6 +4110,9 @@ cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept no
     cdef int j, c, pid, sid, off, plen, status, candidate_count
     cdef int dirty_room, nba_room
     cdef int work_lo = 0, work_hi = changed_count
+
+    if dc.cont_topo_depth > 0:
+        return _propagate_cont_topo(dc, p_changed_count)
 
     for ca_iter in range(dc.delta_limit):
         ca_new_start = changed_count
@@ -4713,6 +4816,12 @@ cdef class CyContext:
     cdef int       *cont_rev_indices
     cdef char      *cont_ready
     cdef int       *cont_work
+    cdef int       *cont_topo_rank
+    cdef int       *cont_topo_procs
+    cdef readonly int cont_topo_depth
+    cdef unsigned long long *cont_topo_words
+    cdef unsigned long long *cont_topo_groups
+    cdef int        cont_topo_group_count
     cdef int       *edge_offset       # [n_procs + 1]
     cdef int       *edge_sigs         # [total_entries]
     cdef int       *edge_types        # [total_entries]
@@ -4792,6 +4901,12 @@ cdef class CyContext:
         self.cont_rev_indices = NULL
         self.cont_ready = NULL
         self.cont_work = NULL
+        self.cont_topo_rank = NULL
+        self.cont_topo_procs = NULL
+        self.cont_topo_depth = 0
+        self.cont_topo_words = NULL
+        self.cont_topo_groups = NULL
+        self.cont_topo_group_count = 0
         self.edge_offset = NULL
         self.edge_sigs = NULL
         self.edge_types = NULL
@@ -4880,6 +4995,10 @@ cdef class CyContext:
         free(self.cont_rev_indices)
         free(self.cont_ready)
         free(self.cont_work)
+        free(self.cont_topo_rank)
+        free(self.cont_topo_procs)
+        free(self.cont_topo_words)
+        free(self.cont_topo_groups)
         free(self.edge_offset)
         free(self.edge_sigs)
         free(self.edge_types)
@@ -5558,6 +5677,29 @@ cdef class CyContext:
 
         self._procs_setup = True
 
+    def setup_continuous_order(self, list order, int depth):
+        """Install the scheduler's verified batch-only dependency order."""
+        cdef int rank, index, word_count
+        if (not self._procs_setup or self.cont_topo_rank != NULL or depth <= 0 or
+                sorted(order) != list(range(self.cont_count))):
+            raise ValueError("Invalid continuous-assignment dependency plan")
+        self.cont_topo_rank = <int *>malloc(max(self.cont_count, 1) * sizeof(int))
+        self.cont_topo_procs = <int *>malloc(max(self.cont_count, 1) * sizeof(int))
+        word_count = max((self.cont_count + 63) // 64, 1)
+        self.cont_topo_group_count = (word_count + 63) // 64
+        self.cont_topo_words = <unsigned long long *>malloc(word_count * sizeof(unsigned long long))
+        self.cont_topo_groups = <unsigned long long *>malloc(self.cont_topo_group_count * sizeof(unsigned long long))
+        if (self.cont_topo_rank == NULL or self.cont_topo_procs == NULL or
+                self.cont_topo_words == NULL or self.cont_topo_groups == NULL):
+            raise MemoryError("VM Cython interpreter: out of memory building dependency order")
+        memset(self.cont_topo_words, 0, word_count * sizeof(unsigned long long))
+        memset(self.cont_topo_groups, 0, self.cont_topo_group_count * sizeof(unsigned long long))
+        for rank in range(self.cont_count):
+            index = order[rank]
+            self.cont_topo_rank[index] = rank
+            self.cont_topo_procs[rank] = self.cont_indices[index]
+        self.cont_topo_depth = depth
+
     def take_snapshot(self):
         """Copy current signal values to snapshot arrays for edge detection."""
         cdef int i
@@ -5596,6 +5738,12 @@ cdef class CyContext:
         dc.cont_rev_indices = self.cont_rev_indices
         dc.cont_ready = self.cont_ready
         dc.cont_work = self.cont_work
+        dc.cont_topo_rank = self.cont_topo_rank
+        dc.cont_topo_procs = self.cont_topo_procs
+        dc.cont_topo_depth = 0  # The ordinary event loop retains multi-pass order.
+        dc.cont_topo_words = self.cont_topo_words
+        dc.cont_topo_groups = self.cont_topo_groups
+        dc.cont_topo_group_count = self.cont_topo_group_count
         dc.edge_offset = self.edge_offset
         dc.edge_sigs = self.edge_sigs
         dc.edge_types = self.edge_types
@@ -5740,6 +5888,8 @@ cdef class CyContext:
                 raise ValueError("Batch events must be sorted")
         ev = 0
         self._fill_delta_ctx(&dc, delta_limit)
+        if self.cont_topo_depth <= delta_limit:
+            dc.cont_topo_depth = self.cont_topo_depth
         try:
             with nogil:
                 for cycle in range(cycles):

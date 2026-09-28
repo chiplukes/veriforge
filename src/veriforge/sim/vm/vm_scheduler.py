@@ -23,6 +23,7 @@ from ..executor import StatementExecutor
 from ..value import Value
 from .compiler import Compiler, CompiledProcess, ProcessType
 from .interpreter import Interpreter, StopSimulation, _format_display
+from .propagation import plan_continuous_order
 
 # Try to import the Cython fast interpreter
 try:
@@ -402,6 +403,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 cont_sens_lists,
                 proc_edge_lists,
             )
+            if hasattr(cy_ctx, "setup_continuous_order"):
+                cont_plan = plan_continuous_order(self.compiler.processes)
+                if cont_plan is not None:
+                    cy_ctx.setup_continuous_order(*cont_plan)
 
         # Create EvalContext wrapper for testbench signal access
         self.ctx = _VMEvalContext(self.compiler, self._cy_ctx)

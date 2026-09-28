@@ -60,7 +60,8 @@ callbacks/events.
   memory-heavy designs as well as the small benchmark.
 - [x] Replace continuous-assignment scans with indexed candidate queues; preserve
   deterministic ordering, diamond reactivation, feedback convergence, and limits.
-- [ ] Evaluate dependency ordering with same-pass propagation for acyclic regions.
+- [x] Evaluate dependency ordering; implement a guarded batch-only path for pure,
+  single-writer acyclic networks with no procedural observers of assigned signals.
 - [ ] Consider edge-only snapshots and selective coroutine signal/memory syncing.
 - [x] Measure and add a falling-edge shortcut only when no process or continuous
   assignment can observe the falling clock edge.
@@ -147,7 +148,7 @@ the clock is explicitly posedge-triggered. Designs with negedge logic, a
 combinational clock read, or a derived clock keep the full falling-edge pass.
 
 The reproducible workload suite is
-`python benchmarks/vm_propagation.py --cycles 10000 --repeat 3 --assigns 256`.
+`uv run python benchmarks/vm_propagation.py --cycles 10000 --repeat 3 --assigns 256`.
 It checks final signal and memory state against the event-driven VM. The numbers
 below are medians from the same host; construction and parsing are excluded.
 
@@ -166,8 +167,64 @@ every assignment runs. The original ALU/register-file/FSM benchmark reached
 approximately 1.09 million batch cycles/second in a 100,000-cycle run,
 versus 1.02 million in Phase 1. These are workload-specific measurements.
 
-A reverse-ordered dependent chain still takes multiple delta passes; a 64-stage
-chain took approximately 0.035 s for 10,000 cycles. Same-pass dependency
-ordering may help, but needs careful treatment of feedback, multi-path updates,
-assignment ordering, and delta limits before implementation. Reference engine
-work remains in Phase 4.
+### Dependency scheduling
+
+The native batch runner now evaluates eligible continuous assignments in
+dependency order. An affected assignment runs once after its affected
+predecessors. This removes repeated evaluation in reconvergent networks, where
+an assignment depends on both a changing source and a chain driven by that
+source. A simple chain already needed only one evaluation per assignment, so
+changing its scheduling has little effect.
+
+Ready assignments use a two-level bitset, so wide fanout does not require a
+heap operation per assignment and sparse activity skips inactive groups. The
+planner and its native storage are built once at elaboration.
+
+Eligibility is deliberately conservative and applies to the entire continuous
+assignment network. Each assignment must contain only allowlisted pure expression
+instructions and one whole-signal store. Bytecode reads must match sensitivity
+metadata. Destinations must have unique writers, cannot be written by procedural
+blocks, and cannot trigger procedural blocks. Cycles, partial writes, memory
+accesses, inlined functions with scratch writes, random expressions, and timed
+processes retain the existing path. Independent assignments and single-input
+chains/fanout also keep their existing scheduler: they offer no redundant
+evaluations for dependency scheduling to remove. Width, sign, and unknown-bit
+operations still use the same bytecode executor.
+
+The observer restriction matters even in an acyclic network: unequal-length
+paths can make a wire change temporarily and return to its previous value. The
+existing scheduler records that change and can activate a combinational observer.
+Collapsing the paths must not suppress that activation. A regression exercises
+this exact case. Ordinary event-driven execution and between-batch settling
+retain declaration-order passes. A batch also falls back when its delta limit
+is smaller than the network's maximum dependency depth.
+
+The benchmark now includes a 64-stage chain, a 64-stage reconvergent network,
+and wide fanout with a short dependency chain.
+Use `uv run python benchmarks/vm_propagation.py --cycles 10000 --repeat 5 --compare-legacy`
+to compare against both event-driven execution and the previous batch scheduler
+on the same workload, with final signal and memory state checked in all modes.
+
+Final native batch medians for 10,000 cycles and five repeats on this host:
+
+| Workload | Execution | Cycles/second | Versus prior batch scheduler |
+| --- | ---: | ---: | ---: |
+| 64-stage reconvergent network | 0.0246 s | 405,882 | 34.20x |
+| 64-stage single-input chain | 0.0230 s | 434,784 | 0.98x |
+| 256-assignment shallow fanout | 0.0989 s | 101,106 | 1.00x |
+| 256 active assignments | 0.0984 s | 101,625 | 1.00x |
+| 256-entry memory | 0.0011 s | 9,330,047 | 1.00x |
+| Lowered AXI-Stream loopback | 0.0026 s | 3,831,321 | 1.02x |
+
+The large gain is specific to a network with repeated evaluations; the other
+workloads have little or no change. The event-driven VM and previous batch
+paths matched the final signal and memory state in every benchmark repeat.
+
+Validation: 484 VM, cross-engine, memory, batch, and lowering regression tests
+passed with the native extension; the 76 native-only focused tests skipped as
+expected when the extension was disabled. Ruff, whitespace, and repository file
+checks passed. The new tests cover random dependency graphs, wide and unknown
+values, procedural observers, fallback cases, and bitset word/group boundaries.
+
+Next: assess snapshot/synchronization cost and profile bytecode execution before
+changing instruction dispatch. Reference engine work remains in Phase 4.

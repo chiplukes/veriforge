@@ -94,8 +94,8 @@ jobs:
       - run: uv sync --extra test --extra bench
       - run: uv run python setup_cython.py build_ext --inplace
       - name: VM tests (Cython vm-fast extension built)
-        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_vm_batch_run.py tests/test_sim/test_bench_native.py -n auto -q
+        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_vm_batch_run.py tests/test_sim/test_vm_propagation.py tests/test_sim/test_bench_native.py -n auto -q
       - name: VM tests (pure-Python VM, extension disabled)
-        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_vm_batch_run.py tests/test_sim/test_bench_native.py -n auto -q
+        run: uv run pytest tests/test_sim/test_vm.py tests/test_sim/test_vm_batch_run.py tests/test_sim/test_vm_propagation.py tests/test_sim/test_bench_native.py -n auto -q
         env:
           VERIFORGE_DISABLE_CYTHON_VM: "1"
