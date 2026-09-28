@@ -2361,7 +2361,7 @@ class LoweredDesign:  # cm:3e3a4c
         returns the captured output signal values.
 
         Args:
-            engine: Simulator engine (``"reference"``, ``"vm"``, ``"compiled"``).
+            engine: Simulator engine (``"reference"``, ``"vm"``, ``"vm-fast"``, ``"compiled"``).
             max_time: Simulation time limit in simulator time units. Defaults to
                 1000 x the minimum clock period across all domains (or 10000 if
                 no period hints are set).
@@ -2416,11 +2416,12 @@ class LoweredDesign:  # cm:3e3a4c
         self,
         cycles: int = 1000,
         *,
+        engine: str = "compiled",
         clock_name: str | None = None,
         clock_period: int | None = None,
         reset_cycles: int = 4,
     ) -> dict[str, int]:
-        """Run the lowered design using the compiled engine's C-level batch loop.
+        """Run the lowered design using a compiled or vm-fast C-level batch loop.
 
         Unlike :meth:`run`, this method drives the clock and applies reset
         entirely inside a single C-level loop with no Python per-cycle overhead.
@@ -2431,9 +2432,12 @@ class LoweredDesign:  # cm:3e3a4c
         needed.
 
         Only single-domain lowered designs support automatic clock detection.
-        For multi-domain designs supply *clock_name* explicitly.
+        For compiled multi-domain designs supply *clock_name* explicitly. The VM
+        batch path requires exactly one domain.
 
         Args:
+            engine: ``"compiled"`` (default) or ``"vm-fast"``. VM batching
+                requires a single clock domain and an available native extension.
             cycles: Total clock cycles to run.  Must be greater than
                 *reset_cycles*.  Defaults to 1000.
             clock_name: Name of the clock signal to drive.  Auto-detected from
@@ -2457,6 +2461,12 @@ class LoweredDesign:  # cm:3e3a4c
 
         _DEFAULT_PERIOD = 10
 
+        if engine not in ("compiled", "vm-fast"):
+            raise ValueError("batch_run engine must be 'compiled' or 'vm-fast'")
+        if engine == "vm-fast" and len(self.plan.domains) != 1:
+            raise ValueError("VM lowered batch execution requires exactly one clock domain")
+        if reset_cycles < 0:
+            raise ValueError("reset_cycles must be non-negative")
         if reset_cycles >= cycles:
             raise ValueError(f"reset_cycles ({reset_cycles}) must be less than cycles ({cycles})")
 
@@ -2492,7 +2502,7 @@ class LoweredDesign:  # cm:3e3a4c
                 events.append((reset_cycles, dom.reset.name, dom.reset.release_level))
         events.sort(key=lambda e: e[0])
 
-        sim = Simulator(self.wrapper, design=self.design, engine="compiled")
+        sim = Simulator(self.wrapper, design=self.design, engine=engine)
         sim.batch_run(cycles, clock_name, clock_period, events=events if events else None)
 
         return {name: int(sim.signal(name).value) for sigs in self.capture_signals.values() for name in sigs} | {

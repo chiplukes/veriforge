@@ -87,6 +87,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     __slots__ = (
         "_always_timing_coroutines",
+        "_batch_started",
+        "_batch_stopped",
         "_bootstrapped",
         "_combo_bootstrapped",
         "_combo_procs",
@@ -98,6 +100,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "_cy_ctx",
         "_event_queue",
         "_event_seq",
+        "_event_started",
         "_initial_coroutines",
         "_initial_procs",
         "_monitor_active",
@@ -187,6 +190,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Guard: prevent re-executing initial blocks on subsequent run() calls
         self._bootstrapped: bool = False
+        self._batch_started = False
+        self._batch_stopped = False
+        self._event_started = False
         # Guard: run settle()'s one-time combinational-always bootstrap
         # (see settle()'s own comment) only once.
         self._combo_bootstrapped: bool = False
@@ -569,12 +575,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     # ── Main simulation loop ─────────────────────────────────────
 
-    def run(self, *, max_time: int = 1_000_000) -> None:
-        """Run the simulation until completion or max_time."""
-        interp = self.interpreter
-        if interp is None:
-            raise RuntimeError("Must call elaborate() before run()")
-
+    def ensure_bootstrapped(self) -> bool:
+        """Execute initial blocks and register timed processes once; report a stop."""
         if not self._bootstrapped:
             # Execute initial blocks at t=0 BEFORE combo/continuous evaluation
             # so that memory arrays and signals are properly initialized.
@@ -585,7 +587,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 else:
                     stopped = self._execute_initial_direct(proc)
                 if stopped:
-                    return
+                    self._bootstrapped = True
+                    self._batch_stopped = True
+                    return True
 
             # Schedule always blocks with timing controls as reference coroutines.
             # These cannot be compiled to bytecode (e.g. "always #5 clk=~clk;").
@@ -597,6 +601,20 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self._wire_vcd_from_ref()
 
             self._bootstrapped = True
+
+        return self._batch_stopped
+
+    def run(self, *, max_time: int = 1_000_000) -> None:
+        """Run the simulation until completion or max_time."""
+        interp = self.interpreter
+        if interp is None:
+            raise RuntimeError("Must call elaborate() before run()")
+
+        if self._batch_started:
+            raise ValueError("Cannot mix VM batch execution with run()/run_step(); use a new Simulator")
+        self._event_started = True
+        if self.ensure_bootstrapped():
+            return
 
         # Bootstrap / re-bootstrap: execute all continuous assigns until stable.
         # This must run on every run() call so that external drive() changes
@@ -670,6 +688,109 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             if writer is not None:
                 writer.finalize()
                 self._ref_executor._vcd_writer = None
+
+    def batch_run(
+        self,
+        cycles: int,
+        clock_name: str,
+        clock_period: int = 10,
+        events: list[tuple[int, str, int]] | None = None,
+    ) -> int:
+        """Run complete clock cycles in the native VM, with no Python edge loop.
+
+        Supports untimed HDL and one externally controlled 1-bit clock. Events
+        are known integer scalar drives (at most 64 bits), relative to this call.
+        A zero-cycle call is a no-op, including initialization. The clock ends
+        low, and time advances by completed cycles * period unless HDL stops
+        during a partial cycle, in which case time identifies that phase.
+        """
+        from array import array
+        from operator import index
+
+        cycles = index(cycles)
+        clock_period = index(clock_period)
+        if cycles < 0 or clock_period < 2:
+            raise ValueError("batch_run requires cycles >= 0 and clock_period >= 2")
+        if cycles > ((1 << 63) - 1 - self.time) // clock_period:
+            raise OverflowError("Batch simulation time exceeds signed 64-bit range")
+        cy = self._cy_ctx
+        if cy is None or not hasattr(cy, "batch_run"):
+            raise NotImplementedError(
+                "VM batch execution requires the current native extension and a supported design; "
+                "rebuild with: python setup_cython.py build_ext --inplace"
+            )
+        clk_sid = self.compiler.signal_map.get(clock_name)
+        if clk_sid is None:
+            raise ValueError(f"Unknown clock signal: {clock_name!r}")
+        if self.compiler.sig_width[clk_sid] != 1:
+            raise ValueError("VM batch execution requires a 1-bit clock")
+        if self._on_time_step is not None:
+            raise ValueError("VM batch execution does not support VCD or time-step callbacks; use run()")
+        if self._event_queue or self._event_started:
+            raise ValueError(
+                "Cannot mix VM batch execution with queued events or run()/run_step(); use a new Simulator"
+            )
+        if any(proc.has_timing for proc in self.compiler.processes):
+            raise ValueError("VM batch execution does not support timed HDL processes; use run()")
+        if self.compiler.monitor_programs:
+            raise ValueError("VM batch execution does not support $monitor; use run()")
+
+        ev_cycles, ev_sids, ev_vals = array("q"), array("i"), array("Q")
+        previous = -1
+        for cycle, name, value in events or ():
+            cycle = index(cycle)
+            if cycle < 0 or cycle >= cycles:
+                raise ValueError(f"Batch event cycle {cycle} is outside [0, {cycles})")
+            if cycle < previous:
+                raise ValueError("Batch events must be sorted by cycle")
+            previous = cycle
+            sid = self.compiler.signal_map.get(name)
+            if sid is None:
+                raise ValueError(f"Unknown batch event signal {name!r}; memory-element events are not supported")
+            if sid == clk_sid:
+                raise ValueError("Batch events cannot drive the batch clock")
+            width = self.compiler.sig_width[sid]
+            if width > 64:
+                raise ValueError("VM batch events support scalar signals up to 64 bits")
+            ev_cycles.append(cycle)
+            ev_sids.append(sid)
+            ev_vals.append(index(value) & ((1 << width) - 1))
+
+        if cycles == 0 or self._batch_stopped:
+            return 0
+        if not self._batch_started:
+            self._snapshot_before_first_drive()
+            cy.prepare_batch_clock(clk_sid)
+            self._batch_started = True
+            if self.ensure_bootstrapped():
+                return 0
+            # Initial writes (including memories) and pre-existing drives must
+            # propagate before the first edge. Seed all signals only once.
+            self._pending_drives.update(range(len(self.compiler.sig_val)))
+        try:
+            self.settle()
+            if self._batch_stopped:
+                return 0
+            # Recover a clock driven high between batches with a real negedge.
+            if cy.read_signal(clk_sid) != (0, 0):
+                self.drive_signal(clock_name, 0)
+                self.settle()
+            if self._batch_stopped:
+                return 0
+            completed, stopped, output = cy.batch_run(
+                cycles, clk_sid, clock_period, ev_cycles, ev_sids, ev_vals, self.delta_limit
+            )
+            self._batch_stopped = stopped
+            for time, display_events in output:
+                self._record_cy_display(display_events, time)
+            return completed
+        except StopSimulation:
+            self._batch_stopped = True
+            return 0
+        finally:
+            self.time = cy.get_time()
+            self.interpreter.time = self.time
+            self.interpreter.dirty.clear()
 
     def _wire_vcd_from_ref(self) -> None:
         """If the reference executor created a VCD writer, wire it into _on_time_step."""
@@ -792,9 +913,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         the delta cycle loop to convergence.  Returns True if simulation
         should continue, False if finished or stopped ($finish / empty queue).
         """
+        if self._batch_started:
+            raise ValueError("Cannot mix VM batch execution with run()/run_step(); use a new Simulator")
         if not self._event_queue:
             return False
 
+        self._event_started = True
         next_time = self._event_queue[0].time
         self.time = next_time
         self.interpreter.time = self.time
@@ -878,12 +1002,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if self._cy_ctx is None:
             return
         events = self._cy_ctx.drain_display_buffer()
+        self._record_cy_display(events, self.time)
+
+    def _record_cy_display(self, events: list, time: int) -> None:
+        """Format native output using its original simulation timestamp."""
         if not events:
             return
         fmts = self.compiler.display_formats if self.compiler else []
         for fmt_id, _is_monitor, raw_args in events:
             args = [Value(v, width=w, mask=m) for v, m, w in raw_args]
-            self.display_output.append(_format_display(args, fmt_id, fmts, self.time))
+            self.display_output.append(_format_display(args, fmt_id, fmts, time))
 
     def _check_monitor_activation(self) -> None:
         """Check if interpreter activated a new $monitor and register it."""
@@ -1011,6 +1139,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         except StopSimulation:
             self.display_output.extend(self.interpreter.display_output)
             self.interpreter.display_output.clear()
+            if self._cy_ctx is not None:
+                self._cy_ctx.sync_signals_from_lists(self.compiler.sig_val, self.compiler.sig_mask)
+                if self.compiler.mem_count:
+                    self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
             self._event_queue.clear()
             return True
 
@@ -1682,6 +1814,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             try:
                 self._cy_ctx.run_delta_loop(list(changed), self.delta_limit)
             except _CyStop:
+                self._batch_stopped = True
                 self._drain_cy_display()
                 return
             self._drain_cy_display()

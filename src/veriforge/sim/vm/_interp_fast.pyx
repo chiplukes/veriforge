@@ -8,7 +8,7 @@ All 4-state logic is done inline with (val, mask, width) triples.
 
 from libc.stdlib cimport malloc, free, realloc
 from libc.stdlib cimport rand as c_rand
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 
 # ── Opcode constants (must match opcodes.py Op enum values) ──────────
 # We duplicate them as C #defines so the switch compiles to a jump table.
@@ -4197,6 +4197,12 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
             if dc.nba_mem_buf != NULL:
                 total_nba_mem_count += nba_mem_room
 
+            # Keep execution status separate from dirty-buffer growth status:
+            # a successful push must not erase $finish or an execution error.
+            if status != 0:
+                p_changed_count[0] = 0
+                return status
+
             # Merge blocking-assign dirty into changed
             for j in range(dirty_room):
                 sid = dc.dirty_buf[j]
@@ -4206,13 +4212,6 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                     if status != 0:
                         p_changed_count[0] = 0
                         return status
-
-            if status == 1:
-                p_changed_count[0] = 0
-                return 1
-            if status == 2:
-                p_changed_count[0] = 0
-                return 2
 
         # ── Apply NBAs ──
         for i in range(total_nba_count):
@@ -5527,24 +5526,7 @@ cdef class CyContext:
         for i in range(self.n_procs):
             self.seq_fired[i] = 0
 
-    def run_delta_loop(self, list changed_sids, int delta_limit):
-        """Run the full delta cycle loop in C.
-
-        Args:
-            changed_sids: list of signal IDs changed by events.
-            delta_limit:  max delta iterations before raising.
-
-        Raises:
-            CyStopSimulation: on $finish.
-            RuntimeError: on delta limit exceeded.
-        """
-        cdef DeltaCtx dc
-        cdef int changed_count = len(changed_sids)
-        cdef int i, status, sid
-        cdef int new_cap
-        cdef int *new_buf
-
-        # Populate DeltaCtx from self
+    cdef void _fill_delta_ctx(self, DeltaCtx *dc, int delta_limit) noexcept:
         dc.sig_val = self.sig_val
         dc.sig_mask = self.sig_mask
         dc.sig_width = self.sig_width
@@ -5598,6 +5580,26 @@ cdef class CyContext:
         self.wide_part_nba_count = 0      # reset before delta loop
         dc.wctx = self.wctx_c   # copied by value; nba_count/nba_part_count ptrs stay valid
 
+
+    def run_delta_loop(self, list changed_sids, int delta_limit):
+        """Run the full delta cycle loop in C.
+
+        Args:
+            changed_sids: list of signal IDs changed by events.
+            delta_limit:  max delta iterations before raising.
+
+        Raises:
+            CyStopSimulation: on $finish.
+            RuntimeError: on delta limit exceeded.
+        """
+        cdef DeltaCtx dc
+        cdef int changed_count = len(changed_sids)
+        cdef int i, status, sid
+        cdef int new_cap
+        cdef int *new_buf
+
+        self._fill_delta_ctx(&dc, delta_limit)
+
         # Populate the initial changed set. Grow changed_buf up front if the
         # caller handed us more entries than it currently holds -- mirrors
         # _changed_buf_push's growth (see its docstring) rather than
@@ -5629,6 +5631,9 @@ cdef class CyContext:
         self.changed_buf = dc.changed_buf
         self.changed_cap = dc.changed_cap
 
+        self._check_delta_status(status, delta_limit)
+
+    cdef void _check_delta_status(self, int status, int delta_limit) except *:
         if status == 1:
             raise CyStopSimulation()
         if status == 2:
@@ -5640,6 +5645,101 @@ cdef class CyContext:
             raise MemoryError("VM Cython interpreter: out of memory growing changed_buf")
         if status == -1:
             raise RuntimeError(f"Delta cycle limit ({delta_limit}) exceeded")
+
+    def prepare_batch_clock(self, int sid):
+        """Establish the initial low clock without manufacturing a startup edge."""
+        if not self._procs_setup or sid < 0 or sid >= self.sig_count:
+            raise ValueError("Invalid batch clock")
+        self.sig_val[sid] = self.snap_val[sid] = 0
+        self.sig_mask[sid] = self.snap_mask[sid] = 0
+
+    def get_time(self):
+        return self.sim_time
+
+    def batch_run(self, long long cycles, int clk_sid, long long clock_period,
+                  const long long[::1] ev_cycles, const int[::1] ev_sids,
+                  const unsigned long long[::1] ev_vals, int delta_limit):
+        """Clock a prepared design in C; return completed cycles, stop flag, output.
+
+        Events settle before the posedge. Posedges occur at start + i*period,
+        negedges at start + i*period + period//2. A stopped partial cycle is not
+        counted. Display output and existing opcode fallbacks may acquire the GIL.
+        """
+        cdef DeltaCtx dc
+        cdef long long cycle, high_time = clock_period // 2
+        cdef long long completed = 0
+        cdef Py_ssize_t ev = 0, n_events = ev_cycles.shape[0]
+        cdef int phase, sid, status = 0, changed_count = 0
+        cdef long long value
+        cdef list output = []
+        if not self._procs_setup or clk_sid < 0 or clk_sid >= self.sig_count:
+            raise ValueError("Invalid batch clock")
+        if cycles < 0 or clock_period < 2 or self.sig_width[clk_sid] != 1:
+            raise ValueError("Invalid batch cycles, period, or clock width")
+        if cycles > (0x7fffffffffffffff - self.sim_time) // clock_period:
+            raise OverflowError("Batch simulation time exceeds signed 64-bit range")
+        if ev_sids.shape[0] != n_events or ev_vals.shape[0] != n_events:
+            raise ValueError("Batch event arrays must have equal lengths")
+        for ev in range(n_events):
+            sid = ev_sids[ev]
+            if sid < 0 or sid >= self.sig_count or sid == clk_sid or self.sig_width[sid] > 64:
+                raise ValueError("Invalid batch event signal")
+            if ev_cycles[ev] < 0 or ev_cycles[ev] >= cycles:
+                raise ValueError("Batch event cycle out of range")
+            if ev > 0 and ev_cycles[ev] < ev_cycles[ev - 1]:
+                raise ValueError("Batch events must be sorted")
+        ev = 0
+        self._fill_delta_ctx(&dc, delta_limit)
+        try:
+            with nogil:
+                for cycle in range(cycles):
+                    # Separate stimulus, rising-edge and falling-edge phases.
+                    for phase in range(3):
+                        if phase == 0 and (ev == n_events or ev_cycles[ev] != cycle):
+                            continue
+                        if phase == 2:
+                            dc.sim_time += high_time
+                        memcpy(dc.snap_val, dc.sig_val, dc.sig_count * sizeof(long long))
+                        memcpy(dc.snap_mask, dc.sig_mask, dc.sig_count * sizeof(long long))
+                        memset(dc.seq_fired, 0, self.n_procs * sizeof(char))
+                        changed_count = 0
+                        if phase == 0:
+                            while ev < n_events and ev_cycles[ev] == cycle:
+                                sid = ev_sids[ev]
+                                value = <long long>ev_vals[ev] & mask_for_width(dc.sig_width[sid])
+                                if dc.sig_val[sid] != value or dc.sig_mask[sid] != 0:
+                                    dc.sig_val[sid] = value
+                                    dc.sig_mask[sid] = 0
+                                    if not dc.is_changed[sid]:
+                                        dc.is_changed[sid] = 1
+                                        status = _changed_buf_push(&dc, sid, &changed_count)
+                                        if status != 0:
+                                            break
+                                ev += 1
+                        else:
+                            dc.sig_val[clk_sid] = 1 if phase == 1 else 0
+                            dc.sig_mask[clk_sid] = 0
+                            dc.is_changed[clk_sid] = 1
+                            status = _changed_buf_push(&dc, clk_sid, &changed_count)
+                        if status == 0 and changed_count:
+                            status = _run_delta_loop_core(&dc, &changed_count)
+                        if self.disp_pos:
+                            with gil:
+                                output.append((dc.sim_time, self.drain_display_buffer()))
+                        if status != 0:
+                            break
+                    if status != 0:
+                        break
+                    completed += 1
+                    dc.sim_time += clock_period - high_time
+        finally:
+            # Propagation can realloc changed_buf, including on an error path.
+            self.changed_buf = dc.changed_buf
+            self.changed_cap = dc.changed_cap
+            self.sim_time = dc.sim_time
+        if status != 1:
+            self._check_delta_status(status, delta_limit)
+        return completed, status == 1, output
 
     def drain_display_buffer(self):
         """Read display events from the C buffer and return as list of tuples.

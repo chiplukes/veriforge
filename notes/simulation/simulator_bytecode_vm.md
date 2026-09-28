@@ -48,6 +48,68 @@ inner loop. See `notes/benchmarks.md` for full methodology and results.
 
 ---
 
+## Native cycle batching (`vm-fast`)
+
+`engine="vm"` selects the Python bytecode interpreter. `engine="vm-fast"`
+uses the optional Cython extension. Build or rebuild it after updating the VM:
+
+```sh
+python setup_cython.py build_ext --inplace
+```
+
+The native VM supports `Simulator.batch_run()` and `Simulator.run_cycles()`:
+
+```python
+sim = Simulator(module, engine="vm-fast")
+sim.batch_run(1000, "clk", events=[(0, "rst", 1), (4, "rst", 0)])
+
+# Inspect state and choose new input values between batches.
+sim.drive("enable", 1)
+sim.run_cycles(100, "clk", 10)
+```
+
+`run_cycles()` can infer the clock name and period from a single forked `Clock`.
+Both APIs execute untimed initial blocks once, settle external drives, and then
+run the clock and delta loops in C. The clock starts low; each cycle applies its
+events and settles them before the posedge, then settles the falling edge.
+Posedges occur at `start_time + cycle * period`, falling edges at
+`start_time + cycle * period + period // 2`. A completed batch ends low at
+`start_time + cycles * period`. Both edges are processed, including derived
+clock activity handled by the existing delta loop.
+
+Events are sorted `(cycle, signal_name, integer_value)` tuples, relative to each
+call. Equal-cycle events preserve input order; repeated targets take the last
+value before settling. Values are truncated to their target width. The first
+version supports scalar event targets up to 64 bits; wide inputs and memory
+elements can instead be driven between batches through `drive()`.
+
+Zero cycles does not initialize or advance the simulation. On `$finish`, only
+fully completed cycles are returned; a partial cycle is excluded, simulation
+time remains at its stopping phase, and later batch calls return zero. Display
+output retains its timestamp and is drained during the run. Clock scheduling
+stays in C; display output and existing wide-arithmetic fallbacks acquire the GIL.
+
+Batching requires the native extension and a design supported by it. Timed HDL
+processes, `$monitor`, VCD/time-step callbacks, multiple forked clocks, and queued
+events are rejected. Do not mix `run()`/`run_step()` with batching on the same
+simulator. Use the event-driven API for those features. An inferred clock with
+a non-default duty cycle is rejected; the batch clock always uses `period // 2`
+high time and the remaining low time.
+
+Supported bench lowerings already produce HDL wrappers that the VM can execute:
+
+```python
+captures = lowered.batch_run(cycles=1000, reset_cycles=4, engine="vm-fast")
+```
+
+The lowered VM batch API requires one clock domain. Its default engine remains
+`"compiled"`. See [the performance plan](../plans/vm_reference_perf_2026-09.md)
+for measurements and subsequent optimization work. Run
+`python benchmarks/vm_batch.py --cycles 50000 --repeat 3` to compare both VM
+execution paths and check their final signal and memory state.
+
+---
+
 ## Architecture
 
 ```

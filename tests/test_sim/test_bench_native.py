@@ -127,6 +127,24 @@ def _read_signal(sim: Simulator, name: str) -> int:
 
 
 class TestRoundTrip:
+    def test_vm_fast_batch_roundtrip(self):
+        from veriforge.sim.vm.vm_scheduler import _HAS_CYTHON
+
+        if not _HAS_CYTHON:
+            pytest.skip("requires native VM extension")
+        beats = [0x12, 0x34, 0x80, 0xFF]
+        lowered = compile_native(
+            Testbench(_parse(LOOPBACK_SRC)),
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(beats, data_width=8),
+                "s_axis": AXIStreamSinkLowering(len(beats), data_width=8),
+            },
+        )
+        captures = lowered.batch_run(cycles=40, engine="vm-fast")
+        assert captures == lowered.run("reference", max_time=395)
+        assert [captures[f"s_axis_cap_{i}"] for i in range(len(beats))] == beats
+        assert captures["s_axis_snk_done"] == 1
+
     @pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
     def test_axis_loopback_native_roundtrip(self, engine):
         beats = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5]

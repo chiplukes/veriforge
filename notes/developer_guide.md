@@ -73,8 +73,9 @@ GitHub Actions runs three workflows:
     coverage; `weekly.yml` below only covers the compiled engine and
     Icarus cross-validation.
   - **vm-equivalence** job (needs lint): builds the `_interp_fast` Cython
-    extension, then runs `tests/test_sim/test_vm.py` +
-    `tests/test_sim/test_bench_native.py` twice — once with the extension
+    extension, then runs `tests/test_sim/test_vm.py`,
+    `tests/test_sim/test_vm_batch_run.py`, and `tests/test_sim/test_bench_native.py`
+    twice — once with the extension
     built, once with `VERIFORGE_DISABLE_CYTHON_VM=1` — requiring both green.
     This is the drift gate described in the sync policy above.
 - **`weekly.yml`** — `on: schedule` (Mondays 06:00 UTC) + `workflow_dispatch`:

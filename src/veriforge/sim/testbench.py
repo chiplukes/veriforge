@@ -490,7 +490,7 @@ class Simulator:  # cm:a5c8f4
         clock_period: int = 10,
         events: list[tuple[int, str, int]] | None = None,
     ) -> int:
-        """Run *cycles* full clock cycles in batch mode (compiled engine only).
+        """Run *cycles* full clock cycles in batch mode (compiled or vm-fast).
 
         Args:
             cycles: Number of full clock cycles to execute.
@@ -504,10 +504,19 @@ class Simulator:  # cm:a5c8f4
             Number of cycles actually completed.
 
         Raises:
-            NotImplementedError: If the engine is not ``"compiled"``.
+            NotImplementedError: If the engine has no native batch runner.
+
+        The VM runner requires untimed HDL, no queued events or callbacks, and
+        a 1-bit clock. VM events target scalar signals up to 64 bits. It executes
+        initial blocks on first use; zero cycles is a no-op. A partial cycle
+        interrupted by ``$finish`` is not counted, and time stays at that phase.
         """
+        if self._engine == "vm-fast":
+            if len(self._clocks) > 1:
+                raise ValueError("VM batch execution supports at most one forked clock")
+            return self._sched.batch_run(cycles, clock_name, clock_period, events=events)
         if self._engine != "compiled":
-            raise NotImplementedError(f"batch_run() requires engine='compiled', got {self._engine!r}")
+            raise NotImplementedError(f"batch_run() requires engine='compiled' or 'vm-fast', got {self._engine!r}")
         from .compiled.compiled_scheduler import CompiledScheduler as _CSched
 
         sched = self._sched
@@ -521,7 +530,7 @@ class Simulator:  # cm:a5c8f4
         clock_period: int | None = None,
         events: list[tuple[int, str, int]] | None = None,
     ) -> int:
-        """Run *cycles* full clock cycles at C speed (compiled engine only).
+        """Run *cycles* full clock cycles at C speed (compiled or vm-fast).
 
         A convenience wrapper over :meth:`batch_run` for interactive,
         decision-driven testbenches: unlike ``run()``/``run_step()``, which
@@ -562,16 +571,12 @@ class Simulator:  # cm:a5c8f4
             pending t=0 ``initial`` block).
 
         Raises:
-            NotImplementedError: If the engine is not ``"compiled"``.
+            NotImplementedError: If the engine has no native batch runner.
             ValueError: If *clock_name*/*clock_period* are omitted and zero
                 or more than one clock has been forked.
         """
-        if self._engine != "compiled":
-            raise NotImplementedError(f"run_cycles() requires engine='compiled', got {self._engine!r}")
-        from .compiled.compiled_scheduler import CompiledScheduler as _CSched
-
-        sched = self._sched
-        assert isinstance(sched, _CSched)  # noqa: S101
+        if self._engine not in ("compiled", "vm-fast"):
+            raise NotImplementedError(f"run_cycles() requires engine='compiled' or 'vm-fast', got {self._engine!r}")
 
         if clock_name is None or clock_period is None:
             if len(self._clocks) != 1:
@@ -583,7 +588,19 @@ class Simulator:  # cm:a5c8f4
             if clock_name is None:
                 clock_name = clock.signal.name
             if clock_period is None:
+                if self._engine == "vm-fast" and clock.high_time != (clock.high_time + clock.low_time) // 2:
+                    raise ValueError(
+                        "VM run_cycles() requires a 50% duty clock; provide an explicit period to override"
+                    )
                 clock_period = clock.high_time + clock.low_time
+
+        if self._engine == "vm-fast":
+            return self.batch_run(cycles, clock_name, clock_period, events=events)
+
+        from .compiled.compiled_scheduler import CompiledScheduler as _CSched
+
+        sched = self._sched
+        assert isinstance(sched, _CSched)  # noqa: S101
 
         if not self._run_cycles_clock_ready:
             # Mirror `_schedule_clock_events()`'s own initialization of the

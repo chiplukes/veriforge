@@ -584,11 +584,14 @@ for i in range(4):
 print("done:", results.get("m_axis_snk_done"))
 ```
 
-#### Fastest: `lowered.batch_run()` (compiled engine, no Python overhead)
+#### Native batching: `lowered.batch_run()` (compiled or vm-fast)
 
 ```python
 # Single call — entire sim including reset in C. No VCD.
 results = lowered.batch_run(cycles=1000, reset_cycles=4)
+
+# Use the VM's native loop without compiling a native module per design.
+results = lowered.batch_run(cycles=1000, reset_cycles=4, engine="vm-fast")
 
 for i in range(4):
     print(f"beat {i}: {results[f'm_axis_cap_{i}']:#04x}")
