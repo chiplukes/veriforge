@@ -65,7 +65,7 @@ callbacks/events.
 - [x] Snapshot only edge-sensitive signals and clear only edge-sensitive
   process flags in the native batch loop; use bulk operations for dense cases.
 - [x] Measure coroutine signal/memory synchronization in event-driven VM runs.
-- [ ] Avoid whole-memory coroutine synchronization when a conservative body
+- [x] Avoid whole-memory coroutine synchronization when a conservative body
   analysis proves the coroutine cannot read or write the memory.
 - [x] Measure and add a falling-edge shortcut only when no process or continuous
   assignment can observe the falling clock edge.
@@ -260,9 +260,25 @@ An event-driven `vm-fast` cProfile run with `always #5 clk=~clk`, 100 rising
 edges, and an otherwise unused 1,024-word memory recorded 401 coroutine syncs.
 The memory copy into the reference context took 0.288 s cumulative; the copy
 back took 0.028 s. The same run without memory spent under 0.001 s in each
-direction. This identifies a separate opportunity for conservative per-coroutine
-memory access analysis before skipping copies; the current signal-only access
-set does not establish whether a coroutine writes memory.
+direction. The VM now skips memory copies for timed `always` coroutines only
+when a model-tree scan finds no memory reference, function/task call, or unknown
+node. Timed `initial` blocks, memory-accessing blocks, and VCD callbacks retain
+the full sync. Rerunning that profile reduced both memory-sync directions to
+under 0.001 s cumulative. The old signal-only access set did not establish
+whether a coroutine wrote memory, so the memory check includes assignment
+targets as well as reads.
+
+An isolated 100-rising-edge timed-clock run with 1,024 unused memory words,
+five repeats, and simulator construction excluded measured 0.118 s median
+with full coroutine memory sync and 0.0014 s with the guarded skip. Both runs
+used the same VM implementation and source; a temporary benchmark toggled the
+guard to force the full-sync comparison. This is an intentionally favorable
+workload, not a general event-loop speedup estimate. Six focused differential
+tests cover native VM, Python VM, and reference behavior for inactive memory,
+memory reads/writes, write-only accesses, timed initial blocks, and call
+fallback. A broader VM/memory run passed 504 tests; after the write-only
+signal-sync correction, a final VM and timing-memory rerun passed 352 tests.
+Ruff, formatting, whitespace, and repository file checks passed.
 
 Next: profile bytecode execution before changing instruction dispatch. Reference
 work remains in Phase 4.

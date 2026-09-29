@@ -660,7 +660,10 @@ is re-created when it completes (always blocks loop forever).
 
 **Sync optimization**: The scheduler pre-computes `_coro_sync_names[proc_id]`
 — the set of signal names each coroutine reads or writes. Only those signals
-are synced, avoiding a full-array copy on every resume.
+are synced, avoiding a full-array copy on every resume. For timed `always`
+blocks, it also skips whole-memory copies when the body has no memory
+references. Calls and unrecognized model nodes fall back to full signal and
+memory sync. Timed `initial` blocks and VCD callbacks retain full memory sync.
 
 ### $monitor Re-fire
 

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from veriforge.model.expressions import Identifier
+from veriforge.model.base import VerilogNode
+from veriforge.model.expressions import FunctionCall, Identifier, Literal, StringLiteral
+from veriforge.model.statements import Statement, SystemTaskCall, TaskEnable
 
 from ..evaluator import EvalContext, ExpressionEvaluator
 from ..event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
@@ -70,6 +72,16 @@ def _identifier_from_name(name: str) -> Identifier:
     if len(parts) == 1:
         return Identifier(name)
     return Identifier(name=parts[-1], hierarchy=parts[:-1])
+
+
+class _CoroutineSignalNames(set[str]):
+    """Targeted signal set carrying a conservative memory-sync decision."""
+
+    __slots__ = ("skip_memory_sync",)
+
+    def __init__(self, names: set[str], *, skip_memory_sync: bool) -> None:
+        super().__init__(names)
+        self.skip_memory_sync = skip_memory_sync
 
 
 class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
@@ -184,8 +196,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         self._ref_ctx: EvalContext | None = None
         self._initial_coroutines: dict[int, object] = {}
         self._always_timing_coroutines: dict[int, object] = {}
-        # Coroutine sync optimization: proc_id → set of signal names to sync
-        self._coro_sync_names: dict[int, set[str]] = {}
+        # Coroutine sync optimization: proc_id → signal names, or None for full sync
+        self._coro_sync_names: dict[int, set[str] | None] = {}
         # Reverse signal map: sid → name (built during elaborate)
         self._reverse_sig_map: dict[int, str] = {}
 
@@ -459,7 +471,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         self._sync_ref_ctx()
 
-    def _sync_ref_ctx(self, names: set[str] | None = None) -> None:  # noqa: PLR0912
+    def _sync_ref_ctx(self, names: set[str] | None = None, *, sync_memory: bool = True) -> None:  # noqa: PLR0912
         """Sync reference EvalContext from VM signal storage.
 
         Args:
@@ -494,9 +506,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             else:
                 for name, sid in sig_map.items():
                     ref_sigs[name] = Value(sig_val[sid], width=sig_width[sid], mask=sig_mask[sid])
-        self._sync_mem_to_ref()
+        if sync_memory:
+            self._sync_mem_to_ref()
 
-    def _sync_from_ref_ctx(self, names: set[str] | None = None) -> None:
+    def _sync_from_ref_ctx(self, names: set[str] | None = None, *, sync_memory: bool = True) -> None:
         """Sync VM signal storage from reference EvalContext.
 
         Also marks signals that actually changed as dirty in the interpreter
@@ -532,7 +545,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                         sig_mask[sid] = v.mask
                         if dirty is not None:
                             dirty.add(sid)
-        self._sync_mem_from_ref()
+        if sync_memory:
+            self._sync_mem_from_ref()
 
     def _sync_mem_to_ref(self) -> None:
         """Copy memory arrays from VM storage into the fallback EvalContext."""
@@ -1170,8 +1184,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
     def _schedule_always_with_timing(self, proc: CompiledProcess) -> None:
         """Start an always block with timing controls as a coroutine.
 
-        Computes targeted sync names for performance, then delegates
-        to ``CoroutineMixin._start_always_coro``.
+        Computes a conservative sync plan, then delegates to the coroutine.
         """
         block = proc.source_block
         if block is None:
@@ -1179,19 +1192,50 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         proc_id = id(proc)
 
-        # Compute the set of signal names this coroutine touches (once).
-        body_sigs: set[int] = set()
-        self.compiler._collect_stmt_signals(block.body, body_sigs)
-        rsm = self._reverse_sig_map
-        sync_names = {rsm[sid] for sid in body_sigs if sid in rsm}
-        self._coro_sync_names[proc_id] = sync_names
+        self._coro_sync_names[proc_id] = self._coroutine_sync_plan(block.body)
 
         self._start_always_coro(block.body, proc_id)
+
+    def _coroutine_sync_plan(self, body: Statement) -> _CoroutineSignalNames | None:
+        """Return targeted names only when the body can be inspected fully."""
+        signal_ids: set[int] = set()
+        self.compiler._collect_stmt_signals(body, signal_ids)
+        touches_memory = False
+        for node in body.walk():
+            # Calls can touch signals or memory through another body. Unknown
+            # leaves cannot be proven free of hidden accesses either.
+            if isinstance(node, (FunctionCall, TaskEnable, SystemTaskCall)):
+                return None
+            if type(node)._child_nodes is VerilogNode._child_nodes and not isinstance(
+                node, (Identifier, Literal, StringLiteral)
+            ):
+                return None
+            if isinstance(node, Identifier):
+                name = self.compiler._resolve_id_name(node)
+                sid = self.compiler.signal_map.get(name)
+                if sid is not None:
+                    signal_ids.add(sid)  # Include write-only assignment targets.
+                if self.compiler.mem_count:
+                    if name in self.compiler.mem_map:
+                        touches_memory = True
+                    storage = self.compiler._resolve_struct_storage_access(name)
+                    if storage is not None and storage[0] == "memory":
+                        touches_memory = True
+        names = {self._reverse_sig_map[sid] for sid in signal_ids if sid in self._reverse_sig_map}
+        return _CoroutineSignalNames(names, skip_memory_sync=not touches_memory)
+
+    def _coro_needs_memory_sync(self, names: set[str] | None) -> bool:
+        # VCD callbacks use the reference context and may inspect its memory.
+        return (
+            not isinstance(names, _CoroutineSignalNames)
+            or not names.skip_memory_sync
+            or (self._ref_executor is not None and self._ref_executor._vcd_writer is not None)
+        )
 
     # -- CoroutineMixin hooks --------------------------------------------------
 
     def _coro_sync_in(self, names: set[str] | None = None) -> None:
-        self._sync_ref_ctx(names)
+        self._sync_ref_ctx(names, sync_memory=self._coro_needs_memory_sync(names))
 
     def _coro_sync_out(self, names: set[str] | None = None) -> None:
         if self._cy_ctx is not None and names is None:
@@ -1202,8 +1246,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self._cy_ctx.sync_signals_to_lists(self.compiler.sig_val, self.compiler.sig_mask)
             if self.compiler.mem_count > 0:
                 self._cy_ctx.sync_mem_to_lists(self.compiler.mem_val, self.compiler.mem_mask)
-        self._sync_from_ref_ctx(names)
-        self._sync_cy_from_vm(names)
+        sync_memory = self._coro_needs_memory_sync(names)
+        self._sync_from_ref_ctx(names, sync_memory=sync_memory)
+        self._sync_cy_from_vm(names, sync_memory=sync_memory)
 
     def _coro_post_resume(self) -> None:
         self._wire_vcd_from_ref()
@@ -1214,7 +1259,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
     def _coro_get_sync_names(self, proc_id: int) -> set[str] | None:
         return self._coro_sync_names.get(proc_id)
 
-    def _sync_cy_from_vm(self, names: set[str] | None = None) -> None:
+    def _sync_cy_from_vm(self, names: set[str] | None = None, *, sync_memory: bool = True) -> None:
         """Sync CyContext from VM Python lists (after reference executor writes).
 
         If ``names`` is provided, only those signals are written back to the
@@ -1232,7 +1277,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                     sid = sig_map.get(name)
                     if sid is not None:
                         self._cy_ctx.write_signal(sid, sig_val[sid], sig_mask[sid])
-            if self.compiler.mem_count > 0:
+            if sync_memory and self.compiler.mem_count > 0:
                 self._cy_ctx.sync_mem_from_lists(self.compiler.mem_val, self.compiler.mem_mask)
 
     def _run_continuous_assigns(self) -> None:
