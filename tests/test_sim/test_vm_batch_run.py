@@ -368,3 +368,26 @@ def test_batch_falling_edge_activity_matches_event_loop(src, names):
     step.run(max_time=95)
     assert batch.batch_run(10, "clk", events=events) == 10
     assert _state(batch, names) == _state(step, names)
+
+
+def test_sparse_edge_snapshots_preserve_async_reset_and_both_clock_edges():
+    declarations = " ".join(f"reg [7:0] idle{i}; wire [7:0] out{i}; assign out{i}=idle{i};" for i in range(32))
+    src = f"""module sparse_edges(input clk, input rst, output reg [7:0] q, falls);
+        wire rst_wire; assign rst_wire=rst;
+        {declarations}
+        initial begin q=0; falls=0; end
+        always @(posedge clk or posedge rst_wire)
+            if (rst_wire) q<=0; else q<=q+1;
+        always @(negedge clk) falls<=falls+1;
+    endmodule"""
+    events = [(0, "rst", 1), (2, "rst", 0), (5, "rst", 1), (7, "rst", 0)]
+    batch = _sim(src)
+    assert batch.batch_run(10, "clk", events=events) == 10
+    step_src = src.replace("endmodule", "initial begin rst=1; #20 rst=0; #30 rst=1; #20 rst=0; end endmodule")
+    for engine in ("vm-fast", "vm", "reference"):
+        step = _sim(step_src, engine)
+        step.fork(Clock(step.signal("clk"), period=10))
+        step.run(max_time=95)
+        assert _state(batch, ["q", "falls", "rst_wire", "clk", "out0", "out31"]) == _state(
+            step, ["q", "falls", "rst_wire", "clk", "out0", "out31"]
+        ), engine

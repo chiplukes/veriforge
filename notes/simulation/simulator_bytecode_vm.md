@@ -126,6 +126,13 @@ to measure sparse, active, shallow-fanout, chain, reconvergent, memory, and lowe
 workloads against both the event loop and batch execution without dependency
 ordering. Every comparison checks final signal and memory state.
 
+The native batch loop snapshots only signals used in edge controls and clears
+fired flags only for processes with edge controls. Dense designs use bulk
+copy/clear operations. The index is built once at elaboration and preserves
+old-value detection across stimulus, rising edges, derived edges, and falling
+edges. Run `uv run python benchmarks/vm_edge_snapshots.py --cycles 20000 --repeat 5`
+to compare designs with many inactive signals against the event-driven VM.
+
 ---
 
 ## Architecture
@@ -570,7 +577,8 @@ run_delta_loop(changed_sids, delta_limit):
 ```
 
 Edge detection for sequential processes is done inline:
-- Snapshot arrays `snap_val/snap_mask` are taken at the start of each time step
+- Snapshot arrays `snap_val/snap_mask` are taken at the start of each event-driven
+  time step; native batches update only edge-sensitive signal entries
 - `seq_fired[pid]` flag prevents a sequential process from firing more than
   once per time step
 

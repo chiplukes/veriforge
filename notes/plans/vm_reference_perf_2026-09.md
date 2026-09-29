@@ -62,7 +62,11 @@ callbacks/events.
   deterministic ordering, diamond reactivation, feedback convergence, and limits.
 - [x] Evaluate dependency ordering; implement a guarded batch-only path for pure,
   single-writer acyclic networks with no procedural observers of assigned signals.
-- [ ] Consider edge-only snapshots and selective coroutine signal/memory syncing.
+- [x] Snapshot only edge-sensitive signals and clear only edge-sensitive
+  process flags in the native batch loop; use bulk operations for dense cases.
+- [x] Measure coroutine signal/memory synchronization in event-driven VM runs.
+- [ ] Avoid whole-memory coroutine synchronization when a conservative body
+  analysis proves the coroutine cannot read or write the memory.
 - [x] Measure and add a falling-edge shortcut only when no process or continuous
   assignment can observe the falling clock edge.
 
@@ -226,5 +230,39 @@ expected when the extension was disabled. Ruff, whitespace, and repository file
 checks passed. The new tests cover random dependency graphs, wide and unknown
 values, procedural observers, fallback cases, and bitset word/group boundaries.
 
-Next: assess snapshot/synchronization cost and profile bytecode execution before
-changing instruction dispatch. Reference engine work remains in Phase 4.
+### Batch edge bookkeeping
+
+The native batch loop now builds unique lists of signals with explicit edge
+triggers and processes with edge controls at elaboration. Before each active
+phase it snapshots and clears only those entries. When at least one quarter of
+all signals or processes are edge-sensitive, it uses the existing bulk copy or
+clear operation. Ordinary event-driven execution retains its full snapshots.
+This preserves old-value edge detection through derived clocks, asynchronous
+reset inputs, both clock edges, and event stimulus.
+
+The before/after measurements exclude parsing and construction and compare all
+final signal state against the event-driven VM. With 20,000 cycles and five
+repeats on the same host, dormant-1024 changed from about 3.07 ms to 1.10 ms,
+dormant-4096 from 22.62 ms to 1.20 ms, and sparse-1024 from 14.29 ms to 2.75 ms.
+The reproducible workload is
+`uv run python benchmarks/vm_edge_snapshots.py --cycles 20000 --repeat 5`.
+These deliberately sparse designs isolate snapshot and flag-clearing overhead;
+they do not predict the gain for dense activity.
+
+The native extension rebuilt successfully. All 78 focused VM batch,
+propagation, and lowered-roundtrip tests passed, including a new sparse
+derived-reset and dual-edge comparison against the event-driven native VM,
+Python VM, and reference engine. The standard 100,000-cycle VM batch benchmark
+reported 1,067,404 cycles/s versus 179,412 cycles/s for event-driven VM;
+all final states matched. Ruff, whitespace, and repository file checks passed.
+
+An event-driven `vm-fast` cProfile run with `always #5 clk=~clk`, 100 rising
+edges, and an otherwise unused 1,024-word memory recorded 401 coroutine syncs.
+The memory copy into the reference context took 0.288 s cumulative; the copy
+back took 0.028 s. The same run without memory spent under 0.001 s in each
+direction. This identifies a separate opportunity for conservative per-coroutine
+memory access analysis before skipping copies; the current signal-only access
+set does not establish whether a coroutine writes memory.
+
+Next: profile bytecode execution before changing instruction dispatch. Reference
+work remains in Phase 4.

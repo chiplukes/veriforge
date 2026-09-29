@@ -4825,6 +4825,10 @@ cdef class CyContext:
     cdef int       *edge_offset       # [n_procs + 1]
     cdef int       *edge_sigs         # [total_entries]
     cdef int       *edge_types        # [total_entries]
+    cdef int       *batch_edge_sids   # unique edge-sensitive signal IDs
+    cdef int        batch_edge_sig_count
+    cdef int       *batch_edge_procs  # processes with explicit edge controls
+    cdef int        batch_edge_proc_count
     cdef long long *snap_val          # [sig_count]
     cdef long long *snap_mask         # [sig_count]
     cdef char      *seq_fired         # [n_procs]
@@ -4910,6 +4914,10 @@ cdef class CyContext:
         self.edge_offset = NULL
         self.edge_sigs = NULL
         self.edge_types = NULL
+        self.batch_edge_sids = NULL
+        self.batch_edge_sig_count = 0
+        self.batch_edge_procs = NULL
+        self.batch_edge_proc_count = 0
         self.snap_val = NULL
         self.snap_mask = NULL
         self.seq_fired = NULL
@@ -5002,6 +5010,8 @@ cdef class CyContext:
         free(self.edge_offset)
         free(self.edge_sigs)
         free(self.edge_types)
+        free(self.batch_edge_sids)
+        free(self.batch_edge_procs)
         free(self.snap_val)
         free(self.snap_mask)
         free(self.seq_fired)
@@ -5646,6 +5656,22 @@ cdef class CyContext:
                 offset += 1
         self.edge_offset[self.n_procs] = offset
 
+        # Native batching needs pre-phase values only for edge-sensitive
+        # signals, and resets fired flags only for processes that can fire.
+        # Keep the full snapshot/flag arrays for the event-driven VM path.
+        edge_sids = sorted({pair[0] for edges in proc_edge_lists for pair in edges})
+        edge_procs = [i for i in range(self.n_procs) if proc_edge_lists[i]]
+        self.batch_edge_sig_count = len(edge_sids)
+        self.batch_edge_proc_count = len(edge_procs)
+        self.batch_edge_sids = <int *>malloc(max(self.batch_edge_sig_count, 1) * sizeof(int))
+        self.batch_edge_procs = <int *>malloc(max(self.batch_edge_proc_count, 1) * sizeof(int))
+        if self.batch_edge_sids == NULL or self.batch_edge_procs == NULL:
+            raise MemoryError("VM Cython interpreter: out of memory building batch edge index")
+        for i in range(self.batch_edge_sig_count):
+            self.batch_edge_sids[i] = <int>edge_sids[i]
+        for i in range(self.batch_edge_proc_count):
+            self.batch_edge_procs[i] = <int>edge_procs[i]
+
         # ── Snapshot arrays ──
         self.snap_val  = <long long *>malloc(self.sig_count * sizeof(long long))
         self.snap_mask = <long long *>malloc(self.sig_count * sizeof(long long))
@@ -5867,7 +5893,7 @@ cdef class CyContext:
         cdef long long cycle, high_time = clock_period // 2
         cdef long long completed = 0
         cdef Py_ssize_t ev = 0, n_events = ev_cycles.shape[0]
-        cdef int phase, sid, status = 0, changed_count = 0
+        cdef int phase, sid, k, status = 0, changed_count = 0
         cdef long long value
         cdef list output = []
         if not self._procs_setup or clk_sid < 0 or clk_sid >= self.sig_count:
@@ -5906,9 +5932,19 @@ cdef class CyContext:
                                 dc.sig_val[clk_sid] = 0
                                 dc.sig_mask[clk_sid] = 0
                                 continue
-                        memcpy(dc.snap_val, dc.sig_val, dc.sig_count * sizeof(long long))
-                        memcpy(dc.snap_mask, dc.sig_mask, dc.sig_count * sizeof(long long))
-                        memset(dc.seq_fired, 0, self.n_procs * sizeof(char))
+                        if self.batch_edge_sig_count * 4 >= dc.sig_count:
+                            memcpy(dc.snap_val, dc.sig_val, dc.sig_count * sizeof(long long))
+                            memcpy(dc.snap_mask, dc.sig_mask, dc.sig_count * sizeof(long long))
+                        else:
+                            for k in range(self.batch_edge_sig_count):
+                                sid = self.batch_edge_sids[k]
+                                dc.snap_val[sid] = dc.sig_val[sid]
+                                dc.snap_mask[sid] = dc.sig_mask[sid]
+                        if self.batch_edge_proc_count * 4 >= self.n_procs:
+                            memset(dc.seq_fired, 0, self.n_procs * sizeof(char))
+                        else:
+                            for k in range(self.batch_edge_proc_count):
+                                dc.seq_fired[self.batch_edge_procs[k]] = 0
                         changed_count = 0
                         if phase == 0:
                             while ev < n_events and ev_cycles[ev] == cycle:

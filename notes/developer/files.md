@@ -142,6 +142,7 @@ src/veriforge/
 │       ├── compiler.py       # AST → bytecode compiler (expression/statement/LHS, struct fields)
 │       ├── interpreter.py    # Pure-Python stack-based bytecode interpreter (deferred NBA_RANGE)
 │       ├── vm_scheduler.py   # Event-driven scheduler (EventQueueMixin, cascaded CA propagation)
+│       ├── propagation.py    # Conservative native-batch continuous-assignment scheduling plan
 │       └── _interp_fast.pyx  # Cython fast interpreter + C delta loop
 │   └── compiled/         # Compiled Cython engine (design-specific .pyx)
 │       ├── __init__.py   # Public API: CythonCompiler, CythonCodegen, CompiledScheduler
@@ -431,4 +432,3 @@ examples/                          # Runnable DSL examples
 │   ├── sim/testbench_fast.v       # Minimal testbench (for batch_run)
 │   └── sim/firmware.hex           # Generated RV32I test firmware
 ```
-
