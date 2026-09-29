@@ -89,7 +89,9 @@ callbacks/events.
   of them; retain a declaration-order scan when candidates are dense.
 - [x] Cache declaration signedness per elaborated context; keep function scopes
   separate and context-dependent expression widths dynamic.
-- Investigate redundant `Value` resizing/allocation after scheduler improvements.
+- [x] Investigate redundant `Value` resizing/allocation after scheduler
+  improvements; remove repeated assignment-width work instead of changing
+  `Value` construction semantics.
 - Keep tree walking and independent semantic implementations. Validate against
   pre-change traces and, where supported, an external simulator in addition to
   VM/compiled comparisons.
@@ -367,4 +369,22 @@ matched for a signed user function (80 snapshots), memory updates (80), and
 the mixed DUT (413). Focused evaluator/scheduler tests passed 108 cases, and
 the signed/function/wide-array cross-engine suite passed 114 cases.
 
-Next: investigate redundant `Value` resizing and allocation.
+### Reference assignment width reuse
+
+On the mixed DUT, cProfile recorded only 378 `Value.resize()` calls over
+2,000 cycles, so resizing itself is not a useful target. The assignment path
+did make about 64,000 redundant sign-extension helper calls in the same run.
+Procedural and continuous assignments now use their already-computed LHS
+width and only check signedness when the evaluated RHS is narrower. This keeps
+the same extension rule without repeating LHS width evaluation.
+
+Nine paired runs against the pre-change scheduler/executor measured
+120.1 → 116.0 ms (1.04x) for the mixed DUT and 64.9 → 61.6 ms (1.05x) for
+64 active processes over 100 cycles. Old/new signal and memory snapshots
+matched at every time step in four signed-assignment, function, and memory
+cases (80 snapshots each). The assignment, width, function, and cross-engine
+suite passed 221 tests. `Value` construction and resize behavior were left
+unchanged.
+
+Next: profile active continuous propagation and expression dispatch for the
+next reference-engine bottleneck.

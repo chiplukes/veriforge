@@ -382,6 +382,10 @@ values and task ports can change an identifier's width. Run
 `uv run python benchmarks/reference_metadata.py` to compare cached and
 uncached reference evaluation on the mixed DUT and active processes.
 
+Assignments pass their target width into expression evaluation and reuse that
+width for the final signed-extension check. The check runs only when the RHS
+remains narrower, avoiding a second LHS-width calculation on the common path.
+
 ### Performance Bottlenecks
 
 The fundamental performance ceiling of the tree-walking approach:

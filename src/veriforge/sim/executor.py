@@ -203,7 +203,10 @@ class StatementExecutor:  # cm:c2f9a1
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
-            rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
+            # eval already received the target width; only a narrower signed
+            # result needs a second extension before the assignment.
+            if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self._write_target(stmt.lhs, rhs_val, ctx, immediate=True)
             return
 
@@ -215,7 +218,8 @@ class StatementExecutor:  # cm:c2f9a1
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
-            rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
+            if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self._write_target(stmt.lhs, rhs_val, ctx, immediate=False)
             return
 
@@ -428,7 +432,8 @@ class StatementExecutor:  # cm:c2f9a1
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
-            rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
+            if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self._write_target(stmt.lhs, rhs_val, ctx, immediate=True)
             return
 
@@ -440,7 +445,8 @@ class StatementExecutor:  # cm:c2f9a1
                 return
             lhs_w = self._lhs_width(stmt.lhs, ctx)
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
-            rhs_val = self._maybe_sign_extend(stmt.rhs, rhs_val, stmt.lhs, ctx)
+            if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self._write_target(stmt.lhs, rhs_val, ctx, immediate=False)
             return
 
@@ -1086,14 +1092,6 @@ class StatementExecutor:  # cm:c2f9a1
                 for sig_name, sig_val in pending.items():
                     self.nba_queue.append(NbaEntry(sig_name, sig_val))
             return
-
-    def _maybe_sign_extend(self, rhs_expr, rhs_val: Value, lhs_expr, ctx: EvalContext) -> Value:
-        """Sign-extend RHS value if the source expression is signed and LHS is wider."""
-        if _expr_signed(rhs_expr, ctx):
-            lhs_w = self._lhs_width(lhs_expr, ctx)
-            if lhs_w > rhs_val.width:
-                return rhs_val.sign_extend(lhs_w)
-        return rhs_val
 
     def _lhs_width(self, expr: Expression, ctx: EvalContext) -> int:
         """Estimate the width of an LHS target expression."""

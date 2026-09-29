@@ -41,7 +41,7 @@ from veriforge.model.statements import SensitivityEdge
 from ..semantics import const_int as _const_int
 from ..semantics import range_width as _range_width
 from ..semantics import var_width as _var_width
-from .evaluator import EvalContext, ExpressionEvaluator
+from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed
 from .executor import StatementExecutor, StopExecution, SuspendExecution
 from .value import Value
 
@@ -843,7 +843,9 @@ class Scheduler:  # cm:9a7f2c
         if ptype is ContinuousProcess:
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
-            rhs_val = self.executor._maybe_sign_extend(proc.assign.rhs, rhs_val, proc.assign.lhs, self.ctx)
+            # Use the width already computed for evaluation.
+            if rhs_val.width < lhs_w and _expr_signed(proc.assign.rhs, self.ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self.executor._write_target(proc.assign.lhs, rhs_val, self.ctx, immediate=True)
             return
 
@@ -899,7 +901,8 @@ class Scheduler:  # cm:9a7f2c
                 continue
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
-            rhs_val = self.executor._maybe_sign_extend(proc.assign.rhs, rhs_val, proc.assign.lhs, self.ctx)
+            if rhs_val.width < lhs_w and _expr_signed(proc.assign.rhs, self.ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self.executor._write_target(proc.assign.lhs, rhs_val, self.ctx, immediate=True)
             new = self._read_lhs(proc.assign.lhs)
             if old is not None and new is not None:
@@ -1002,7 +1005,8 @@ class Scheduler:  # cm:9a7f2c
                 continue
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
-            rhs_val = self.executor._maybe_sign_extend(proc.assign.rhs, rhs_val, proc.assign.lhs, self.ctx)
+            if rhs_val.width < lhs_w and _expr_signed(proc.assign.rhs, self.ctx):
+                rhs_val = rhs_val.sign_extend(lhs_w)
             self.executor._write_target(proc.assign.lhs, rhs_val, self.ctx, immediate=True)
             new = self._read_lhs(proc.assign.lhs)
             if old is not None and new is not None:
