@@ -214,6 +214,7 @@ class Scheduler:  # cm:9a7f2c
         "_prev_signals",
         "_seq_procs",
         "_settle_snapshot",
+        "_sig_to_continuous",
         "_sig_to_procs",
         "_timing_procs",
         "_triggered_seq_procs",
@@ -245,6 +246,7 @@ class Scheduler:  # cm:9a7f2c
 
         # Signal → set of processes sensitive to it
         self._sig_to_procs: dict[str, list[Process]] = {}
+        self._sig_to_continuous: dict[str, list[int]] = {}
 
         # Edge detection state (per time step)
         self._prev_signals: dict[str, Value] = {}
@@ -435,8 +437,11 @@ class Scheduler:  # cm:9a7f2c
         for assign in module.continuous_assigns:
             sens = _collect_reads(assign.rhs)
             proc = ContinuousProcess(assign, sens)
+            position = len(self._continuous_procs)
             self._continuous_procs.append(proc)
             self._register_sensitivity(proc, sens)
+            for name in sens:
+                self._sig_to_continuous.setdefault(name, []).append(position)
 
         # Create always block processes
         for block in module.always_blocks:
@@ -894,8 +899,42 @@ class Scheduler:  # cm:9a7f2c
         win because most assigns are unaffected by any given state change.
         """
         changed = False
-        for proc in self._continuous_procs:
-            # proc.sensitivity is the set of signal names read by the RHS.
+        candidates: set[int] = set()
+        dense = False
+        threshold = max(1, (len(self._continuous_procs) + 3) // 4)
+        for name in dirty:
+            affected = self._sig_to_continuous.get(name, ())
+            if len(affected) >= threshold:
+                dense = True
+                break
+            candidates.update(affected)
+            if len(candidates) >= threshold:
+                dense = True
+                break
+        pending = [] if dense else list(candidates)
+        if pending:
+            heapq.heapify(pending)
+
+        def indexed_positions():
+            while pending:
+                yield heapq.heappop(pending)
+
+        def mark_outputs(lhs: Expression, current_position: int) -> None:
+            # A newly changed output can activate a later assignment during
+            # this same declaration-order pass. Earlier assignments still
+            # wait for the caller's next convergence pass, as before.
+            for name in _lhs_base_names(lhs):
+                if name in dirty:
+                    continue
+                dirty.add(name)
+                for position in self._sig_to_continuous.get(name, ()):
+                    if position > current_position and position not in candidates:
+                        candidates.add(position)
+                        heapq.heappush(pending, position)
+
+        positions = range(len(self._continuous_procs)) if dense else indexed_positions()
+        for current_position in positions:
+            proc = self._continuous_procs[current_position]
             if not proc.sensitivity.intersection(dirty):
                 continue
             old = self._read_lhs(proc.assign.lhs)
@@ -923,7 +962,10 @@ class Scheduler:  # cm:9a7f2c
                 new = self._read_lhs(proc.assign.lhs)
                 if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
                     changed = True
-                    dirty.update(_lhs_base_names(proc.assign.lhs))
+                    if dense:
+                        dirty.update(_lhs_base_names(proc.assign.lhs))
+                    else:
+                        mark_outputs(proc.assign.lhs, current_position)
                 continue
             # `arr = '{a, b, ...};` (unkeyed positional assignment pattern)
             # whole-memory LHS -- same reasoning as `_copy_whole_memory`
@@ -936,7 +978,10 @@ class Scheduler:  # cm:9a7f2c
                 new = self._read_lhs(proc.assign.lhs)
                 if old is not None and new is not None and (old.val != new.val or old.mask != new.mask):
                     changed = True
-                    dirty.update(_lhs_base_names(proc.assign.lhs))
+                    if dense:
+                        dirty.update(_lhs_base_names(proc.assign.lhs))
+                    else:
+                        mark_outputs(proc.assign.lhs, current_position)
                 continue
             lhs_w = self.executor._lhs_width(proc.assign.lhs, self.ctx)
             rhs_val = self.evaluator.eval(proc.assign.rhs, self.ctx, width=lhs_w)
@@ -947,7 +992,10 @@ class Scheduler:  # cm:9a7f2c
                 if old.val != new.val or old.mask != new.mask:
                     changed = True
                     # Track the output as dirty too so downstream CAs are re-evaluated
-                    dirty.update(_lhs_base_names(proc.assign.lhs))
+                    if dense:
+                        dirty.update(_lhs_base_names(proc.assign.lhs))
+                    else:
+                        mark_outputs(proc.assign.lhs, current_position)
         return changed
 
     def _read_lhs(self, lhs: Expression) -> Value | None:

@@ -293,10 +293,16 @@ checked against `_prev_signals` (snapshotted at the start of each time step):
 
 ### Dirty Continuous Assigns
 
-`_run_dirty_continuous_assigns(dirty)` skips assigns whose sensitivity set
-is disjoint from the dirty set. When an assign changes its output, the output
-signal name is added to `dirty` so downstream assigns are re-evaluated in the
-same pass — handling multi-stage combinational chains.
+`_run_dirty_continuous_assigns(dirty)` uses an index from signal names to
+continuous assignments, built at elaboration, to select affected assignments
+without scanning unrelated ones. Candidates execute in declaration order.
+When an assignment changes its output, later dependent assignments can enter
+the same pass; earlier ones wait for the next convergence pass. If at least a
+quarter of assignments are eligible, the scheduler scans all assignments in
+declaration order instead. The full bootstrap pass still handles constant
+assignments with no sensitivity set. Run
+`uv run python benchmarks/reference_propagation.py --assigns 256 --cycles 200`
+to compare sparse and dense reference activity with VM final state.
 
 ---
 

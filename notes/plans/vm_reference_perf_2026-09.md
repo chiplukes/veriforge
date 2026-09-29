@@ -85,7 +85,8 @@ callbacks/events.
 
 - Use `_sig_to_procs` to select affected processes with stable ordering and correct
   edge detection; retain the old behavior as a differential baseline during work.
-- Queue affected continuous assignments instead of repeatedly scanning all of them.
+- [x] Queue affected continuous assignments instead of repeatedly scanning all
+  of them; retain a declaration-order scan when candidates are dense.
 - Cache provably static expression metadata per elaborated context; account for
   function scopes and context-dependent widths.
 - Investigate redundant `Value` resizing/allocation after scheduler improvements.
@@ -305,5 +306,31 @@ batch, and wide-value regression tests passed. Targeted tests compare
 wide-to-narrow blocking/NBA stores, unknown masks, signed extension, and wide
 destinations against the Python VM and reference engine.
 
-Next: use these profiles to evaluate narrower execution-path changes and
-precomputed widths/masks. Reference work remains in Phase 4.
+Further VM instruction work should use these profiles to justify narrower
+execution paths or precomputed widths/masks.
+
+### Reference continuous-assignment index
+
+The pure-Python reference scheduler now builds a signal-to-continuous-assignment
+index at elaboration. A dirty signal schedules only assignments that read it.
+When an assignment changes an output, later assignments sensitive to that
+output enter the same declaration-order pass; earlier assignments wait for the
+next convergence pass, preserving the previous scheduler's behavior and delta
+limits. If at least one quarter of assignments are initially eligible, it uses
+the previous full scan to avoid heap overhead on dense activity.
+
+The reproducible benchmark is
+`uv run python benchmarks/reference_propagation.py --assigns 256 --cycles 200 --repeat 5`.
+Five paired old/new scheduler runs on the same 200-cycle, 256-assignment
+workloads measured 16.86 → 7.84 ms for sparse activity (2.15x) and
+411.15 → 415.85 ms for active activity (within about 1% of baseline).
+These timings exclude parsing and simulator construction. The durable benchmark
+compares every final signal value, mask, and width with vm-fast.
+
+A differential run loaded the pre-change reference scheduler from Git and
+compared complete time-step signal and memory snapshots for eight shuffled
+dependency graphs, a memory case, and a concat-LHS case; all 10 traces matched.
+The broader reference scheduling and cross-engine suite passed 227 tests.
+
+Next: index affected combinational and sequential processes using
+`_sig_to_procs`, then profile expression evaluation and metadata caching.
