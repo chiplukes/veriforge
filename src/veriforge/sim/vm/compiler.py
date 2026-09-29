@@ -2807,7 +2807,11 @@ class Compiler:  # cm:8c1e4a
             if sid is not None:
                 # Direct signal store
                 target_width = self.sig_width[sid]
-                program.append(instr(Op.RESIZE, target_width))
+                # Narrow signal stores already mask values and unknown bits to
+                # their destination width. Keep RESIZE for wide destinations,
+                # whose native store copies the prepared word array directly.
+                if target_width > 64:
+                    program.append(instr(Op.RESIZE, target_width))
                 if immediate:
                     program.append(instr(Op.STORE_SIG, sid))
                 else:
@@ -2865,7 +2869,8 @@ class Compiler:  # cm:8c1e4a
                 return
             sid = self._get_signal_id(name)
             target_width = self.sig_width[sid]
-            program.append(instr(Op.RESIZE, target_width))
+            if target_width > 64:
+                program.append(instr(Op.RESIZE, target_width))
             if immediate:
                 program.append(instr(Op.STORE_SIG, sid))
             else:

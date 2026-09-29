@@ -133,6 +133,13 @@ old-value detection across stimulus, rising edges, derived edges, and falling
 edges. Run `uv run python benchmarks/vm_edge_snapshots.py --cycles 20000 --repeat 5`
 to compare designs with many inactive signals against the event-driven VM.
 
+For direct signal stores up to 64 bits, the compiler omits the preceding
+`RESIZE`: `STORE_SIG` and `NBA_SIG` already apply the destination mask. Native
+stores take the low word if the source expression is wide. Wide destinations
+still use `RESIZE` to prepare the full word array. Run
+`uv run python benchmarks/vm_opcode_profile.py --cycles 100` to inspect the
+compiled and Python VM executed opcode mixes before changing dispatch.
+
 ---
 
 ## Architecture

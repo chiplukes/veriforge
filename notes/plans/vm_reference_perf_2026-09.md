@@ -72,7 +72,10 @@ callbacks/events.
 
 ## Phase 3 — VM instruction execution
 
-- Measure opcode distribution and native execution cost.
+- [x] Measure compiled and executed opcode distributions and native batch cost
+  on representative arithmetic, propagation, memory, and benchmark workloads.
+- [x] Remove redundant `RESIZE` before narrow direct signal stores; make native
+  stores consume the low word when the producer is wide.
 - Evaluate fused common instructions, precomputed masks/widths, and a narrow-only
   execution path. Preserve unknown masks, signedness, and wide fallbacks.
 - Consider a register-based instruction format only if simpler changes leave
@@ -280,5 +283,27 @@ fallback. A broader VM/memory run passed 504 tests; after the write-only
 signal-sync correction, a final VM and timing-memory rerun passed 352 tests.
 Ruff, formatting, whitespace, and repository file checks passed.
 
-Next: profile bytecode execution before changing instruction dispatch. Reference
-work remains in Phase 4.
+### Direct-store instruction reduction
+
+`benchmarks/vm_opcode_profile.py` reports compiled opcodes and dynamically
+executed Python VM opcodes. The trace is a guide to the instruction mix; native
+batch scheduling can execute processes a different number of times. In the
+100-cycle profiles, direct-store `RESIZE` was frequent, while both `STORE_SIG`
+and `NBA_SIG` already apply the narrow destination mask. The compiler now omits
+that resize for destinations up to 64 bits. The native store reads the low word
+of a wide producer before masking; wide destinations retain their explicit
+resize, which prepares the full word array.
+
+The benchmark DUT's compiled program shrank from 411 to 364 instructions;
+the 64-stage reconvergent chain shrank from 397 to 331. On this host, the
+standard 100,000-cycle VM batch benchmark changed from 1,073,764 to 1,124,899
+cycles/s (five repeats, parsing and construction excluded). A 2,000-cycle,
+64-assignment active workload changed from 356,185 to 399,423 batch cycles/s;
+the shorter runs are more sensitive to timing noise. All benchmark final-state
+comparisons passed. The native extension rebuilt, and 452 VM, cross-engine,
+batch, and wide-value regression tests passed. Targeted tests compare
+wide-to-narrow blocking/NBA stores, unknown masks, signed extension, and wide
+destinations against the Python VM and reference engine.
+
+Next: use these profiles to evaluate narrower execution-path changes and
+precomputed widths/masks. Reference work remains in Phase 4.

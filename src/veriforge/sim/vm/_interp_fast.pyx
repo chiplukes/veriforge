@@ -853,6 +853,11 @@ cdef int _execute_core(
                         dirty_idx += 1
             else:
                 a = stack[sp]
+                if wflag[sp]:
+                    # A wide expression assigned to a narrow signal keeps
+                    # only its low word; STORE_SIG applies the target mask.
+                    a.val = <long long>wv[sp * WIDE_WORDS]
+                    a.mask = <long long>wm[sp * WIDE_WORDS]
                 w = sig_width[arg1]
                 wmask = mask_for_width(w)
                 new_val = a.val & wmask & ~a.mask
@@ -887,6 +892,9 @@ cdef int _execute_core(
                 # If overflow, silently drop (same policy as narrow NBA overflow avoidance)
             else:
                 a = stack[sp]
+                if wflag[sp]:
+                    a.val = <long long>wv[sp * WIDE_WORDS]
+                    a.mask = <long long>wm[sp * WIDE_WORDS]
                 w = sig_width[arg1]
                 wmask = mask_for_width(w)
                 if nba_idx < nba_max:
