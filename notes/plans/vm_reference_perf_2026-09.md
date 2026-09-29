@@ -386,5 +386,31 @@ cases (80 snapshots each). The assignment, width, function, and cross-engine
 suite passed 221 tests. `Value` construction and resize behavior were left
 unchanged.
 
-Next: profile active continuous propagation and expression dispatch for the
-next reference-engine bottleneck.
+### Main benchmark harness refresh
+
+`benchmarks/benchmark.py` now measures `vm-fast` through `Simulator.run()`,
+`run_step()`, and native `batch_run()` as separate rows. Step and batch run two
+reset cycles outside the timed section, then execute the requested number of
+full cycles. The harness checks their final signal and memory state for equality.
+The refreshed 50,000-cycle report is in `notes/benchmarks.md`: VM-fast step
+reached 163.2K cycles/s and batch reached 1.12M cycles/s (about 6.9x faster
+than step) on this host. The event-loop row includes a different setup boundary,
+which the report states explicitly. Native-disabled runs skip both new modes.
+
+### Reference active continuous propagation
+
+cProfile on the 256-assignment active workload found about 103,000 continuous
+assignment evaluations over 200 cycles. Expression evaluation dominates, but
+the scheduler also repeatedly resolves plain output names to read their old
+value and width. `_run_dirty_continuous_assigns` now reads those directly from
+signal storage for simple, present, non-memory Identifier targets. It still
+uses the executor for writes and retains the existing path for memories,
+hierarchical names, bit/range selects, and concatenations.
+
+Seven-run medians from `uv run python benchmarks/reference_propagation.py`
+(`--assigns 256 --cycles 200 --repeat 7`) changed from 0.3714 to 0.3066 s in the active case
+(about 1.21x), while the sparse case remained about 0.008 s. Final state
+matched vm-fast. The scheduler, reference-propagation, and VM/reference
+comparison suite passed 72 tests. These measurements are workload-specific.
+
+Next: profile expression dispatch for the next reference-engine bottleneck.

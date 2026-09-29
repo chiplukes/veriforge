@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Simulation benchmark — all engines and external simulators.
 
-Benchmarks Reference, VM (Python), VM (Cython), Compiled (step), and
-Compiled (batch) engines against Icarus Verilog and Verilator (if found).
+Benchmarks Reference, VM (Python), VM-fast event/step/batch modes, Compiled
+(step/batch), Icarus Verilog, and Verilator (if found).
 
 Usage:
     uv run python benchmarks/benchmark.py                  # 50K cycles, console output
@@ -29,10 +29,10 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from veriforge.sim.testbench import Clock, Simulator
-from veriforge.sim.value import Value
-from veriforge.transforms import tree_to_design
-from veriforge.verilog_parser import verilog_parser
+from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
+from veriforge.sim.value import Value  # noqa: E402
+from veriforge.transforms import tree_to_design  # noqa: E402
+from veriforge.verilog_parser import verilog_parser  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DUT
@@ -492,7 +492,7 @@ def run_vm_python(cycles: int, max_time: int) -> dict:
 
 
 def run_vm_cython(cycles: int, max_time: int) -> dict:
-    """VM engine with Cython C delta loop."""
+    """VM-fast event-loop run with Cython delta execution."""
     if not _has_vm_cython():
         return {"error": "Cython VM extension not built (run: uv run python setup_cython.py build_ext --inplace)"}
 
@@ -511,6 +511,93 @@ def run_vm_cython(cycles: int, max_time: int) -> dict:
     sim.run(test, max_time=max_time)
     elapsed = time.perf_counter() - t0
     return {"time": elapsed, "throughput": cycles / elapsed if elapsed > 0 else 0}
+
+
+def _vm_fast_state(sim: Simulator) -> tuple:
+    """Capture scalar and memory state to validate step/batch equivalence."""
+    sched = sim._sched
+    names = set(sched.signal_names())
+    for name, mid in sched.compiler.mem_map.items():
+        _, depth, _ = sched.compiler.mem_info[mid]
+        names.update(f"{name}[{index}]" for index in range(depth))
+    return tuple((name, value.val, value.mask, value.width) for name in sorted(names) for value in [sim.read(name)])
+
+
+def run_vm_cython_step(cycles: int) -> dict:
+    """Execute full VM-fast clock cycles through ``Simulator.run_step()``."""
+    if not _has_vm_cython():
+        return {"error": "Cython VM extension not built (run: uv run python setup_cython.py build_ext --inplace)"}
+
+    sim = Simulator(_parse_design().modules[0], engine="vm-fast")
+    sched = sim._sched
+    if sched._cy_ctx is None:
+        return {"error": "Native VM context unavailable for this design"}
+
+    # Bootstrap and two reset cycles are outside the timed region, matching
+    # the batch runner. run_step() consumes one scheduled time step at a time.
+    sim.run(max_time=0)
+    sim.drive("rst", 1)
+    sim.drive("clk", 0)
+    sim.settle()
+    high, low = Value(1, width=1), Value(0, width=1)
+    for cycle in range(2):
+        base = cycle * 10
+        sched.schedule_at(base, ("clock_toggle", "clk", high))
+        sched.schedule_at(base + 5, ("clock_toggle", "clk", low))
+    for _ in range(4):
+        if not sim.run_step():
+            raise RuntimeError("VM step runner stopped during reset setup")
+    sim.drive("rst", 0)
+    sim.settle()
+
+    t0 = time.perf_counter()
+    for cycle in range(cycles):
+        base = (cycle + 2) * 10
+        sched.schedule_at(base, ("clock_toggle", "clk", high))
+        sched.schedule_at(base + 5, ("clock_toggle", "clk", low))
+    for _ in range(cycles * 2):
+        if not sim.run_step():
+            raise RuntimeError("VM step runner stopped before completing benchmark cycles")
+    elapsed = time.perf_counter() - t0
+    state = _vm_fast_state(sim)
+    if next(value for name, value, _mask, _width in state if name == "cycle_count") != (cycles & 0xFFFF):
+        raise RuntimeError("VM step runner did not execute the requested number of cycles")
+    return {
+        "time": elapsed,
+        "throughput": cycles / elapsed if elapsed > 0 else 0,
+        "state": state,
+    }
+
+
+def run_vm_cython_batch(cycles: int) -> dict:
+    """Execute full VM-fast clock cycles in the native batch loop."""
+    if not _has_vm_cython():
+        return {"error": "Cython VM extension not built (run: uv run python setup_cython.py build_ext --inplace)"}
+
+    sim = Simulator(_parse_design().modules[0], engine="vm-fast")
+    sched = sim._sched
+    if sched._cy_ctx is None or not hasattr(sched._cy_ctx, "batch_run"):
+        return {"error": "Native VM batch runner unavailable (rebuild the Cython extension)"}
+
+    # Match the step runner's two reset cycles, then measure only work cycles.
+    if sim.batch_run(2, "clk", events=[(0, "rst", 1)]) != 2:
+        raise RuntimeError("VM batch runner stopped during reset setup")
+    sim.drive("rst", 0)
+    sim.settle()
+
+    t0 = time.perf_counter()
+    completed = sim.batch_run(cycles, "clk", clock_period=10)
+    elapsed = time.perf_counter() - t0
+    if completed != cycles:
+        raise RuntimeError(f"VM batch runner completed {completed} of {cycles} benchmark cycles")
+    state = _vm_fast_state(sim)
+    if next(value for name, value, _mask, _width in state if name == "cycle_count") != (cycles & 0xFFFF):
+        raise RuntimeError("VM batch runner did not execute the requested number of cycles")
+    return {
+        "time": elapsed,
+        "throughput": cycles / elapsed if elapsed > 0 else 0,
+        "state": state,
+    }
 
 
 def run_compiled_step(cycles: int, max_time: int) -> dict:
@@ -703,9 +790,11 @@ def profile_reference(_cycles: int, max_time: int, sim_time: int, top_n: int = 3
 
 _ENGINE_ORDER = [
     "Compiled (batch)",
+    "VM-fast (batch)",
     "Verilator",
     "Compiled (step)",
     "VM (Cython)",
+    "VM-fast (step)",
     "Icarus Verilog",
     "VM (Python)",
     "Reference",
@@ -787,11 +876,17 @@ def generate_markdown(
         "|--------|-------------|",
         "| Reference | Pure-Python tree-walking interpreter — baseline for correctness |",
         "| VM (Python) | Stack-based bytecode interpreter, pure Python dispatch |",
-        "| VM (Cython) | Same bytecode, C delta loop via Cython extension (`_interp_fast.pyx`) |",
+        "| VM (Cython) | VM-fast through `Simulator.run()` with the Cython delta loop |",
+        "| VM-fast (step) | Cython VM through repeated `Simulator.run_step()` calls |",
+        "| VM-fast (batch) | Cython VM native multi-cycle `Simulator.batch_run()` |",
         "| Compiled (step) | Design-specific Cython `.pyx`, event-driven step mode |",
         "| Compiled (batch) | Same compiled code, `nogil` C loop — no Python per cycle |",
         "| Icarus Verilog | Industry-standard interpreted simulator (external process) |",
         "| Verilator | Compiled C++ simulator (external process) |",
+        "",
+        "VM-fast step and batch each execute two reset cycles before timing, then exactly the requested",
+        "number of full clock cycles. The existing VM (Cython) `run()` row includes event scheduling",
+        "and reset setup in its timed region, so it measures a different API boundary.",
         "",
     ]
 
@@ -933,6 +1028,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         ("Reference", lambda: run_reference(cycles, max_time, sim_time)),
         ("VM (Python)", lambda: run_vm_python(cycles, max_time)),
         ("VM (Cython)", lambda: run_vm_cython(cycles, max_time)),
+        ("VM-fast (step)", lambda: run_vm_cython_step(cycles)),
+        ("VM-fast (batch)", lambda: run_vm_cython_batch(cycles)),
         ("Compiled (step)", lambda: run_compiled_step(cycles, max_time)),
         ("Compiled (batch)", lambda: run_compiled_batch(cycles)),
         ("Icarus Verilog", lambda: run_icarus(cycles, sim_time)),
@@ -942,6 +1039,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         ("Reference", lambda: run_reference(200, 2200, 2020)),
         ("VM (Python)", lambda: run_vm_python(200, 2200)),
         ("VM (Cython)", lambda: run_vm_cython(200, 2200)),
+        ("VM-fast (step)", lambda: run_vm_cython_step(200)),
+        ("VM-fast (batch)", lambda: run_vm_cython_batch(200)),
         ("Compiled (step)", lambda: run_compiled_step(200, 2200)),
         ("Compiled (batch)", lambda: run_compiled_batch(200)),
     ]
@@ -974,6 +1073,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         print(f"  throughput: {_fmt_tp(tp)}")
         results[name] = result
 
+    vm_step_state = results.get("VM-fast (step)", {}).get("state")
+    vm_batch_state = results.get("VM-fast (batch)", {}).get("state")
+    if vm_step_state is not None and vm_batch_state is not None:
+        if vm_step_state != vm_batch_state:
+            raise RuntimeError("VM-fast step and batch finished with different signal or memory state")
+        print("\nVM-fast step/batch final signal and memory state: match")
+
     # ── Summary comparison ────────────────────────────────────────────────
     def _tp(name: str) -> float:
         return results.get(name, {}).get("throughput", 0.0)
@@ -981,6 +1087,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     ref_tp = _tp("Reference")
     vm_py_tp = _tp("VM (Python)")
     vm_cy_tp = _tp("VM (Cython)")
+    vm_step_tp = _tp("VM-fast (step)")
+    vm_batch_tp = _tp("VM-fast (batch)")
     compiled_tp = _tp("Compiled (batch)")
     icarus_tp = _tp("Icarus Verilog")
 
@@ -992,6 +1100,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         print(f"  VM (Cython) vs Reference:   {vm_cy_tp / ref_tp:.1f}x")
     if vm_py_tp > 0 and vm_cy_tp > 0:
         print(f"  VM (Cython) vs VM (Python): {vm_cy_tp / vm_py_tp:.1f}x")
+    if vm_step_tp > 0 and vm_batch_tp > 0:
+        print(f"  VM-fast batch vs step:      {vm_batch_tp / vm_step_tp:.1f}x")
     if ref_tp > 0 and compiled_tp > 0:
         print(f"  Compiled (batch) vs Reference: {compiled_tp / ref_tp:.0f}x")
     if icarus_tp > 0 and vm_cy_tp > 0:

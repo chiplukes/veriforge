@@ -957,6 +957,27 @@ class Scheduler:  # cm:9a7f2c
             proc = self._continuous_procs[current_position]
             if not proc.sensitivity.intersection(dirty):
                 continue
+            lhs = proc.assign.lhs
+            if type(lhs) is Identifier and not lhs.hierarchy and lhs.name not in self.ctx._memory_names:
+                old_signal = self.ctx._signals.get(lhs.name)
+                if old_signal is not None:
+                    # Ordinary scalar/wire targets already have their width
+                    # and old value in signal storage. Keep _write_target so
+                    # region bookkeeping and value resizing stay identical.
+                    lhs_w = old_signal.width
+                    rhs = proc.assign.rhs
+                    rhs_val = self.evaluator.eval(rhs, self.ctx, width=lhs_w)
+                    if rhs_val.width < lhs_w and _expr_signed(rhs, self.ctx):
+                        rhs_val = rhs_val.sign_extend(lhs_w)
+                    self.executor._write_target(lhs, rhs_val, self.ctx, immediate=True)
+                    new_signal = self.ctx._signals[lhs.name]
+                    if old_signal.val != new_signal.val or old_signal.mask != new_signal.mask:
+                        changed = True
+                        if dense:
+                            dirty.add(lhs.name)
+                        else:
+                            mark_outputs(lhs, current_position)
+                    continue
             old = self._read_lhs(proc.assign.lhs)
             # A bare memory-to-memory Identifier continuous assign (e.g. a
             # whole-array port connection, `assign u.imd_val_q_i =
