@@ -83,7 +83,7 @@ callbacks/events.
 
 ## Phase 4 — reference engine
 
-- Use `_sig_to_procs` to select affected processes with stable ordering and correct
+- [x] Use `_sig_to_procs` to select affected processes with stable ordering and correct
   edge detection; retain the old behavior as a differential baseline during work.
 - [x] Queue affected continuous assignments instead of repeatedly scanning all
   of them; retain a declaration-order scan when candidates are dense.
@@ -332,5 +332,22 @@ compared complete time-step signal and memory snapshots for eight shuffled
 dependency graphs, a memory case, and a concat-LHS case; all 10 traces matched.
 The broader reference scheduling and cross-engine suite passed 227 tests.
 
-Next: index affected combinational and sequential processes using
-`_sig_to_procs`, then profile expression evaluation and metadata caching.
+### Reference process index
+
+The reference scheduler now selects combinational and sequential always blocks
+through its existing signal-to-process index. It restores declaration order
+before executing selected blocks, retains the once-per-time-step sequential
+guard, and remembers edge-signal changes across delta cycles. A declaration-
+order scan remains for dense activity. The sparse process benchmark with 256
+dormant combinational and sequential blocks and one active counter measured
+63.8 → 9.3 ms over 200 cycles (6.9x) in three-run medians. A 64-block,
+100-cycle active workload measured 68.8 → 71.0 ms (about 3% slower), within
+the cost of sparse candidate selection. The durable benchmark is
+`uv run python benchmarks/reference_processes.py`.
+
+Pre-change and indexed schedulers produced identical complete time-step
+signal and memory snapshots for derived-clock, async-reset, combinational-
+chain, and memory-update cases (40 snapshots each). The focused scheduler
+and cross-engine suite passed 203 tests.
+
+Next: profile expression evaluation and metadata caching.

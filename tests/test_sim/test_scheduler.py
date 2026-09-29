@@ -468,3 +468,45 @@ class TestEdgeSensitivity:
         proc = sched._always_procs[0]
         assert "clk" in proc.sensitivity
         assert proc.edge_signals.get("clk") == "posedge"
+
+    def test_indexed_trigger_order_and_once_per_step(self):
+        """Sparse changes retain declaration order and edge firing rules."""
+        names = ("a", "b", "c")
+        module = Module(
+            "indexed_triggers",
+            variables=[
+                Variable(name, VariableKind.REG)
+                for name in (*names, *(f"combo_{name}" for name in names), *(f"seq_{name}" for name in names))
+            ],
+        )
+        for name in names:
+            module.always_blocks.append(
+                AlwaysBlock(
+                    BlockingAssign(Identifier(f"combo_{name}"), Identifier(name)),
+                    sensitivity_type=SensitivityType.COMBINATIONAL,
+                )
+            )
+            module.always_blocks.append(
+                AlwaysBlock(
+                    NonblockingAssign(Identifier(f"seq_{name}"), Identifier(name)),
+                    sensitivity_list=[SensitivityEdge("posedge", Identifier(name))],
+                    sensitivity_type=SensitivityType.SEQUENTIAL,
+                )
+            )
+
+        sched = Scheduler()
+        sched.elaborate(module)
+        for name in names:
+            sched.ctx.write_signal(name, Value(0, width=1))
+        sched._prev_signals = sched._snapshot_signals()
+        for name in ("c", "a"):
+            sched.ctx.write_signal(name, Value(1, width=1))
+
+        triggered = sched._collect_triggered({"c", "a"})
+        assert triggered == [
+            sched._combo_procs[0],
+            sched._combo_procs[2],
+            sched._seq_procs[0],
+            sched._seq_procs[2],
+        ]
+        assert sched._collect_triggered({"b"}) == [sched._combo_procs[1]]

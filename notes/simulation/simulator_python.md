@@ -291,6 +291,14 @@ checked against `_prev_signals` (snapshotted at the start of each time step):
 - **posedge**: transition to 1 from 0, x, or z
 - **negedge**: transition to 0 from 1, x, or z
 
+`_collect_triggered(dirty)` uses `_sig_to_procs` to select always blocks whose
+inputs changed, then restores declaration order. It retains edge-signal names
+across delta cycles so a sequential block can still be checked against the
+time-step snapshot after later changes. When indexed bucket sizes suggest
+dense activity, it scans that category in declaration order. Run
+`uv run python benchmarks/reference_processes.py --processes 256 --cycles 200`
+to compare sparse and active process activity with VM final state.
+
 ### Dirty Continuous Assigns
 
 `_run_dirty_continuous_assigns(dirty)` uses an index from signal names to

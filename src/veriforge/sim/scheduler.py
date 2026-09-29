@@ -204,14 +204,18 @@ class Scheduler:  # cm:9a7f2c
     __slots__ = (
         "_always_procs",
         "_combo_bootstrapped",
+        "_combo_proc_set",
         "_combo_procs",
         "_continuous_procs",
+        "_edge_changed",
         "_event_waiting",
         "_initial_procs",
         "_last_run_signals",
         "_on_time_step",
         "_pending_drives",
         "_prev_signals",
+        "_seq_edge_names",
+        "_seq_proc_set",
         "_seq_procs",
         "_settle_snapshot",
         "_sig_to_continuous",
@@ -240,7 +244,10 @@ class Scheduler:  # cm:9a7f2c
         self._continuous_procs: list[ContinuousProcess] = []
         self._always_procs: list[AlwaysProcess] = []
         self._combo_procs: list[AlwaysProcess] = []  # combinational subset
+        self._combo_proc_set: set[AlwaysProcess] = set()
         self._seq_procs: list[AlwaysProcess] = []  # sequential subset
+        self._seq_proc_set: set[AlwaysProcess] = set()
+        self._seq_edge_names: set[str] = set()
         self._timing_procs: list[AlwaysProcess] = []  # always blocks with #delay/@event
         self._initial_procs: list[InitialProcess] = []
 
@@ -250,6 +257,7 @@ class Scheduler:  # cm:9a7f2c
 
         # Edge detection state (per time step)
         self._prev_signals: dict[str, Value] = {}
+        self._edge_changed: set[str] = set()
         self._triggered_seq_procs: set[int] = set()
 
         # Processes waiting for event controls (@(posedge clk), etc.)
@@ -454,8 +462,11 @@ class Scheduler:  # cm:9a7f2c
                 self._timing_procs.append(proc)
             elif block.sensitivity_type == SensitivityType.COMBINATIONAL:
                 self._combo_procs.append(proc)
+                self._combo_proc_set.add(proc)
             else:
                 self._seq_procs.append(proc)
+                self._seq_proc_set.add(proc)
+                self._seq_edge_names.update(edges)
             self._register_sensitivity(proc, sens)
 
         # Create initial block processes
@@ -625,6 +636,7 @@ class Scheduler:  # cm:9a7f2c
 
         # Use pre-drive snapshot as "previous" for edge detection
         self._prev_signals = old_signals
+        self._edge_changed.clear()
         self._triggered_seq_procs = set()
 
         # Collect triggered processes (combo + sequential with edge detection)
@@ -686,6 +698,7 @@ class Scheduler:  # cm:9a7f2c
 
         # Snapshot signals at start of time step for edge detection
         self._prev_signals = self._snapshot_signals()
+        self._edge_changed.clear()
         self._triggered_seq_procs = set()
 
         # Pop and execute all processes at this time
@@ -1106,13 +1119,33 @@ class Scheduler:  # cm:9a7f2c
           Each sequential process fires at most once per time step.
         """
         triggered: list[Process] = []
-        # Only include combo procs whose sensitivity overlaps dirty signals
-        for proc in self._combo_procs:
+        # Bucket lengths give a cheap upper bound on candidate count. For
+        # dense activity, skip set construction and use the original scan.
+        if 4 * sum(len(self._sig_to_procs.get(name, ())) for name in dirty) >= len(self._combo_procs):
+            combo_procs = self._combo_procs
+        else:
+            combo_candidates: set[AlwaysProcess] = set()
+            for name in dirty:
+                combo_candidates.update(
+                    proc for proc in self._sig_to_procs.get(name, ()) if proc in self._combo_proc_set
+                )
+            combo_procs = sorted(combo_candidates, key=lambda proc: proc.id)
+        for proc in combo_procs:
             if proc.sensitivity & dirty:
                 triggered.append(proc)
-        # Check sequential procs for edge triggers
+
+        # An edge from an earlier delta cycle can still fire a sequential block
+        # relative to the snapshot taken at the start of this time step.
+        self._edge_changed.update(dirty & self._seq_edge_names)
+        if 4 * sum(len(self._sig_to_procs.get(name, ())) for name in self._edge_changed) >= len(self._seq_procs):
+            seq_procs = self._seq_procs
+        else:
+            seq_candidates: set[AlwaysProcess] = set()
+            for name in self._edge_changed:
+                seq_candidates.update(proc for proc in self._sig_to_procs.get(name, ()) if proc in self._seq_proc_set)
+            seq_procs = sorted(seq_candidates, key=lambda proc: proc.id)
         triggered_seq = self._triggered_seq_procs
-        for proc in self._seq_procs:
+        for proc in seq_procs:
             if proc.state != ProcessState.DONE and id(proc) not in triggered_seq and self._edge_fired(proc):
                 triggered_seq.add(id(proc))
                 triggered.append(proc)
@@ -1278,6 +1311,7 @@ class Scheduler:  # cm:9a7f2c
         if self._settle_snapshot:
             self._prev_signals = self._settle_snapshot
             self._settle_snapshot = {}
+        self._edge_changed.clear()
         self._triggered_seq_procs = set()
 
         # Propagate driven signals through continuous assigns.
