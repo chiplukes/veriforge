@@ -335,12 +335,14 @@ class ExpressionEvaluator:  # cm:7e8b5d
     tested first.
     """
 
-    __slots__ = ("_executor", "_literal_cache")
+    __slots__ = ("_executor", "_literal_cache", "_range_literal_bounds")
 
     def __init__(self) -> None:
         # Cache: Literal object id -> Value.  Literals are constants; their
         # Value never changes, so we can compute it once and reuse it.
         self._literal_cache: dict[int, Value] = {}
+        # Literal part-select bounds are independent of signals and context.
+        self._range_literal_bounds: dict[RangeSelect, tuple[int, int]] = {}
         # Back-reference to StatementExecutor for user-defined function calls.
         # Set by StatementExecutor.__init__.
         self._executor: object | None = None
@@ -1123,17 +1125,26 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- RangeSelect -------------------------------------------
         if etype is RangeSelect:
             target = self.eval(expr.target, ctx)
-            msb = self.eval(expr.msb, ctx)
-            lsb = self.eval(expr.lsb, ctx)
-            if msb.is_defined and lsb.is_defined:
-                m, l = int(msb), int(lsb)
+            if type(expr.msb) is Literal and type(expr.lsb) is Literal:
+                bounds = self._range_literal_bounds.get(expr)
+                if bounds is None:
+                    msb = self.eval(expr.msb, ctx)
+                    lsb = self.eval(expr.lsb, ctx)
+                    if msb.is_defined and lsb.is_defined:
+                        bounds = (int(msb), int(lsb))
+                        self._range_literal_bounds[expr] = bounds
+            else:
+                msb = self.eval(expr.msb, ctx)
+                lsb = self.eval(expr.lsb, ctx)
+                bounds = (int(msb), int(lsb)) if msb.is_defined and lsb.is_defined else None
+            if bounds is not None:
+                m, l = bounds
                 base = _select_base(expr.target, ctx)
                 m -= base
                 l -= base
                 result = target[m:l]
             else:
-                w = (int(msb) - int(lsb) + 1) if msb.is_defined and lsb.is_defined else 1
-                result = Value.x(w)
+                result = Value.x(1)
             # Same signed_override reasoning as BitSelect above.
             if width and result.width < width:
                 return result.sign_extend(width) if signed_override else result.resize(width)

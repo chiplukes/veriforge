@@ -413,4 +413,23 @@ Seven-run medians from `uv run python benchmarks/reference_propagation.py`
 matched vm-fast. The scheduler, reference-propagation, and VM/reference
 comparison suite passed 72 tests. These measurements are workload-specific.
 
-Next: profile expression dispatch for the next reference-engine bottleneck.
+### Reference literal range-bound reuse
+
+Profiling the active continuous-assignment workload after the plain-target
+shortcut showed `ExpressionEvaluator.eval()` still dominating execution. The
+256 assignments repeatedly read a fixed `q[7:0]` slice; every read evaluated
+both literal bounds again. The evaluator now caches the evaluated bounds of a
+`RangeSelect` only when both bounds are literals. The selected signal and its
+packed base remain live, and expressions with dynamic bounds keep their
+existing evaluation path.
+
+On the 200-cycle, 256-assignment active workload, seven-run medians changed
+from 0.3084 to 0.2741 s (1.13x) on this host. Sparse activity remained about
+0.007–0.008 s. cProfile recorded about 620,000 evaluator calls before and
+414,000 after, with the same final state as vm-fast. Repeated-read tests cover
+changing signal values, packed bases, and dynamic bounds. The evaluator,
+width, scheduler, propagation, and VM/reference comparison suite passed 211
+tests; Ruff and formatting checks passed. This is a workload-specific gain.
+
+Next: investigate `Value` slicing and remaining evaluator cost on mixed and
+active workloads before changing expression semantics or dispatch more broadly.

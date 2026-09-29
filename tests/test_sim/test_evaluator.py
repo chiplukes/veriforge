@@ -377,6 +377,23 @@ class TestRangeSelect:
         assert r.val == 0xAB
         assert r.width == 8
 
+    def test_literal_bounds_keep_signal_and_packed_base_live(self, ev, ctx):
+        expr = RangeSelect(Identifier("bus"), Literal(7, width=8), Literal(4, width=8))
+        assert ev.eval(expr, ctx).val == 0xA
+        ctx._signal_bases["bus"] = 4
+        assert ev.eval(expr, ctx).val == 0xB
+        ctx.write_signal("bus", Value(0xC2, width=8))
+        assert ev.eval(expr, ctx).val == 0x2
+
+    def test_dynamic_bounds_follow_signal_changes(self, ev, ctx):
+        ctx.write_signal("hi", Value(7, width=8))
+        ctx.write_signal("lo", Value(4, width=8))
+        expr = RangeSelect(Identifier("bus"), Identifier("hi"), Identifier("lo"))
+        assert ev.eval(expr, ctx).val == 0xA
+        ctx.write_signal("hi", Value(3, width=8))
+        ctx.write_signal("lo", Value(0, width=8))
+        assert ev.eval(expr, ctx).val == 0xB
+
 
 # ── Part Select ───────────────────────────────────────────────────────
 
