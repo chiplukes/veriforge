@@ -48,6 +48,7 @@ class EvalContext:  # cm:1f4c6a
 
     __slots__ = (
         "_dirty",
+        "_expr_signed_cache",
         "_functions",
         "_memories",
         "_memory_bases",
@@ -66,6 +67,10 @@ class EvalContext:  # cm:1f4c6a
         # When not None, collects names of signals written during execution.
         # The scheduler sets this before running processes and reads it after.
         self._dirty: set[str] | None = None
+        # Enabled after elaboration, when declaration signedness is complete.
+        # Function calls use a separate EvalContext, so local names cannot
+        # reuse module-scope answers.
+        self._expr_signed_cache: dict[Expression, bool] | None = None
         # Snapshot of signal values at region start (before first write).
         # Used to compute the TRUE dirty set after all processes finish.
         self._originals: dict[str, Value | None] | None = None
@@ -1700,15 +1705,16 @@ def _is_signed_call(expr) -> bool:
     return isinstance(expr, FunctionCall) and expr.name.lower() == "$signed"
 
 
-def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | None = None) -> bool:
+def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[Expression, bool] | None = None) -> bool:
     """Return True if *expr* is a fully signed expression per IEEE 1364-2005 §5.5.
 
-    When *cache* is provided (an ``id(obj) → bool`` dict), intermediate
-    results are memoised to avoid re-walking shared subtrees.
+    Elaborated contexts retain results for their static declaration metadata;
+    unelaborated and function-local contexts compute results on demand.
     """
+    if cache is None:
+        cache = ctx._expr_signed_cache
     if cache is not None:
-        key = id(expr)
-        cached = cache.get(key)
+        cached = cache.get(expr)
         if cached is not None:
             return cached
 
@@ -1721,20 +1727,20 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             name = ".".join(expr.hierarchy) + "." + name
         result = ctx._signal_signed.get(name, False)
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- Literal: signed if base is 's' (e.g. 8'shFF) --------------------
     if etype is Literal:
         result = expr.signed
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- BitSelect / RangeSelect / PartSelect: always unsigned (§5.5.1) ---
     if etype in (BitSelect, RangeSelect, PartSelect):
         if cache is not None:
-            cache[id(expr)] = False
+            cache[expr] = False
         return False
 
     # -- UnaryOp: signed if operand is signed, EXCEPT reduction ops --------
@@ -1746,11 +1752,11 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
         if expr.op in ("!", "&", "|", "^", "~&", "~|", "~^", "^~"):
             result = False
             if cache is not None:
-                cache[id(expr)] = result
+                cache[expr] = result
             return result
         result = _expr_signed(expr.operand, ctx, cache)
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- BinaryOp: for shift, only left operand counts; comparisons and
@@ -1765,21 +1771,21 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
         else:
             result = _expr_signed(expr.left, ctx, cache) and _expr_signed(expr.right, ctx, cache)
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- TernaryOp: both branches must be signed --------------------------
     if etype is TernaryOp:
         result = _expr_signed(expr.true_expr, ctx, cache) and _expr_signed(expr.false_expr, ctx, cache)
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- Concatenation / Replication / StreamingConcatenation → always
     # unsigned (§5.5.1) --------------------------------------------------
     if etype in (Concatenation, Replication, StreamingConcatenation):
         if cache is not None:
-            cache[id(expr)] = False
+            cache[expr] = False
         return False
 
     # -- FunctionCall: $signed → True, a user function → its own declared
@@ -1803,12 +1809,12 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[int, bool] | No
             # than sign-extend an entirely-x `a3`.
             result = func is not None and func.signed
         if cache is not None:
-            cache[id(expr)] = result
+            cache[expr] = result
         return result
 
     # -- All other expression types (Mintypmax, StringLiteral, etc.) → unsigned
     if cache is not None:
-        cache[id(expr)] = False
+        cache[expr] = False
     return False
 
 

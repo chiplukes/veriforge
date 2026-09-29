@@ -352,7 +352,7 @@ tuples for the VM. Note that `period` is keyword-only.
 
 ## Optimization History
 
-The reference engine has been through two optimization rounds:
+The reference engine has been through several optimization rounds:
 
 ### Round 1: Hot-Path Optimizations
 - **Literal caching**: `id(expr)` → Value in `_literal_cache`, avoiding
@@ -372,6 +372,15 @@ The reference engine has been through two optimization rounds:
   Sequential processes fire at most once per time step
 - **Module-level operator functions**: `_eval_binary_op` and `_eval_unary_op`
   as free functions to avoid method-lookup overhead
+
+### Context-Local Expression Metadata
+
+After elaboration, `EvalContext` caches each expression's declared signedness.
+Function calls evaluate in a fresh context, keeping local names separate from
+module names. Expression self-width remains dynamic because externally driven
+values and task ports can change an identifier's width. Run
+`uv run python benchmarks/reference_metadata.py` to compare cached and
+uncached reference evaluation on the mixed DUT and active processes.
 
 ### Performance Bottlenecks
 

@@ -87,8 +87,8 @@ callbacks/events.
   edge detection; retain the old behavior as a differential baseline during work.
 - [x] Queue affected continuous assignments instead of repeatedly scanning all
   of them; retain a declaration-order scan when candidates are dense.
-- Cache provably static expression metadata per elaborated context; account for
-  function scopes and context-dependent widths.
+- [x] Cache declaration signedness per elaborated context; keep function scopes
+  separate and context-dependent expression widths dynamic.
 - Investigate redundant `Value` resizing/allocation after scheduler improvements.
 - Keep tree walking and independent semantic implementations. Validate against
   pre-change traces and, where supported, an external simulator in addition to
@@ -350,4 +350,21 @@ signal and memory snapshots for derived-clock, async-reset, combinational-
 chain, and memory-update cases (40 snapshots each). The focused scheduler
 and cross-engine suite passed 203 tests.
 
-Next: profile expression evaluation and metadata caching.
+### Reference signedness metadata cache
+
+Profiling the mixed reference DUT showed `_expr_signed` called about 61,000
+times per 1,000 cycles. Its result depends on declarations, not signal values,
+so an elaborated `EvalContext` now caches results by expression object after
+all declarations and functions are registered. User-function calls use fresh
+contexts and therefore cannot inherit module-scope results. Self-width remains
+uncached: external drives and task ports can change the width of an identifier.
+
+The paired benchmark `uv run python benchmarks/reference_metadata.py --repeat 9`
+measured 125.7 → 119.9 ms (1.05x) for the mixed DUT and 73.5 → 67.4 ms
+(1.09x) for 64 active processes over 100 cycles. It compares final signal and
+memory state between cached and uncached runs. Complete time-step traces also
+matched for a signed user function (80 snapshots), memory updates (80), and
+the mixed DUT (413). Focused evaluator/scheduler tests passed 108 cases, and
+the signed/function/wide-array cross-engine suite passed 114 cases.
+
+Next: investigate redundant `Value` resizing and allocation.

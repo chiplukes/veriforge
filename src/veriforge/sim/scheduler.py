@@ -481,6 +481,10 @@ class Scheduler:  # cm:9a7f2c
         for task in module.tasks:
             self.executor._task_map[task.name] = task
 
+        # Declarations and function signatures are complete; their expression
+        # signedness is now stable for this module's evaluation context.
+        self.ctx._expr_signed_cache = {}
+
         # Bootstrap: evaluate all continuous assigns until stable so that
         # zero-sensitivity assigns (e.g. constant literals in instance port
         # connections) are initialised before any settle() call.

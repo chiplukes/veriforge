@@ -20,7 +20,7 @@ from veriforge.model.expressions import (
     TernaryOp,
     UnaryOp,
 )
-from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator
+from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator, _expr_self_width, _expr_signed
 from veriforge.sim.value import Value
 
 
@@ -490,3 +490,26 @@ class TestComplexExpressions:
         red = UnaryOp("|", Identifier("a"))
         expr = TernaryOp(red, Literal(1, width=1), Literal(0, width=1))
         assert int(ev.eval(expr, ctx)) == 1
+
+
+class TestExpressionMetadata:
+    def test_signed_cache_is_context_local(self):
+        expr = BinaryOp("+", Identifier("arg"), Literal(1, width=8, signed=True))
+        module_ctx = EvalContext({"arg": Value(3, width=8)})
+        module_ctx._signal_signed["arg"] = True
+        module_ctx._expr_signed_cache = {}
+        function_ctx = EvalContext({"arg": Value(3, width=8)})
+
+        assert _expr_signed(expr, module_ctx)
+        assert not _expr_signed(expr, function_ctx)
+        function_ctx._signal_signed["arg"] = True
+        assert _expr_signed(expr, function_ctx)
+        assert _expr_signed(expr, module_ctx)
+
+    def test_self_width_tracks_value_width_changes(self):
+        ctx = EvalContext({"arg": Value(3, width=8)})
+        ctx._expr_signed_cache = {}
+        expr = Identifier("arg")
+        assert _expr_self_width(expr, ctx) == 8
+        ctx.write_signal("arg", Value(3, width=16))
+        assert _expr_self_width(expr, ctx) == 16
