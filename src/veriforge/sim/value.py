@@ -335,9 +335,8 @@ class Value:  # cm:c8a1e6
             if msb < lsb:
                 msb, lsb = lsb, msb
             w = msb - lsb + 1
-            shifted_v = (self.val >> lsb) & _mask_for_width(w)
-            shifted_m = (self.mask >> lsb) & _mask_for_width(w)
-            return Value(shifted_v, width=w, mask=shifted_m)
+            # Value() already clips both fields to w bits.
+            return Value(self.val >> lsb, width=w, mask=self.mask >> lsb)
         raise TypeError(f"Invalid index type: {type(index)}")
 
     def set_bit(self, index: int, bit_val: int) -> Value:

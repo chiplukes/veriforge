@@ -431,5 +431,24 @@ changing signal values, packed bases, and dynamic bounds. The evaluator,
 width, scheduler, propagation, and VM/reference comparison suite passed 211
 tests; Ruff and formatting checks passed. This is a workload-specific gain.
 
-Next: investigate `Value` slicing and remaining evaluator cost on mixed and
-active workloads before changing expression semantics or dispatch more broadly.
+### Reference range-select and Value slicing
+
+The active propagation profile still spent time in `Value.__getitem__` and in
+recursive evaluation of plain range-select targets. `Value` slicing now lets
+its constructor perform the width masking once instead of masking both shifted
+fields before construction. A plain, present Identifier target in the reference
+evaluator is read directly from signal storage; missing, hierarchical, and
+other target forms retain the existing evaluator path. Packed-range bases are
+still looked up on every evaluation.
+
+Seven-run medians for the 200-cycle active 256-assignment workload changed
+from 0.2677 to 0.2514 s (about 1.06x) on this host. The mixed 1,000-cycle
+benchmark was effectively flat, 0.1073 to 0.1067 s. The active benchmark
+still checks final state against vm-fast. Another 4,000 randomized slices,
+including wide values and unknown masks, matched the previous calculation.
+The Value, evaluator, scheduler, propagation, and VM/reference suite passed
+317 tests; Ruff, formatting, and repository file checks passed. The measured
+gain is specific to range-select-heavy designs.
+
+Next: profile the mixed DUT's remaining evaluator and procedural-execution
+costs before selecting another reference optimization.

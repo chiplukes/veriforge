@@ -1124,7 +1124,13 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
         # -- RangeSelect -------------------------------------------
         if etype is RangeSelect:
-            target = self.eval(expr.target, ctx)
+            target_name = expr.target.name if type(expr.target) is Identifier and not expr.target.hierarchy else None
+            if target_name is not None:
+                target = ctx._signals.get(target_name)
+                if target is None:
+                    target = self.eval(expr.target, ctx)
+            else:
+                target = self.eval(expr.target, ctx)
             if type(expr.msb) is Literal and type(expr.lsb) is Literal:
                 bounds = self._range_literal_bounds.get(expr)
                 if bounds is None:
@@ -1139,7 +1145,9 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 bounds = (int(msb), int(lsb)) if msb.is_defined and lsb.is_defined else None
             if bounds is not None:
                 m, l = bounds
-                base = _select_base(expr.target, ctx)
+                base = (
+                    ctx._signal_bases.get(target_name, 0) if target_name is not None else _select_base(expr.target, ctx)
+                )
                 m -= base
                 l -= base
                 result = target[m:l]
