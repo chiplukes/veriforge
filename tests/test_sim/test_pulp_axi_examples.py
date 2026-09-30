@@ -14,7 +14,7 @@ from veriforge.sim.endpoints import (  # noqa: E402
     AXILiteResponseDriver,
     AXILiteResponseError,
 )
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until  # noqa: E402
+from veriforge.sim.step_harness import step_drive, step_run_until  # noqa: E402
 from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 from veriforge.sim.trace import attach_vcd  # noqa: E402
 
@@ -66,7 +66,7 @@ def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=sim.time)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
@@ -277,7 +277,7 @@ def _settle_axi_cdc_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=0)
     else:
-        step_eval_now(sim, "src_clk_i")
+        sim.settle()
 
 
 def _make_axi_cdc_step_sim(design, engine: str, max_time: int = 320) -> Simulator:

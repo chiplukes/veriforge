@@ -8,7 +8,7 @@ Cython = pytest.importorskip("Cython")
 
 from veriforge.project import parse_files  # noqa: E402
 from veriforge.sim.example_runner import display_lines  # noqa: E402
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until  # noqa: E402
+from veriforge.sim.step_harness import step_drive, step_run_until  # noqa: E402
 from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 
 from .engines import ENGINES  # noqa: E402
@@ -379,10 +379,11 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
 
 
 def _settle_drives(sim: Simulator, engine: str, clock_name: str = "src_clk_i") -> None:
+    # clock_name remains for existing call sites; settle() tracks driven signals.
     if engine == "reference":
         sim.run(max_time=0)
     else:
-        step_eval_now(sim, clock_name)
+        sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:

@@ -69,6 +69,7 @@ jobs:
       # including a fresh Cython "compiled" build — the full tests/test_sim/
       # tree measured ~33 min locally with -n 4, and adding tests/test_dsl/
       # pushed it to ~45 min, both far past a smoke job's ~10-minute budget.
+      # test_ibex_python_bench.py remains in this job as a focused real-DUT case.
       # This scope measured ~9 min locally; full coverage still runs via the
       # `test` job above and the weekly.yml full-regression workflow.
       - run: >

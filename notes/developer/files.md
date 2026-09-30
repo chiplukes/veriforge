@@ -311,6 +311,7 @@ tests/
 │   ├── test_pulp_common_cells_examples.py # Pulp common_cells integration tests
 │   ├── test_pulp_ready_valid_examples.py  # Pulp ready/valid protocol tests
 │   ├── test_ibex_examples.py      # Ibex core integration tests
+│   ├── test_ibex_python_bench.py  # Ibex controller with Python-driven stimulus (no timed HDL bench)
 │   ├── test_value_widths.py       # Value width edge cases
 │   ├── test_param_width.py        # Parametric width tests
 │   ├── test_wide_signal_catchall.py # Wide signal handling tests

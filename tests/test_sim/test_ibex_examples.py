@@ -1,4 +1,9 @@
-"""Focused Ibex example regressions across simulation engines."""
+"""Ibex regressions for timed Verilog testbench compatibility.
+
+These probes intentionally exercise #delay, clock generators, and system tasks.
+For a Python-driven controller test without compiled-engine timing fallback,
+see test_ibex_python_bench.py.
+"""
 
 from __future__ import annotations
 

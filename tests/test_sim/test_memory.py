@@ -305,9 +305,11 @@ class TestMemoryRead:
         """Each memory element holds its own value."""
         m = _make_mem_write_module()
         expected = {0: 0xAA, 1: 0xBB, 2: 0xCC, 3: 0xDD}
+        sim = Simulator(m, engine=engine)
+        sim.run(max_time=0)
         for addr, exp_val in expected.items():
-            sim = Simulator(m, engine=engine)
-            sim.run(lambda s, a=addr: s.drive("addr", Value(a, width=2)), max_time=0)
+            sim.drive("addr", Value(addr, width=2))
+            sim.settle()
             assert sim.read("out") == exp_val, f"mem[{addr}] expected {exp_val:#x}"
 
 
@@ -377,9 +379,11 @@ class TestReadmem:
         hex_file.write_text("0A\n14\n1E\n28\n")
         m = _make_readmemh_module(str(hex_file))
         expected = {0: 0x0A, 1: 0x14, 2: 0x1E, 3: 0x28}
+        sim = Simulator(m, engine=engine)
+        sim.run(max_time=0)
         for addr, exp_val in expected.items():
-            sim = Simulator(m, engine=engine)
-            sim.run(lambda s, a=addr: s.drive("addr", Value(a, width=2)), max_time=0)
+            sim.drive("addr", Value(addr, width=2))
+            sim.settle()
             assert sim.read("out") == exp_val, f"mem[{addr}] expected {exp_val:#x}"
 
     @pytest.mark.parametrize("engine", ENGINES)
@@ -452,9 +456,11 @@ class TestReadmem:
         hex_file.write_text("0A 14\n1E 28\n")
         m = _make_readmemh_module(str(hex_file))
         expected = {0: 0x0A, 1: 0x14, 2: 0x1E, 3: 0x28}
+        sim = Simulator(m, engine=engine)
+        sim.run(max_time=0)
         for addr, exp_val in expected.items():
-            sim = Simulator(m, engine=engine)
-            sim.run(lambda s, a=addr: s.drive("addr", Value(a, width=2)), max_time=0)
+            sim.drive("addr", Value(addr, width=2))
+            sim.settle()
             assert sim.read("out") == exp_val
 
 
@@ -532,30 +538,23 @@ class TestDumpVcd:
             )
         )
         sim = Simulator(m, engine=engine)
-        sim.run(lambda s: None, max_time=0)
-        import os
+        sim.run(max_time=0)
 
-        assert os.path.exists(vcd_path)
-        content = open(vcd_path).read()
+        assert (tmp_path / "out.vcd").exists()
+        content = (tmp_path / "out.vcd").read_text()
         assert "$timescale" in content
         assert "$enddefinitions" in content
         assert "$dumpvars" in content
 
     @pytest.mark.parametrize("engine", ENGINES)
-    def test_dumpvars_default_filename(self, engine, tmp_path):
+    def test_dumpvars_default_filename(self, engine, tmp_path, monkeypatch):
         """$dumpvars without $dumpfile uses 'dump.vcd' as default."""
-        import os
-
-        old_cwd = os.getcwd()
-        try:
-            os.chdir(tmp_path)
-            m = Module("vcd_default_test")
-            m.initial_blocks.append(InitialBlock(SystemTaskCall("$dumpvars", [])))
-            sim = Simulator(m, engine=engine)
-            sim.run(lambda s: None, max_time=0)
-            assert os.path.exists(tmp_path / "dump.vcd")
-        finally:
-            os.chdir(old_cwd)
+        monkeypatch.chdir(tmp_path)
+        m = Module("vcd_default_test")
+        m.initial_blocks.append(InitialBlock(SystemTaskCall("$dumpvars", [])))
+        sim = Simulator(m, engine=engine)
+        sim.run(max_time=0)
+        assert (tmp_path / "dump.vcd").exists()
 
 
 # ── Memory partial-range writes ──────────────────────────────────────
