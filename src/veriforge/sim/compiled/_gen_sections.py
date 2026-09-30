@@ -48,9 +48,8 @@ _WIDE_MEM_MASK_RE = re.compile(r"c\.wide_mem_(\d+)_mask\[")
 _WMEM_EXTRACT_VAL_RE = re.compile(r"_wmem(\d+)_extract_val\(c,")
 _WMEM_EXTRACT_MASK_RE = re.compile(r"_wmem(\d+)_extract_mask\(c,")
 
-# Maximum number of trigger[] terms to inline on a single sensitivity check line.
-# Longer sensitivity sets are split across multiple shorter lines using parenthesised
-# continuation so no individual line grows beyond ~120 characters.
+# Maximum number of signal IDs in one sensitivity-check expression. A signal
+# contributes both trigger[] and dirty[] terms in the delta-loop dispatch.
 _MAX_INLINE_SENS = 6
 
 
@@ -107,31 +106,23 @@ def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
 
 
 def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool = False) -> list[str]:
-    """Return one or more Cython if-condition lines for a sensitivity check.
+    """Return a Cython sensitivity check ending in an ``if`` body opener.
 
-    For small sensitivity sets emits a single inline ``if`` line.  For large
-    sets (> ``_MAX_INLINE_SENS`` signals) spreads the condition across multiple
-    short lines using parenthesised continuation so that no single generated
-    line exceeds roughly 120 characters.
+    A line-wrapped ``or`` expression is still one left-deep Cython AST. Split
+    large sensitivity sets into separate shallow statements instead, while
+    preserving short-circuit evaluation after a hit.
     """
     term = (lambda s: f"trigger[{s}] or c.dirty[{s}]") if also_dirty else (lambda s: f"trigger[{s}]")
     if len(sorted_sids) <= _MAX_INLINE_SENS:
         cond = " or ".join(term(s) for s in sorted_sids)
         return [f"{indent}if {cond}:"]
-    cont = indent + "        "
-    chunks = [sorted_sids[i : i + _MAX_INLINE_SENS] for i in range(0, len(sorted_sids), _MAX_INLINE_SENS)]
-    lines: list[str] = []
-    for ci, chunk in enumerate(chunks):
-        terms = " or ".join(term(s) for s in chunk)
-        is_last = ci == len(chunks) - 1
-        if ci == 0 and is_last:
-            lines.append(f"{indent}if {terms}:")
-        elif ci == 0:
-            lines.append(f"{indent}if ({terms}")
-        elif is_last:
-            lines.append(f"{cont}or {terms}):")
-        else:
-            lines.append(f"{cont}or {terms}")
+    lines = [f"{indent}_sens_hit = 0"]
+    for i in range(0, len(sorted_sids), _MAX_INLINE_SENS):
+        chunk = sorted_sids[i : i + _MAX_INLINE_SENS]
+        cond = " or ".join(term(s) for s in chunk)
+        lines.append(f"{indent}if not _sens_hit and ({cond}):")
+        lines.append(f"{indent}    _sens_hit = 1")
+    lines.append(f"{indent}if _sens_hit:")
     return lines
 
 
@@ -529,19 +520,22 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         sids = {sid for sens, _b in procs for sid in sens}
         sids |= {sid for edges, _s, _b in self._seq_processes for sid, et in edges.items() if et != "posedge"}
         if not sids:
-            cond = "0"
+            check_lines = ["                if 0:"]
+        elif len(sids) <= _MAX_INLINE_SENS:
+            cond = " or ".join(f"clk_sid == {sid}" for sid in sorted(sids))
+            check_lines = [f"                if {cond}:"]
         else:
             terms = [f"clk_sid == {sid}" for sid in sorted(sids)]
-            chunks = [" or ".join(terms[i : i + 6]) for i in range(0, len(terms), 6)]
-            cond = (
-                ("\n" + " " * 24).join(f"{c} or" for c in chunks[:-1])
-                + (("\n" + " " * 24) if len(chunks) > 1 else "")
-                + chunks[-1]
-            )
-            if len(chunks) > 1:
-                cond = "(" + cond + ")"
+            # Line wrapping one large `or` still leaves a left-deep Cython
+            # expression tree. Keep each check bounded for large designs.
+            check_lines = ["                _negedge_reacts = 0"]
+            for i in range(0, len(terms), _MAX_INLINE_SENS):
+                cond = " or ".join(terms[i : i + _MAX_INLINE_SENS])
+                check_lines.append(f"                if not _negedge_reacts and ({cond}):")
+                check_lines.append("                    _negedge_reacts = 1")
+            check_lines.append("                if _negedge_reacts:")
         return [
-            f"                if {cond}:",
+            *check_lines,
             *("    " + ln for ln in body),
             "                else:",
             "                    self.ctx.val[clk_sid] = 0",
@@ -1429,7 +1423,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         )
         lines = [
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
-            "    cdef int it, i, changed, _j, _stable, _any_interesting_dirty",
+            "    cdef int it, i, changed, _j, _stable, _any_interesting_dirty, _sens_hit",
             "    cdef long long _nbaw",
             f"    cdef int trigger[{max(self._n_sigs, 1)}]",
         ]
@@ -2159,7 +2153,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                        int n_mem_events=0, int[::1] ev_mem_cycles=None,",
                 "                        int[::1] ev_mem_mids=None, int[::1] ev_mem_addrs=None,",
                 "                        long long[::1] ev_mem_vals=None):",
-                "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles",
+                "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles, _negedge_reacts",
                 *(
                     ["        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid"]
                     if self._processes

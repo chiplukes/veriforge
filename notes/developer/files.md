@@ -318,7 +318,9 @@ tests/
 │   ├── test_combinational_coordinator.py # CombinationalCoordinator (clockless DUT) tests (7 tests)
 │   ├── test_coordinator_strict.py # EndpointCoordinator(strict=True) contract tests (14 tests)
 │   ├── test_compiled_latent_risks.py    # Compiled-engine latent-risk regression tests (3 tests)
-│   └── test_compiled_batch_run_propagation.py # batch_run event-propagation fix regression (3 tests)
+│   ├── test_compiled_batch_run_propagation.py # batch_run event-propagation fix regression (3 tests)
+│   ├── test_compiled_wide_wrapper_recursion.py # Native AXI-Stream wrapper Cython recursion regression
+│   └── test_compiled_negedge_recursion.py # Large batch_run falling-clock Cython recursion regression
 ├── test_validation/               # 3rd-party simulator cross-validation
 │   ├── __init__.py
 │   ├── test_iverilog_validation.py # iverilog VCD comparison tests (24 ref + 12 VM-vs-icarus)
