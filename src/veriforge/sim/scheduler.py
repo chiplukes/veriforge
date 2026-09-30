@@ -920,17 +920,20 @@ class Scheduler:  # cm:9a7f2c
         """
         changed = False
         candidates: set[int] = set()
-        dense = False
+        # For a tiny network, scanning in declaration order costs less than
+        # building a candidate heap and still checks each process sensitivity.
+        dense = len(self._continuous_procs) <= 8
         threshold = max(1, (len(self._continuous_procs) + 3) // 4)
-        for name in dirty:
-            affected = self._sig_to_continuous.get(name, ())
-            if len(affected) >= threshold:
-                dense = True
-                break
-            candidates.update(affected)
-            if len(candidates) >= threshold:
-                dense = True
-                break
+        if not dense:
+            for name in dirty:
+                affected = self._sig_to_continuous.get(name, ())
+                if len(affected) >= threshold:
+                    dense = True
+                    break
+                candidates.update(affected)
+                if len(candidates) >= threshold:
+                    dense = True
+                    break
         pending = [] if dense else list(candidates)
         if pending:
             heapq.heapify(pending)

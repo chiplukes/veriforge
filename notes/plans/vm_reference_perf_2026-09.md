@@ -450,5 +450,30 @@ The Value, evaluator, scheduler, propagation, and VM/reference suite passed
 317 tests; Ruff, formatting, and repository file checks passed. The measured
 gain is specific to range-select-heavy designs.
 
-Next: profile the mixed DUT's remaining evaluator and procedural-execution
-costs before selecting another reference optimization.
+### Reference procedural assignment and small-network scheduling
+
+A 2,000-cycle mixed-DUT profile found procedural execution, expression
+evaluation, and continuous-assignment scheduling all material. Ordinary
+blocking and nonblocking scalar assignments repeatedly called two memory-only
+handlers and resolved the target width through `read_signal`. For an existing,
+plain, non-memory Identifier target, the executor now takes its width directly
+from signal storage and retains the same evaluator and write path. Other LHS
+forms continue through the memory handlers and general width lookup.
+
+The mixed DUT has seven continuous assignments. For networks of at most eight
+assignments, dirty propagation now scans them in declaration order and checks
+each sensitivity set directly, avoiding candidate-set and heap construction.
+Larger networks keep their indexed scheduler. A before/after trial on the mixed DUT
+and an eight-assignment workload favored the small-network scan slightly;
+the difference was small.
+
+With both changes, the nine-run mixed 1,000-cycle median changed from 0.1044
+to 0.1004 s (about 1.04x) on this host. The seven-run active 64-process,
+100-cycle median changed from 0.0636 to 0.0594 s (about 1.07x), with final
+state checked against vm-fast. The executor/evaluator/cross-engine suite passed
+207 tests; the final scheduler, propagation, memory, concat-LHS, and
+cross-engine suite passed 96 tests. Ruff and formatting checks passed. These
+are modest, workload-specific gains.
+
+Next: profile trigger collection or another representative reference workload
+before making a larger evaluator or executor change.

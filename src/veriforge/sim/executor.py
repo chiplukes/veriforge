@@ -197,30 +197,48 @@ class StatementExecutor:  # cm:c2f9a1
 
         # -- Blocking assignment (most frequent) -------------------
         if stype is BlockingAssign:
-            if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
-                return
-            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=True):
-                return
-            lhs_w = self._lhs_width(stmt.lhs, ctx)
+            lhs = stmt.lhs
+            signal = (
+                ctx._signals.get(lhs.name)
+                if type(lhs) is Identifier and not lhs.hierarchy and lhs.name not in ctx._memory_names
+                else None
+            )
+            if signal is None:
+                if self._copy_whole_memory(lhs, stmt.rhs, ctx, immediate=True):
+                    return
+                if self._assign_pattern_to_memory(lhs, stmt.rhs, ctx, immediate=True):
+                    return
+                lhs_w = self._lhs_width(lhs, ctx)
+            else:
+                lhs_w = signal.width
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
             # eval already received the target width; only a narrower signed
             # result needs a second extension before the assignment.
             if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
                 rhs_val = rhs_val.sign_extend(lhs_w)
-            self._write_target(stmt.lhs, rhs_val, ctx, immediate=True)
+            self._write_target(lhs, rhs_val, ctx, immediate=True)
             return
 
         # -- Non-blocking assignment -------------------------------
         if stype is NonblockingAssign:
-            if self._copy_whole_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
-                return
-            if self._assign_pattern_to_memory(stmt.lhs, stmt.rhs, ctx, immediate=False):
-                return
-            lhs_w = self._lhs_width(stmt.lhs, ctx)
+            lhs = stmt.lhs
+            signal = (
+                ctx._signals.get(lhs.name)
+                if type(lhs) is Identifier and not lhs.hierarchy and lhs.name not in ctx._memory_names
+                else None
+            )
+            if signal is None:
+                if self._copy_whole_memory(lhs, stmt.rhs, ctx, immediate=False):
+                    return
+                if self._assign_pattern_to_memory(lhs, stmt.rhs, ctx, immediate=False):
+                    return
+                lhs_w = self._lhs_width(lhs, ctx)
+            else:
+                lhs_w = signal.width
             rhs_val = self.evaluator.eval(stmt.rhs, ctx, width=lhs_w)
             if rhs_val.width < lhs_w and _expr_signed(stmt.rhs, ctx):
                 rhs_val = rhs_val.sign_extend(lhs_w)
-            self._write_target(stmt.lhs, rhs_val, ctx, immediate=False)
+            self._write_target(lhs, rhs_val, ctx, immediate=False)
             return
 
         # -- Sequential block (begin...end) ------------------------
