@@ -510,3 +510,62 @@ class TestEdgeSensitivity:
             sched._seq_procs[2],
         ]
         assert sched._collect_triggered({"b"}) == [sched._combo_procs[1]]
+
+    def test_shared_signal_posedge_negedge_and_unknown_transitions(self):
+        module = Module(
+            "shared_edge",
+            variables=[Variable(name, VariableKind.REG) for name in ("clk", "pos", "neg")],
+        )
+        for edge, target in (("posedge", "pos"), ("negedge", "neg")):
+            module.always_blocks.append(
+                AlwaysBlock(
+                    NonblockingAssign(Identifier(target), Literal(1, width=1)),
+                    sensitivity_list=[SensitivityEdge(edge, Identifier("clk"))],
+                    sensitivity_type=SensitivityType.SEQUENTIAL,
+                )
+            )
+
+        sched = Scheduler()
+        sched.elaborate(module)
+        pos, neg = sched._seq_procs
+        for old, new, expected in (
+            (Value.x(1), Value(0, width=1), [neg]),
+            (Value(0, width=1), Value(1, width=1), [pos]),
+            (Value(1, width=1), Value(0, width=1), [neg]),
+            (Value(0, width=1), Value.x(1), []),
+        ):
+            sched.ctx.write_signal("clk", old)
+            sched._prev_signals = sched._snapshot_signals()
+            sched.ctx.write_signal("clk", new)
+            sched._edge_changed.clear()
+            sched._triggered_seq_procs.clear()
+            assert sched._collect_triggered({"clk"}) == expected
+
+    def test_multiple_fired_edges_keep_declaration_order_without_duplicates(self):
+        module = Module(
+            "multiple_edges",
+            variables=[Variable(name, VariableKind.REG) for name in ("clk", "rst", "first", "both", "last")],
+        )
+        for target, edges in (
+            ("first", [("negedge", "rst")]),
+            ("both", [("posedge", "clk"), ("negedge", "rst")]),
+            ("last", [("posedge", "clk")]),
+        ):
+            module.always_blocks.append(
+                AlwaysBlock(
+                    NonblockingAssign(Identifier(target), Literal(1, width=1)),
+                    sensitivity_list=[SensitivityEdge(edge, Identifier(name)) for edge, name in edges],
+                    sensitivity_type=SensitivityType.SEQUENTIAL,
+                )
+            )
+
+        sched = Scheduler()
+        sched.elaborate(module)
+        sched.ctx.write_signal("clk", Value(0, width=1))
+        sched.ctx.write_signal("rst", Value(1, width=1))
+        sched._prev_signals = sched._snapshot_signals()
+        sched.ctx.write_signal("clk", Value(1, width=1))
+        sched.ctx.write_signal("rst", Value(0, width=1))
+
+        assert sched._collect_triggered({"clk", "rst"}) == sched._seq_procs
+        assert sched._collect_triggered({"clk"}) == []

@@ -475,5 +475,26 @@ state checked against vm-fast. The executor/evaluator/cross-engine suite passed
 cross-engine suite passed 96 tests. Ruff and formatting checks passed. These
 are modest, workload-specific gains.
 
-Next: profile trigger collection or another representative reference workload
-before making a larger evaluator or executor change.
+### Reference edge-direction trigger index
+
+Profiling 256 active combinational and sequential processes found trigger
+collection repeatedly checking the same clock transition for each process,
+including posedge-only processes on falling edges. The scheduler now computes
+the current edge direction once per changed edge-sensitive signal and indexes
+sequential processes by `(signal, direction)` at elaboration. A single fired
+edge uses its declaration-ordered bucket directly. Multiple fired edges merge
+their buckets, deduplicate processes, and restore declaration order. The
+existing once-per-time-step guard and prior-delta edge tracking remain.
+
+Seven-run medians over 200 cycles changed from 0.4638 to 0.4319 s (1.07x)
+for the 256-process active workload; the sparse case remained about 0.008 s.
+The mixed 1,000-cycle benchmark changed from 0.1018 to 0.0997 s (1.02x).
+An active-workload cProfile run reduced `_collect_triggered` cumulative time
+from about 0.43 to 0.24 s. The process benchmark checks final state against
+vm-fast. The scheduler and cross-engine regression suite passed 98 tests;
+five additional derived-clock, falling-edge, and asynchronous-reset
+comparisons passed. New focused tests cover X-to-known transitions, both
+clock edges, simultaneous signals, declaration order, and deduplication.
+
+Next: profile evaluator and `Value.resize` costs on mixed and active workloads
+before attempting a broader expression-execution change.

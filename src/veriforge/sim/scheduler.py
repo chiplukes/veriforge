@@ -208,6 +208,7 @@ class Scheduler:  # cm:9a7f2c
         "_combo_procs",
         "_continuous_procs",
         "_edge_changed",
+        "_edge_to_seq_procs",
         "_event_waiting",
         "_initial_procs",
         "_last_run_signals",
@@ -215,7 +216,6 @@ class Scheduler:  # cm:9a7f2c
         "_pending_drives",
         "_prev_signals",
         "_seq_edge_names",
-        "_seq_proc_set",
         "_seq_procs",
         "_settle_snapshot",
         "_sig_to_continuous",
@@ -246,7 +246,7 @@ class Scheduler:  # cm:9a7f2c
         self._combo_procs: list[AlwaysProcess] = []  # combinational subset
         self._combo_proc_set: set[AlwaysProcess] = set()
         self._seq_procs: list[AlwaysProcess] = []  # sequential subset
-        self._seq_proc_set: set[AlwaysProcess] = set()
+        self._edge_to_seq_procs: dict[tuple[str, str], list[AlwaysProcess]] = {}
         self._seq_edge_names: set[str] = set()
         self._timing_procs: list[AlwaysProcess] = []  # always blocks with #delay/@event
         self._initial_procs: list[InitialProcess] = []
@@ -465,8 +465,9 @@ class Scheduler:  # cm:9a7f2c
                 self._combo_proc_set.add(proc)
             else:
                 self._seq_procs.append(proc)
-                self._seq_proc_set.add(proc)
                 self._seq_edge_names.update(edges)
+                for name, edge in edges.items():
+                    self._edge_to_seq_procs.setdefault((name, edge), []).append(proc)
             self._register_sensitivity(proc, sens)
 
         # Create initial block processes
@@ -1169,47 +1170,42 @@ class Scheduler:  # cm:9a7f2c
         # An edge from an earlier delta cycle can still fire a sequential block
         # relative to the snapshot taken at the start of this time step.
         self._edge_changed.update(dirty & self._seq_edge_names)
-        if 4 * sum(len(self._sig_to_procs.get(name, ())) for name in self._edge_changed) >= len(self._seq_procs):
-            seq_procs = self._seq_procs
+        fired_edges = {
+            name: direction for name in self._edge_changed if (direction := self._edge_direction(name)) is not None
+        }
+        if not fired_edges:
+            return triggered
+        if len(fired_edges) == 1:
+            name, direction = next(iter(fired_edges.items()))
+            seq_procs = self._edge_to_seq_procs.get((name, direction), ())
         else:
             seq_candidates: set[AlwaysProcess] = set()
-            for name in self._edge_changed:
-                seq_candidates.update(proc for proc in self._sig_to_procs.get(name, ()) if proc in self._seq_proc_set)
+            for name, direction in fired_edges.items():
+                seq_candidates.update(self._edge_to_seq_procs.get((name, direction), ()))
             seq_procs = sorted(seq_candidates, key=lambda proc: proc.id)
         triggered_seq = self._triggered_seq_procs
         for proc in seq_procs:
-            if proc.state != ProcessState.DONE and id(proc) not in triggered_seq and self._edge_fired(proc):
+            if proc.state != ProcessState.DONE and id(proc) not in triggered_seq:
                 triggered_seq.add(id(proc))
                 triggered.append(proc)
         return triggered
 
-    def _edge_fired(self, proc: AlwaysProcess) -> bool:
-        """Check if any edge condition in a sequential process fired.
-
-        Compares current signal values against ``_prev_signals`` (snapshot
-        taken at the start of the current time step).  Uses IEEE 1364-2005
-        edge semantics:
-          posedge — transition to 1 from 0, x, or z
-          negedge — transition to 0 from 1, x, or z
-        """
-        for sig_name, edge_type in proc.edge_signals.items():
-            old = self._prev_signals.get(sig_name)
-            if old is None:
-                continue
-            new = self.ctx.read_signal(sig_name)
-            old_bit = old.val & 1
-            old_x = (old.mask & 1) != 0
-            new_bit = new.val & 1
-            new_x = (new.mask & 1) != 0
-            if edge_type == "posedge":
-                # posedge: transition to 1 from 0, x, or z
-                if not new_x and new_bit == 1 and (old_x or old_bit == 0):
-                    return True
-            elif edge_type == "negedge":
-                # negedge: transition to 0 from 1, x, or z
-                if not new_x and new_bit == 0 and (old_x or old_bit == 1):
-                    return True
-        return False
+    def _edge_direction(self, sig_name: str) -> str | None:
+        """Return the signal's edge relative to this time step's snapshot."""
+        old = self._prev_signals.get(sig_name)
+        if old is None:
+            return None
+        new = self.ctx.read_signal(sig_name)
+        if new.mask & 1:
+            return None
+        old_bit = old.val & 1
+        old_x = old.mask & 1
+        new_bit = new.val & 1
+        if new_bit and (old_x or not old_bit):
+            return "posedge"
+        if not new_bit and (old_x or old_bit):
+            return "negedge"
+        return None
 
     def _snapshot_signals(self) -> dict[str, Value]:
         """Snapshot current signal values for change detection."""
