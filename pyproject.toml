@@ -70,6 +70,11 @@ veriforge-lsp = "veriforge_lsp.__main__:main"
 # Combined:          uv run pytest -n auto --run-slow
 # Note: Cython cache is content-hash keyed per module; parallel workers are safe
 #       because each unique parametrize row compiles a distinct module name.
+filterwarnings = [
+    # Compiled fallback is intentional in cross-engine tests; the dedicated
+    # preflight test still explicitly checks that applications receive it.
+    "ignore:^Compiled engine preflight .*:UserWarning",
+]
 
 
 [tool.ruff]

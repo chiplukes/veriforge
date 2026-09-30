@@ -55,6 +55,9 @@ if TYPE_CHECKING:
     from veriforge.model.statements import Statement
 
 
+_MAX_INLINE_CASE_VALUES = 6
+
+
 class _StmtEmittersMixin:
     """Mixin providing statement, LHS, and memory write emitter methods."""
 
@@ -2362,6 +2365,9 @@ class _StmtEmittersMixin:
         else:
             sel_mask = self._emit_mask_expr(stmt.expression, sel_w, signed_override=False)
 
+        if any(len(item.values) > _MAX_INLINE_CASE_VALUES for item in stmt.items if not item.is_default):
+            return self._emit_case_narrow_many_values(stmt, indent, sel_w, is_casex, sel, sel_mask, context=context)
+
         for item in stmt.items:
             if item.is_default:
                 default_lines = self._emit_stmt(item.body, indent + 1, context=context) if item.body else []
@@ -2408,6 +2414,67 @@ class _StmtEmittersMixin:
 
         return lines
 
+    def _emit_case_narrow_many_values(  # noqa: PLR0913
+        self,
+        stmt: CaseStatement,
+        indent: int,
+        sel_w: int,
+        is_casex: bool,
+        sel: str,
+        sel_mask: str,
+        *,
+        context: str,
+    ) -> list[str]:
+        """Emit large case items as shallow checks, evaluated in item order."""
+        pad = "    " * indent
+        n = self._et_count
+        self._et_count += 1
+        done = f"_case_done{n}"
+        hit = f"_case_hit{n}"
+        lines = [f"{pad}cdef int {done} = 0", f"{pad}cdef int {hit} = 0"]
+        default_item = None
+
+        for item in stmt.items:
+            if item.is_default:
+                default_item = item
+                continue
+
+            conds = []
+            for val_expr in item.values:
+                val = self._emit_expr(val_expr, sel_w, signed_override=False)
+                if is_casex:
+                    val_mask = self._emit_expr_mask(val_expr)
+                    conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
+                else:
+                    val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
+                    conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
+
+            if len(conds) <= _MAX_INLINE_CASE_VALUES:
+                cond = " or ".join(conds) if conds else "0"
+                lines.append(f"{pad}if not {done} and ({cond}):")
+                body_indent = indent + 1
+            else:
+                lines.append(f"{pad}if not {done}:")
+                lines.append(f"{pad}    {hit} = 0")
+                for i in range(0, len(conds), _MAX_INLINE_CASE_VALUES):
+                    cond = " or ".join(conds[i : i + _MAX_INLINE_CASE_VALUES])
+                    lines.append(f"{pad}    if not {hit} and ({cond}):")
+                    lines.append(f"{pad}        {hit} = 1")
+                lines.append(f"{pad}    if {hit}:")
+                body_indent = indent + 2
+
+            body_pad = "    " * body_indent
+            lines.append(f"{body_pad}{done} = 1")
+            if item.body:
+                lines.extend(self._emit_stmt(item.body, body_indent, context=context))
+
+        if default_item is not None:
+            lines.append(f"{pad}if not {done}:")
+            default_lines = self._emit_stmt(default_item.body, indent + 1, context=context) if default_item.body else []
+            lines.extend(default_lines if default_lines else [f"{pad}    pass"])
+
+        return lines
+
     def _emit_case_wide(
         self, stmt: CaseStatement, indent: int, sel_w: int, is_casex: bool, *, context: str = "process"
     ) -> list[str] | None:
@@ -2417,10 +2484,11 @@ class _StmtEmittersMixin:
         this expression shape, letting the caller fall back to the narrow
         (over-width-item-truncating) path rather than failing to compile.
 
-        All item match checks are computed in a FIRST PASS, each reduced
-        to a single `cdef bint _casematch{n} = ...` local declared right
-        where it's computed, BEFORE any item body is emitted in the
-        second pass. This is not just an optimization -- computing a
+        All item match checks are computed in a FIRST PASS and retained
+        in integer `_casematch{n}` locals before any item body is emitted
+        in the second pass. Each value is compared immediately, letting
+        subsequent values reuse its scratch arrays. This is not just an
+        optimization -- computing a
         match check as a raw scratch-array comparison (`_sc{slot}_v[wi]
         == ...`) and only consuming it later, inside a subsequent
         `elif`, is unsound: an item's own body can itself contain a wide
@@ -2445,9 +2513,7 @@ class _StmtEmittersMixin:
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
 
         setup: list[str] = []
-        alloc_slots: list[int] = []
         sel_slot = self._alloc_scratch()
-        alloc_slots.append(sel_slot)
         # Widening the case expression (or an item literal) up to the
         # comparison's shared `sel_w` must ZERO-extend, never sign-extend
         # -- regardless of the case expression's own declared signedness.
@@ -2473,7 +2539,7 @@ class _StmtEmittersMixin:
             stmt.expression, sel_slot, n_words, sel_w, indent, signed_override=False
         )
         if sel_lines is None:
-            self._free_scratch(*alloc_slots)
+            self._free_scratch(sel_slot)
             return None
         setup.extend(sel_lines)
 
@@ -2483,36 +2549,29 @@ class _StmtEmittersMixin:
                 match_flags.append(None)
                 continue
 
-            conds = []
+            n = self._et_count
+            self._et_count += 1
+            flag = f"_casematch{n}"
+            setup.append(f"{pad}cdef int {flag} = 0")
             for val_expr in item.values:
                 val_slot = self._alloc_scratch()
-                alloc_slots.append(val_slot)
                 val_lines = self._emit_wide_expr_to_scratch(
                     val_expr, val_slot, n_words, sel_w, indent, signed_override=False
                 )
                 if val_lines is None:
-                    self._free_scratch(*alloc_slots)
+                    self._free_scratch(val_slot, sel_slot)
                     return None
                 setup.extend(val_lines)
-                word_conds = []
-                for wi in range(n_words):
-                    if is_casex:
-                        # don't-care bits = x/z in either operand.
-                        word_conds.append(
-                            f"((_sc{sel_slot}_v[{wi}] ^ _sc{val_slot}_v[{wi}])"
-                            f" & ~(_sc{sel_slot}_m[{wi}] | _sc{val_slot}_m[{wi}])) == 0"
-                        )
-                    else:
-                        word_conds.append(
-                            f"(_sc{sel_slot}_v[{wi}] == _sc{val_slot}_v[{wi}])"
-                            f" and (_sc{sel_slot}_m[{wi}] == _sc{val_slot}_m[{wi}])"
-                        )
-                conds.append(" and ".join(word_conds))
-            cond = " or ".join(conds) if conds else "0"
-
-            n = self._et_count
-            self._et_count += 1
-            flag = f"_casematch{n}"
+                # Compare before reusing this scratch slot for the next value.
+                # The selector stays live; every item match flag is frozen
+                # before any case body can overwrite scratch arrays.
+                setup.append(
+                    f"{pad}if not {flag} and wide_case_match("
+                    f"_sc{sel_slot}_v, _sc{sel_slot}_m, _sc{val_slot}_v, _sc{val_slot}_m,"
+                    f" {n_words}, {int(is_casex)}):"
+                )
+                setup.append(f"{pad}    {flag} = 1")
+                self._free_scratch(val_slot)
             # `cdef int`, not `cdef bint` -- `_gen_sections.py`'s
             # `_hoist_inline_cdefs` (which every process-function
             # generator already runs specifically because Cython forbids
@@ -2523,10 +2582,9 @@ class _StmtEmittersMixin:
             # `bint` -- an unrecognized type passes through unhoisted and
             # fails to compile with "cdef statement not allowed here".
             # 0/1 semantics are identical for this purpose.
-            setup.append(f"{pad}cdef int {flag} = {cond}")
             match_flags.append(flag)
 
-        self._free_scratch(*alloc_slots)
+        self._free_scratch(sel_slot)
 
         lines: list[str] = []
         default_lines: list[str] = []

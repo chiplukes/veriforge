@@ -320,7 +320,8 @@ tests/
 │   ├── test_compiled_latent_risks.py    # Compiled-engine latent-risk regression tests (3 tests)
 │   ├── test_compiled_batch_run_propagation.py # batch_run event-propagation fix regression (3 tests)
 │   ├── test_compiled_wide_wrapper_recursion.py # Native AXI-Stream wrapper Cython recursion regression
-│   └── test_compiled_negedge_recursion.py # Large batch_run falling-clock Cython recursion regression
+│   ├── test_compiled_negedge_recursion.py # Large batch_run falling-clock Cython recursion regression
+│   └── test_compiled_large_expression_recursion.py # Wide arithmetic/case/edge Cython recursion regressions
 ├── test_validation/               # 3rd-party simulator cross-validation
 │   ├── __init__.py
 │   ├── test_iverilog_validation.py # iverilog VCD comparison tests (24 ref + 12 VM-vs-icarus)

@@ -1486,9 +1486,15 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     else:  # negedge
                         edge_checks.append(f"((c.val[{sid}] & 1) == 0 and (sv[{sid}] & 1) == 1)")
                 if edge_checks:
-                    cond = " or ".join(edge_checks)
-                    lines.append(f"        if not done_seq_{i} and ({cond}):")
-                    lines.append(f"            fire_seq_{i} = 1")
+                    if len(edge_checks) <= _MAX_INLINE_SENS:
+                        cond = " or ".join(edge_checks)
+                        lines.append(f"        if not done_seq_{i} and ({cond}):")
+                        lines.append(f"            fire_seq_{i} = 1")
+                    else:
+                        for j in range(0, len(edge_checks), _MAX_INLINE_SENS):
+                            cond = " or ".join(edge_checks[j : j + _MAX_INLINE_SENS])
+                            lines.append(f"        if not done_seq_{i} and not fire_seq_{i} and ({cond}):")
+                            lines.append(f"            fire_seq_{i} = 1")
 
         # Fire sequential processes (once per step, guarded by fire flag)
         if has_seq:

@@ -4059,7 +4059,7 @@ class _WideEmitterMixin:
                     if lines is None:
                         self._free_scratch(op_slot)
                         return None
-                    has_x_expr = " or ".join(f"_sc{op_slot}_m[{i}] != 0" for i in range(op_n))
+                    has_x_expr = f"wide_any_nonzero(_sc{op_slot}_m, {op_n})"
                     lines.append(f"{pad}if {has_x_expr}:")
                     for i in range(n_words):
                         lines.append(f"{pad}    _sc{slot}_v[{i}] = 0")
@@ -4573,10 +4573,12 @@ class _WideEmitterMixin:
                     # vastly larger than `a5`'s own 65-bit width (should
                     # shift to all-zero), but reading only the low word
                     # gave a small, wrong, non-saturating count.
-                    overflow_checks = [f"(_sc{aslot}_v[0] > <unsigned long long>0x7FFFFFFF)"]
-                    overflow_checks += [f"(_sc{aslot}_v[{wi}] != 0)" for wi in range(1, amount_n)]
-                    amount_expr = f"(0x7FFFFFFF if ({' or '.join(overflow_checks)}) else <int>(_sc{aslot}_v[0]))"
-                    amount_mask_expr = " | ".join(f"_sc{aslot}_m[{wi}]" for wi in range(amount_n))
+                    overflow = (
+                        f"_sc{aslot}_v[0] > <unsigned long long>0x7FFFFFFF"
+                        f" or wide_any_nonzero(_sc{aslot}_v + 1, {amount_n - 1})"
+                    )
+                    amount_expr = f"(0x7FFFFFFF if ({overflow}) else <int>(_sc{aslot}_v[0]))"
+                    amount_mask_expr = f"wide_any_nonzero(_sc{aslot}_m, {amount_n})"
                 else:
                     lines = llines
                     # Mask to `amount_w` bits before the `<int>` cast: a
