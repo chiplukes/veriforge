@@ -12,7 +12,7 @@ from veriforge.sim.endpoints import (
     EndpointCoordinator,
     MultiDomainRunner,
 )
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -202,7 +202,7 @@ def test_single_domain_endpoint_coordinator_unchanged():
     sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 2000)
     sim.run(max_time=0)
     step_run_until(sim, 30)
-    step_eval_now(sim)
+    sim.settle()
 
     src = AXIStreamSource(sim, "s_axis")
     sink = AXIStreamSink(sim, "m_axis")

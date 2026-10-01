@@ -12,6 +12,22 @@
 
 ## Open defects
 
+### Full-signal VCD tracing is very slow on large compiled designs
+
+**Status**: Open performance limitation; correctness unaffected.
+**Found**: September 2026, on the Windows `axis_col_correct` testbench.
+
+The test finishes with `--engine compiled` but appears to stall when
+`--vcd` is added. The flattened module has roughly 4,600 nets and 3,100
+variables, and default tracing also includes memory elements. The shared
+`VcdTraceSession` reads every traced signal and constructs a Python `Value`
+on every time step, so full traces scale with signal count times time steps
+even when few values change. For now, run without VCD or pass a small
+`vcd_signals` list to `Testbench.run()`. A raw value/mask callback gave a
+6.7x improvement in an isolated 7,700-signal benchmark, but it was not
+validated against the real Windows design and was left out pending a
+focused VCD performance pass.
+
 ### `vm`/`vm-fast`: loop-bearing combinational block behind a child instance doesn't re-fire on a second settle()
 
 **Status**: Open, root-caused but not fixed. `reference`/`compiled` unaffected

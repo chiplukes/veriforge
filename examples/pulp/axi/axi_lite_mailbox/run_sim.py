@@ -15,7 +15,7 @@ from pathlib import Path
 from veriforge.project import parse_files
 from veriforge.sim.endpoints import AXILiteMaster, AXILiteResponseError
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -62,7 +62,7 @@ def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=sim.time)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _make_step_sim(design, engine: str) -> Simulator:

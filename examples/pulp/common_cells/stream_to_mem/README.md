@@ -83,5 +83,6 @@ Expected pass markers:
 ```text
 PASS stream_to_mem deterministic checks
 PASS stream_to_mem python vm checks
+PASS stream_to_mem python vm-fast checks
 PASS stream_to_mem python compiled checks
 ```

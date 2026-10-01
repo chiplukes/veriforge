@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_eval_now
+from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Simulator
 
 
@@ -44,7 +44,7 @@ def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=0)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _make_sim(design, engine: str) -> Simulator:

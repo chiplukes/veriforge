@@ -32,7 +32,7 @@ from veriforge.sim.endpoints import (
     AXI4Responder,
     AXI4ResponseError,
 )
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -165,7 +165,7 @@ def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=sim.time)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _make_ram_sim(engine: str) -> Simulator:

@@ -6,7 +6,7 @@ from veriforge.dsl import Module
 from veriforge.dsl.lib import axi_stream
 from veriforge.sim.bench import PlannerOverrides, Testbench
 from veriforge.sim.endpoints import AXIStreamFrame, AXIStreamSink, AXIStreamSource, EndpointCoordinator, PauseGenerator
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 from .engines import ENGINES
@@ -120,7 +120,7 @@ def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=0)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _make_sim_for(module, engine: str, signal_names: list[str]) -> Simulator:

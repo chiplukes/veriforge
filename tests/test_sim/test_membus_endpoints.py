@@ -15,7 +15,7 @@ import pytest
 from veriforge.dsl import Module
 from veriforge.sim.endpoints import MemBusMaster, MemBusResponder
 from veriforge.sim.endpoints.detect import detect_interfaces, detect_membus_interfaces
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -170,7 +170,7 @@ def _settle(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=sim.time)
     else:
-        step_eval_now(sim)
+        sim.settle()
 
 
 def _make_stub_sim(engine: str) -> Simulator:

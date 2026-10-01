@@ -14,7 +14,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -45,11 +45,11 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str, clock_name: str = "src_clk_i") -> None:
+def _settle_drives(sim: Simulator, engine: str) -> None:
     if engine == "reference":
         sim.run(max_time=0)
     else:
-        step_eval_now(sim, clock_name)
+        sim.settle()
 
 
 def _run_until_condition(sim: Simulator, limit: int, predicate, message: str) -> None:

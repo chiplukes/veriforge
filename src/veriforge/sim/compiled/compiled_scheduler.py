@@ -448,9 +448,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                 mod = self._compiler.compile_pyx_files(file_paths, source_hash, f"compiled_{module.name}")
             except Exception as exc:
                 raise RuntimeError(
-                    f"Failed to compile Cython extension for module '{module.name}'. "
-                    f"Ensure a C compiler is available or use engine='vm'. "
-                    f"Original error: {exc}"
+                    f"Failed to compile Cython extension for module '{module.name}'. Original error: {exc}"
                 ) from exc
 
         self._sim = mod.CompiledSim()

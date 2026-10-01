@@ -70,5 +70,6 @@ Success is indicated by:
 ```text
 PASS rr_arb_tree deterministic checks
 PASS rr_arb_tree python vm checks
+PASS rr_arb_tree python vm-fast checks
 PASS rr_arb_tree python compiled checks
 ```
