@@ -4,6 +4,8 @@ Tests the ``generate_testbench()`` function that auto-generates Verilog
 testbenches for DUT modules.
 """
 
+import pytest
+
 from veriforge.dsl import Module
 from veriforge.dsl.lib import axi4_lite, axi_stream
 from veriforge.dsl.testbench import (
@@ -18,6 +20,8 @@ from veriforge.codegen import emit_module
 from veriforge.model.ports import Port, PortDirection
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
+
+from tests.test_sim.engines import ENGINES
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +278,17 @@ class TestResetGeneration:
 class TestPythonTestbenchGeneration:
     """Tests for Python testbench skeleton generation."""
 
+    @pytest.mark.parametrize("engine", ENGINES)
+    @pytest.mark.parametrize("enhanced", [False, True])
+    def test_generated_clock_reset_scaffold_runs(self, engine, enhanced):
+        dut = _build_dut(("clk", "input", 1), ("rst_n", "input", 1))
+        namespace = {}
+        exec(generate_python_testbench(dut, enhanced=enhanced), namespace)  # noqa: S102
+
+        sim = namespace["_make_sim"](dut, engine=engine)
+        assert sim.time >= 25
+        assert sim.read("rst_n") == 1
+
     def test_python_skeleton_includes_clock_and_reset_helpers(self):
         dut = _build_dut(("clk", "input", 1), ("rst", "input", 1), ("q", "output", 8))
 
@@ -281,8 +296,8 @@ class TestPythonTestbenchGeneration:
 
         assert 'def _make_sim(module, *, design=None, engine: str = "reference") -> Simulator:' in code
         assert 'sim.schedule_clock(Clock(sim.signal("clk"), period=10), 1000)' in code
-        assert 'step_drive(sim, engine, "rst", 1)' in code
-        assert 'step_drive(sim, engine, "rst", 0)' in code
+        assert 'sim.drive("rst", 1)' in code
+        assert 'sim.drive("rst", 0)' in code
 
     def test_python_skeleton_references_axis_endpoints(self):
         m = Module("axis_dut")

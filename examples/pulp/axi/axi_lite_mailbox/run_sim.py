@@ -59,10 +59,7 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
 
 
 def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=sim.time)
-    else:
-        sim.settle()
+    sim.settle()
 
 
 def _make_step_sim(design, engine: str) -> Simulator:

@@ -46,7 +46,7 @@ def _generate_for_multi_domain_dut() -> str:
 def test_bench_style_emits_testbench_framework_imports():
     text = _generate_for_multi_domain_dut()
     assert "from veriforge.sim.bench import BenchTimeoutError, PlannerOverrides, Testbench" in text
-    # legacy step_drive imports must NOT appear in --style bench output
+    # The bench scaffold does not expose simulator step helpers.
     assert "step_drive" not in text
     assert "Simulator(" not in text
 
@@ -172,14 +172,14 @@ def test_bench_style_requires_no_axis_emits_raw_signal_hint():
     assert 'DUT_PATH = Path("path/to/your_dut.v")' in text
 
 
-def test_legacy_style_unchanged_when_style_omitted():
-    """Default style='legacy' continues to emit the original Simulator scaffold."""
+def test_legacy_style_uses_simulator_scaffold_when_style_omitted():
+    """Default style='legacy' emits a Simulator-based scaffold."""
     dut = _parse(DUT_PATH.read_text())
     overrides = PlannerOverrides(
         iface_domains={"pix_in": "pclk", "pix_out": "pclk", "rtr_in": "rclk", "rtr_out": "rclk"},
     )
     text = generate_python_testbench(dut, enhanced=True, overrides=overrides)  # style defaults to "legacy"
-    assert "step_drive" in text
+    assert "sim.drive(" in text
     assert "Simulator(" in text
     assert "bench.iface(" not in text
 

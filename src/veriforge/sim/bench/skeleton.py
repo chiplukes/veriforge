@@ -245,7 +245,7 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
 
     When ``style='bench'`` (combined with ``enhanced=True``), the generator
     emits a scaffold built on the higher-level :class:`Testbench` framework
-    instead of the legacy ``Simulator`` + ``step_drive`` style: per-interface
+    instead of the legacy ``Simulator``-based style: per-interface
     proxy stubs (``bench.iface(...).put(...)`` / ``.expect(...)``), inferred
     ``iface_layouts`` (elements_per_beat / element_size_bits derived from
     TKEEP / TDATA widths), an ``argparse --vcd`` flag, and a
@@ -286,7 +286,7 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
     axi_lite_interfaces = detect_axi_lite_interfaces(dut)
 
     imports = [
-        "from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until",
+        "from veriforge.sim.step_harness import step_run_until",
         "from veriforge.sim.testbench import Clock, Simulator",
     ]
 
@@ -305,13 +305,6 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         *imports,
         "",
         "",
-        "def _settle_drives(sim: Simulator, engine: str) -> None:",
-        '    if engine == "reference":',
-        "        sim.run(max_time=0)",
-        "    else:",
-        "        step_eval_now(sim)",
-        "",
-        "",
         'def _make_sim(module, *, design=None, engine: str = "reference") -> Simulator:',
         "    sim = Simulator(module, engine=engine, design=design)",
         "    sim.run(max_time=0)",
@@ -324,8 +317,8 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
                 "    for signal_name in [",
                 *[f'        "{name}",' for name in init_ports],
                 "    ]:",
-                "        step_drive(sim, engine, signal_name, 0)",
-                "    _settle_drives(sim, engine)",
+                "        sim.drive(signal_name, 0)",
+                "    sim.settle()",
             ]
         )
 
@@ -333,7 +326,7 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         lines.extend(
             [
                 f'    sim.schedule_clock(Clock(sim.signal("{clocks[0]}"), period={clock_period}), {clock_max_time})',
-                "    _settle_drives(sim, engine)",
+                "    sim.settle()",
             ]
         )
 
@@ -343,11 +336,11 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         release_level = 1 - assert_level
         lines.extend(
             [
-                f'    step_drive(sim, engine, "{first_reset}", {assert_level})',
-                "    _settle_drives(sim, engine)",
+                f'    sim.drive("{first_reset}", {assert_level})',
+                "    sim.settle()",
                 f"    step_run_until(sim, {reset_release_time})",
-                f'    step_drive(sim, engine, "{first_reset}", {release_level})',
-                "    _settle_drives(sim, engine)",
+                f'    sim.drive("{first_reset}", {release_level})',
+                "    sim.settle()",
             ]
         )
     else:
@@ -517,7 +510,7 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
 
     # ── Imports ────────────────────────────────────────────────
     imports = [
-        "from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until",
+        "from veriforge.sim.step_harness import step_run_until",
         "from veriforge.sim.testbench import Clock, Simulator",
     ]
 
@@ -546,13 +539,6 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         *imports,
         "",
         "",
-        "def _settle_drives(sim: Simulator, engine: str) -> None:",
-        '    if engine == "reference":',
-        "        sim.run(max_time=0)",
-        "    else:",
-        "        step_eval_now(sim)",
-        "",
-        "",
         'def _make_sim(module, *, design=None, engine: str = "reference") -> Simulator:',
         "    sim = Simulator(module, engine=engine, design=design)",
         "    sim.run(max_time=0)",
@@ -566,8 +552,8 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
                 "    for signal_name in [",
                 *[f'        "{name}",' for name in init_ports],
                 "    ]:",
-                "        step_drive(sim, engine, signal_name, 0)",
-                "    _settle_drives(sim, engine)",
+                "        sim.drive(signal_name, 0)",
+                "    sim.settle()",
             ]
         )
 
@@ -578,7 +564,7 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
             [
                 f"    # domain {d.name!r}: clock {d.clock.name!r}",
                 f'    sim.schedule_clock(Clock(sim.signal("{d.clock.name}"), period={period}), {clock_max_time})',
-                "    _settle_drives(sim, engine)",
+                "    sim.settle()",
             ]
         )
 
@@ -592,11 +578,11 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         release_level = 1 - assert_level
         polarity_label = "active_low" if active_low else "active_high"
         lines.append(f"    # domain {d.name!r}: reset {d.reset.name!r} ({polarity_label})")
-        lines.append(f'    step_drive(sim, engine, "{d.reset.name}", {assert_level})')
-        lines.append("    _settle_drives(sim, engine)")
+        lines.append(f'    sim.drive("{d.reset.name}", {assert_level})')
+        lines.append("    sim.settle()")
         lines.append(f"    step_run_until(sim, {reset_release_time})")
-        lines.append(f'    step_drive(sim, engine, "{d.reset.name}", {release_level})')
-        lines.append("    _settle_drives(sim, engine)")
+        lines.append(f'    sim.drive("{d.reset.name}", {release_level})')
+        lines.append("    sim.settle()")
 
     if not real_domains:
         lines.append("    # No clock domains were detected; initialize DUT inputs as needed.")

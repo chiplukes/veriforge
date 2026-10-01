@@ -60,10 +60,7 @@ def _expect_value(actual: int, expected: int, message: str) -> None:
 
 
 def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=sim.time)
-    else:
-        sim.settle()
+    sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:

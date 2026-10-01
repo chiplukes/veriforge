@@ -1,4 +1,4 @@
-"""Helpers for Python-driven stepped simulation on VM and compiled engines."""
+"""Compatibility helpers for Python-driven stepped simulation."""
 
 from __future__ import annotations
 
@@ -8,13 +8,8 @@ from veriforge.sim.testbench import Simulator
 
 
 def step_drive(sim: Simulator, engine: str, signal_name: str, value: Any) -> None:
-    """Drive a signal and mark it dirty for the VM interpreter when needed."""
+    """Compatibility wrapper for ``sim.drive()``; *engine* is unused."""
     sim.drive(signal_name, value)
-    if engine in ("vm", "vm-fast"):
-        sched = sim._sched
-        sid = sched.compiler.signal_map.get(signal_name)
-        if sid is not None:
-            sched.interpreter.dirty.add(sid)
 
 
 def step_eval_now(sim: Simulator, clock_name: str = "clk") -> None:

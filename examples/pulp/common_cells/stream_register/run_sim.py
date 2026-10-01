@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -41,13 +41,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=0)
-    else:
-        sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -67,87 +60,85 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "clr", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("clr", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _check_capture_without_passthrough(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 1)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x11)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x11)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_register should not pass valid combinationally")
     _expect(sim, "ready_o", 1, "empty stream_register should accept input")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "capture edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "captured item should become valid after one edge")
     _expect(sim, "data_o", 0x11, "captured item payload mismatch")
 
 
 def _check_blocked_overwrite_and_refill(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "ready_o", 0, "full stream_register should block new input while stalled")
 
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x22)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x22)
+    sim.settle()
     _expect(sim, "data_o", 0x11, "blocked overwrite should not disturb the buffered head")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "blocked overwrite edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "blocked overwrite should leave the stored item valid")
     _expect(sim, "data_o", 0x11, "blocked overwrite should preserve the stored payload")
 
-    step_drive(sim, engine, "ready_i", 1)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x33)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x33)
+    sim.settle()
     _expect(sim, "ready_o", 1, "stream_register should reopen immediately when draining")
     _expect(sim, "data_o", 0x11, "old payload should remain visible until the drain edge")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "drain/refill edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "drain/refill should keep the register occupied")
     _expect(sim, "data_o", 0x33, "drain/refill should replace the payload with the new item")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "final drain edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_register should empty after draining the replacement item")
     _expect(sim, "ready_o", 1, "empty stream_register should become ready again")
 
 
 def _check_synchronous_clear(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x44)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x44)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "clear setup edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "clear scenario should start with a stored item")
     _expect(sim, "data_o", 0x44, "clear scenario payload mismatch")
 
-    step_drive(sim, engine, "clr", 1)
-    _settle_drives(sim, engine)
+    sim.drive("clr", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "clear edge not observed")
-    step_drive(sim, engine, "clr", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clr", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "synchronous clear should empty the stream_register")
     _expect(sim, "ready_o", 1, "synchronous clear should restore ready")
 

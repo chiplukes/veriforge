@@ -101,8 +101,8 @@ class TestEnhancedSingleDomain:
 
     def test_drives_active_low_reset(self):
         text = generate_python_testbench(_parse(SINGLE_DOMAIN), enhanced=True)
-        assert 'step_drive(sim, engine, "rst_n", 0)' in text
-        assert 'step_drive(sim, engine, "rst_n", 1)' in text
+        assert 'sim.drive("rst_n", 0)' in text
+        assert 'sim.drive("rst_n", 1)' in text
 
     def test_emits_axis_endpoint_grouped_by_domain(self):
         text = generate_python_testbench(_parse(SINGLE_DOMAIN), enhanced=True)
@@ -119,10 +119,10 @@ class TestEnhancedTwoDomain:
 
     def test_releases_each_reset(self):
         text = generate_python_testbench(_parse(TWO_DOMAIN), enhanced=True)
-        assert 'step_drive(sim, engine, "aresetn", 0)' in text
-        assert 'step_drive(sim, engine, "aresetn", 1)' in text
-        assert 'step_drive(sim, engine, "brst_n", 0)' in text
-        assert 'step_drive(sim, engine, "brst_n", 1)' in text
+        assert 'sim.drive("aresetn", 0)' in text
+        assert 'sim.drive("aresetn", 1)' in text
+        assert 'sim.drive("brst_n", 0)' in text
+        assert 'sim.drive("brst_n", 1)' in text
 
     def test_groups_endpoints_per_domain(self):
         text = generate_python_testbench(_parse(TWO_DOMAIN), enhanced=True)
@@ -136,8 +136,8 @@ class TestEnhancedTwoDomain:
 class TestEnhancedCombinational:
     def test_no_clock_no_reset_no_endpoints(self):
         text = generate_python_testbench(_parse(COMB_ONLY), enhanced=True)
-        assert "_schedule_clock_events" not in text
-        assert 'step_drive(sim, engine, "rst' not in text
+        assert "sim.schedule_clock(" not in text
+        assert 'sim.drive("rst' not in text
         assert "No AXI-Stream or AXI-Lite interfaces were detected" in text
 
 
