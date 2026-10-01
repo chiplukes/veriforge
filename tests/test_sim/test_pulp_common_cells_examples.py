@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-Cython = pytest.importorskip("Cython")
-
 from veriforge.project import parse_files  # noqa: E402
 from veriforge.sim.example_runner import display_lines  # noqa: E402
 from veriforge.sim.step_harness import step_drive, step_run_until  # noqa: E402

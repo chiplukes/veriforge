@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pytest
 
-Cython = pytest.importorskip("Cython")
-
 from veriforge.project import parse_files  # noqa: E402
 from veriforge.sim.endpoints import (  # noqa: E402
     AXILiteMaster,

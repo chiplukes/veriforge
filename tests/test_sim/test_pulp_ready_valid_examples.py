@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-Cython = pytest.importorskip("Cython")
-
 from veriforge.project import parse_files  # noqa: E402
 from veriforge.sim.example_runner import display_lines  # noqa: E402
 from veriforge.sim.step_harness import step_drive, step_run_until  # noqa: E402
@@ -14,6 +12,7 @@ from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 from .engines import ENGINES  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TYPED_XBAR_ENGINES = [engine for engine in ENGINES if engine != "vm-fast"]
 
 
 def _read_int(sim: Simulator, signal_name: str) -> int:
@@ -2070,7 +2069,7 @@ def test_stream_arbiter_flushable_cross_engine(tmp_path, engine):
     _expect(sim, "inp_ready_o", 0b0000, "idle stream_arbiter_flushable should not assert any input ready")
 
 
-@pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+@pytest.mark.parametrize("engine", TYPED_XBAR_ENGINES)
 def test_typed_stream_xbar_cross_engine(tmp_path, engine):
     design = _parse_typed_stream_xbar_design(tmp_path)
     sim = _make_step_sim(design, "sxt0_tb", engine)
@@ -2101,7 +2100,7 @@ def test_typed_stream_xbar_cross_engine(tmp_path, engine):
     _expect(sim, "idx_o", 0b0001, "typed stream_xbar should report input 1 after rotation")
 
 
-@pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+@pytest.mark.parametrize("engine", TYPED_XBAR_ENGINES)
 def test_typed_stream_xbar_flush_reset_cross_engine(tmp_path, engine):
     design = _parse_typed_stream_xbar_design(tmp_path)
     sim = _make_step_sim(design, "sxt0_tb", engine)
@@ -2132,7 +2131,7 @@ def test_typed_stream_xbar_flush_reset_cross_engine(tmp_path, engine):
     _expect(sim, "ready_o", 0b001, "typed stream_xbar flush should restore first-contender ready")
 
 
-@pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+@pytest.mark.parametrize("engine", TYPED_XBAR_ENGINES)
 def test_typed_stream_xbar_spill_cross_engine(tmp_path, engine):
     design = _parse_typed_stream_xbar_design(tmp_path)
     sim = _make_step_sim(design, "sxt1_tb", engine)
@@ -2177,7 +2176,7 @@ def test_typed_stream_xbar_spill_cross_engine(tmp_path, engine):
     _expect(sim, "idx_o", 0b1001, "typed spill stream_xbar should advance output 0 idx to input 1")
 
 
-@pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+@pytest.mark.parametrize("engine", TYPED_XBAR_ENGINES)
 def test_typed_stream_xbar_spill_flush_reset_cross_engine(tmp_path, engine):
     design = _parse_typed_stream_xbar_design(tmp_path)
     sim = _make_step_sim(design, "sxt1_tb", engine)
