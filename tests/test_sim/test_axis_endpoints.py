@@ -129,7 +129,7 @@ def _make_sim_for(module, engine: str, signal_names: list[str]) -> Simulator:
     for signal_name in signal_names:
         step_drive(sim, engine, signal_name, 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 1000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 1000)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst", 1)

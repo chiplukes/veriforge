@@ -86,10 +86,10 @@ for a_val, b_val, op_val, expected, desc in test_cases:
     sim.drive("a", a_val)
     sim.drive("b", b_val)
     sim.drive("op", op_val)
-    sim.run(lambda s: None, max_time=10)
+    sim.settle()
     actual = int(sim.read("result"))
     zero_flag = int(sim.read("zero"))
-    passed = actual == expected
+    passed = actual == expected and zero_flag == int(expected == 0)
     status = "PASS" if passed else "FAIL"
     print(f"//   [{status}] {desc} → got {actual}, zero={zero_flag}")
     if not passed:

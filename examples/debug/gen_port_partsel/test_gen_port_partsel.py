@@ -8,7 +8,9 @@ Expected combined_out = 0xA3_A2_A1_A0 (COUNT=4, WIDTH=8).
 """
 
 from pathlib import Path
+
 from veriforge.project import parse_files
+from veriforge.sim.example_runner import available_engines
 from veriforge.sim.testbench import Simulator
 
 RTL = Path(__file__).parent / "gen_port_partsel.v"
@@ -22,16 +24,16 @@ def run_case(engine: str) -> None:
     design = parse_files([str(RTL)])
     mod = design.get_module("gen_port_partsel")
     sim = Simulator(mod, design=design, engine=engine)
-    sim.run(max_time=0)
+    sim.settle()
 
-    got = int(sim.signal("combined_out").value)
+    got = int(sim.read("combined_out"))
     ok = got == EXPECTED
     print(f"[{engine}] combined_out: got=0x{got:08x} exp=0x{EXPECTED:08x} -> {'PASS' if ok else 'FAIL'}")
     assert ok, f"combined_out mismatch: got 0x{got:08x}, expected 0x{EXPECTED:08x}"
 
 
 def main() -> None:
-    for engine in ("vm", "reference"):
+    for engine in available_engines():
         run_case(engine)
     print("All cases passed.")
 

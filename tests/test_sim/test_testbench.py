@@ -19,7 +19,7 @@ from veriforge.model.ports import Port, PortDirection
 from veriforge.model.statements import BlockingAssign, IfStatement, NonblockingAssign, SeqBlock
 from veriforge.model.variables import Variable, VariableKind
 from veriforge.sim.scheduler import Scheduler
-from veriforge.sim.step_harness import step_drive, step_eval_now, step_run_until
+from veriforge.sim.step_harness import step_drive, step_run_until
 from veriforge.sim.testbench import (
     Clock,
     SignalHandle,
@@ -289,6 +289,18 @@ class TestSimulator:
 
 
 class TestSimulatorClock:
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_scheduled_clock_steps(self, engine):
+        sim = Simulator(Module("clk_mod", nets=[Net("clk", NetKind.WIRE)]), engine=engine)
+        sim.schedule_clock(Clock(sim.signal("clk"), period=10), 10)
+
+        assert sim.run_step() is True
+        assert sim.time == 0
+        assert sim.read("clk") == 1
+        assert sim.run_step() is True
+        assert sim.time == 5
+        assert sim.read("clk") == 0
+
     @pytest.mark.parametrize("engine", ENGINES)
     def test_clock_toggles(self, engine):
         """Clock should toggle the signal over time."""
@@ -588,14 +600,14 @@ class TestSteppedHarnessCrossEngine:
     def test_manual_clock_schedule_and_drive(self, engine):
         """Manual stepped drive/read loops stay aligned across engines."""
         sim = Simulator(_make_step_probe(), engine=engine)
-        sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 40)
+        sim.schedule_clock(Clock(sim.signal("clk"), period=10), 40)
         sim.run(max_time=0)
 
         step_drive(sim, engine, "clk", 0)
         step_drive(sim, engine, "rst_n", 0)
         step_drive(sim, engine, "load", 0)
         step_drive(sim, engine, "d", 0)
-        step_eval_now(sim)
+        sim.settle()
 
         assert int(sim.read("accept")) == 0
         assert int(sim.read("q")) == 0
@@ -604,7 +616,7 @@ class TestSteppedHarnessCrossEngine:
         step_drive(sim, engine, "rst_n", 1)
         step_drive(sim, engine, "d", 0xA5)
         step_drive(sim, engine, "load", 1)
-        step_eval_now(sim)
+        sim.settle()
 
         assert int(sim.read("accept")) == 1
         assert int(sim.read("q")) == 0
@@ -614,7 +626,7 @@ class TestSteppedHarnessCrossEngine:
 
         step_drive(sim, engine, "load", 0)
         step_drive(sim, engine, "d", 0x3C)
-        step_eval_now(sim)
+        sim.settle()
 
         assert int(sim.read("accept")) == 0
         assert int(sim.read("q")) == 0xA5

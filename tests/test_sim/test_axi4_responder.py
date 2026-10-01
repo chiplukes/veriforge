@@ -8,17 +8,9 @@ practice, driving real RTL.
 ``AXI4Responder`` is tested via raw signal poking on a bare stub, mirroring
 ``test_axi_lite_master.py``'s strict-mode section.
 
-Pure-Python ``AXI4Master`` and ``AXI4Responder`` *can* be paired directly
-against each other — see the passthrough tests at the bottom of this file,
-which pair them through both a purely combinational (``assign``-only) and a
-registered slave-to-master DUT, both successfully. The one combination that
-does **not** work reliably is pairing them with **no module at all** between
-them (both endpoints attached to a bare, logic-free stub's own top-level
-ports) — confirmed pre-existing, independent of the changes in this session,
-and not a realistic scenario in practice (every real test has a DUT). Build
-your simulator the way `Testbench`/`bench.run()` do — via
-`sim._schedule_clock_events(Clock(...), n)`, not `sim.fork(Clock(...))` — to
-match this file's convention and avoid surprises.
+The passthrough tests pair ``AXI4Master`` and ``AXI4Responder`` through
+combinational and registered DUTs. Stepped checks queue clock edges with
+``sim.schedule_clock(Clock(...), n)`` before calling ``run_step()``.
 """
 
 from __future__ import annotations
@@ -195,7 +187,7 @@ def _make_ram_sim(engine: str) -> Simulator:
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 4000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst_n", 0)
@@ -310,7 +302,7 @@ def _make_stub_sim(engine: str, *, id_width: int = 0, write: bool = True, read: 
     sim = Simulator(_axi4_stub_module(id_width=id_width, write=write, read=read), engine=engine)
     sim.run(max_time=0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 4000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     return sim
@@ -587,7 +579,7 @@ def test_axi4_responder_rd_latency_one_no_dropped_or_shifted_beat(engine: str) -
     initial_memory = {i * 4: values[i] for i in range(4)}
     sim = Simulator(_parse(AXI4_READ_MASTER_FSM_SRC), engine=engine)
     sim.run(max_time=0)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 4000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst_n", 0)
     step_run_until(sim, 32)
@@ -877,7 +869,7 @@ endmodule
 def _make_passthru_sim(engine: str, src: str) -> Simulator:
     sim = Simulator(_parse(src), engine=engine)
     sim.run(max_time=0)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 20000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 20000)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst_n", 0)

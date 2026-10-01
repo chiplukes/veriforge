@@ -97,8 +97,8 @@ def _make_step_sim(design, engine: str, top_name: str = "cdc_reset_ctrlr_tb_loca
     ]:
         step_drive(sim, engine, signal_name, value)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("a_clk_i"), period=10), MAX_TIME)
-    sim._schedule_clock_events(Clock(sim.signal("b_clk_i"), period=14), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("a_clk_i"), period=10), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("b_clk_i"), period=14), MAX_TIME)
     _settle_drives(sim, engine)
     return sim
 

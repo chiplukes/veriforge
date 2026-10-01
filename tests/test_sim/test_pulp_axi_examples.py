@@ -145,7 +145,7 @@ def _make_step_sim(design, top_name: str, engine: str, max_time: int = 320) -> S
         except Exception:  # noqa: S110 - optional testbench signals vary by top module
             pass
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), max_time)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), max_time)
     _settle_drives(sim, engine)
     step_run_until(sim, 22)
     step_drive(sim, engine, "rst_n", 1)
@@ -319,8 +319,8 @@ def _make_axi_cdc_step_sim(design, engine: str, max_time: int = 320) -> Simulato
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_axi_cdc_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("src_clk_i"), period=10), max_time)
-    sim._schedule_clock_events(Clock(sim.signal("dst_clk_i"), period=14), max_time)
+    sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), max_time)
+    sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), max_time)
     _settle_axi_cdc_drives(sim, engine)
     return sim
 
@@ -357,8 +357,8 @@ def _make_axi_cdc_req_fifo_step_sim(design, engine: str, max_time: int = 360) ->
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_axi_cdc_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("src_clk_i"), period=10), max_time)
-    sim._schedule_clock_events(Clock(sim.signal("dst_clk_i"), period=14), max_time)
+    sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), max_time)
+    sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), max_time)
     _settle_axi_cdc_drives(sim, engine)
     return sim
 
@@ -390,8 +390,8 @@ def _make_axi_cdc_resp_fifo_step_sim(design, engine: str, max_time: int = 360) -
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_axi_cdc_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("src_clk_i"), period=10), max_time)
-    sim._schedule_clock_events(Clock(sim.signal("dst_clk_i"), period=14), max_time)
+    sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), max_time)
+    sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), max_time)
     _settle_axi_cdc_drives(sim, engine)
     return sim
 

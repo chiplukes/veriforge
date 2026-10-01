@@ -189,8 +189,10 @@ class Simulator:  # cm:a5c8f4
     @property
     def display_output(self) -> list[str]:
         """Collected $display output."""
-        # Flush any pending $write buffer from the executor
         sched = self._sched
+        if self._engine == "compiled":
+            sched._drain_compiled_output()
+        # Flush any pending $write buffer from the executor
         executor = getattr(sched, "executor", None) or getattr(sched, "_ref_executor", None)
         if executor is not None and executor._write_buffer:
             sched.display_output.append(executor._write_buffer)
@@ -380,6 +382,14 @@ class Simulator:  # cm:a5c8f4
     def fork(self, clock: Clock) -> None:
         """Start a clock generator as a background process."""
         self._clocks.append(clock)
+
+    def schedule_clock(self, clock: Clock, max_time: int) -> None:
+        """Queue clock edges through *max_time* for a ``run_step()`` testbench.
+
+        The first rising edge occurs at time zero. Call this once before
+        stepping; ``fork()`` is for clocks driven by ``run()`` instead.
+        """
+        self._schedule_clock_events(clock, max_time)
 
     def run(
         self,

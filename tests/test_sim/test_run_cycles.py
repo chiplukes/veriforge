@@ -64,6 +64,16 @@ def _decide(total: int) -> int:
 
 
 class TestRunCyclesReactiveStimulus:
+    def test_display_output_after_batch_run(self):
+        source = 'module batch_display(input clk); always @(posedge clk) $display("tick"); endmodule'
+        mod = tree_to_design(verilog_parser(start="source_text").build_tree(source)).modules[0]
+        sim = Simulator(mod, engine="compiled")
+        sim.drive("clk", 0)
+
+        assert sim.batch_run(3, "clk") == 3
+        assert sim.display_output == ["tick", "tick", "tick"]
+        assert sim.display_output == ["tick", "tick", "tick"]
+
     def test_run_cycles_matches_run_step_with_reactive_decisions(self):
         chunk = 4
         checkpoints = 6
@@ -75,7 +85,7 @@ class TestRunCyclesReactiveStimulus:
         clk_step = Clock(sim_step.signal("clk"), period=clock_period)
         sim_step.fork(clk_step)
         max_time = (2 + checkpoints * chunk + 2) * clock_period
-        sim_step._schedule_clock_events(clk_step, max_time)
+        sim_step.schedule_clock(clk_step, max_time)
         sim_step.drive("rst", Value(1, width=1))
         sim_step.drive("load_en", Value(0, width=1))
 

@@ -416,8 +416,8 @@ def _make_isochronous_4phase_sim(design, engine: str) -> Simulator:
     step_drive(sim, engine, "src_valid_i", 0)
     step_drive(sim, engine, "dst_ready_i", 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("src_clk_i"), period=10), 220)
-    sim._schedule_clock_events(Clock(sim.signal("dst_clk_i"), period=20), 220)
+    sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), 220)
+    sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=20), 220)
     _settle_drives(sim, engine)
     return sim
 
@@ -456,8 +456,8 @@ def _make_cdc_reset_ctrlr_sim_for_top(design, top_name: str, engine: str) -> Sim
     ]:
         step_drive(sim, engine, signal_name, value)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("a_clk_i"), period=10), 2400)
-    sim._schedule_clock_events(Clock(sim.signal("b_clk_i"), period=14), 2400)
+    sim.schedule_clock(Clock(sim.signal("a_clk_i"), period=10), 2400)
+    sim.schedule_clock(Clock(sim.signal("b_clk_i"), period=14), 2400)
     _settle_drives(sim, engine)
     return sim
 
@@ -532,7 +532,7 @@ def _make_rstgen_bypass_sim(design, engine: str) -> Simulator:
     _settle_drives(sim, engine, "clk_i")
     step_drive(sim, engine, "rst_ni", 0)
     _settle_drives(sim, engine, "clk_i")
-    sim._schedule_clock_events(Clock(sim.signal("clk_i"), period=10), 120)
+    sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 120)
     _settle_drives(sim, engine, "clk_i")
     return sim
 
@@ -549,7 +549,7 @@ def _make_rstgen_sim(design, engine: str) -> Simulator:
     _settle_drives(sim, engine, "clk_i")
     step_drive(sim, engine, "rst_ni", 0)
     _settle_drives(sim, engine, "clk_i")
-    sim._schedule_clock_events(Clock(sim.signal("clk_i"), period=10), 170)
+    sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 170)
     _settle_drives(sim, engine, "clk_i")
     return sim
 
@@ -566,7 +566,7 @@ def _make_sync_sim(design, top_name: str, engine: str) -> Simulator:
     _settle_drives(sim, engine, "clk_i")
     step_drive(sim, engine, "rst_ni", 0)
     _settle_drives(sim, engine, "clk_i")
-    sim._schedule_clock_events(Clock(sim.signal("clk_i"), period=10), 180)
+    sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 180)
     _settle_drives(sim, engine, "clk_i")
     return sim
 
@@ -584,7 +584,7 @@ def _make_sync_wedge_sim(design, engine: str) -> Simulator:
     _settle_drives(sim, engine, "clk_i")
     step_drive(sim, engine, "rst_ni", 0)
     _settle_drives(sim, engine, "clk_i")
-    sim._schedule_clock_events(Clock(sim.signal("clk_i"), period=10), 190)
+    sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 190)
     _settle_drives(sim, engine, "clk_i")
     return sim
 

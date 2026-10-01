@@ -103,7 +103,7 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
     _settle_drives(sim, engine)
     step_run_until(sim, 22)
     step_drive(sim, engine, "rst_n", 1)

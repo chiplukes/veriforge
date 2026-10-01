@@ -113,11 +113,10 @@ def main() -> int:
     print(f"\nbatch_run: {TOTAL_CYCLES} cycles, reset release at cycle {RESET_CYCLES}...")
     t0 = time.time()
     completed = sim.batch_run(TOTAL_CYCLES, "clk", clock_period=CLOCK_PERIOD, events=events)
-    sim._sched._drain_compiled_output()
     t_batch = time.time() - t0
     print(f"  Completed {completed} cycles in {t_batch:.2f}s")
-    if sim._sched._sim.is_finished():
-        print("  ($finish encountered)")
+    if completed < TOTAL_CYCLES:
+        print("  (simulation stopped early)")
 
     # ── Display output ───────────────────────────────────────────────
     if sim.display_output:

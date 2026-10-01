@@ -256,7 +256,7 @@ def test_wide_signal_catchall_cross_engine(engine, scenario, tmp_path):
 
     clk = Clock(sim.signal("clk"), period=10)
     sim.fork(clk)
-    sim._schedule_clock_events(clk, 80)
+    sim.schedule_clock(clk, 80)
 
     for _ in range(2):
         sim.run_step()

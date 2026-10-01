@@ -12,20 +12,15 @@ With M_COUNT=4, S_COUNT=4, the 4 generate iterations produce:
 """
 
 from pathlib import Path
+
 from veriforge.project import parse_files
+from veriforge.sim.example_runner import available_engines
 from veriforge.sim.testbench import Simulator
 
 RTL = Path(__file__).parent / "gen_partselect.v"
 
 M_COUNT = 4
 S_COUNT = 4
-
-
-def make_sim() -> Simulator:
-    design = parse_files([str(RTL)])
-    mod = design.get_module("gen_partselect")
-    sim = Simulator(mod, design=design, engine="vm")
-    return sim
 
 
 def run_case(engine: str, desc: str, m_bvalid: int, b_select: list[int], bready: int):
@@ -42,10 +37,10 @@ def run_case(engine: str, desc: str, m_bvalid: int, b_select: list[int], bready:
     sim.drive("int_m_axi_bvalid", m_bvalid)
     sim.drive("b_select", bsel_packed)
     sim.drive("int_axi_bready", bready)
-    sim.run(max_time=0)  # evaluate combinational logic
+    sim.settle()
 
-    got_bvalid = int(sim.signal("int_axi_bvalid").value)
-    got_bready = int(sim.signal("int_m_axi_bready").value)
+    got_bvalid = int(sim.read("int_axi_bvalid"))
+    got_bready = int(sim.read("int_m_axi_bready"))
 
     # Compute expected int_axi_bvalid
     exp_bvalid = 0
@@ -77,7 +72,7 @@ def run_case(engine: str, desc: str, m_bvalid: int, b_select: list[int], bready:
 
 
 def main():
-    for engine in ("vm", "reference"):
+    for engine in available_engines():
         # Case 1: master 0 has bvalid, routed to slave slot 0 (b_select[0]=0)
         run_case(engine, "m0->s0", m_bvalid=0b0001, b_select=[0, 0, 0, 0], bready=0xFFFF)
 

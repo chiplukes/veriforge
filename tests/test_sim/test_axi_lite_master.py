@@ -147,7 +147,7 @@ def _make_sim(engine: str) -> Simulator:
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 600)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 600)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst", 1)
@@ -177,7 +177,7 @@ def _make_stub_sim(engine: str) -> Simulator:
     ]:
         step_drive(sim, engine, signal_name, 0)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 400)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 400)
     _settle_drives(sim, engine)
     step_run_until(sim, 12)
     return sim

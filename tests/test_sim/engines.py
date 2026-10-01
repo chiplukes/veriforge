@@ -21,5 +21,5 @@ def available_engines() -> list[str]:
 ENGINES = available_engines()
 """All available engines for parameterisation."""
 
-STEPPED_ENGINES = [e for e in ENGINES if e in {"vm", "compiled"}]
-"""Engines that support stepped execution (no reference-engine-only constructs)."""
+STEPPED_ENGINES = [e for e in ENGINES if e in {"vm", "vm-fast", "compiled"}]
+"""Non-reference engines exercised by the manual stepped-harness test."""

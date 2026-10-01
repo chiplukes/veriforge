@@ -332,7 +332,7 @@ def generate_python_testbench(  # noqa: PLR0912, PLR0913, PLR0915
     if clocks:
         lines.extend(
             [
-                f'    sim._schedule_clock_events(Clock(sim.signal("{clocks[0]}"), period={clock_period}), {clock_max_time})',
+                f'    sim.schedule_clock(Clock(sim.signal("{clocks[0]}"), period={clock_period}), {clock_max_time})',
                 "    _settle_drives(sim, engine)",
             ]
         )
@@ -577,7 +577,7 @@ def _render_enhanced_testbench(  # noqa: PLR0912, PLR0913, PLR0915
         lines.extend(
             [
                 f"    # domain {d.name!r}: clock {d.clock.name!r}",
-                f'    sim._schedule_clock_events(Clock(sim.signal("{d.clock.name}"), period={period}), {clock_max_time})',
+                f'    sim.schedule_clock(Clock(sim.signal("{d.clock.name}"), period={period}), {clock_max_time})',
                 "    _settle_drives(sim, engine)",
             ]
         )

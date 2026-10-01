@@ -37,7 +37,7 @@ def _make_sim(module=None):
     sim.drive("clk", 0)
     sim.settle()
     clock = Clock(sim.signal("clk"), period=10)
-    sim._schedule_clock_events(clock, max_time=5000)
+    sim.schedule_clock(clock, max_time=5000)
     return sim
 
 

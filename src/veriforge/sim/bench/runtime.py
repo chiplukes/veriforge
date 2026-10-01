@@ -250,7 +250,7 @@ class Testbench:  # cm:8a7c9d
             # cleanly before the runner starts ticking endpoints.
             domain.release_reset()
             # Schedule clock toggles for the full simulation horizon.
-            self.sim._schedule_clock_events(
+            self.sim.schedule_clock(
                 Clock(self.sim.signal(domain.clock_name), period=period),
                 max_sim_time,
             )

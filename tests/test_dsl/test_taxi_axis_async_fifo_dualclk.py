@@ -62,8 +62,8 @@ def _make_sim(s_period: int = 10, m_period: int = 17) -> Simulator:
     sim.run(max_time=0)
 
     # Schedule both clocks at different periods so edges never align.
-    sim._schedule_clock_events(Clock(sim.signal("s_clk"), period=s_period), 10000)
-    sim._schedule_clock_events(Clock(sim.signal("m_clk"), period=m_period), 10000)
+    sim.schedule_clock(Clock(sim.signal("s_clk"), period=s_period), 10000)
+    sim.schedule_clock(Clock(sim.signal("m_clk"), period=m_period), 10000)
     sim.run(max_time=0)
 
     # Apply reset, hold for a comfortable margin in both domains, then

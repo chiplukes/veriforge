@@ -15,9 +15,10 @@ so only the LSB of each element is retained.
 """
 
 from pathlib import Path
+
 from veriforge.project import parse_files
+from veriforge.sim.example_runner import available_engines
 from veriforge.sim.testbench import Simulator
-from veriforge.sim.value import Value
 
 RTL = Path(__file__).parent / "gen_unpacked_arr.v"
 
@@ -38,15 +39,14 @@ def run_case(engine: str) -> None:
 
     expected = data_in  # after one clock, data_out should match data_in
 
-    # Drive data_in before clock. Use schedule_at to properly toggle clk
-    # so the VM edge-detection mechanism fires the always @posedge clk blocks.
+    # Start the clock low, then drive a rising edge through the public API.
+    sim.drive("clk", 0)
     sim.drive("data_in", data_in)
-    sim._sched.schedule_at(0, ("clock_toggle", "clk", Value(0, width=1)))
-    sim._sched.schedule_at(1, ("clock_toggle", "clk", Value(1, width=1)))  # posedge at t=1
-    sim._sched.schedule_at(2, ("clock_toggle", "clk", Value(0, width=1)))
-    sim._sched.run(max_time=4)
+    sim.settle()
+    sim.drive("clk", 1)
+    sim.settle()
 
-    got = int(sim.signal("data_out").value)
+    got = int(sim.read("data_out"))
     ok = got == expected
     print(f"[{engine}] data_out: got=0x{got:08x} exp=0x{expected:08x} -> {'PASS' if ok else 'FAIL'}")
     if not ok:
@@ -59,8 +59,7 @@ def run_case(engine: str) -> None:
 
 
 def main() -> None:
-    # Reference engine does not support generate-for + unpacked arrays
-    for engine in ("vm",):
+    for engine in available_engines():
         run_case(engine)
     print("All cases passed.")
 

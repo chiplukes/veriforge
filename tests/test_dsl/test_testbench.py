@@ -280,7 +280,7 @@ class TestPythonTestbenchGeneration:
         code = generate_python_testbench(dut)
 
         assert 'def _make_sim(module, *, design=None, engine: str = "reference") -> Simulator:' in code
-        assert 'sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 1000)' in code
+        assert 'sim.schedule_clock(Clock(sim.signal("clk"), period=10), 1000)' in code
         assert 'step_drive(sim, engine, "rst", 1)' in code
         assert 'step_drive(sim, engine, "rst", 0)' in code
 

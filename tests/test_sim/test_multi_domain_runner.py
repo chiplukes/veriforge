@@ -64,8 +64,8 @@ def _make_sim(*, aclk_period: int = 10, bclk_period: int = 14) -> Simulator:
     ]:
         step_drive(sim, "reference", s, 0)
     _settle(sim)
-    sim._schedule_clock_events(Clock(sim.signal("aclk"), period=aclk_period), 5000)
-    sim._schedule_clock_events(Clock(sim.signal("bclk"), period=bclk_period), 5000)
+    sim.schedule_clock(Clock(sim.signal("aclk"), period=aclk_period), 5000)
+    sim.schedule_clock(Clock(sim.signal("bclk"), period=bclk_period), 5000)
     _settle(sim)
     step_run_until(sim, 12)
     step_drive(sim, "reference", "arst", 1)
@@ -199,7 +199,7 @@ def test_single_domain_endpoint_coordinator_unchanged():
     for sig in ["clk", "rst", "s_axis_tvalid", "s_axis_tdata", "s_axis_tlast", "m_axis_tready"]:
         step_drive(sim, "reference", sig, 0)
     sim.run(max_time=0)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 2000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
     sim.run(max_time=0)
     step_run_until(sim, 30)
     sim.settle()

@@ -96,7 +96,7 @@ class TestEnhancedSingleDomain:
 
     def test_schedules_single_clock(self):
         text = generate_python_testbench(_parse(SINGLE_DOMAIN), enhanced=True)
-        assert text.count("_schedule_clock_events(Clock(sim.signal(") == 1
+        assert text.count("schedule_clock(Clock(sim.signal(") == 1
         assert 'sim.signal("clk")' in text
 
     def test_drives_active_low_reset(self):
@@ -115,7 +115,7 @@ class TestEnhancedTwoDomain:
         text = generate_python_testbench(_parse(TWO_DOMAIN), enhanced=True)
         assert 'sim.signal("aclk")' in text
         assert 'sim.signal("bclk")' in text
-        assert text.count("_schedule_clock_events(Clock(") == 2
+        assert text.count("schedule_clock(Clock(") == 2
 
     def test_releases_each_reset(self):
         text = generate_python_testbench(_parse(TWO_DOMAIN), enhanced=True)

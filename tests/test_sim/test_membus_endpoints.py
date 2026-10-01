@@ -20,8 +20,7 @@ from veriforge.sim.testbench import Clock, Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
-
-ENGINES = ["reference", "vm"]
+from .engines import ENGINES
 
 # Canonical signal map for the stub / SRAM DUT (prefix "mem").
 _SIGNALS = {
@@ -184,7 +183,7 @@ def _make_stub_sim(engine: str) -> Simulator:
     for sig in ["mem_rdata", "mem_rvalid"]:
         step_drive(sim, engine, sig, 0)
     _settle(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 2000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
     _settle(sim, engine)
     step_run_until(sim, 12)
     return sim
@@ -197,7 +196,7 @@ def _make_sram_sim(engine: str) -> Simulator:
     for sig in ["clk", "rst", "mem_addr", "mem_wdata", "mem_wen", "mem_ren"]:
         step_drive(sim, engine, sig, 0)
     _settle(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), 2000)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
     _settle(sim, engine)
     step_run_until(sim, 12)
     step_drive(sim, engine, "rst", 1)

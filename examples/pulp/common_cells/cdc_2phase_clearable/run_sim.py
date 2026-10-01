@@ -101,8 +101,8 @@ def _make_step_sim(design, engine: str, top_name: str = "cdc_2phase_clearable_tb
     ]:
         step_drive(sim, engine, signal_name, value)
     _settle_drives(sim, engine)
-    sim._schedule_clock_events(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
-    sim._schedule_clock_events(Clock(sim.signal("dst_clk_i"), period=14), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), MAX_TIME)
     _settle_drives(sim, engine)
     return sim
 

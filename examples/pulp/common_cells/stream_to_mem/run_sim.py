@@ -70,7 +70,7 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
         raise RuntimeError(f"Top module {top_name!r} not found")
 
     sim = Simulator(top, engine=engine, design=design)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
     step_drive(sim, engine, "rst_n", 0)
     step_drive(sim, engine, "req_i", 0)
     step_drive(sim, engine, "req_valid_i", 0)

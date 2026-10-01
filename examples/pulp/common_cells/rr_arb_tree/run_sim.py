@@ -77,7 +77,7 @@ def _make_step_sim(design, engine: str) -> Simulator:
         raise RuntimeError("Top module 'rr_arb_tree_tb_vm_local' not found")
 
     sim = Simulator(top, engine=engine, design=design)
-    sim._schedule_clock_events(Clock(sim.signal("clk"), period=10), MAX_TIME)
+    sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
     step_drive(sim, engine, "clk", 0)
     step_drive(sim, engine, "rst_n", 0)
     step_drive(sim, engine, "flush", 0)
