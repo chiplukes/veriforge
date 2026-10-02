@@ -8,10 +8,10 @@ The DUT crosses an AXI4 bus between two asynchronous clock domains:
 The two clocks run at different periods (10 and 14 ns) so the CDC FIFOs
 are exercised across phase relationships.
 
-Like ``axi_fifo``, this is fundamentally a signal-passthrough timing
-test — the bench framework provides clock/reset scaffolding for *both*
-domains, and the test logic drives signals manually with explicit
-condition-waits across the CDC.
+The signal-level checks drive both domains manually to verify AXI4
+sidebands and CDC timing. A separate single-beat write/read sweep uses
+``bench.iface()`` on the AXI-Lite subset of the ports, with the extra
+AXI4 sidebands held at single-beat values.
 
 Generate the scaffold with::
 
@@ -33,8 +33,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.bench import PlannerOverrides, Testbench
-from veriforge.sim.endpoints.helpers import _settle_current_time
-from veriforge.sim.step_harness import step_drive
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -80,10 +78,9 @@ def _expect(bench: Testbench, name: str, expected: int, message: str) -> None:
 
 def _drive(bench: Testbench, **values: int) -> None:
     sim = bench.sim
-    eng = sim._engine
     for name, val in values.items():
-        step_drive(sim, eng, name, val)
-    _settle_current_time(sim, "src_clk_i")
+        sim.drive(name, val)
+    sim.settle()
 
 
 def _wait_until(bench: Testbench, predicate, *, max_cycles: int = 80, message: str) -> None:
@@ -93,18 +90,18 @@ def _wait_until(bench: Testbench, predicate, *, max_cycles: int = 80, message: s
             return
         if not bench.step(1):
             raise RuntimeError(f"{message}: simulator stalled")
-        _settle_current_time(bench.sim, "src_clk_i")
+        bench.sim.settle()
     raise RuntimeError(f"{message}: predicate never satisfied within {max_cycles} cycles")
 
 
 def _step_src(bench: Testbench, n: int = 1) -> None:
     bench.step(n, domain="src_clk_i")
-    _settle_current_time(bench.sim, "src_clk_i")
+    bench.sim.settle()
 
 
 def _step_dst(bench: Testbench, n: int = 1) -> None:
     bench.step(n, domain="dst_clk_i")
-    _settle_current_time(bench.sim, "src_clk_i")
+    bench.sim.settle()
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +263,34 @@ def exercise_read_transfer(bench: Testbench) -> None:
     print("axi_cdc read transfer passed: src -> dst -> src across CDC")
 
 
+def exercise_transactions(bench: Testbench) -> None:
+    """Round-trip single-beat writes and reads across the two clocks."""
+    _drive(
+        bench,
+        src_aw_id=0,
+        src_aw_len=0,
+        src_w_last=1,
+        src_ar_id=0,
+        src_ar_len=0,
+        dst_b_id=0,
+        dst_r_id=0,
+        dst_r_last=1,
+    )
+    src = bench.iface("src")
+    dst = bench.iface("dst")
+    payload = {0x20: 0x1234ABCD, 0x24: 0xCAFE5678}
+
+    for addr, value in payload.items():
+        assert src.write(addr, value, timeout_cycles=100) == 0
+    assert dst.write_log == [(addr, value, 0xF) for addr, value in payload.items()]
+    assert all(dst.memory.get(addr) == value for addr, value in payload.items())
+
+    for addr, value in payload.items():
+        assert src.read(addr, timeout_cycles=100) == value
+    assert dst.read_log == list(payload)
+    print("axi_cdc transaction roundtrip passed: two writes and reads across CDC")
+
+
 def run_smoke_test() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--vcd", type=Path, default=None, help="Optional VCD output path.")
@@ -274,6 +299,7 @@ def run_smoke_test() -> None:
     for label, exercise in (
         ("write", exercise_write_transfer),
         ("read", exercise_read_transfer),
+        ("transactions", exercise_transactions),
     ):
         bench = build_bench()
         if label == "write":

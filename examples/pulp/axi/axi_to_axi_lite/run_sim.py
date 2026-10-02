@@ -15,7 +15,7 @@ from pathlib import Path
 from veriforge.project import parse_files
 from veriforge.sim.endpoints import AXILiteResponseDriver
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -43,10 +43,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
@@ -97,13 +93,13 @@ def _make_step_sim(design, engine: str) -> Simulator:
         "mst_r_resp",
         "mst_r_valid",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -112,35 +108,35 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
 def _begin_write(sim: Simulator, engine: str, request: tuple[int, int, int, int, int]) -> None:
     request_id, addr, prot, data, strb = request
-    step_drive(sim, engine, "slv_aw_id", request_id)
-    step_drive(sim, engine, "slv_aw_addr", addr)
-    step_drive(sim, engine, "slv_aw_prot", prot)
-    step_drive(sim, engine, "slv_aw_len", 0)
-    step_drive(sim, engine, "slv_aw_atop", 0)
-    step_drive(sim, engine, "slv_aw_valid", 1)
-    step_drive(sim, engine, "slv_w_data", data)
-    step_drive(sim, engine, "slv_w_strb", strb)
-    step_drive(sim, engine, "slv_w_last", 1)
-    step_drive(sim, engine, "slv_w_valid", 1)
-    step_drive(sim, engine, "slv_b_ready", 1)
+    sim.drive("slv_aw_id", request_id)
+    sim.drive("slv_aw_addr", addr)
+    sim.drive("slv_aw_prot", prot)
+    sim.drive("slv_aw_len", 0)
+    sim.drive("slv_aw_atop", 0)
+    sim.drive("slv_aw_valid", 1)
+    sim.drive("slv_w_data", data)
+    sim.drive("slv_w_strb", strb)
+    sim.drive("slv_w_last", 1)
+    sim.drive("slv_w_valid", 1)
+    sim.drive("slv_b_ready", 1)
 
 
 def _end_write(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_aw_valid", 0)
-    step_drive(sim, engine, "slv_w_valid", 0)
+    sim.drive("slv_aw_valid", 0)
+    sim.drive("slv_w_valid", 0)
 
 
 def _begin_read(sim: Simulator, engine: str, *, request_id: int, addr: int, prot: int) -> None:
-    step_drive(sim, engine, "slv_ar_id", request_id)
-    step_drive(sim, engine, "slv_ar_addr", addr)
-    step_drive(sim, engine, "slv_ar_prot", prot)
-    step_drive(sim, engine, "slv_ar_len", 0)
-    step_drive(sim, engine, "slv_ar_valid", 1)
-    step_drive(sim, engine, "slv_r_ready", 1)
+    sim.drive("slv_ar_id", request_id)
+    sim.drive("slv_ar_addr", addr)
+    sim.drive("slv_ar_prot", prot)
+    sim.drive("slv_ar_len", 0)
+    sim.drive("slv_ar_valid", 1)
+    sim.drive("slv_r_ready", 1)
 
 
 def _end_read(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_ar_valid", 0)
+    sim.drive("slv_ar_valid", 0)
 
 
 def _expect_write_forwarding(sim: Simulator) -> None:
@@ -179,34 +175,34 @@ def _exercise_bridge(design, engine: str) -> None:
 
     response_driver.set_write_ready(True)
     _begin_write(sim, engine, (0x2, 0x44, 0x3, 0xCAFEBABE, 0xA))
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_write_forwarding(sim)
     _run_until_rising_edge(sim, "clk", sim.time + 20, "write capture edge not observed")
     _end_write(sim, engine)
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_write_pending(sim)
 
     response_driver.begin_write_response(0x2)
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "slv_b_id", 0x2, "write response ID reflection mismatch")
     _expect(sim, "slv_b_resp", 0x2, "write response code mismatch")
     _expect(sim, "slv_b_valid", 0x1, "write response valid mismatch")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "write response consume edge not observed")
     response_driver.end_write_response()
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "slv_aw_ready", 0x1, "write path did not recover after response")
 
     response_driver.set_read_ready(True)
     _begin_read(sim, engine, request_id=0x1, addr=0x88, prot=0x5)
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_read_forwarding(sim)
     _run_until_rising_edge(sim, "clk", sim.time + 20, "read capture edge not observed")
     _end_read(sim, engine)
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_read_pending(sim)
 
     response_driver.begin_read_response(0x12345678, resp=0x1)
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "slv_r_id", 0x1, "read response ID reflection mismatch")
     _expect(sim, "slv_r_data", 0x12345678, "read response data mismatch")
     _expect(sim, "slv_r_resp", 0x1, "read response code mismatch")
@@ -214,7 +210,7 @@ def _exercise_bridge(design, engine: str) -> None:
     _expect(sim, "slv_r_valid", 0x1, "read response valid mismatch")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "read response consume edge not observed")
     response_driver.end_read_response()
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "slv_ar_ready", 0x1, "read path did not recover after response")
 
 

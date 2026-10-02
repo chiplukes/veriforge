@@ -35,8 +35,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.bench import Testbench
-from veriforge.sim.endpoints.helpers import _settle_current_time
-from veriforge.sim.step_harness import step_drive
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -87,15 +85,14 @@ def _expect(bench: Testbench, name: str, expected: int, message: str) -> None:
 
 def _drive(bench: Testbench, **values: int) -> None:
     sim = bench.sim
-    eng = sim._engine
     for name, val in values.items():
-        step_drive(sim, eng, name, val)
-    _settle_current_time(sim, "clk")
+        sim.drive(name, val)
+    sim.settle()
 
 
 def _wait_posedge(bench: Testbench, n: int = 1) -> None:
     bench.step(n)
-    _settle_current_time(bench.sim, "clk")
+    bench.sim.settle()
 
 
 def _idle(bench: Testbench) -> None:

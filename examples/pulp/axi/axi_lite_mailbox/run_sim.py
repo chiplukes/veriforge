@@ -15,7 +15,7 @@ from pathlib import Path
 from veriforge.project import parse_files
 from veriforge.sim.endpoints import AXILiteMaster, AXILiteResponseError
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -58,10 +58,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _make_step_sim(design, engine: str) -> Simulator:
     top = design.get_module("axi_lite_mailbox_exec_tb")
     if top is None:
@@ -69,14 +65,14 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -106,7 +102,7 @@ def _exercise_mailbox(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
     port0 = _make_axi_lite_master(sim, "slv0")
     port1 = _make_axi_lite_master(sim, "slv1")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect_value(port0.read(BASE0 + REG_STATUS), 0x1, "port0 reset status mismatch")
     _expect_value(port1.read(BASE1 + REG_STATUS), 0x1, "port1 reset status mismatch")

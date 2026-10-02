@@ -12,7 +12,7 @@ from veriforge.sim.endpoints import (
     EndpointCoordinator,
     MultiDomainRunner,
 )
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -41,10 +41,6 @@ def _two_domain_module():
     return module.build()
 
 
-def _settle(sim: Simulator) -> None:
-    sim.run(max_time=0)
-
-
 def _make_sim(*, aclk_period: int = 10, bclk_period: int = 14) -> Simulator:
     sim = Simulator(_two_domain_module(), engine="reference")
     sim.run(max_time=0)
@@ -62,19 +58,19 @@ def _make_sim(*, aclk_period: int = 10, bclk_period: int = 14) -> Simulator:
         "b_in_tlast",
         "b_out_tready",
     ]:
-        step_drive(sim, "reference", s, 0)
-    _settle(sim)
+        sim.drive(s, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("aclk"), period=aclk_period), 5000)
     sim.schedule_clock(Clock(sim.signal("bclk"), period=bclk_period), 5000)
-    _settle(sim)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, "reference", "arst", 1)
-    step_drive(sim, "reference", "brst", 1)
-    _settle(sim)
+    sim.drive("arst", 1)
+    sim.drive("brst", 1)
+    sim.settle()
     step_run_until(sim, 30)
-    step_drive(sim, "reference", "arst", 0)
-    step_drive(sim, "reference", "brst", 0)
-    _settle(sim)
+    sim.drive("arst", 0)
+    sim.drive("brst", 0)
+    sim.settle()
     return sim
 
 
@@ -197,10 +193,10 @@ def test_single_domain_endpoint_coordinator_unchanged():
     sim = Simulator(module.build(), engine="reference")
     sim.run(max_time=0)
     for sig in ["clk", "rst", "s_axis_tvalid", "s_axis_tdata", "s_axis_tlast", "m_axis_tready"]:
-        step_drive(sim, "reference", sig, 0)
-    sim.run(max_time=0)
+        sim.drive(sig, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
-    sim.run(max_time=0)
+    sim.settle()
     step_run_until(sim, 30)
     sim.settle()
 

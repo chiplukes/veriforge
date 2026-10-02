@@ -14,7 +14,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -43,10 +43,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, limit: int, predicate, message: str) -> None:
@@ -111,19 +107,19 @@ def _make_step_sim(design, engine: str) -> Simulator:
         "dst_r_last",
         "dst_r_valid",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
     sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _expect(sim, "src_aw_ready", 1, "write-address channel should be ready after reset")
     _expect(sim, "src_w_ready", 1, "write-data channel should be ready after reset")
@@ -139,23 +135,23 @@ def _exercise_write_transfer(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
     _release_reset(sim, engine)
 
-    step_drive(sim, engine, "src_aw_id", 0x2)
-    step_drive(sim, engine, "src_aw_addr", 0x44)
-    step_drive(sim, engine, "src_aw_prot", 0x3)
-    step_drive(sim, engine, "src_aw_len", 0)
-    step_drive(sim, engine, "src_aw_valid", 1)
-    step_drive(sim, engine, "src_w_data", 0xCAFEBABE)
-    step_drive(sim, engine, "src_w_strb", 0xA)
-    step_drive(sim, engine, "src_w_last", 1)
-    step_drive(sim, engine, "src_w_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_aw_id", 0x2)
+    sim.drive("src_aw_addr", 0x44)
+    sim.drive("src_aw_prot", 0x3)
+    sim.drive("src_aw_len", 0)
+    sim.drive("src_aw_valid", 1)
+    sim.drive("src_w_data", 0xCAFEBABE)
+    sim.drive("src_w_strb", 0xA)
+    sim.drive("src_w_last", 1)
+    sim.drive("src_w_valid", 1)
+    sim.settle()
     _expect(sim, "src_aw_ready", 1, "source AW should be ready before the first transfer")
     _expect(sim, "src_w_ready", 1, "source W should be ready before the first transfer")
 
     _run_until_rising_edge(sim, "src_clk_i", sim.time + 60, "source write capture edge not observed")
-    step_drive(sim, engine, "src_aw_valid", 0)
-    step_drive(sim, engine, "src_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_aw_valid", 0)
+    sim.drive("src_w_valid", 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -171,13 +167,13 @@ def _exercise_write_transfer(design, engine: str) -> None:
     _expect(sim, "dst_w_strb", 0xA, "destination W strobe mismatch")
     _expect(sim, "dst_w_last", 0x1, "destination W last mismatch")
 
-    step_drive(sim, engine, "dst_aw_ready", 1)
-    step_drive(sim, engine, "dst_w_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_aw_ready", 1)
+    sim.drive("dst_w_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", sim.time + 50, "destination write consume edge not observed")
-    step_drive(sim, engine, "dst_aw_ready", 0)
-    step_drive(sim, engine, "dst_w_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_aw_ready", 0)
+    sim.drive("dst_w_ready", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 80,
@@ -186,13 +182,13 @@ def _exercise_write_transfer(design, engine: str) -> None:
     )
 
     _expect(sim, "dst_b_ready", 1, "destination B channel should be ready for a response")
-    step_drive(sim, engine, "dst_b_id", 0x2)
-    step_drive(sim, engine, "dst_b_resp", 0x1)
-    step_drive(sim, engine, "dst_b_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_b_id", 0x2)
+    sim.drive("dst_b_resp", 0x1)
+    sim.drive("dst_b_valid", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", sim.time + 50, "destination write-response capture edge not observed")
-    step_drive(sim, engine, "dst_b_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_b_valid", 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -203,8 +199,8 @@ def _exercise_write_transfer(design, engine: str) -> None:
     _expect(sim, "src_b_id", 0x2, "source B ID mismatch")
     _expect(sim, "src_b_resp", 0x1, "source B response mismatch")
 
-    step_drive(sim, engine, "src_b_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", sim.time + 60, "source write-response consume edge not observed")
     _run_until_condition(
         sim,
@@ -218,17 +214,17 @@ def _exercise_read_transfer(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
     _release_reset(sim, engine)
 
-    step_drive(sim, engine, "src_ar_id", 0x1)
-    step_drive(sim, engine, "src_ar_addr", 0x88)
-    step_drive(sim, engine, "src_ar_prot", 0x5)
-    step_drive(sim, engine, "src_ar_len", 0)
-    step_drive(sim, engine, "src_ar_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_ar_id", 0x1)
+    sim.drive("src_ar_addr", 0x88)
+    sim.drive("src_ar_prot", 0x5)
+    sim.drive("src_ar_len", 0)
+    sim.drive("src_ar_valid", 1)
+    sim.settle()
     _expect(sim, "src_ar_ready", 1, "source AR should be ready before the first transfer")
 
     _run_until_rising_edge(sim, "src_clk_i", sim.time + 60, "source read capture edge not observed")
-    step_drive(sim, engine, "src_ar_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_ar_valid", 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -241,11 +237,11 @@ def _exercise_read_transfer(design, engine: str) -> None:
     _expect(sim, "dst_ar_prot", 0x5, "destination AR protection mismatch")
     _expect(sim, "dst_ar_len", 0x0, "destination AR length mismatch")
 
-    step_drive(sim, engine, "dst_ar_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ar_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", sim.time + 50, "destination read consume edge not observed")
-    step_drive(sim, engine, "dst_ar_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ar_ready", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 80,
@@ -254,15 +250,15 @@ def _exercise_read_transfer(design, engine: str) -> None:
     )
 
     _expect(sim, "dst_r_ready", 1, "destination R channel should be ready for a response")
-    step_drive(sim, engine, "dst_r_id", 0x1)
-    step_drive(sim, engine, "dst_r_data", 0x12345678)
-    step_drive(sim, engine, "dst_r_resp", 0x2)
-    step_drive(sim, engine, "dst_r_last", 1)
-    step_drive(sim, engine, "dst_r_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_r_id", 0x1)
+    sim.drive("dst_r_data", 0x12345678)
+    sim.drive("dst_r_resp", 0x2)
+    sim.drive("dst_r_last", 1)
+    sim.drive("dst_r_valid", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", sim.time + 50, "destination read-response capture edge not observed")
-    step_drive(sim, engine, "dst_r_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_r_valid", 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -275,8 +271,8 @@ def _exercise_read_transfer(design, engine: str) -> None:
     _expect(sim, "src_r_resp", 0x2, "source R response mismatch")
     _expect(sim, "src_r_last", 0x1, "source R last mismatch")
 
-    step_drive(sim, engine, "src_r_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_r_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", sim.time + 60, "source read-response consume edge not observed")
     _run_until_condition(
         sim,

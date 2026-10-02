@@ -7,10 +7,10 @@ small FIFO. The TB exposes two depth variants:
 * ``axi_fifo_depth1_tb`` — single-entry FIFO that captures requests on
   one cycle and releases them after backpressure is removed.
 
-Because the test verifies *signal-level passthrough* (id, prot, last,
-resp), we don't use the AXILite master/responder endpoints. Instead we
-let the bench framework provide clock/reset/init scaffolding and drive
-the wires directly (mirroring the original ``run_sim.py``).
+The signal-level checks verify passthrough, backpressure, and AXI4
+sidebands. Separate single-beat transaction checks use ``bench.iface()``
+on the AXI-Lite subset, with the extra AXI4 sidebands held at
+single-beat values.
 
 Generate the scaffold with::
 
@@ -32,8 +32,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.bench import PlannerOverrides, Testbench
-from veriforge.sim.endpoints.helpers import _settle_current_time
-from veriforge.sim.step_harness import step_drive
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -74,15 +72,14 @@ def _expect(bench: Testbench, name: str, expected: int, message: str) -> None:
 
 def _drive(bench: Testbench, **values: int) -> None:
     sim = bench.sim
-    eng = sim._engine
     for name, val in values.items():
-        step_drive(sim, eng, name, val)
-    _settle_current_time(sim, "clk")
+        sim.drive(name, val)
+    sim.settle()
 
 
 def _wait_posedge(bench: Testbench) -> None:
     bench.step(1)
-    _settle_current_time(bench.sim, "clk")
+    bench.sim.settle()
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +269,35 @@ def exercise_depth1(bench: Testbench) -> None:
     print("axi_fifo depth1 passed: capture/backpressure/release timing")
 
 
+def exercise_transactions(bench: Testbench, top_name: str) -> None:
+    """Check write strobes and readback through one FIFO depth variant."""
+    _drive(
+        bench,
+        slv_aw_id=0,
+        slv_w_last=1,
+        slv_ar_id=0,
+        mst_b_id=0,
+        mst_r_id=0,
+        mst_r_last=1,
+    )
+    slv = bench.iface("slv")
+    mst = bench.iface("mst")
+    assert slv.write(0x20, 0x11223344, timeout_cycles=100) == 0
+    assert slv.write(0x24, 0xAABBCCDD, timeout_cycles=100) == 0
+    assert slv.write(0x20, 0xEE, strb=0x1, timeout_cycles=100) == 0
+    assert mst.write_log == [
+        (0x20, 0x11223344, 0xF),
+        (0x24, 0xAABBCCDD, 0xF),
+        (0x20, 0xEE, 0x1),
+    ]
+    assert mst.memory[0x20] == 0x112233EE
+    assert mst.memory[0x24] == 0xAABBCCDD
+    assert slv.read(0x20, timeout_cycles=100) == 0x112233EE
+    assert slv.read(0x24, timeout_cycles=100) == 0xAABBCCDD
+    assert mst.read_log == [0x20, 0x24]
+    print(f"axi_fifo {top_name} transaction roundtrip passed")
+
+
 def run_smoke_test() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--vcd", type=Path, default=None, help="Optional VCD output path.")
@@ -294,6 +320,16 @@ def run_smoke_test() -> None:
                 print(f"VCD tracing -> {vcd_path}")
             bench.reset_all()
             exercise(bench)
+
+        transaction_bench = build_bench(top)
+        transaction_vcd = None
+        if args.vcd is not None:
+            transaction_vcd = args.vcd.with_name(f"{args.vcd.stem}_{top}_transactions{args.vcd.suffix}")
+        with transaction_bench.run(vcd=transaction_vcd):
+            if transaction_vcd is not None:
+                print(f"VCD tracing -> {transaction_vcd}")
+            transaction_bench.reset_all()
+            exercise_transactions(transaction_bench, top)
 
 
 if __name__ == "__main__":

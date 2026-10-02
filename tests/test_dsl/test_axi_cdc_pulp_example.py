@@ -1,7 +1,7 @@
 """Tests for the Wave D-8 pulp axi_cdc migration.
 
 The axi_cdc example exercises a two-asynchronous-clock-domain AXI4 CDC bridge.
-The bench drives signals manually using separate src/dst clock domains.
+The bench checks signals manually and round-trips AXI transactions across domains.
 """
 
 from __future__ import annotations
@@ -51,3 +51,4 @@ def test_axi_cdc_bench_runs_end_to_end():
     assert proc.returncode == 0, f"axi_cdc bench failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "axi_cdc write transfer passed" in proc.stdout
     assert "axi_cdc read transfer passed" in proc.stdout
+    assert "axi_cdc transaction roundtrip passed" in proc.stdout

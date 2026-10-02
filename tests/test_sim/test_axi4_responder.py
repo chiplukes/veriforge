@@ -24,7 +24,7 @@ from veriforge.sim.endpoints import (
     AXI4Responder,
     AXI4ResponseError,
 )
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -153,13 +153,6 @@ endmodule
 """
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=sim.time)
-    else:
-        sim.settle()
-
-
 def _make_ram_sim(engine: str) -> Simulator:
     sim = Simulator(_parse(AXI4_RAM_MULTIBEAT_SRC), engine=engine)
     sim.run(max_time=0)
@@ -185,16 +178,16 @@ def _make_ram_sim(engine: str) -> Simulator:
         "s_axi_arvalid",
         "s_axi_rready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst_n", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 0)
+    sim.settle()
     step_run_until(sim, 32)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     return sim
 
 
@@ -244,8 +237,8 @@ def test_axi4_master_id_echoed(engine: str) -> None:
 def test_axi4_master_write_timeout_no_dut_response(engine: str) -> None:
     sim = _make_ram_sim(engine)
     # Hold reset asserted forever so the RAM never accepts anything.
-    step_drive(sim, engine, "rst_n", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 0)
+    sim.settle()
     master = AXI4Master(sim, "s_axi", default_timeout_cycles=5)
 
     with pytest.raises(TimeoutError):
@@ -301,9 +294,9 @@ def _axi4_stub_module(*, id_width: int = 0, write: bool = True, read: bool = Tru
 def _make_stub_sim(engine: str, *, id_width: int = 0, write: bool = True, read: bool = True) -> Simulator:
     sim = Simulator(_axi4_stub_module(id_width=id_width, write=write, read=read), engine=engine)
     sim.run(max_time=0)
-    _settle_drives(sim, engine)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
     return sim
 
@@ -313,30 +306,30 @@ def test_axi4_responder_accepts_write_and_read_via_raw_signals(engine: str) -> N
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", initial_memory={0x4: 0xCAFEBABE})
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x0)
-    step_drive(sim, engine, "m_axi_awlen", 0)
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0x11223344)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 1)
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x0)
+    sim.drive("m_axi_awlen", 0)
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0x11223344)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 1)
     for target in range(15, 200, 5):  # poll in small increments; drop VALID the instant it's accepted
         step_run_until(sim, target)
         if responder.write_log:
             break
-    step_drive(sim, engine, "m_axi_awvalid", 0)
-    step_drive(sim, engine, "m_axi_wvalid", 0)
+    sim.drive("m_axi_awvalid", 0)
+    sim.drive("m_axi_wvalid", 0)
     step_run_until(sim, sim.time + 20)
     assert responder.write_log == [(0x0, 0x11223344, 0xF)]
 
-    step_drive(sim, engine, "m_axi_arvalid", 1)
-    step_drive(sim, engine, "m_axi_araddr", 0x4)
-    step_drive(sim, engine, "m_axi_arlen", 0)
-    step_drive(sim, engine, "m_axi_arsize", 2)
-    step_drive(sim, engine, "m_axi_arburst", 1)
-    step_drive(sim, engine, "m_axi_rready", 1)
+    sim.drive("m_axi_arvalid", 1)
+    sim.drive("m_axi_araddr", 0x4)
+    sim.drive("m_axi_arlen", 0)
+    sim.drive("m_axi_arsize", 2)
+    sim.drive("m_axi_arburst", 1)
+    sim.drive("m_axi_rready", 1)
     step_run_until(sim, 100)
     assert int(sim.signal("m_axi_rdata").value) == 0xCAFEBABE
     responder.close()
@@ -371,16 +364,16 @@ def test_axi4_responder_memory_depth_out_of_range_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", memory_depth=4)  # 4 words = 16 bytes
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x40)  # out of range (limit=16), fits the 8-bit port
-    step_drive(sim, engine, "m_axi_awlen", 0)
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0xDEADBEEF)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 1)
-    step_drive(sim, engine, "m_axi_bready", 1)
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x40)  # out of range (limit=16), fits the 8-bit port
+    sim.drive("m_axi_awlen", 0)
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0xDEADBEEF)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 1)
+    sim.drive("m_axi_bready", 1)
     with pytest.raises(ValueError, match="out of range"):
         step_run_until(sim, 100)
     responder.close()
@@ -404,22 +397,22 @@ def test_axi4_responder_queue_write_response_overrides_bresp(engine: str) -> Non
     responder = AXI4Responder(sim, "m_axi")
     responder.queue_write_response(0x2)  # SLVERR
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x0)
-    step_drive(sim, engine, "m_axi_awlen", 0)
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0xDEADBEEF)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 1)
-    step_drive(sim, engine, "m_axi_bready", 1)
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x0)
+    sim.drive("m_axi_awlen", 0)
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0xDEADBEEF)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 1)
+    sim.drive("m_axi_bready", 1)
     for target in range(15, 200, 5):  # poll; drop VALID the instant the beat is accepted
         step_run_until(sim, target)
         if responder.write_log:
             break
-    step_drive(sim, engine, "m_axi_awvalid", 0)
-    step_drive(sim, engine, "m_axi_wvalid", 0)
+    sim.drive("m_axi_awvalid", 0)
+    sim.drive("m_axi_wvalid", 0)
     step_run_until(sim, sim.time + 20)
     assert int(sim.signal("m_axi_bresp").value) == 0x2
     responder.close()
@@ -433,19 +426,19 @@ def test_axi4_responder_max_bw_percent_throttles_sustained_reads(engine: str) ->
     def _elapsed_for_n_reads(max_bw_percent: int, seed: int, n: int) -> int:
         sim = _make_stub_sim(engine)
         responder = AXI4Responder(sim, "m_axi", max_bw_percent=max_bw_percent, latency_seed=seed)
-        step_drive(sim, engine, "m_axi_arsize", 2)
-        step_drive(sim, engine, "m_axi_arburst", 1)
-        step_drive(sim, engine, "m_axi_rready", 1)
+        sim.drive("m_axi_arsize", 2)
+        sim.drive("m_axi_arburst", 1)
+        sim.drive("m_axi_rready", 1)
         # Queue all N single-beat ARs back-to-back (ARREADY is always high,
         # so each cycle with ARVALID=1 enqueues one burst) — reads start
         # retiring immediately, overlapping with enqueue, so start the
         # clock *before* this loop, not after it.
         t0 = sim.time
-        step_drive(sim, engine, "m_axi_arvalid", 1)
+        sim.drive("m_axi_arvalid", 1)
         for i in range(n):
-            step_drive(sim, engine, "m_axi_araddr", i * 4)
+            sim.drive("m_axi_araddr", i * 4)
             step_run_until(sim, sim.time + 10)
-        step_drive(sim, engine, "m_axi_arvalid", 0)
+        sim.drive("m_axi_arvalid", 0)
         for _ in range(2000):  # generous cap; only guards against a true hang
             if len(responder.read_log) >= n:
                 break
@@ -467,11 +460,11 @@ def test_axi4_responder_rd_latency_delays_first_read(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", rd_latency_cycles=10, latency_seed=1)
 
-    step_drive(sim, engine, "m_axi_arvalid", 1)
-    step_drive(sim, engine, "m_axi_araddr", 0x0)
-    step_drive(sim, engine, "m_axi_arlen", 0)
-    step_drive(sim, engine, "m_axi_arsize", 2)
-    step_drive(sim, engine, "m_axi_arburst", 1)
+    sim.drive("m_axi_arvalid", 1)
+    sim.drive("m_axi_araddr", 0x0)
+    sim.drive("m_axi_arlen", 0)
+    sim.drive("m_axi_arsize", 2)
+    sim.drive("m_axi_arburst", 1)
     step_run_until(sim, 22)  # a couple of cycles after AR accept — should NOT be valid yet
     assert int(sim.signal("m_axi_rvalid").value) == 0
     step_run_until(sim, 200)
@@ -581,9 +574,9 @@ def test_axi4_responder_rd_latency_one_no_dropped_or_shifted_beat(engine: str) -
     sim.run(max_time=0)
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 4000)
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst_n", 0)
+    sim.drive("rst_n", 0)
     step_run_until(sim, 32)
-    step_drive(sim, engine, "rst_n", 1)
+    sim.drive("rst_n", 1)
 
     responder = AXI4Responder(sim, "m_axi", initial_memory=initial_memory, rd_latency_cycles=1, latency_seed=1)
 
@@ -607,15 +600,15 @@ def test_axi4_strict_wlast_early_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", strict=True)
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x0)
-    step_drive(sim, engine, "m_axi_awlen", 1)  # 2-beat burst
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0x11111111)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 1)  # violation: WLAST on beat 1 of 2
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x0)
+    sim.drive("m_axi_awlen", 1)  # 2-beat burst
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0x11111111)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 1)  # violation: WLAST on beat 1 of 2
     with pytest.raises(AXI4ProtocolError, match="WLAST asserted"):
         step_run_until(sim, 40)
 
@@ -628,15 +621,15 @@ def test_axi4_strict_wlast_missing_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", strict=True)
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x0)
-    step_drive(sim, engine, "m_axi_awlen", 0)  # 1-beat burst
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0x22222222)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 0)  # violation: no WLAST on the only (=final) beat
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x0)
+    sim.drive("m_axi_awlen", 0)  # 1-beat burst
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0x22222222)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 0)  # violation: no WLAST on the only (=final) beat
     with pytest.raises(AXI4ProtocolError, match="WLAST not asserted"):
         step_run_until(sim, 40)
 
@@ -648,15 +641,15 @@ def test_axi4_strict_off_by_default_no_raise(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi", strict=False)
 
-    step_drive(sim, engine, "m_axi_awvalid", 1)
-    step_drive(sim, engine, "m_axi_awaddr", 0x0)
-    step_drive(sim, engine, "m_axi_awlen", 1)
-    step_drive(sim, engine, "m_axi_awsize", 2)
-    step_drive(sim, engine, "m_axi_awburst", 1)
-    step_drive(sim, engine, "m_axi_wvalid", 1)
-    step_drive(sim, engine, "m_axi_wdata", 0x33333333)
-    step_drive(sim, engine, "m_axi_wstrb", 0xF)
-    step_drive(sim, engine, "m_axi_wlast", 1)  # would violate strict mode
+    sim.drive("m_axi_awvalid", 1)
+    sim.drive("m_axi_awaddr", 0x0)
+    sim.drive("m_axi_awlen", 1)
+    sim.drive("m_axi_awsize", 2)
+    sim.drive("m_axi_awburst", 1)
+    sim.drive("m_axi_wvalid", 1)
+    sim.drive("m_axi_wdata", 0x33333333)
+    sim.drive("m_axi_wstrb", 0xF)
+    sim.drive("m_axi_wlast", 1)  # would violate strict mode
     step_run_until(sim, 40)  # no error raised
 
     responder.close()
@@ -870,13 +863,13 @@ def _make_passthru_sim(engine: str, src: str) -> Simulator:
     sim = Simulator(_parse(src), engine=engine)
     sim.run(max_time=0)
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 20000)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst_n", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 0)
+    sim.settle()
     step_run_until(sim, 60)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     return sim
 
 

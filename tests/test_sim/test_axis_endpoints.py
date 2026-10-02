@@ -6,7 +6,7 @@ from veriforge.dsl import Module
 from veriforge.dsl.lib import axi_stream
 from veriforge.sim.bench import PlannerOverrides, Testbench
 from veriforge.sim.endpoints import AXIStreamFrame, AXIStreamSink, AXIStreamSource, EndpointCoordinator, PauseGenerator
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 from .engines import ENGINES
@@ -116,27 +116,20 @@ def _read_int(sim: Simulator, signal_name: str) -> int:
     return int(sim.read(signal_name))
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=0)
-    else:
-        sim.settle()
-
-
 def _make_sim_for(module, engine: str, signal_names: list[str]) -> Simulator:
     sim = Simulator(module, engine=engine)
     sim.run(max_time=0)
     for signal_name in signal_names:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 1000)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst", 1)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst", 0)
+    sim.settle()
     return sim
 
 

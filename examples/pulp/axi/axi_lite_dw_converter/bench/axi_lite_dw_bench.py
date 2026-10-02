@@ -10,7 +10,7 @@ Five variants are exercised, each on its own fresh ``Testbench`` instance:
 * **typed_up32_128** 32-bit slv → 128-bit mst: replication + strobe shift.
 * **typed_up64_128** 64-bit slv → 128-bit mst: replication + strobe shift.
 
-All signals are driven manually via ``step_drive``.  The bench acts as both
+All signals are driven manually via ``sim.drive()``.  The bench acts as both
 AXI-Lite master (driving ``slv_*`` inputs) and AXI-Lite slave responder
 (driving ``mst_*`` response inputs back into the DUT).
 
@@ -26,8 +26,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.bench import Testbench
-from veriforge.sim.endpoints.helpers import _settle_current_time
-from veriforge.sim.step_harness import step_drive
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -70,15 +68,14 @@ def _expect(bench: Testbench, name: str, expected: int, message: str) -> None:
 
 def _drive(bench: Testbench, **values: int) -> None:
     sim = bench.sim
-    eng = sim._engine
     for name, val in values.items():
-        step_drive(sim, eng, name, val)
-    _settle_current_time(sim, "clk")
+        sim.drive(name, val)
+    sim.settle()
 
 
 def _wait_posedge(bench: Testbench) -> None:
     bench.step(1)
-    _settle_current_time(bench.sim, "clk")
+    bench.sim.settle()
 
 
 def _wait_until(bench: Testbench, predicate, max_cycles: int = 50, message: str = "timeout") -> None:

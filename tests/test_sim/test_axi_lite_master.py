@@ -12,7 +12,7 @@ from veriforge.sim.endpoints import (
     AXILiteResponseDriver,
     AXILiteResponseError,
 )
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 from .engines import ENGINES
@@ -100,13 +100,6 @@ def _axi_lite_stub_module():
     return module.build()
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=sim.time)
-    else:
-        sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = int(sim.read(signal_name))
     while sim.time < limit:
@@ -145,16 +138,16 @@ def _make_sim(engine: str) -> Simulator:
         "s_axi_arvalid",
         "s_axi_rready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 600)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst", 1)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst", 0)
+    sim.settle()
     return sim
 
 
@@ -175,10 +168,10 @@ def _make_stub_sim(engine: str) -> Simulator:
         "axi_arvalid",
         "axi_rready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 400)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
     return sim
 
@@ -220,23 +213,23 @@ def test_axi_lite_request_driver_with_responder(engine: str) -> None:
     responder = AXILiteResponder(sim, "axi", initial_memory={0x0: 0x11223344})
 
     driver.begin_write(0x4, 0xAABBCCDD)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_high(sim, "axi_bvalid", sim.time + 30, "stub write response not observed")
     assert responder.write_log == [(0x4, 0xAABBCCDD, 0xF)]
     driver.end_write()
     driver.set_bready(True)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stub write consume edge not observed")
     driver.set_bready(False)
 
     driver.begin_read(0x0)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_high(sim, "axi_rvalid", sim.time + 30, "stub read response not observed")
     assert responder.read_log == [0x0]
     assert int(sim.read("axi_rdata")) == 0x11223344
     driver.end_read()
     driver.set_rready(True)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stub read consume edge not observed")
     driver.set_rready(False)
     responder.close()
@@ -250,13 +243,13 @@ def test_axi_lite_request_and_response_drivers(engine: str) -> None:
 
     response_driver.set_write_ready(True)
     request_driver.begin_write(0x4, 0xAABBCCDD)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stub write accept edge not observed")
     request_driver.end_write()
-    _settle_drives(sim, engine)
+    sim.settle()
     request_driver.set_bready(True)
     response_driver.begin_write_response(0x2)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_high(sim, "axi_bvalid", sim.time + 20, "stub write response valid not observed")
     assert int(sim.read("axi_bresp")) == 0x2
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stub write response consume edge not observed")
@@ -265,13 +258,13 @@ def test_axi_lite_request_and_response_drivers(engine: str) -> None:
 
     response_driver.set_read_ready(True)
     request_driver.begin_read(0x8)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stub read accept edge not observed")
     request_driver.end_read()
-    _settle_drives(sim, engine)
+    sim.settle()
     request_driver.set_rready(True)
     response_driver.begin_read_response(0x11223344, resp=0x0)
-    _settle_drives(sim, engine)
+    sim.settle()
     _run_until_high(sim, "axi_rvalid", sim.time + 20, "stub read response valid not observed")
     assert int(sim.read("axi_rdata")) == 0x11223344
     assert int(sim.read("axi_rresp")) == 0x0
@@ -307,11 +300,11 @@ def test_axi_lite_strict_awvalid_deassert_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = _stub_strict_responder(sim, engine)
 
-    step_drive(sim, engine, "axi_awvalid", 1)
-    step_drive(sim, engine, "axi_awaddr", 0x4)
+    sim.drive("axi_awvalid", 1)
+    sim.drive("axi_awaddr", 0x4)
     step_run_until(sim, 16)  # posedge at t=15 → sets unacked flag
 
-    step_drive(sim, engine, "axi_awvalid", 0)  # violation: deassert before ready
+    sim.drive("axi_awvalid", 0)  # violation: deassert before ready
     with pytest.raises(AXILiteProtocolError, match="AWVALID deasserted"):
         step_run_until(sim, 26)  # posedge at t=25 → raises
 
@@ -324,11 +317,11 @@ def test_axi_lite_strict_awaddr_change_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = _stub_strict_responder(sim, engine)
 
-    step_drive(sim, engine, "axi_awvalid", 1)
-    step_drive(sim, engine, "axi_awaddr", 0x4)
+    sim.drive("axi_awvalid", 1)
+    sim.drive("axi_awaddr", 0x4)
     step_run_until(sim, 16)  # posedge at t=15 → snapshot addr=0x4
 
-    step_drive(sim, engine, "axi_awaddr", 0x8)  # violation: addr changed
+    sim.drive("axi_awaddr", 0x8)  # violation: addr changed
     with pytest.raises(AXILiteProtocolError, match="AWADDR changed"):
         step_run_until(sim, 26)
 
@@ -341,11 +334,11 @@ def test_axi_lite_strict_wvalid_deassert_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = _stub_strict_responder(sim, engine)
 
-    step_drive(sim, engine, "axi_wvalid", 1)
-    step_drive(sim, engine, "axi_wdata", 0xDEADBEEF)
+    sim.drive("axi_wvalid", 1)
+    sim.drive("axi_wdata", 0xDEADBEEF)
     step_run_until(sim, 16)
 
-    step_drive(sim, engine, "axi_wvalid", 0)
+    sim.drive("axi_wvalid", 0)
     with pytest.raises(AXILiteProtocolError, match="WVALID deasserted"):
         step_run_until(sim, 26)
 
@@ -358,11 +351,11 @@ def test_axi_lite_strict_wdata_change_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = _stub_strict_responder(sim, engine)
 
-    step_drive(sim, engine, "axi_wvalid", 1)
-    step_drive(sim, engine, "axi_wdata", 0x11223344)
+    sim.drive("axi_wvalid", 1)
+    sim.drive("axi_wdata", 0x11223344)
     step_run_until(sim, 16)
 
-    step_drive(sim, engine, "axi_wdata", 0xAABBCCDD)  # violation
+    sim.drive("axi_wdata", 0xAABBCCDD)  # violation
     with pytest.raises(AXILiteProtocolError, match="WDATA changed"):
         step_run_until(sim, 26)
 
@@ -375,11 +368,11 @@ def test_axi_lite_strict_arvalid_deassert_raises(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = _stub_strict_responder(sim, engine)
 
-    step_drive(sim, engine, "axi_arvalid", 1)
-    step_drive(sim, engine, "axi_araddr", 0x8)
+    sim.drive("axi_arvalid", 1)
+    sim.drive("axi_araddr", 0x8)
     step_run_until(sim, 16)
 
-    step_drive(sim, engine, "axi_arvalid", 0)
+    sim.drive("axi_arvalid", 0)
     with pytest.raises(AXILiteProtocolError, match="ARVALID deasserted"):
         step_run_until(sim, 26)
 
@@ -392,11 +385,11 @@ def test_axi_lite_strict_off_by_default_no_raise(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXILiteResponder(sim, "axi", always_ready=False, strict=False)
 
-    step_drive(sim, engine, "axi_awvalid", 1)
-    step_drive(sim, engine, "axi_awaddr", 0x4)
+    sim.drive("axi_awvalid", 1)
+    sim.drive("axi_awaddr", 0x4)
     step_run_until(sim, 16)
 
-    step_drive(sim, engine, "axi_awvalid", 0)  # violation, but strict=False
+    sim.drive("axi_awvalid", 0)  # violation, but strict=False
     step_run_until(sim, 26)  # no error raised
 
     responder.close()
@@ -414,12 +407,12 @@ def test_axi_lite_strict_clean_transaction_no_raise(engine: str) -> None:
     responder = AXILiteResponder(sim, "axi", always_ready=True, strict=True)
 
     # Assert AWVALID — AWREADY is already 1 (always_ready)
-    step_drive(sim, engine, "axi_awvalid", 1)
-    step_drive(sim, engine, "axi_awaddr", 0x4)
+    sim.drive("axi_awvalid", 1)
+    sim.drive("axi_awaddr", 0x4)
     step_run_until(sim, 16)  # posedge at t=15: AWVALID=1, AWREADY=1 → unacked=False
 
     # Deassert AWVALID — handshake already completed, no violation.
-    step_drive(sim, engine, "axi_awvalid", 0)
+    sim.drive("axi_awvalid", 0)
     step_run_until(sim, 26)  # posedge at t=25: no error raised
 
     responder.close()

@@ -15,7 +15,7 @@ from pathlib import Path
 from veriforge.project import parse_files
 from veriforge.sim.endpoints import AXILiteMaster, AXILiteResponseError
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -57,10 +57,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
 def _expect_value(actual: int, expected: int, message: str) -> None:
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
@@ -108,13 +104,13 @@ def _make_step_sim(design, engine: str) -> Simulator:
         "slv1_ar_valid",
         "slv1_r_ready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -139,7 +135,7 @@ def _exercise_routing(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
     port0 = _make_axi_lite_master(sim, "slv0")
     port1 = _make_axi_lite_master(sim, "slv1")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect_value(port0.read(ADDR_TARGET0), TARGET0_INIT, "target0 reset read mismatch")
     _expect_value(port1.read(ADDR_TARGET1), TARGET1_INIT, "target1 reset read mismatch")
@@ -154,46 +150,47 @@ def _exercise_routing(design, engine: str) -> None:
 def _exercise_same_target_arbitration(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
 
-    step_drive(sim, engine, "slv0_aw_addr", ADDR_TARGET0)
-    step_drive(sim, engine, "slv0_aw_valid", 1)
-    step_drive(sim, engine, "slv0_w_data", ARBITRATION_FIRST)
-    step_drive(sim, engine, "slv0_w_strb", 0xF)
-    step_drive(sim, engine, "slv0_w_valid", 1)
-    step_drive(sim, engine, "slv0_b_ready", 0)
-    step_drive(sim, engine, "slv1_aw_addr", ADDR_TARGET0 + 4)
-    step_drive(sim, engine, "slv1_aw_valid", 1)
-    step_drive(sim, engine, "slv1_w_data", ARBITRATION_SECOND)
-    step_drive(sim, engine, "slv1_w_strb", 0xF)
-    step_drive(sim, engine, "slv1_w_valid", 1)
-    step_drive(sim, engine, "slv1_b_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_addr", ADDR_TARGET0)
+    sim.drive("slv0_aw_valid", 1)
+    sim.drive("slv0_w_data", ARBITRATION_FIRST)
+    sim.drive("slv0_w_strb", 0xF)
+    sim.drive("slv0_w_valid", 1)
+    sim.drive("slv0_b_ready", 0)
+    sim.drive("slv1_aw_addr", ADDR_TARGET0 + 4)
+    sim.drive("slv1_aw_valid", 1)
+    sim.drive("slv1_w_data", ARBITRATION_SECOND)
+    sim.drive("slv1_w_strb", 0xF)
+    sim.drive("slv1_w_valid", 1)
+    sim.drive("slv1_b_ready", 0)
+    sim.settle()
 
     _expect(sim, "slv0_aw_ready", 1, "port0 should win first same-target arbitration")
     _expect(sim, "slv0_w_ready", 1, "port0 write data should be accepted first")
     _expect(sim, "slv1_aw_ready", 0, "port1 should stall behind port0 for same target")
     _expect(sim, "slv1_w_ready", 0, "port1 write data should stall behind port0")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first arbitration capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv0_aw_valid", 0)
-    step_drive(sim, engine, "slv0_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_valid", 0)
+    sim.drive("slv0_w_valid", 0)
+    sim.settle()
     _expect(sim, "slv0_b_valid", 1, "port0 should hold the first write response")
     _expect(sim, "slv1_aw_ready", 0, "port1 should remain stalled while target0 response is pending")
 
-    step_drive(sim, engine, "slv0_b_ready", 1)
+    sim.drive("slv0_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first arbitration response release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect(sim, "slv0_b_valid", 0, "port0 response should clear after release")
     _expect(sim, "slv1_aw_ready", 1, "port1 should become ready after port0 releases target0")
     _expect(sim, "slv1_w_ready", 1, "port1 write data should become ready after release")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "second arbitration capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv1_aw_valid", 0)
-    step_drive(sim, engine, "slv1_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv1_aw_valid", 0)
+    sim.drive("slv1_w_valid", 0)
+    sim.settle()
     _expect(sim, "slv1_b_valid", 1, "port1 should receive the deferred write response")
     _expect(sim, "target0_data", ARBITRATION_SECOND, "target0 should contain the second write after arbitration")
     _expect(sim, "target1_data", TARGET1_INIT, "target1 should remain unchanged during target0 arbitration")

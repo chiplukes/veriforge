@@ -14,7 +14,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -42,10 +42,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _make_step_sim(design, engine: str) -> Simulator:
@@ -80,13 +76,13 @@ def _make_step_sim(design, engine: str) -> Simulator:
         "mst_r_resp",
         "mst_r_valid",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -94,28 +90,28 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
 
 def _drive_case_one(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_aw_addr", 0x104)
-    step_drive(sim, engine, "slv_aw_prot", 0x5)
-    step_drive(sim, engine, "slv_aw_cache", 0xB)
-    step_drive(sim, engine, "slv_aw_valid", 1)
-    step_drive(sim, engine, "slv_w_data", 0xCAFEBABE)
-    step_drive(sim, engine, "slv_w_strb", 0xA)
-    step_drive(sim, engine, "slv_w_valid", 1)
-    step_drive(sim, engine, "slv_b_ready", 1)
-    step_drive(sim, engine, "slv_ar_addr", 0x208)
-    step_drive(sim, engine, "slv_ar_prot", 0x3)
-    step_drive(sim, engine, "slv_ar_cache", 0x6)
-    step_drive(sim, engine, "slv_ar_valid", 1)
-    step_drive(sim, engine, "slv_r_ready", 1)
-    step_drive(sim, engine, "mst_aw_ready", 1)
-    step_drive(sim, engine, "mst_w_ready", 0)
-    step_drive(sim, engine, "mst_b_resp", 0x2)
-    step_drive(sim, engine, "mst_b_valid", 1)
-    step_drive(sim, engine, "mst_ar_ready", 1)
-    step_drive(sim, engine, "mst_r_data", 0x12345678)
-    step_drive(sim, engine, "mst_r_resp", 0x1)
-    step_drive(sim, engine, "mst_r_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("slv_aw_addr", 0x104)
+    sim.drive("slv_aw_prot", 0x5)
+    sim.drive("slv_aw_cache", 0xB)
+    sim.drive("slv_aw_valid", 1)
+    sim.drive("slv_w_data", 0xCAFEBABE)
+    sim.drive("slv_w_strb", 0xA)
+    sim.drive("slv_w_valid", 1)
+    sim.drive("slv_b_ready", 1)
+    sim.drive("slv_ar_addr", 0x208)
+    sim.drive("slv_ar_prot", 0x3)
+    sim.drive("slv_ar_cache", 0x6)
+    sim.drive("slv_ar_valid", 1)
+    sim.drive("slv_r_ready", 1)
+    sim.drive("mst_aw_ready", 1)
+    sim.drive("mst_w_ready", 0)
+    sim.drive("mst_b_resp", 0x2)
+    sim.drive("mst_b_valid", 1)
+    sim.drive("mst_ar_ready", 1)
+    sim.drive("mst_r_data", 0x12345678)
+    sim.drive("mst_r_resp", 0x1)
+    sim.drive("mst_r_valid", 1)
+    sim.settle()
 
 
 def _expect_case_one(sim: Simulator) -> None:
@@ -148,28 +144,28 @@ def _expect_case_one(sim: Simulator) -> None:
 
 
 def _drive_case_two(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_aw_addr", 0x3FC)
-    step_drive(sim, engine, "slv_aw_prot", 0x2)
-    step_drive(sim, engine, "slv_aw_cache", 0x1)
-    step_drive(sim, engine, "slv_aw_valid", 0)
-    step_drive(sim, engine, "slv_w_data", 0x01020304)
-    step_drive(sim, engine, "slv_w_strb", 0x5)
-    step_drive(sim, engine, "slv_w_valid", 0)
-    step_drive(sim, engine, "slv_b_ready", 0)
-    step_drive(sim, engine, "slv_ar_addr", 0x40)
-    step_drive(sim, engine, "slv_ar_prot", 0x7)
-    step_drive(sim, engine, "slv_ar_cache", 0xF)
-    step_drive(sim, engine, "slv_ar_valid", 0)
-    step_drive(sim, engine, "slv_r_ready", 0)
-    step_drive(sim, engine, "mst_aw_ready", 0)
-    step_drive(sim, engine, "mst_w_ready", 1)
-    step_drive(sim, engine, "mst_b_resp", 0x0)
-    step_drive(sim, engine, "mst_b_valid", 0)
-    step_drive(sim, engine, "mst_ar_ready", 0)
-    step_drive(sim, engine, "mst_r_data", 0xDEADBEEF)
-    step_drive(sim, engine, "mst_r_resp", 0x2)
-    step_drive(sim, engine, "mst_r_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv_aw_addr", 0x3FC)
+    sim.drive("slv_aw_prot", 0x2)
+    sim.drive("slv_aw_cache", 0x1)
+    sim.drive("slv_aw_valid", 0)
+    sim.drive("slv_w_data", 0x01020304)
+    sim.drive("slv_w_strb", 0x5)
+    sim.drive("slv_w_valid", 0)
+    sim.drive("slv_b_ready", 0)
+    sim.drive("slv_ar_addr", 0x40)
+    sim.drive("slv_ar_prot", 0x7)
+    sim.drive("slv_ar_cache", 0xF)
+    sim.drive("slv_ar_valid", 0)
+    sim.drive("slv_r_ready", 0)
+    sim.drive("mst_aw_ready", 0)
+    sim.drive("mst_w_ready", 1)
+    sim.drive("mst_b_resp", 0x0)
+    sim.drive("mst_b_valid", 0)
+    sim.drive("mst_ar_ready", 0)
+    sim.drive("mst_r_data", 0xDEADBEEF)
+    sim.drive("mst_r_resp", 0x2)
+    sim.drive("mst_r_valid", 0)
+    sim.settle()
 
 
 def _expect_case_two(sim: Simulator) -> None:

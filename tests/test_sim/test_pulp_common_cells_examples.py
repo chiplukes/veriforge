@@ -6,7 +6,7 @@ import pytest
 
 from veriforge.project import parse_files  # noqa: E402
 from veriforge.sim.example_runner import display_lines  # noqa: E402
-from veriforge.sim.step_harness import step_drive, step_run_until  # noqa: E402
+from veriforge.sim.step_harness import step_run_until  # noqa: E402
 from veriforge.sim.testbench import Clock, Simulator  # noqa: E402
 
 from .engines import ENGINES  # noqa: E402
@@ -376,14 +376,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     assert actual == expected, f"{message}: expected {expected:#x}, got {actual:#x}"
 
 
-def _settle_drives(sim: Simulator, engine: str, clock_name: str = "src_clk_i") -> None:
-    # clock_name remains for existing call sites; settle() tracks driven signals.
-    if engine == "reference":
-        sim.run(max_time=0)
-    else:
-        sim.settle()
-
-
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
     while sim.time < target_time:
         if predicate(sim):
@@ -409,24 +401,24 @@ def _make_isochronous_4phase_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "src_clk_i", 0)
-    step_drive(sim, engine, "dst_clk_i", 0)
-    step_drive(sim, engine, "src_rst_ni", 0)
-    step_drive(sim, engine, "dst_rst_ni", 0)
-    step_drive(sim, engine, "src_valid_i", 0)
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_clk_i", 0)
+    sim.drive("dst_clk_i", 0)
+    sim.drive("src_rst_ni", 0)
+    sim.drive("dst_rst_ni", 0)
+    sim.drive("src_valid_i", 0)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), 220)
     sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=20), 220)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_isochronous_4phase_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 36)
     _expect(sim, "src_ready_o", 1, "source should be ready after reset")
     _expect(sim, "dst_valid_o", 0, "destination should be idle after reset")
@@ -454,19 +446,19 @@ def _make_cdc_reset_ctrlr_sim_for_top(design, top_name: str, engine: str) -> Sim
         ("a_isolate_ack_i", 0),
         ("b_isolate_ack_i", 0),
     ]:
-        step_drive(sim, engine, signal_name, value)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, value)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("a_clk_i"), period=10), 2400)
     sim.schedule_clock(Clock(sim.signal("b_clk_i"), period=14), 2400)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_cdc_reset_ctrlr_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "a_rst_ni", 1)
-    step_drive(sim, engine, "b_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 1)
+    sim.drive("b_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _expect(sim, "a_isolate_o", 0, "a side should start idle after reset release")
     _expect(sim, "a_clear_o", 0, "a side clear should start low after reset release")
@@ -476,9 +468,9 @@ def _release_cdc_reset_ctrlr_reset(sim: Simulator, engine: str) -> None:
 
 def _release_cdc_reset_ctrlr_async_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "a_rst_ni", 1)
-    step_drive(sim, engine, "b_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 1)
+    sim.drive("b_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _run_until_condition(
         sim,
@@ -488,18 +480,18 @@ def _release_cdc_reset_ctrlr_async_reset(sim: Simulator, engine: str) -> None:
     )
     _expect(sim, "a_clear_o", 0, "startup async reset a-side clear should stay low before isolate acknowledgements")
     _expect(sim, "b_clear_o", 0, "startup async reset b-side clear should stay low before isolate acknowledgements")
-    step_drive(sim, engine, "a_isolate_ack_i", 1)
-    step_drive(sim, engine, "b_isolate_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 1)
+    sim.drive("b_isolate_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_ASSERT_WINDOW,
         lambda s: _read_int(s, "a_clear_o") == 1 and _read_int(s, "b_clear_o") == 1,
         "startup async reset never reached clear on both sides",
     )
-    step_drive(sim, engine, "a_clear_ack_i", 1)
-    step_drive(sim, engine, "b_clear_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_clear_ack_i", 1)
+    sim.drive("b_clear_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_COMPLETE_WINDOW,
@@ -512,11 +504,11 @@ def _release_cdc_reset_ctrlr_async_reset(sim: Simulator, engine: str) -> None:
         lambda s: _read_int(s, "a_isolate_o") == 0 and _read_int(s, "b_isolate_o") == 0,
         "startup async reset isolate phase never released",
     )
-    step_drive(sim, engine, "a_isolate_ack_i", 0)
-    step_drive(sim, engine, "b_isolate_ack_i", 0)
-    step_drive(sim, engine, "a_clear_ack_i", 0)
-    step_drive(sim, engine, "b_clear_ack_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 0)
+    sim.drive("b_isolate_ack_i", 0)
+    sim.drive("a_clear_ack_i", 0)
+    sim.drive("b_clear_ack_i", 0)
+    sim.settle()
 
 
 def _make_rstgen_bypass_sim(design, engine: str) -> Simulator:
@@ -525,15 +517,15 @@ def _make_rstgen_bypass_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "rst_test_mode_ni", 1)
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine, "clk_i")
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("rst_test_mode_ni", 1)
+    sim.drive("test_mode_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 120)
-    _settle_drives(sim, engine, "clk_i")
+    sim.settle()
     return sim
 
 
@@ -543,14 +535,14 @@ def _make_rstgen_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine, "clk_i")
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("test_mode_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 170)
-    _settle_drives(sim, engine, "clk_i")
+    sim.settle()
     return sim
 
 
@@ -560,14 +552,14 @@ def _make_sync_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine, "clk_i")
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("serial_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 180)
-    _settle_drives(sim, engine, "clk_i")
+    sim.settle()
     return sim
 
 
@@ -577,15 +569,15 @@ def _make_sync_wedge_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "en_i", 1)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine, "clk_i")
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("en_i", 1)
+    sim.drive("serial_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), 190)
-    _settle_drives(sim, engine, "clk_i")
+    sim.settle()
     return sim
 
 
@@ -745,11 +737,11 @@ def test_isochronous_4phase_cross_engine(tmp_path, engine):
     sim = _make_isochronous_4phase_sim(design, engine)
     _release_isochronous_4phase_reset(sim, engine)
 
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 60, "source request edge not observed")
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
     _expect(sim, "src_ready_o", 0, "source ready should drop after a request")
     _expect(sim, "dst_valid_o", 0, "destination should not see a request before a destination edge")
 
@@ -764,13 +756,13 @@ def test_isochronous_4phase_cross_engine(tmp_path, engine):
     _run_until_rising_edge(sim, "dst_clk_i", 110, "second destination edge not observed while stalled")
     _expect(sim, "dst_valid_o", 1, "destination valid should hold while not ready")
 
-    step_drive(sim, engine, "dst_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", 130, "destination acknowledge edge not observed")
     _expect(sim, "dst_valid_o", 0, "destination valid should clear after acknowledgement")
 
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         160,
@@ -778,12 +770,12 @@ def test_isochronous_4phase_cross_engine(tmp_path, engine):
         "source ready never reopened after the first acknowledgement",
     )
 
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 180, "second source request edge not observed")
-    step_drive(sim, engine, "src_valid_i", 0)
-    step_drive(sim, engine, "dst_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.drive("dst_ready_i", 1)
+    sim.settle()
     _expect(sim, "src_ready_o", 0, "second request should drop source ready again")
 
     _run_until_condition(
@@ -812,11 +804,11 @@ def _run_cdc_reset_ctrlr_round(
     remote_clear_ack: str,
     label: str,
 ) -> None:
-    step_drive(sim, engine, trigger_signal, 1)
-    _settle_drives(sim, engine)
+    sim.drive(trigger_signal, 1)
+    sim.settle()
     _run_until_rising_edge(sim, trigger_clock, sim.time + 30, f"{label} trigger edge not observed")
-    step_drive(sim, engine, trigger_signal, 0)
-    _settle_drives(sim, engine)
+    sim.drive(trigger_signal, 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -836,9 +828,9 @@ def _run_cdc_reset_ctrlr_round(
     _expect(sim, local_clear, 0, f"{label} local clear should still be low before isolate acknowledgements")
     _expect(sim, remote_clear, 0, f"{label} remote clear should still be low before isolate acknowledgements")
 
-    step_drive(sim, engine, local_isolate_ack, 1)
-    step_drive(sim, engine, remote_isolate_ack, 1)
-    _settle_drives(sim, engine)
+    sim.drive(local_isolate_ack, 1)
+    sim.drive(remote_isolate_ack, 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 220,
@@ -848,9 +840,9 @@ def _run_cdc_reset_ctrlr_round(
     _expect(sim, local_isolate, 1, f"{label} local isolate should stay high during clear")
     _expect(sim, remote_isolate, 1, f"{label} remote isolate should stay high during clear")
 
-    step_drive(sim, engine, local_clear_ack, 1)
-    step_drive(sim, engine, remote_clear_ack, 1)
-    _settle_drives(sim, engine)
+    sim.drive(local_clear_ack, 1)
+    sim.drive(remote_clear_ack, 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 220,
@@ -864,11 +856,11 @@ def _run_cdc_reset_ctrlr_round(
         f"{label} isolate phase never released after post-clear",
     )
 
-    step_drive(sim, engine, local_isolate_ack, 0)
-    step_drive(sim, engine, remote_isolate_ack, 0)
-    step_drive(sim, engine, local_clear_ack, 0)
-    step_drive(sim, engine, remote_clear_ack, 0)
-    _settle_drives(sim, engine)
+    sim.drive(local_isolate_ack, 0)
+    sim.drive(remote_isolate_ack, 0)
+    sim.drive(local_clear_ack, 0)
+    sim.drive(remote_clear_ack, 0)
+    sim.settle()
 
 
 def _run_cdc_reset_ctrlr_async_round(sim: Simulator, engine: str, *, side: str, label: str) -> None:
@@ -881,13 +873,13 @@ def _run_cdc_reset_ctrlr_async_round(sim: Simulator, engine: str, *, side: str, 
         local_isolate = "b_isolate_o"
         local_clear = "b_clear_o"
 
-    step_drive(sim, engine, reset_signal, 0)
-    _settle_drives(sim, engine)
+    sim.drive(reset_signal, 0)
+    sim.settle()
     _expect(sim, local_isolate, 1, f"{label} should assert local isolate immediately")
     _expect(sim, local_clear, 0, f"{label} should not assert local clear immediately")
     step_run_until(sim, sim.time + 24)
-    step_drive(sim, engine, reset_signal, 1)
-    _settle_drives(sim, engine)
+    sim.drive(reset_signal, 1)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -895,18 +887,18 @@ def _run_cdc_reset_ctrlr_async_round(sim: Simulator, engine: str, *, side: str, 
         lambda s: _read_int(s, "a_isolate_o") == 1 and _read_int(s, "b_isolate_o") == 1,
         f"{label} never asserted isolate on both sides",
     )
-    step_drive(sim, engine, "a_isolate_ack_i", 1)
-    step_drive(sim, engine, "b_isolate_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 1)
+    sim.drive("b_isolate_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_ASSERT_WINDOW,
         lambda s: _read_int(s, "a_clear_o") == 1 and _read_int(s, "b_clear_o") == 1,
         f"{label} never reached clear on both sides",
     )
-    step_drive(sim, engine, "a_clear_ack_i", 1)
-    step_drive(sim, engine, "b_clear_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_clear_ack_i", 1)
+    sim.drive("b_clear_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_COMPLETE_WINDOW,
@@ -919,11 +911,11 @@ def _run_cdc_reset_ctrlr_async_round(sim: Simulator, engine: str, *, side: str, 
         lambda s: _read_int(s, "a_isolate_o") == 0 and _read_int(s, "b_isolate_o") == 0,
         f"{label} isolate phase never released",
     )
-    step_drive(sim, engine, "a_isolate_ack_i", 0)
-    step_drive(sim, engine, "b_isolate_ack_i", 0)
-    step_drive(sim, engine, "a_clear_ack_i", 0)
-    step_drive(sim, engine, "b_clear_ack_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 0)
+    sim.drive("b_isolate_ack_i", 0)
+    sim.drive("a_clear_ack_i", 0)
+    sim.drive("b_clear_ack_i", 0)
+    sim.settle()
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -983,8 +975,8 @@ def test_rstgen_bypass_cross_engine(tmp_path, engine):
     _expect(sim, "init_no", 0, "functional reset should hold init_no low initially")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 0, "synchronized reset output should stay low immediately after release")
     _expect(sim, "init_no", 0, "synchronized init output should stay low immediately after release")
 
@@ -998,28 +990,28 @@ def test_rstgen_bypass_cross_engine(tmp_path, engine):
         "outputs never asserted after the synchronized release window",
     )
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "functional reset reassertion should clear rst_no immediately")
     _expect(sim, "init_no", 0, "functional reset reassertion should clear init_no immediately")
 
-    step_drive(sim, engine, "test_mode_i", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("test_mode_i", 1)
+    sim.settle()
     _expect(sim, "rst_no", 1, "test mode should bypass rst_no immediately from rst_test_mode_ni")
     _expect(sim, "init_no", 1, "test mode should force init_no high immediately")
 
-    step_drive(sim, engine, "rst_test_mode_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_test_mode_ni", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "test-mode reset low should clear rst_no immediately")
     _expect(sim, "init_no", 1, "init_no should stay high in test mode even when rst_test_mode_ni is low")
 
-    step_drive(sim, engine, "rst_test_mode_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_test_mode_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 1, "test-mode reset high should restore rst_no immediately")
     _expect(sim, "init_no", 1, "init_no should remain high while test mode stays enabled")
 
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("test_mode_i", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "leaving test mode should return rst_no to the functional reset path")
     _expect(sim, "init_no", 0, "leaving test mode should return init_no to the functional reset path")
 
@@ -1033,8 +1025,8 @@ def test_rstgen_cross_engine(tmp_path, engine):
     _expect(sim, "init_no", 0, "functional reset should hold init_no low initially")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 0, "synchronized reset output should stay low immediately after release")
     _expect(sim, "init_no", 0, "synchronized init output should stay low immediately after release")
 
@@ -1048,18 +1040,18 @@ def test_rstgen_cross_engine(tmp_path, engine):
         "outputs never asserted after the synchronized release window",
     )
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "functional reset reassertion should clear rst_no immediately")
     _expect(sim, "init_no", 0, "functional reset reassertion should clear init_no immediately")
 
-    step_drive(sim, engine, "test_mode_i", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("test_mode_i", 1)
+    sim.settle()
     _expect(sim, "rst_no", 0, "test mode should still reflect rst_ni on rst_no while reset is asserted")
     _expect(sim, "init_no", 1, "test mode should force init_no high even while reset stays asserted")
 
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 1, "test mode should bypass rst_no immediately from rst_ni")
     _expect(sim, "init_no", 1, "test mode should keep init_no high after reset release")
 
@@ -1067,8 +1059,8 @@ def test_rstgen_cross_engine(tmp_path, engine):
     _expect(sim, "rst_no", 1, "rst_no should stay high while test mode remains enabled")
     _expect(sim, "init_no", 1, "init_no should stay high while test mode remains enabled")
 
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("test_mode_i", 0)
+    sim.settle()
     _expect(sim, "rst_no", 1, "leaving test mode should keep rst_no high after the sync path refills")
     _expect(sim, "init_no", 1, "leaving test mode should keep init_no high after the sync path refills")
 
@@ -1081,8 +1073,8 @@ def test_sync_cross_engine(tmp_path, engine):
     _expect(sim, "serial_o", 0, "default reset value should drive serial_o low under reset")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "serial_o", 0, "default reset case should stay low immediately after release")
 
     _run_until_condition(
@@ -1091,8 +1083,8 @@ def test_sync_cross_engine(tmp_path, engine):
         lambda s: _read_int(s, "clk_i") == 0,
         "clock never reached a low phase before the rising-latency drive",
     )
-    step_drive(sim, engine, "serial_i", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("serial_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk_i", 60, "first rising sample edge not observed")
     _expect(sim, "serial_o", 0, "stage 1 should not reach the output immediately")
     _run_until_rising_edge(sim, "clk_i", 80, "second rising sample edge not observed")
@@ -1106,8 +1098,8 @@ def test_sync_cross_engine(tmp_path, engine):
         lambda s: _read_int(s, "clk_i") == 0,
         "clock never reached a low phase before the falling-latency drive",
     )
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("serial_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, "clk_i", 140, "first falling sample edge not observed")
     _expect(sim, "serial_o", 1, "output should hold high for the first falling sample edge")
     _run_until_rising_edge(sim, "clk_i", 160, "second falling sample edge not observed")
@@ -1119,8 +1111,8 @@ def test_sync_cross_engine(tmp_path, engine):
     _expect(sim, "serial_o", 1, "RESET_VALUE=1 should drive serial_o high under reset")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "serial_o", 1, "RESET_VALUE=1 case should stay high immediately after release")
     _run_until_rising_edge(sim, "clk_i", 60, "first drain edge not observed")
     _expect(sim, "serial_o", 1, "RESET_VALUE=1 should hold high on the first drain edge")
@@ -1129,8 +1121,8 @@ def test_sync_cross_engine(tmp_path, engine):
     _run_until_rising_edge(sim, "clk_i", 120, "third drain edge not observed")
     _expect(sim, "serial_o", 0, "RESET_VALUE=1 should drain to zero on the third edge when serial_i stays low")
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "serial_o", 1, "async reset reassertion should immediately restore RESET_VALUE=1")
 
 
@@ -1144,8 +1136,8 @@ def test_sync_wedge_cross_engine(tmp_path, engine):
     _expect(sim, "f_edge_o", 0, "reset should clear the falling-edge pulse")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "serial_o", 0, "release should not change serial_o immediately")
     _expect(sim, "r_edge_o", 0, "release should not create a rising-edge pulse")
     _expect(sim, "f_edge_o", 0, "release should not create a falling-edge pulse")
@@ -1156,8 +1148,8 @@ def test_sync_wedge_cross_engine(tmp_path, engine):
         lambda s: _read_int(s, "clk_i") == 0,
         "clock never reached a low phase before the rising drive",
     )
-    step_drive(sim, engine, "serial_i", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("serial_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk_i", 60, "first rising sample edge not observed")
     _expect(sim, "r_edge_o", 0, "first synchronized stage should not pulse immediately")
     _expect(sim, "serial_o", 0, "serial_o should stay low through the first sample edge")
@@ -1169,14 +1161,14 @@ def test_sync_wedge_cross_engine(tmp_path, engine):
     _expect(sim, "r_edge_o", 0, "rising-edge pulse should clear on the following sample edge")
     _expect(sim, "serial_o", 1, "serial_o should go high after the rising pulse cycle")
 
-    step_drive(sim, engine, "en_i", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("en_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, "clk_i", 120, "disabled hold edge not observed")
     _expect(sim, "serial_o", 1, "disabled hold should preserve the sampled high level")
     _expect(sim, "r_edge_o", 0, "disabled hold should not emit a rising-edge pulse")
     _expect(sim, "f_edge_o", 0, "disabled hold should not emit a falling-edge pulse")
-    step_drive(sim, engine, "en_i", 1)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("en_i", 1)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -1184,8 +1176,8 @@ def test_sync_wedge_cross_engine(tmp_path, engine):
         lambda s: _read_int(s, "clk_i") == 0,
         "clock never reached a low phase before the falling drive",
     )
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("serial_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, "clk_i", 140, "first falling sample edge not observed")
     _expect(sim, "f_edge_o", 0, "first falling sample should not pulse immediately")
     _expect(sim, "serial_o", 1, "serial_o should stay high through the first falling sample")
@@ -1197,8 +1189,8 @@ def test_sync_wedge_cross_engine(tmp_path, engine):
     _expect(sim, "f_edge_o", 0, "falling-edge pulse should clear on the following sample edge")
     _expect(sim, "serial_o", 0, "serial_o should return low after the falling pulse cycle")
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine, "clk_i")
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "serial_o", 0, "async reset reassertion should clear serial_o immediately")
     _expect(sim, "r_edge_o", 0, "async reset reassertion should clear r_edge_o immediately")
     _expect(sim, "f_edge_o", 0, "async reset reassertion should clear f_edge_o immediately")

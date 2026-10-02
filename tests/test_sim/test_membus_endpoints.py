@@ -15,7 +15,7 @@ import pytest
 from veriforge.dsl import Module
 from veriforge.sim.endpoints import MemBusMaster, MemBusResponder
 from veriforge.sim.endpoints.detect import detect_interfaces, detect_membus_interfaces
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -165,26 +165,19 @@ def _parse_master_dut():
 # ---------------------------------------------------------------------------
 
 
-def _settle(sim: Simulator, engine: str) -> None:
-    if engine == "reference":
-        sim.run(max_time=sim.time)
-    else:
-        sim.settle()
-
-
 def _make_stub_sim(engine: str) -> Simulator:
     """Sim from stub module. Drives all input ports to 0; also zeros the outputs."""
     sim = Simulator(_membus_stub_module(), engine=engine)
     sim.run(max_time=0)
     for sig in ["clk", "rst", "mem_addr", "mem_wdata", "mem_wen", "mem_ren"]:
-        step_drive(sim, engine, sig, 0)
+        sim.drive(sig, 0)
     # Explicitly zero-drive the unconnected output ports so they are
     # known (not X) when no responder is present.
     for sig in ["mem_rdata", "mem_rvalid"]:
-        step_drive(sim, engine, sig, 0)
-    _settle(sim, engine)
+        sim.drive(sig, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
-    _settle(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
     return sim
 
@@ -194,16 +187,16 @@ def _make_sram_sim(engine: str) -> Simulator:
     sim = Simulator(_parse_sram(), engine=engine)
     sim.run(max_time=0)
     for sig in ["clk", "rst", "mem_addr", "mem_wdata", "mem_wen", "mem_ren"]:
-        step_drive(sim, engine, sig, 0)
-    _settle(sim, engine)
+        sim.drive(sig, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), 2000)
-    _settle(sim, engine)
+    sim.settle()
     step_run_until(sim, 12)
-    step_drive(sim, engine, "rst", 1)
-    _settle(sim, engine)
+    sim.drive("rst", 1)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst", 0)
-    _settle(sim, engine)
+    sim.drive("rst", 0)
+    sim.settle()
     return sim
 
 

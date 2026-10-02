@@ -21,8 +21,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.bench import PlannerOverrides, Testbench
-from veriforge.sim.endpoints.helpers import _settle_current_time
-from veriforge.sim.step_harness import step_drive
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -52,67 +50,65 @@ def build_bench() -> Testbench:
 
 def _slv_write(bench: Testbench, addr: int, data: int, *, strb: int = 0xF, timeout: int = 30) -> None:
     sim = bench.sim
-    eng = sim._engine
-    step_drive(sim, eng, "slv_aw_id", 0)
-    step_drive(sim, eng, "slv_aw_addr", addr)
-    step_drive(sim, eng, "slv_aw_prot", 0)
-    step_drive(sim, eng, "slv_aw_len", 0)
-    step_drive(sim, eng, "slv_aw_atop", 0)
-    step_drive(sim, eng, "slv_aw_valid", 1)
-    step_drive(sim, eng, "slv_w_data", data)
-    step_drive(sim, eng, "slv_w_strb", strb)
-    step_drive(sim, eng, "slv_w_last", 1)
-    step_drive(sim, eng, "slv_w_valid", 1)
-    step_drive(sim, eng, "slv_b_ready", 1)
+    sim.drive("slv_aw_id", 0)
+    sim.drive("slv_aw_addr", addr)
+    sim.drive("slv_aw_prot", 0)
+    sim.drive("slv_aw_len", 0)
+    sim.drive("slv_aw_atop", 0)
+    sim.drive("slv_aw_valid", 1)
+    sim.drive("slv_w_data", data)
+    sim.drive("slv_w_strb", strb)
+    sim.drive("slv_w_last", 1)
+    sim.drive("slv_w_valid", 1)
+    sim.drive("slv_b_ready", 1)
 
     aw_done = w_done = False
     for _ in range(timeout):
         bench.step(1)
-        _settle_current_time(sim, "clk")
+        sim.settle()
         if not aw_done and int(sim.read("slv_aw_ready").val) == 1:
             aw_done = True
-            step_drive(sim, eng, "slv_aw_valid", 0)
+            sim.drive("slv_aw_valid", 0)
         if not w_done and int(sim.read("slv_w_ready").val) == 1:
             w_done = True
-            step_drive(sim, eng, "slv_w_valid", 0)
+            sim.drive("slv_w_valid", 0)
         if int(sim.read("slv_b_valid").val) == 1:
-            step_drive(sim, eng, "slv_aw_valid", 0)
-            step_drive(sim, eng, "slv_w_valid", 0)
+            sim.drive("slv_aw_valid", 0)
+            sim.drive("slv_w_valid", 0)
             # Hold b_ready high through the next posedge so the bridge can
             # observe aw_complete = slv_b_valid & mst_b_ready and clear its
             # internal aw_pending_q flop. Then drop b_ready.
             bench.step(1)
-            _settle_current_time(sim, "clk")
-            step_drive(sim, eng, "slv_b_ready", 0)
+            sim.settle()
+            sim.drive("slv_b_ready", 0)
             return
     raise TimeoutError(f"slv write to 0x{addr:x} did not complete")
 
 
 def _slv_read(bench: Testbench, addr: int, *, timeout: int = 30) -> int:
     sim = bench.sim
-    eng = sim._engine
-    step_drive(sim, eng, "slv_ar_id", 0)
-    step_drive(sim, eng, "slv_ar_addr", addr)
-    step_drive(sim, eng, "slv_ar_prot", 0)
-    step_drive(sim, eng, "slv_ar_len", 0)
-    step_drive(sim, eng, "slv_ar_valid", 1)
-    step_drive(sim, eng, "slv_r_ready", 1)
+    sim.drive("slv_ar_id", 0)
+    sim.drive("slv_ar_addr", addr)
+    sim.drive("slv_ar_prot", 0)
+    sim.drive("slv_ar_len", 0)
+    sim.drive("slv_ar_valid", 1)
+    sim.drive("slv_r_ready", 1)
 
     ar_done = False
     for _ in range(timeout):
         bench.step(1)
-        _settle_current_time(sim, "clk")
+        sim.settle()
         if not ar_done and int(sim.read("slv_ar_ready").val) == 1:
             ar_done = True
-            step_drive(sim, eng, "slv_ar_valid", 0)
+            sim.drive("slv_ar_valid", 0)
         if int(sim.read("slv_r_valid").val) == 1:
             data = int(sim.read("slv_r_data").val)
-            step_drive(sim, eng, "slv_ar_valid", 0)
+            sim.drive("slv_ar_valid", 0)
             # Hold r_ready high through the next posedge so the bridge can
             # observe ar_complete and clear its internal ar_pending_q flop.
             bench.step(1)
-            _settle_current_time(sim, "clk")
-            step_drive(sim, eng, "slv_r_ready", 0)
+            sim.settle()
+            sim.drive("slv_r_ready", 0)
             return data
     raise TimeoutError(f"slv read at 0x{addr:x} did not complete")
 

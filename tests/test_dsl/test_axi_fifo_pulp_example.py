@@ -1,9 +1,7 @@
 """Tests for the Wave D-7 pulp axi_fifo migration.
 
-The axi_fifo example exercises AXI4 signal-level passthrough through a
-configurable-depth buffer. The bench drives signals manually because
-the test verifies passthrough timing rather than transactional
-semantics.
+The axi_fifo example checks AXI4 signal-level timing and single-beat
+transactions through both depth variants.
 """
 
 from __future__ import annotations
@@ -49,3 +47,5 @@ def test_axi_fifo_bench_runs_end_to_end():
     assert proc.returncode == 0, f"axi_fifo bench failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
     assert "axi_fifo depth0 passed" in proc.stdout
     assert "axi_fifo depth1 passed" in proc.stdout
+    assert "axi_fifo axi_fifo_depth0_tb transaction roundtrip passed" in proc.stdout
+    assert "axi_fifo axi_fifo_depth1_tb transaction roundtrip passed" in proc.stdout

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -41,10 +41,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
@@ -95,13 +91,13 @@ def _make_step_sim(design, top_name: str, engine: str, *, max_time: int = MAX_TI
         "mst_r_last",
         "mst_r_valid",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), max_time)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -109,32 +105,32 @@ def _make_step_sim(design, top_name: str, engine: str, *, max_time: int = MAX_TI
 
 
 def _drive_depth0(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_aw_id", 0x2)
-    step_drive(sim, engine, "slv_aw_addr", 0x44)
-    step_drive(sim, engine, "slv_aw_prot", 0x3)
-    step_drive(sim, engine, "slv_aw_valid", 1)
-    step_drive(sim, engine, "slv_w_data", 0xCAFEBABE)
-    step_drive(sim, engine, "slv_w_strb", 0xA)
-    step_drive(sim, engine, "slv_w_last", 1)
-    step_drive(sim, engine, "slv_w_valid", 1)
-    step_drive(sim, engine, "slv_b_ready", 1)
-    step_drive(sim, engine, "slv_ar_id", 0x1)
-    step_drive(sim, engine, "slv_ar_addr", 0x88)
-    step_drive(sim, engine, "slv_ar_prot", 0x5)
-    step_drive(sim, engine, "slv_ar_valid", 1)
-    step_drive(sim, engine, "slv_r_ready", 1)
-    step_drive(sim, engine, "mst_aw_ready", 1)
-    step_drive(sim, engine, "mst_w_ready", 0)
-    step_drive(sim, engine, "mst_b_id", 0x3)
-    step_drive(sim, engine, "mst_b_resp", 0x2)
-    step_drive(sim, engine, "mst_b_valid", 1)
-    step_drive(sim, engine, "mst_ar_ready", 1)
-    step_drive(sim, engine, "mst_r_id", 0x1)
-    step_drive(sim, engine, "mst_r_data", 0x12345678)
-    step_drive(sim, engine, "mst_r_resp", 0x1)
-    step_drive(sim, engine, "mst_r_last", 1)
-    step_drive(sim, engine, "mst_r_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("slv_aw_id", 0x2)
+    sim.drive("slv_aw_addr", 0x44)
+    sim.drive("slv_aw_prot", 0x3)
+    sim.drive("slv_aw_valid", 1)
+    sim.drive("slv_w_data", 0xCAFEBABE)
+    sim.drive("slv_w_strb", 0xA)
+    sim.drive("slv_w_last", 1)
+    sim.drive("slv_w_valid", 1)
+    sim.drive("slv_b_ready", 1)
+    sim.drive("slv_ar_id", 0x1)
+    sim.drive("slv_ar_addr", 0x88)
+    sim.drive("slv_ar_prot", 0x5)
+    sim.drive("slv_ar_valid", 1)
+    sim.drive("slv_r_ready", 1)
+    sim.drive("mst_aw_ready", 1)
+    sim.drive("mst_w_ready", 0)
+    sim.drive("mst_b_id", 0x3)
+    sim.drive("mst_b_resp", 0x2)
+    sim.drive("mst_b_valid", 1)
+    sim.drive("mst_ar_ready", 1)
+    sim.drive("mst_r_id", 0x1)
+    sim.drive("mst_r_data", 0x12345678)
+    sim.drive("mst_r_resp", 0x1)
+    sim.drive("mst_r_last", 1)
+    sim.drive("mst_r_valid", 1)
+    sim.settle()
 
 
 def _expect_depth0(sim: Simulator) -> None:
@@ -172,22 +168,22 @@ def _run_depth0(design, engine: str) -> None:
 
 
 def _drive_depth1_requests(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "mst_aw_ready", 0)
-    step_drive(sim, engine, "mst_w_ready", 0)
-    step_drive(sim, engine, "mst_ar_ready", 0)
-    step_drive(sim, engine, "slv_aw_id", 0x2)
-    step_drive(sim, engine, "slv_aw_addr", 0x44)
-    step_drive(sim, engine, "slv_aw_prot", 0x3)
-    step_drive(sim, engine, "slv_aw_valid", 1)
-    step_drive(sim, engine, "slv_w_data", 0xCAFEBABE)
-    step_drive(sim, engine, "slv_w_strb", 0xA)
-    step_drive(sim, engine, "slv_w_last", 1)
-    step_drive(sim, engine, "slv_w_valid", 1)
-    step_drive(sim, engine, "slv_ar_id", 0x1)
-    step_drive(sim, engine, "slv_ar_addr", 0x88)
-    step_drive(sim, engine, "slv_ar_prot", 0x5)
-    step_drive(sim, engine, "slv_ar_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("mst_aw_ready", 0)
+    sim.drive("mst_w_ready", 0)
+    sim.drive("mst_ar_ready", 0)
+    sim.drive("slv_aw_id", 0x2)
+    sim.drive("slv_aw_addr", 0x44)
+    sim.drive("slv_aw_prot", 0x3)
+    sim.drive("slv_aw_valid", 1)
+    sim.drive("slv_w_data", 0xCAFEBABE)
+    sim.drive("slv_w_strb", 0xA)
+    sim.drive("slv_w_last", 1)
+    sim.drive("slv_w_valid", 1)
+    sim.drive("slv_ar_id", 0x1)
+    sim.drive("slv_ar_addr", 0x88)
+    sim.drive("slv_ar_prot", 0x5)
+    sim.drive("slv_ar_valid", 1)
+    sim.settle()
 
 
 def _expect_depth1_request_pre(sim: Simulator) -> None:
@@ -200,10 +196,10 @@ def _expect_depth1_request_pre(sim: Simulator) -> None:
 
 
 def _drain_depth1_request_inputs(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_aw_valid", 0)
-    step_drive(sim, engine, "slv_w_valid", 0)
-    step_drive(sim, engine, "slv_ar_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv_aw_valid", 0)
+    sim.drive("slv_w_valid", 0)
+    sim.drive("slv_ar_valid", 0)
+    sim.settle()
 
 
 def _expect_depth1_request_buffered(sim: Simulator) -> None:
@@ -225,10 +221,10 @@ def _expect_depth1_request_buffered(sim: Simulator) -> None:
 
 
 def _release_depth1_requests(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "mst_aw_ready", 1)
-    step_drive(sim, engine, "mst_w_ready", 1)
-    step_drive(sim, engine, "mst_ar_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("mst_aw_ready", 1)
+    sim.drive("mst_w_ready", 1)
+    sim.drive("mst_ar_ready", 1)
+    sim.settle()
 
 
 def _expect_depth1_request_recovered(sim: Simulator) -> None:
@@ -241,17 +237,17 @@ def _expect_depth1_request_recovered(sim: Simulator) -> None:
 
 
 def _drive_depth1_responses(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_b_ready", 0)
-    step_drive(sim, engine, "slv_r_ready", 0)
-    step_drive(sim, engine, "mst_b_id", 0x3)
-    step_drive(sim, engine, "mst_b_resp", 0x2)
-    step_drive(sim, engine, "mst_b_valid", 1)
-    step_drive(sim, engine, "mst_r_id", 0x1)
-    step_drive(sim, engine, "mst_r_data", 0x12345678)
-    step_drive(sim, engine, "mst_r_resp", 0x1)
-    step_drive(sim, engine, "mst_r_last", 1)
-    step_drive(sim, engine, "mst_r_valid", 1)
-    _settle_drives(sim, engine)
+    sim.drive("slv_b_ready", 0)
+    sim.drive("slv_r_ready", 0)
+    sim.drive("mst_b_id", 0x3)
+    sim.drive("mst_b_resp", 0x2)
+    sim.drive("mst_b_valid", 1)
+    sim.drive("mst_r_id", 0x1)
+    sim.drive("mst_r_data", 0x12345678)
+    sim.drive("mst_r_resp", 0x1)
+    sim.drive("mst_r_last", 1)
+    sim.drive("mst_r_valid", 1)
+    sim.settle()
 
 
 def _expect_depth1_response_pre(sim: Simulator) -> None:
@@ -262,9 +258,9 @@ def _expect_depth1_response_pre(sim: Simulator) -> None:
 
 
 def _drain_depth1_response_inputs(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "mst_b_valid", 0)
-    step_drive(sim, engine, "mst_r_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("mst_b_valid", 0)
+    sim.drive("mst_r_valid", 0)
+    sim.settle()
 
 
 def _expect_depth1_response_buffered(sim: Simulator) -> None:
@@ -281,9 +277,9 @@ def _expect_depth1_response_buffered(sim: Simulator) -> None:
 
 
 def _release_depth1_responses(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv_b_ready", 1)
-    step_drive(sim, engine, "slv_r_ready", 1)
-    _settle_drives(sim, engine)
+    sim.drive("slv_b_ready", 1)
+    sim.drive("slv_r_ready", 1)
+    sim.settle()
 
 
 def _expect_depth1_response_recovered(sim: Simulator) -> None:
@@ -302,7 +298,7 @@ def _run_depth1(design, engine: str) -> None:
     _expect_depth1_request_buffered(sim)
     _release_depth1_requests(sim, engine)
     _run_until_rising_edge(sim, "clk", sim.time + 20, "depth1 request release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_depth1_request_recovered(sim)
     _drive_depth1_responses(sim, engine)
     _expect_depth1_response_pre(sim)
@@ -311,7 +307,7 @@ def _run_depth1(design, engine: str) -> None:
     _expect_depth1_response_buffered(sim)
     _release_depth1_responses(sim, engine)
     _run_until_rising_edge(sim, "clk", sim.time + 20, "depth1 response release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect_depth1_response_recovered(sim)
 
 

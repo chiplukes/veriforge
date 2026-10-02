@@ -14,7 +14,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -51,10 +51,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
@@ -112,13 +108,13 @@ def _make_step_sim(design, engine: str) -> Simulator:
         "slv1_ar_valid",
         "slv1_r_ready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
     if engine == "reference":
         sim.run(max_time=0)
@@ -138,42 +134,42 @@ def _drive_idle(sim: Simulator, engine: str) -> None:
         "slv1_ar_valid",
         "slv1_r_ready",
     ]:
-        step_drive(sim, engine, signal_name, 0)
+        sim.drive(signal_name, 0)
 
 
 def _drive_parallel_writes(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv0_aw_id", 0x1)
-    step_drive(sim, engine, "slv0_aw_addr", ADDR_TARGET0)
-    step_drive(sim, engine, "slv0_aw_len", 0)
-    step_drive(sim, engine, "slv0_aw_valid", 1)
-    step_drive(sim, engine, "slv0_w_data", TARGET0_WRITE)
-    step_drive(sim, engine, "slv0_w_strb", 0xF)
-    step_drive(sim, engine, "slv0_w_last", 1)
-    step_drive(sim, engine, "slv0_w_valid", 1)
-    step_drive(sim, engine, "slv0_b_ready", 0)
-    step_drive(sim, engine, "slv1_aw_id", 0x2)
-    step_drive(sim, engine, "slv1_aw_addr", ADDR_TARGET1)
-    step_drive(sim, engine, "slv1_aw_len", 0)
-    step_drive(sim, engine, "slv1_aw_valid", 1)
-    step_drive(sim, engine, "slv1_w_data", TARGET1_WRITE)
-    step_drive(sim, engine, "slv1_w_strb", 0xF)
-    step_drive(sim, engine, "slv1_w_last", 1)
-    step_drive(sim, engine, "slv1_w_valid", 1)
-    step_drive(sim, engine, "slv1_b_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_id", 0x1)
+    sim.drive("slv0_aw_addr", ADDR_TARGET0)
+    sim.drive("slv0_aw_len", 0)
+    sim.drive("slv0_aw_valid", 1)
+    sim.drive("slv0_w_data", TARGET0_WRITE)
+    sim.drive("slv0_w_strb", 0xF)
+    sim.drive("slv0_w_last", 1)
+    sim.drive("slv0_w_valid", 1)
+    sim.drive("slv0_b_ready", 0)
+    sim.drive("slv1_aw_id", 0x2)
+    sim.drive("slv1_aw_addr", ADDR_TARGET1)
+    sim.drive("slv1_aw_len", 0)
+    sim.drive("slv1_aw_valid", 1)
+    sim.drive("slv1_w_data", TARGET1_WRITE)
+    sim.drive("slv1_w_strb", 0xF)
+    sim.drive("slv1_w_last", 1)
+    sim.drive("slv1_w_valid", 1)
+    sim.drive("slv1_b_ready", 0)
+    sim.settle()
 
 
 def _check_parallel_write_capture(sim: Simulator, engine: str) -> None:
     _expect(sim, "slv0_aw_ready", 1, "port0 target0 write should be accepted")
     _expect(sim, "slv1_aw_ready", 1, "port1 target1 write should be accepted")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "parallel write capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv0_aw_valid", 0)
-    step_drive(sim, engine, "slv0_w_valid", 0)
-    step_drive(sim, engine, "slv1_aw_valid", 0)
-    step_drive(sim, engine, "slv1_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_valid", 0)
+    sim.drive("slv0_w_valid", 0)
+    sim.drive("slv1_aw_valid", 0)
+    sim.drive("slv1_w_valid", 0)
+    sim.settle()
 
 
 def _check_parallel_write_responses(sim: Simulator) -> None:
@@ -190,38 +186,39 @@ def _check_parallel_write_responses(sim: Simulator) -> None:
 
 
 def _release_parallel_write_responses(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv0_b_ready", 1)
-    step_drive(sim, engine, "slv1_b_ready", 1)
+    sim.drive("slv0_b_ready", 1)
+    sim.drive("slv1_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "parallel write release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect(sim, "slv0_b_valid", 0, "port0 write response should clear")
     _expect(sim, "slv1_b_valid", 0, "port1 write response should clear")
 
 
 def _drive_parallel_reads(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv0_ar_id", 0x0)
-    step_drive(sim, engine, "slv0_ar_addr", ADDR_TARGET1)
-    step_drive(sim, engine, "slv0_ar_len", 0)
-    step_drive(sim, engine, "slv0_ar_valid", 1)
-    step_drive(sim, engine, "slv0_r_ready", 0)
-    step_drive(sim, engine, "slv1_ar_id", 0x3)
-    step_drive(sim, engine, "slv1_ar_addr", ADDR_TARGET0)
-    step_drive(sim, engine, "slv1_ar_len", 0)
-    step_drive(sim, engine, "slv1_ar_valid", 1)
-    step_drive(sim, engine, "slv1_r_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_ar_id", 0x0)
+    sim.drive("slv0_ar_addr", ADDR_TARGET1)
+    sim.drive("slv0_ar_len", 0)
+    sim.drive("slv0_ar_valid", 1)
+    sim.drive("slv0_r_ready", 0)
+    sim.drive("slv1_ar_id", 0x3)
+    sim.drive("slv1_ar_addr", ADDR_TARGET0)
+    sim.drive("slv1_ar_len", 0)
+    sim.drive("slv1_ar_valid", 1)
+    sim.drive("slv1_r_ready", 0)
+    sim.settle()
 
 
 def _check_parallel_read_capture(sim: Simulator, engine: str) -> None:
     _expect(sim, "slv0_ar_ready", 1, "port0 target1 read should be accepted")
     _expect(sim, "slv1_ar_ready", 1, "port1 target0 read should be accepted")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "parallel read capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv0_ar_valid", 0)
-    step_drive(sim, engine, "slv1_ar_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_ar_valid", 0)
+    sim.drive("slv1_ar_valid", 0)
+    sim.settle()
 
 
 def _check_parallel_read_responses(sim: Simulator) -> None:
@@ -240,10 +237,11 @@ def _check_parallel_read_responses(sim: Simulator) -> None:
 
 
 def _release_parallel_read_responses(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "slv0_r_ready", 1)
-    step_drive(sim, engine, "slv1_r_ready", 1)
+    sim.drive("slv0_r_ready", 1)
+    sim.drive("slv1_r_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "parallel read release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect(sim, "slv0_r_valid", 0, "port0 read response should clear")
     _expect(sim, "slv1_r_valid", 0, "port1 read response should clear")
@@ -266,24 +264,24 @@ def _exercise_parallel_routes(design, engine: str) -> None:
 def _exercise_decode_errors(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
 
-    step_drive(sim, engine, "slv0_aw_id", 0x2)
-    step_drive(sim, engine, "slv0_aw_addr", ADDR_INVALID)
-    step_drive(sim, engine, "slv0_aw_len", 0)
-    step_drive(sim, engine, "slv0_aw_valid", 1)
-    step_drive(sim, engine, "slv0_w_data", 0x55AA55AA)
-    step_drive(sim, engine, "slv0_w_strb", 0xF)
-    step_drive(sim, engine, "slv0_w_last", 1)
-    step_drive(sim, engine, "slv0_w_valid", 1)
-    step_drive(sim, engine, "slv0_b_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_id", 0x2)
+    sim.drive("slv0_aw_addr", ADDR_INVALID)
+    sim.drive("slv0_aw_len", 0)
+    sim.drive("slv0_aw_valid", 1)
+    sim.drive("slv0_w_data", 0x55AA55AA)
+    sim.drive("slv0_w_strb", 0xF)
+    sim.drive("slv0_w_last", 1)
+    sim.drive("slv0_w_valid", 1)
+    sim.drive("slv0_b_ready", 0)
+    sim.settle()
 
     _expect(sim, "slv0_aw_ready", 1, "decode-error write should be accepted")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "decode-error write capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv0_aw_valid", 0)
-    step_drive(sim, engine, "slv0_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_valid", 0)
+    sim.drive("slv0_w_valid", 0)
+    sim.settle()
 
     _expect(sim, "slv0_b_valid", 1, "decode-error write response should be pending")
     _expect(sim, "slv0_b_id", 0x2, "decode-error write response ID mismatch")
@@ -291,23 +289,24 @@ def _exercise_decode_errors(design, engine: str) -> None:
     _expect(sim, "target0_data", TARGET0_INIT, "target0 must remain unchanged on decode error")
     _expect(sim, "target1_data", TARGET1_INIT, "target1 must remain unchanged on decode error")
 
-    step_drive(sim, engine, "slv0_b_ready", 1)
+    sim.drive("slv0_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "decode-error write release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv1_ar_id", 0x1)
-    step_drive(sim, engine, "slv1_ar_addr", ADDR_INVALID)
-    step_drive(sim, engine, "slv1_ar_len", 0)
-    step_drive(sim, engine, "slv1_ar_valid", 1)
-    step_drive(sim, engine, "slv1_r_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv1_ar_id", 0x1)
+    sim.drive("slv1_ar_addr", ADDR_INVALID)
+    sim.drive("slv1_ar_len", 0)
+    sim.drive("slv1_ar_valid", 1)
+    sim.drive("slv1_r_ready", 0)
+    sim.settle()
 
     _expect(sim, "slv1_ar_ready", 1, "decode-error read should be accepted")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "decode-error read capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv1_ar_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv1_ar_valid", 0)
+    sim.settle()
 
     _expect(sim, "slv1_r_valid", 1, "decode-error read response should be pending")
     _expect(sim, "slv1_r_id", 0x1, "decode-error read response ID mismatch")
@@ -315,68 +314,71 @@ def _exercise_decode_errors(design, engine: str) -> None:
     _expect(sim, "slv1_r_resp", 0x3, "decode-error read response code mismatch")
     _expect(sim, "slv1_r_last", 1, "decode-error read last mismatch")
 
-    step_drive(sim, engine, "slv1_r_ready", 1)
+    sim.drive("slv1_r_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "decode-error read release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
 
 def _exercise_same_target_write_arbitration(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
 
-    step_drive(sim, engine, "slv0_aw_id", 0x1)
-    step_drive(sim, engine, "slv0_aw_addr", ADDR_TARGET0)
-    step_drive(sim, engine, "slv0_aw_len", 0)
-    step_drive(sim, engine, "slv0_aw_valid", 1)
-    step_drive(sim, engine, "slv0_w_data", ARB_FIRST)
-    step_drive(sim, engine, "slv0_w_strb", 0xF)
-    step_drive(sim, engine, "slv0_w_last", 1)
-    step_drive(sim, engine, "slv0_w_valid", 1)
-    step_drive(sim, engine, "slv0_b_ready", 0)
-    step_drive(sim, engine, "slv1_aw_id", 0x2)
-    step_drive(sim, engine, "slv1_aw_addr", ADDR_TARGET0 + 4)
-    step_drive(sim, engine, "slv1_aw_len", 0)
-    step_drive(sim, engine, "slv1_aw_valid", 1)
-    step_drive(sim, engine, "slv1_w_data", ARB_SECOND)
-    step_drive(sim, engine, "slv1_w_strb", 0xF)
-    step_drive(sim, engine, "slv1_w_last", 1)
-    step_drive(sim, engine, "slv1_w_valid", 1)
-    step_drive(sim, engine, "slv1_b_ready", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_id", 0x1)
+    sim.drive("slv0_aw_addr", ADDR_TARGET0)
+    sim.drive("slv0_aw_len", 0)
+    sim.drive("slv0_aw_valid", 1)
+    sim.drive("slv0_w_data", ARB_FIRST)
+    sim.drive("slv0_w_strb", 0xF)
+    sim.drive("slv0_w_last", 1)
+    sim.drive("slv0_w_valid", 1)
+    sim.drive("slv0_b_ready", 0)
+    sim.drive("slv1_aw_id", 0x2)
+    sim.drive("slv1_aw_addr", ADDR_TARGET0 + 4)
+    sim.drive("slv1_aw_len", 0)
+    sim.drive("slv1_aw_valid", 1)
+    sim.drive("slv1_w_data", ARB_SECOND)
+    sim.drive("slv1_w_strb", 0xF)
+    sim.drive("slv1_w_last", 1)
+    sim.drive("slv1_w_valid", 1)
+    sim.drive("slv1_b_ready", 0)
+    sim.settle()
 
     _expect(sim, "slv0_aw_ready", 1, "port0 should win first target0 arbitration")
     _expect(sim, "slv1_aw_ready", 0, "port1 should stall behind port0 on target0")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first arbitration capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv0_aw_valid", 0)
-    step_drive(sim, engine, "slv0_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv0_aw_valid", 0)
+    sim.drive("slv0_w_valid", 0)
+    sim.settle()
 
     _expect(sim, "slv0_b_valid", 1, "port0 first write response should be pending")
     _expect(sim, "slv1_aw_ready", 0, "port1 should remain stalled while target0 response is pending")
     _expect(sim, "target0_data", ARB_FIRST, "target0 should hold the first write before release")
 
-    step_drive(sim, engine, "slv0_b_ready", 1)
+    sim.drive("slv0_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first arbitration release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
     _expect(sim, "slv0_b_valid", 0, "port0 first write response should clear")
     _expect(sim, "slv1_aw_ready", 1, "port1 should become ready after target0 release")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "second arbitration capture edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
 
-    step_drive(sim, engine, "slv1_aw_valid", 0)
-    step_drive(sim, engine, "slv1_w_valid", 0)
-    _settle_drives(sim, engine)
+    sim.drive("slv1_aw_valid", 0)
+    sim.drive("slv1_w_valid", 0)
+    sim.settle()
 
     _expect(sim, "slv1_b_valid", 1, "port1 deferred write response should be pending")
     _expect(sim, "slv1_b_id", 0x2, "port1 deferred write response ID mismatch")
     _expect(sim, "target0_data", ARB_SECOND, "target0 should contain the deferred write data")
     _expect(sim, "mst0_last_aw_id", 0x6, "target0 widened AW ID should update for the deferred write")
 
-    step_drive(sim, engine, "slv1_b_ready", 1)
+    sim.drive("slv1_b_ready", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "second arbitration release edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _drive_idle(sim, engine)
 
 

@@ -28,7 +28,7 @@ from veriforge.sim.endpoints import (
     DomainCoordinator,
     MultiDomainRunner,
 )
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -58,26 +58,26 @@ def _make_sim(s_period: int = 10, m_period: int = 17) -> Simulator:
         "s_axis_tlast",
         "m_axis_tready",
     ]:
-        step_drive(sim, "reference", name, 0)
-    sim.run(max_time=0)
+        sim.drive(name, 0)
+    sim.settle()
 
     # Schedule both clocks at different periods so edges never align.
     sim.schedule_clock(Clock(sim.signal("s_clk"), period=s_period), 10000)
     sim.schedule_clock(Clock(sim.signal("m_clk"), period=m_period), 10000)
-    sim.run(max_time=0)
+    sim.settle()
 
     # Apply reset, hold for a comfortable margin in both domains, then
     # release. Doing this *before* creating endpoints avoids the
     # endpoints' constructors driving stale idle values mid-reset.
     step_run_until(sim, 5)
-    step_drive(sim, "reference", "s_rst", 1)
-    step_drive(sim, "reference", "m_rst", 1)
-    sim.run(max_time=0)
+    sim.drive("s_rst", 1)
+    sim.drive("m_rst", 1)
+    sim.settle()
     # Hold reset ~10 of each clock — plenty for the synchronizer chains.
     step_run_until(sim, sim.time + max(s_period, m_period) * 10)
-    step_drive(sim, "reference", "s_rst", 0)
-    step_drive(sim, "reference", "m_rst", 0)
-    sim.run(max_time=0)
+    sim.drive("s_rst", 0)
+    sim.drive("m_rst", 0)
+    sim.settle()
     return sim
 
 

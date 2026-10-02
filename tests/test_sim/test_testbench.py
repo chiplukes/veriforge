@@ -603,19 +603,19 @@ class TestSteppedHarnessCrossEngine:
         sim.schedule_clock(Clock(sim.signal("clk"), period=10), 40)
         sim.run(max_time=0)
 
-        step_drive(sim, engine, "clk", 0)
-        step_drive(sim, engine, "rst_n", 0)
-        step_drive(sim, engine, "load", 0)
-        step_drive(sim, engine, "d", 0)
+        sim.drive("clk", 0)
+        sim.drive("rst_n", 0)
+        sim.drive("load", 0)
+        sim.drive("d", 0)
         sim.settle()
 
         assert int(sim.read("accept")) == 0
         assert int(sim.read("q")) == 0
 
         step_run_until(sim, 12)
-        step_drive(sim, engine, "rst_n", 1)
-        step_drive(sim, engine, "d", 0xA5)
-        step_drive(sim, engine, "load", 1)
+        sim.drive("rst_n", 1)
+        sim.drive("d", 0xA5)
+        sim.drive("load", 1)
         sim.settle()
 
         assert int(sim.read("accept")) == 1
@@ -624,8 +624,8 @@ class TestSteppedHarnessCrossEngine:
         step_run_until(sim, 16)
         assert int(sim.read("q")) == 0xA5
 
-        step_drive(sim, engine, "load", 0)
-        step_drive(sim, engine, "d", 0x3C)
+        sim.drive("load", 0)
+        sim.drive("d", 0x3C)
         sim.settle()
 
         assert int(sim.read("accept")) == 0
