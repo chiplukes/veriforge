@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -40,10 +40,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -63,74 +59,72 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _check_partial_handshakes(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b111, "stream_fork should fan out valid to every output when a transfer starts")
     _expect(sim, "ready_o", 0, "stream_fork should not accept the input until every output has handshaked")
 
-    step_drive(sim, engine, "ready_i", 0b001)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b001)
+    sim.settle()
     _expect(sim, "valid_o", 0b111, "stream_fork should still present all outputs before the first handshake edge")
     _expect(sim, "ready_o", 0, "stream_fork should stay blocked until every output is ready")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first partial handshake edge not observed")
 
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b110, "stream_fork should remember that output 0 has already handshaked")
     _expect(sim, "ready_o", 0, "stream_fork should keep input ready low while outputs remain pending")
 
-    step_drive(sim, engine, "ready_i", 0b100)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b100)
+    sim.settle()
     _expect(sim, "valid_o", 0b110, "stream_fork should keep only the remaining outputs pending before the next edge")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "second partial handshake edge not observed")
 
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b010, "stream_fork should remember that only output 1 is still pending")
     _expect(sim, "ready_o", 0, "stream_fork should not accept the input before the final output is served")
 
 
 def _check_final_accept_and_restart(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 0b010)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b010)
+    sim.settle()
     _expect(sim, "valid_o", 0b010, "stream_fork should present only the last pending output before final acceptance")
     _expect(sim, "ready_o", 1, "stream_fork should accept the input when the last pending output is ready")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "final handshake edge not observed")
 
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b000, "stream_fork should return to idle after the input handshake completes")
     _expect(sim, "ready_o", 0, "idle stream_fork should not assert input ready")
 
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 0b111)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 0b111)
+    sim.settle()
     _expect(sim, "valid_o", 0b111, "stream_fork should restart cleanly for a fully-ready transaction")
     _expect(sim, "ready_o", 1, "stream_fork should accept immediately when every output is ready")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "all-ready handshake edge not observed")
 
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b000, "stream_fork should remain idle after the all-ready transaction")
 
 

@@ -15,7 +15,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Simulator
 
 
@@ -44,10 +43,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _make_sim(design, engine: str) -> Simulator:
     top = design.get_module("stream_join_tb_local")
     if top is None:
@@ -55,9 +50,9 @@ def _make_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "inp_valid_i", 0)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     return sim
 
 
@@ -65,23 +60,23 @@ def _run_checks(sim: Simulator, engine: str) -> None:
     _expect(sim, "oup_valid_o", 0, "stream_join should be idle with no valid inputs")
     _expect(sim, "inp_ready_o", 0, "stream_join should not ready any input while idle")
 
-    step_drive(sim, engine, "inp_valid_i", 0b101)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b101)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0, "partial-valid inputs should not assert joined valid")
     _expect(sim, "inp_ready_o", 0, "partial-valid inputs should not see ready fanout")
 
-    step_drive(sim, engine, "inp_valid_i", 0b111)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b111)
+    sim.settle()
     _expect(sim, "oup_valid_o", 1, "all inputs valid should assert joined valid")
     _expect(sim, "inp_ready_o", 0, "stalled downstream should block input ready fanout")
 
-    step_drive(sim, engine, "oup_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("oup_ready_i", 1)
+    sim.settle()
     _expect(sim, "oup_valid_o", 1, "joined valid should stay asserted while all inputs remain valid")
     _expect(sim, "inp_ready_o", 0b111, "joined handshake should fan ready to all inputs at once")
 
-    step_drive(sim, engine, "inp_valid_i", 0b110)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b110)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0, "dropping one input should deassert joined valid immediately")
     _expect(sim, "inp_ready_o", 0, "dropping one input should remove ready fanout")
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -46,10 +46,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -69,22 +65,20 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "data_i", 0)
-    step_drive(sim, engine, "sel_i", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("data_i", 0)
+    sim.drive("sel_i", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -101,13 +95,13 @@ def _pack_indices(i0: int, i1: int, i2: int, i3: int) -> int:
 
 
 def _pulse_flush(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
-    step_drive(sim, engine, "flush", 1)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
+    sim.drive("flush", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "flush edge not observed")
-    step_drive(sim, engine, "flush", 0)
-    _settle_drives(sim, engine)
+    sim.drive("flush", 0)
+    sim.settle()
 
 
 def _check_nospill(design, engine: str) -> None:
@@ -116,22 +110,22 @@ def _check_nospill(design, engine: str) -> None:
     _expect(sim, "valid_o", 0, "stream_omega_net no-spill should be idle after reset")
     _expect(sim, "ready_o", 0, "stream_omega_net no-spill should not assert ready without valids")
 
-    step_drive(sim, engine, "ready_i", 0b1111)
-    step_drive(sim, engine, "data_i", _pack_inputs(0xA0, 0xB1, 0xC2, 0xD3))
-    step_drive(sim, engine, "sel_i", _pack_selects(0, 2, 1, 3))
-    step_drive(sim, engine, "valid_i", 0b1111)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b1111)
+    sim.drive("data_i", _pack_inputs(0xA0, 0xB1, 0xC2, 0xD3))
+    sim.drive("sel_i", _pack_selects(0, 2, 1, 3))
+    sim.drive("valid_i", 0b1111)
+    sim.settle()
     _expect(sim, "valid_o", 0b1111, "stream_omega_net no-spill should route all four outputs independently")
     _expect(sim, "data_o", 0xD3B1C2A0, "stream_omega_net no-spill payload routing mismatch")
     _expect(sim, "idx_o", _pack_indices(0, 2, 1, 3), "stream_omega_net no-spill idx routing mismatch")
     _expect(sim, "ready_o", 0b1111, "stream_omega_net no-spill should ready every selected input")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "independent-routing edge not observed")
 
-    step_drive(sim, engine, "ready_i", 0b0001)
-    step_drive(sim, engine, "data_i", _pack_inputs(0x10, 0x21, 0x32, 0x43))
-    step_drive(sim, engine, "sel_i", _pack_selects(0, 0, 3, 3))
-    step_drive(sim, engine, "valid_i", 0b0011)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b0001)
+    sim.drive("data_i", _pack_inputs(0x10, 0x21, 0x32, 0x43))
+    sim.drive("sel_i", _pack_selects(0, 0, 3, 3))
+    sim.drive("valid_i", 0b0011)
+    sim.settle()
     _expect(sim, "valid_o", 0b0001, "stream_omega_net no-spill should drive only output 0 for first-stage contention")
     _expect(
         sim, "data_o", 0x00000010, "stream_omega_net no-spill should choose input 0 first in first-stage contention"
@@ -153,11 +147,11 @@ def _check_nospill(design, engine: str) -> None:
 
     _pulse_flush(sim, engine)
 
-    step_drive(sim, engine, "ready_i", 0b0001)
-    step_drive(sim, engine, "data_i", _pack_inputs(0x54, 0x65, 0x76, 0x87))
-    step_drive(sim, engine, "sel_i", _pack_selects(0, 3, 0, 3))
-    step_drive(sim, engine, "valid_i", 0b0101)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b0001)
+    sim.drive("data_i", _pack_inputs(0x54, 0x65, 0x76, 0x87))
+    sim.drive("sel_i", _pack_selects(0, 3, 0, 3))
+    sim.drive("valid_i", 0b0101)
+    sim.settle()
     _expect(sim, "valid_o", 0b0001, "stream_omega_net no-spill should drive only output 0 for second-stage contention")
     _expect(
         sim, "data_o", 0x00000054, "stream_omega_net no-spill should choose input 0 first in second-stage contention"
@@ -184,11 +178,11 @@ def _check_nospill(design, engine: str) -> None:
 
     _pulse_flush(sim, engine)
 
-    step_drive(sim, engine, "ready_i", 0b0001)
-    step_drive(sim, engine, "data_i", _pack_inputs(0x54, 0x65, 0x76, 0x87))
-    step_drive(sim, engine, "sel_i", _pack_selects(0, 3, 0, 3))
-    step_drive(sim, engine, "valid_i", 0b0101)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b0001)
+    sim.drive("data_i", _pack_inputs(0x54, 0x65, 0x76, 0x87))
+    sim.drive("sel_i", _pack_selects(0, 3, 0, 3))
+    sim.drive("valid_i", 0b0101)
+    sim.settle()
     _expect(sim, "data_o", 0x00000054, "stream_omega_net no-spill flush should restore second-stage priority")
     _expect(
         sim,
@@ -201,18 +195,18 @@ def _check_nospill(design, engine: str) -> None:
 def _check_spill(design, engine: str) -> None:
     sim = _make_step_sim(design, "so1_tb", engine)
 
-    step_drive(sim, engine, "ready_i", 0b0000)
-    step_drive(sim, engine, "data_i", _pack_inputs(0x44, 0x00, 0x00, 0x00))
-    step_drive(sim, engine, "sel_i", _pack_selects(0, 0, 0, 0))
-    step_drive(sim, engine, "valid_i", 0b0001)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b0000)
+    sim.drive("data_i", _pack_inputs(0x44, 0x00, 0x00, 0x00))
+    sim.drive("sel_i", _pack_selects(0, 0, 0, 0))
+    sim.drive("valid_i", 0b0001)
+    sim.settle()
     _expect(sim, "valid_o", 0b0000, "stream_omega_net spill outputs should stay empty before capture")
     _expect(sim, "ready_o", 0b0001, "stream_omega_net spill should initially accept the routed input")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill first capture edge not observed")
     _expect(sim, "valid_o", 0b0000, "stream_omega_net spill should still be internal after the first stage capture")
-    step_drive(sim, engine, "valid_i", 0b0000)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0b0000)
+    sim.settle()
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill second capture edge not observed")
     _expect(
@@ -225,8 +219,8 @@ def _check_spill(design, engine: str) -> None:
 
     _expect(sim, "valid_o", 0b0001, "stream_omega_net spill should keep output valid until ready")
 
-    step_drive(sim, engine, "ready_i", 0b0001)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b0001)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill drain edge not observed")
     _expect(sim, "valid_o", 0b0000, "stream_omega_net spill should drain once the sink is ready")
 

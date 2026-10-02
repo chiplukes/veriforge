@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines, display_lines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -71,16 +71,16 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "req_i", 0)
-    step_drive(sim, engine, "req_valid_i", 0)
-    step_drive(sim, engine, "resp_ready_i", 0)
-    step_drive(sim, engine, "mem_req_ready_i", 1)
-    step_drive(sim, engine, "mem_resp_i", 0)
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("req_i", 0)
+    sim.drive("req_valid_i", 0)
+    sim.drive("resp_ready_i", 0)
+    sim.drive("mem_req_ready_i", 1)
+    sim.drive("mem_resp_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     step_run_until(sim, 30)
-    step_drive(sim, engine, "rst_n", 1)
+    sim.drive("rst_n", 1)
     sim.settle()
     return sim
 
@@ -88,11 +88,11 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 def _run_step_buf0(design, engine: str) -> None:
     sim = _make_step_sim(design, "stream_to_mem_vm_buf0", engine)
 
-    step_drive(sim, engine, "resp_ready_i", 1)
-    step_drive(sim, engine, "req_i", 0x1234)
-    step_drive(sim, engine, "req_valid_i", 1)
-    step_drive(sim, engine, "mem_resp_i", 0x12CB)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("resp_ready_i", 1)
+    sim.drive("req_i", 0x1234)
+    sim.drive("req_valid_i", 1)
+    sim.drive("mem_resp_i", 0x12CB)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
 
     _expect(sim, "req_ready_o", 1, "buf0 request should be accepted")
@@ -100,8 +100,8 @@ def _run_step_buf0(design, engine: str) -> None:
     _expect(sim, "resp_valid_o", 1, "buf0 response should be valid")
     _expect(sim, "resp_o", 0x12CB, "buf0 response payload mismatch")
 
-    step_drive(sim, engine, "req_valid_i", 0)
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("req_valid_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 0, "buf0 response should clear after handshake")
 
@@ -109,50 +109,50 @@ def _run_step_buf0(design, engine: str) -> None:
 def _run_step_buf1(design, engine: str) -> None:
     sim = _make_step_sim(design, "stream_to_mem_vm_buf1", engine)
 
-    step_drive(sim, engine, "req_i", 0x0011)
-    step_drive(sim, engine, "req_valid_i", 1)
+    sim.drive("req_i", 0x0011)
+    sim.drive("req_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 1, "buf1 first request should be accepted")
     step_run_until(sim, 40)
-    step_drive(sim, engine, "req_valid_i", 0)
+    sim.drive("req_valid_i", 0)
 
     step_run_until(sim, 50)
-    step_drive(sim, engine, "mem_resp_i", 0x0111)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("mem_resp_i", 0x0111)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf1 first response should be visible")
     _expect(sim, "resp_o", 0x0111, "buf1 first response payload mismatch")
 
-    step_drive(sim, engine, "req_i", 0x0022)
-    step_drive(sim, engine, "req_valid_i", 1)
+    sim.drive("req_i", 0x0022)
+    sim.drive("req_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 0, "buf1 second request should stall while response is blocked")
     _expect(sim, "mem_req_valid_o", 0, "buf1 memory request should be blocked while stalled")
 
     step_run_until(sim, 60)
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf1 buffered response should remain valid")
     _expect(sim, "resp_o", 0x0111, "buf1 buffered response mismatch")
 
-    step_drive(sim, engine, "resp_ready_i", 1)
+    sim.drive("resp_ready_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 1, "buf1 second request should reopen while draining")
     _expect(sim, "mem_req_valid_o", 1, "buf1 second request should reach memory while draining")
 
     step_run_until(sim, 70)
-    step_drive(sim, engine, "req_valid_i", 0)
+    sim.drive("req_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 0, "buf1 should have a one-cycle bubble before second response")
 
     step_run_until(sim, 80)
-    step_drive(sim, engine, "mem_resp_i", 0x0122)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("mem_resp_i", 0x0122)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf1 second response should be visible")
     _expect(sim, "resp_o", 0x0122, "buf1 second response payload mismatch")
 
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 0, "buf1 response should clear after second handshake")
 
@@ -160,51 +160,51 @@ def _run_step_buf1(design, engine: str) -> None:
 def _run_step_buf2(design, engine: str) -> None:
     sim = _make_step_sim(design, "stream_to_mem_vm_buf2", engine)
 
-    step_drive(sim, engine, "req_i", 0x0033)
-    step_drive(sim, engine, "req_valid_i", 1)
+    sim.drive("req_i", 0x0033)
+    sim.drive("req_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 1, "buf2 first request should be accepted")
     step_run_until(sim, 40)
 
-    step_drive(sim, engine, "req_i", 0x0044)
-    step_drive(sim, engine, "req_valid_i", 1)
+    sim.drive("req_i", 0x0044)
+    sim.drive("req_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 1, "buf2 second request should be accepted")
     step_run_until(sim, 50)
 
-    step_drive(sim, engine, "req_i", 0x0055)
-    step_drive(sim, engine, "req_valid_i", 1)
+    sim.drive("req_i", 0x0055)
+    sim.drive("req_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 0, "buf2 third request should stall at outstanding limit")
 
     step_run_until(sim, 60)
-    step_drive(sim, engine, "mem_resp_i", 0x0233)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("mem_resp_i", 0x0233)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 0, "buf2 third request should stall at outstanding limit")
     _expect(sim, "resp_valid_o", 1, "buf2 first response should be visible")
     _expect(sim, "resp_o", 0x0233, "buf2 first response payload mismatch")
 
     step_run_until(sim, 70)
-    step_drive(sim, engine, "mem_resp_i", 0x0244)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("mem_resp_i", 0x0244)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf2 first buffered response should remain valid")
     _expect(sim, "resp_o", 0x0233, "buf2 first buffered response should stay stable")
 
     step_run_until(sim, 80)
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf2 buffered responses should remain available")
     _expect(sim, "resp_o", 0x0233, "buf2 head response mismatch before drain")
 
-    step_drive(sim, engine, "resp_ready_i", 1)
+    sim.drive("resp_ready_i", 1)
     sim.settle()
     _expect(sim, "req_ready_o", 1, "buf2 third request should reopen while draining")
     _expect(sim, "mem_req_valid_o", 1, "buf2 third request should reach memory while draining")
 
     step_run_until(sim, 90)
-    step_drive(sim, engine, "req_valid_i", 0)
+    sim.drive("req_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf2 second response should now be visible")
     _expect(sim, "resp_o", 0x0244, "buf2 second response payload mismatch")
@@ -214,13 +214,13 @@ def _run_step_buf2(design, engine: str) -> None:
     _expect(sim, "resp_valid_o", 0, "buf2 should have a one-cycle bubble before third response")
 
     step_run_until(sim, 110)
-    step_drive(sim, engine, "mem_resp_i", 0x0255)
-    step_drive(sim, engine, "mem_resp_valid_i", 1)
+    sim.drive("mem_resp_i", 0x0255)
+    sim.drive("mem_resp_valid_i", 1)
     sim.settle()
     _expect(sim, "resp_valid_o", 1, "buf2 third response should be visible")
     _expect(sim, "resp_o", 0x0255, "buf2 third response payload mismatch")
 
-    step_drive(sim, engine, "mem_resp_valid_i", 0)
+    sim.drive("mem_resp_valid_i", 0)
     sim.settle()
     _expect(sim, "resp_valid_o", 0, "buf2 response should clear after final handshake")
 

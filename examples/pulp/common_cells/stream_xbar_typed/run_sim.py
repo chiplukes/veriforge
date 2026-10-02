@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -47,10 +47,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -70,22 +66,20 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "data_i", 0)
-    step_drive(sim, engine, "sel_i", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("data_i", 0)
+    sim.drive("sel_i", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -106,11 +100,11 @@ def _check_nospill(design, engine: str) -> None:
 
     _expect(sim, "valid_o", 0, "typed stream_xbar should be idle after reset")
 
-    step_drive(sim, engine, "ready_i", 0b11)
-    step_drive(sim, engine, "data_i", _pack_inputs(_pack_word(0xA0, 0x1), _pack_word(0xB1, 0x2), _pack_word(0xC2, 0x3)))
-    step_drive(sim, engine, "sel_i", 0b100)
-    step_drive(sim, engine, "valid_i", 0b101)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b11)
+    sim.drive("data_i", _pack_inputs(_pack_word(0xA0, 0x1), _pack_word(0xB1, 0x2), _pack_word(0xC2, 0x3)))
+    sim.drive("sel_i", 0b100)
+    sim.drive("valid_i", 0b101)
+    sim.settle()
     _expect(sim, "valid_o", 0b11, "typed stream_xbar should route two independent outputs")
     _expect(
         sim,
@@ -121,10 +115,10 @@ def _check_nospill(design, engine: str) -> None:
     _expect(sim, "idx_o", 0b1000, "typed stream_xbar idx routing mismatch")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "typed independent-routing edge not observed")
 
-    step_drive(sim, engine, "data_i", _pack_inputs(_pack_word(0x10, 0x4), _pack_word(0x21, 0x5), _pack_word(0x32, 0x6)))
-    step_drive(sim, engine, "sel_i", 0b000)
-    step_drive(sim, engine, "valid_i", 0b011)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", _pack_inputs(_pack_word(0x10, 0x4), _pack_word(0x21, 0x5), _pack_word(0x32, 0x6)))
+    sim.drive("sel_i", 0b000)
+    sim.drive("valid_i", 0b011)
+    sim.settle()
     _expect(sim, "valid_o", 0b01, "typed stream_xbar should contend on output 0")
     _expect(sim, "data_o", _pack_word(0x10, 0x4), "typed stream_xbar should grant input 0 first")
     _expect(sim, "idx_o", 0b0000, "typed stream_xbar should report input 0 first")
@@ -137,11 +131,11 @@ def _check_nospill(design, engine: str) -> None:
 def _check_spill(design, engine: str) -> None:
     sim = _make_step_sim(design, "sxt1_tb", engine)
 
-    step_drive(sim, engine, "ready_i", 0b00)
-    step_drive(sim, engine, "data_i", _pack_inputs(_pack_word(0x44, 0x1), _pack_word(0x55, 0x2), _pack_word(0x66, 0x3)))
-    step_drive(sim, engine, "sel_i", 0b000)
-    step_drive(sim, engine, "valid_i", 0b011)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b00)
+    sim.drive("data_i", _pack_inputs(_pack_word(0x44, 0x1), _pack_word(0x55, 0x2), _pack_word(0x66, 0x3)))
+    sim.drive("sel_i", 0b000)
+    sim.drive("valid_i", 0b011)
+    sim.settle()
     _expect(sim, "valid_o", 0b00, "typed stream_xbar spill outputs should stay empty before capture")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "typed spill first capture edge not observed")
     _expect(sim, "valid_o", 0b01, "typed stream_xbar spill should capture first contender")

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -42,10 +42,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -65,56 +61,54 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "sel_i", 0)
-    step_drive(sim, engine, "sel_valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("sel_i", 0)
+    sim.drive("sel_valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _check_selector_gating(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "sel_i", 0b101)
-    step_drive(sim, engine, "ready_i", 0b101)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("sel_i", 0b101)
+    sim.drive("ready_i", 0b101)
+    sim.settle()
     _expect(sim, "valid_o", 0b000, "stream_fork_dynamic should gate outputs until the selector stream is valid")
     _expect(sim, "ready_o", 0, "stream_fork_dynamic should gate input ready until the selector stream is valid")
     _expect(sim, "sel_ready_o", 0, "stream_fork_dynamic should keep selector ready low while the selector is invalid")
 
 
 def _check_masked_partial_completion(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "sel_valid_i", 1)
-    step_drive(sim, engine, "ready_i", 0b010)
-    _settle_drives(sim, engine)
+    sim.drive("sel_valid_i", 1)
+    sim.drive("ready_i", 0b010)
+    sim.settle()
     _expect(sim, "valid_o", 0b101, "stream_fork_dynamic should fan out valid only to the selected outputs")
     _expect(sim, "ready_o", 0, "non-selected ready bits must not complete the transaction")
     _expect(sim, "sel_ready_o", 0, "selector ready must stay low until the selected subset completes")
 
-    step_drive(sim, engine, "ready_i", 0b001)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b001)
+    sim.settle()
     _expect(
         sim, "valid_o", 0b101, "stream_fork_dynamic should still present the full selected subset before the first edge"
     )
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first masked partial edge not observed")
 
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b100, "stream_fork_dynamic should remember that output 0 already handshaked")
     _expect(sim, "ready_o", 0, "stream_fork_dynamic should stay blocked while one selected output remains pending")
 
-    step_drive(sim, engine, "ready_i", 0b100)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b100)
+    sim.settle()
     _expect(sim, "valid_o", 0b100, "stream_fork_dynamic should present only the last selected output before completion")
     _expect(sim, "ready_o", 1, "stream_fork_dynamic should accept once the last selected output is ready")
     _expect(sim, "sel_ready_o", 1, "stream_fork_dynamic should accept the selector stream with the data handshake")
@@ -122,19 +116,19 @@ def _check_masked_partial_completion(sim: Simulator, engine: str) -> None:
 
 
 def _check_single_output_restart(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "sel_valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0b000)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("sel_valid_i", 0)
+    sim.drive("ready_i", 0b000)
+    sim.settle()
     _expect(sim, "valid_o", 0b000, "stream_fork_dynamic should return to idle after the masked transaction completes")
     _expect(sim, "ready_o", 0, "idle stream_fork_dynamic should not assert input ready")
     _expect(sim, "sel_ready_o", 0, "idle stream_fork_dynamic should not assert selector ready")
 
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "sel_i", 0b010)
-    step_drive(sim, engine, "sel_valid_i", 1)
-    step_drive(sim, engine, "ready_i", 0b010)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("sel_i", 0b010)
+    sim.drive("sel_valid_i", 1)
+    sim.drive("ready_i", 0b010)
+    sim.settle()
     _expect(sim, "valid_o", 0b010, "stream_fork_dynamic should route a one-hot mask to the single selected output")
     _expect(sim, "ready_o", 1, "stream_fork_dynamic should accept immediately for a ready single-output mask")
     _expect(sim, "sel_ready_o", 1, "selector ready should track the accepted single-output transaction")

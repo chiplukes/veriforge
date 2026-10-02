@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -40,10 +40,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -84,15 +80,15 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "en_i", 1)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine)
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("en_i", 1)
+    sim.drive("serial_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
@@ -103,15 +99,15 @@ def _run_engine_checks(design, engine: str) -> None:
     _expect(sim, "f_edge_o", 0, "reset should clear the falling-edge pulse")
 
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "serial_o", 0, "release should not change serial_o immediately")
     _expect(sim, "r_edge_o", 0, "release should not create a rising-edge pulse")
     _expect(sim, "f_edge_o", 0, "release should not create a falling-edge pulse")
 
     _wait_for_clock_low(sim)
-    step_drive(sim, engine, "serial_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("serial_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, 60, "first rising sample edge not observed")
     _expect(sim, "r_edge_o", 0, "first synchronized stage should not pulse immediately")
     _expect(sim, "serial_o", 0, "serial_o should stay low through the first sample edge")
@@ -123,18 +119,18 @@ def _run_engine_checks(design, engine: str) -> None:
     _expect(sim, "r_edge_o", 0, "rising-edge pulse should clear on the following sample edge")
     _expect(sim, "serial_o", 1, "serial_o should go high after the rising pulse cycle")
 
-    step_drive(sim, engine, "en_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("en_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, 120, "disabled hold edge not observed")
     _expect(sim, "serial_o", 1, "disabled hold should preserve the sampled high level")
     _expect(sim, "r_edge_o", 0, "disabled hold should not emit a rising-edge pulse")
     _expect(sim, "f_edge_o", 0, "disabled hold should not emit a falling-edge pulse")
-    step_drive(sim, engine, "en_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("en_i", 1)
+    sim.settle()
 
     _wait_for_clock_low(sim)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("serial_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, 140, "first falling sample edge not observed")
     _expect(sim, "f_edge_o", 0, "first falling sample should not pulse immediately")
     _expect(sim, "serial_o", 1, "serial_o should stay high through the first falling sample")
@@ -146,8 +142,8 @@ def _run_engine_checks(design, engine: str) -> None:
     _expect(sim, "f_edge_o", 0, "falling-edge pulse should clear on the following sample edge")
     _expect(sim, "serial_o", 0, "serial_o should return low after the falling pulse cycle")
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "serial_o", 0, "async reset reassertion should clear serial_o immediately")
     _expect(sim, "r_edge_o", 0, "async reset reassertion should clear r_edge_o immediately")
     _expect(sim, "f_edge_o", 0, "async reset reassertion should clear f_edge_o immediately")

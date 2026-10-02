@@ -15,7 +15,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Simulator
 
 
@@ -40,10 +39,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _make_sim(design, engine: str) -> Simulator:
     top = design.get_module("stream_demux_tb_local")
     if top is None:
@@ -51,10 +46,10 @@ def _make_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "inp_valid_i", 0)
-    step_drive(sim, engine, "oup_sel_i", 0)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0)
+    sim.drive("oup_sel_i", 0)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     return sim
 
 
@@ -62,29 +57,29 @@ def _run_checks(sim: Simulator, engine: str) -> None:
     _expect(sim, "oup_valid_o", 0b000, "stream_demux should be idle when input valid is low")
     _expect(sim, "inp_ready_o", 0, "stream_demux ready should reflect selected output ready")
 
-    step_drive(sim, engine, "oup_ready_i", 0b001)
-    _settle_drives(sim, engine)
+    sim.drive("oup_ready_i", 0b001)
+    sim.settle()
     _expect(sim, "inp_ready_o", 1, "stream_demux should return selected output 0 ready even when idle")
 
-    step_drive(sim, engine, "inp_valid_i", 1)
-    step_drive(sim, engine, "oup_sel_i", 1)
-    step_drive(sim, engine, "oup_ready_i", 0b001)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 1)
+    sim.drive("oup_sel_i", 1)
+    sim.drive("oup_ready_i", 0b001)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0b010, "stream_demux should assert only selected output 1 valid")
     _expect(sim, "inp_ready_o", 0, "stream_demux input ready should follow selected output 1 ready")
 
-    step_drive(sim, engine, "oup_ready_i", 0b010)
-    _settle_drives(sim, engine)
+    sim.drive("oup_ready_i", 0b010)
+    sim.settle()
     _expect(sim, "inp_ready_o", 1, "stream_demux should return selected output 1 ready")
 
-    step_drive(sim, engine, "oup_sel_i", 2)
-    step_drive(sim, engine, "oup_ready_i", 0b100)
-    _settle_drives(sim, engine)
+    sim.drive("oup_sel_i", 2)
+    sim.drive("oup_ready_i", 0b100)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0b100, "stream_demux should reroute valid immediately when select changes")
     _expect(sim, "inp_ready_o", 1, "stream_demux should reroute ready immediately when select changes")
 
-    step_drive(sim, engine, "inp_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0b000, "stream_demux should clear valid fanout when input valid drops")
     _expect(sim, "inp_ready_o", 1, "stream_demux ready should still reflect selected output when idle")
 

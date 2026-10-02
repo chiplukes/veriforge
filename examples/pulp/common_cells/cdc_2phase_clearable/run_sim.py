@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -50,10 +50,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -96,19 +92,19 @@ def _make_step_sim(design, engine: str, top_name: str = "cdc_2phase_clearable_tb
         ("src_valid_i", 0),
         ("dst_ready_i", 0),
     ]:
-        step_drive(sim, engine, signal_name, value)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, value)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
     sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=14), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _expect(sim, "src_ready_o", 1, "source should be ready after reset")
     _expect(sim, "dst_valid_o", 0, "destination should be idle after reset")
@@ -118,9 +114,9 @@ def _release_reset(sim: Simulator, engine: str) -> None:
 
 def _release_async_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _expect(sim, "dst_valid_o", 0, "destination should stay idle immediately after async-reset release")
     _run_until_condition(
@@ -149,12 +145,12 @@ def _release_async_reset(sim: Simulator, engine: str) -> None:
 
 
 def _send_transfer(sim: Simulator, engine: str, payload: int, edge_limit: int, label: str) -> None:
-    step_drive(sim, engine, "src_data_i", payload)
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_data_i", payload)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", edge_limit, f"{label} source write edge not observed")
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
 
 
 def _recover_clean_transfer(
@@ -173,16 +169,16 @@ def _recover_clean_transfer(
         lambda s: _read_int(s, "dst_valid_o") == 1 and _read_int(s, "dst_data_o") == payload,
         f"{label} never became visible at the destination",
     )
-    step_drive(sim, engine, "dst_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         drain_limit,
         lambda s: _read_int(s, "dst_valid_o") == 0,
         f"{label} never drained from the destination",
     )
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         drain_limit + 120,
@@ -204,11 +200,11 @@ def _run_src_clear_scenario(design, engine: str) -> None:
     )
     _expect(sim, "src_ready_o", 0, "source should remain blocked while the pre-clear transfer is pending")
 
-    step_drive(sim, engine, "src_clear_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_clear_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 220, "source clear edge not observed")
-    step_drive(sim, engine, "src_clear_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_clear_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         320,
@@ -260,11 +256,11 @@ def _run_dst_clear_scenario(design, engine: str) -> None:
     )
     _expect(sim, "src_ready_o", 0, "source should remain blocked while the destination-clear transfer is pending")
 
-    step_drive(sim, engine, "dst_clear_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_clear_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", 220, "destination clear edge not observed")
-    step_drive(sim, engine, "dst_clear_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_clear_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         320,
@@ -316,11 +312,11 @@ def _run_async_reset_scenario(design, engine: str) -> None:
     )
     _expect(sim, "src_ready_o", 0, "source should remain blocked while the async-reset transfer is pending")
 
-    step_drive(sim, engine, "src_rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 0)
+    sim.settle()
     step_run_until(sim, sim.time + 24)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.settle()
 
     reset_release_time = sim.time
     _run_until_condition(
@@ -374,12 +370,12 @@ def _run_async_reset_scenario(design, engine: str) -> None:
     )
     _expect(sim, "src_ready_o", 0, "source should remain blocked while the destination async-reset transfer is pending")
 
-    step_drive(sim, engine, "dst_rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_rst_ni", 0)
+    sim.settle()
     _expect(sim, "dst_valid_o", 0, "destination async reset should clear visible valid state immediately")
     step_run_until(sim, sim.time + 24)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
 
     reset_release_time = sim.time
     _run_until_condition(

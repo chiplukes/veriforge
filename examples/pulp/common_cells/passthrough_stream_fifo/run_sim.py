@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -41,10 +41,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -64,35 +60,33 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _tx(sim: Simulator, engine: str, values: dict[str, int]) -> None:
-    step_drive(sim, engine, "data_i", values.get("data_i", 0))
-    step_drive(sim, engine, "valid_i", values.get("valid_i", 0))
-    step_drive(sim, engine, "ready_i", values.get("ready_i", 0))
-    step_drive(sim, engine, "flush", values.get("flush", 0))
-    _settle_drives(sim, engine)
+    sim.drive("data_i", values.get("data_i", 0))
+    sim.drive("valid_i", values.get("valid_i", 0))
+    sim.drive("ready_i", values.get("ready_i", 0))
+    sim.drive("flush", values.get("flush", 0))
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "next rising clock edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "flush", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("flush", 0)
+    sim.settle()
 
 
 def _check_reset_state(sim: Simulator) -> None:
@@ -115,17 +109,17 @@ def _run_same_cycle(design, engine: str) -> None:
     _expect(sim, "ready_o", 0, "passthrough_stream_fifo same-cycle path should report full after three pushes")
     _expect(sim, "data_o", 0x11, "passthrough_stream_fifo same-cycle full fifo should retain the oldest head")
 
-    step_drive(sim, engine, "data_i", 0x44)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0x44)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "ready_o", 1, "passthrough_stream_fifo same-cycle path should reopen for pop/push on full")
     _expect(sim, "valid_o", 1, "passthrough_stream_fifo same-cycle path should keep the output valid on full")
     _expect(sim, "data_o", 0x11, "passthrough_stream_fifo same-cycle full exchange should keep the old head")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "passthrough_stream_fifo same-cycle edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "ready_o", 0, "passthrough_stream_fifo same-cycle queue should stay full after pop/push")
     _expect(sim, "data_o", 0x22, "passthrough_stream_fifo same-cycle exchange should advance to the next head")
 
@@ -160,14 +154,14 @@ def _run_no_same_cycle(design, engine: str) -> None:
     _expect(sim, "ready_o", 0, "passthrough_stream_fifo no-same-cycle path should report full after three pushes")
     _expect(sim, "data_o", 0x11, "passthrough_stream_fifo no-same-cycle full fifo should retain the head")
 
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "ready_o", 0, "passthrough_stream_fifo no-same-cycle path should stay blocked before the pop edge")
     _expect(sim, "valid_o", 1, "passthrough_stream_fifo no-same-cycle path should keep output valid on full")
     _expect(sim, "data_o", 0x11, "passthrough_stream_fifo no-same-cycle blocked full pop should keep the head")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "passthrough_stream_fifo no-same-cycle edge not observed")
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "ready_o", 1, "passthrough_stream_fifo no-same-cycle path should reopen after a pure pop")
     _expect(sim, "data_o", 0x22, "passthrough_stream_fifo no-same-cycle pure pop should advance the head")
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -45,10 +45,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -68,66 +64,64 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "clr", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("clr", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _check_empty_pass_through(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 1)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x11)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x11)
+    sim.settle()
     _expect(sim, "valid_o", 1, "empty fall-through register should assert valid immediately")
     _expect(sim, "ready_o", 1, "empty fall-through register should remain ready immediately")
     _expect(sim, "data_o", 0x11, "empty fall-through register should forward data immediately")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "pass-through handshake edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "same-cycle accepted item should leave the register empty")
     _expect(sim, "ready_o", 1, "register should reopen after same-cycle pass-through")
 
 
 def _check_stall_and_drain(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x22)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x22)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stalled empty register should still assert valid immediately")
     _expect(sim, "ready_o", 1, "stalled empty register should show default ready before capture")
     _expect(sim, "data_o", 0x22, "stalled empty register should forward input data immediately")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stall capture edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "captured stalled item should remain valid")
     _expect(sim, "data_o", 0x22, "captured stalled item payload mismatch")
     _expect(sim, "ready_o", 0, "depth-1 fall-through register should backpressure once filled")
 
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x33)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x33)
+    sim.settle()
     _expect(sim, "ready_o", 0, "full fall-through register should hold backpressure combinationally")
     _expect(sim, "data_o", 0x22, "full fall-through register should keep the stored head stable")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "blocked input edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "data_o", 0x22, "blocked input should not replace stored data")
 
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stored item should remain valid until the drain edge")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "drain edge not observed")
     _expect(sim, "valid_o", 0, "register should empty after draining the stored item")
@@ -135,20 +129,20 @@ def _check_stall_and_drain(sim: Simulator, engine: str) -> None:
 
 
 def _check_synchronous_clear(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "data_i", 0x44)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.drive("valid_i", 1)
+    sim.drive("data_i", 0x44)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "clear setup capture edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "clear scenario should start with a stored item")
 
-    step_drive(sim, engine, "clr", 1)
-    _settle_drives(sim, engine)
+    sim.drive("clr", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "clear edge not observed")
-    step_drive(sim, engine, "clr", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clr", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "synchronous clear should empty the fall-through register")
     _expect(sim, "ready_o", 1, "synchronous clear should restore ready")
 

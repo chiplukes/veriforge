@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -40,10 +40,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -63,20 +59,18 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -85,31 +79,31 @@ def _check_stalled_sink(design, engine: str) -> None:
     _expect(sim, "valid_o", 0, "stream_delay should be idle after reset")
     _expect(sim, "ready_o", 0, "stream_delay should not assert ready after reset")
 
-    step_drive(sim, engine, "data_i", 0x34)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0x34)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_delay should not assert valid immediately")
     _expect(sim, "ready_o", 0, "stream_delay should not assert ready during the delay window")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_delay first delay edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_delay should still be delaying after the first edge")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_delay second delay edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_delay should assert valid after two delay edges")
     _expect(sim, "data_o", 0x34, "stream_delay should preserve the payload through the delay")
     _expect(sim, "ready_o", 0, "stream_delay should keep ready low while the sink stalls")
 
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_delay should hold valid until the delayed transfer is accepted")
     _expect(sim, "ready_o", 1, "stream_delay should reflect ready once the sink can accept")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_delay accept edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_delay should return to idle after acceptance")
     _expect(sim, "ready_o", 0, "stream_delay should clear ready again once idle")
 
@@ -117,19 +111,19 @@ def _check_stalled_sink(design, engine: str) -> None:
 def _check_ready_preasserted(design, engine: str) -> None:
     sim = _make_step_sim(design, engine)
 
-    step_drive(sim, engine, "data_i", 0x56)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0x56)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_delay should not bypass the delay when ready is already high")
     _expect(sim, "ready_o", 0, "stream_delay should keep ready low until the delay expires")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_delay pre-ready first edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_delay should still be delaying after the first pre-ready edge")
 
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_delay pre-ready second edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_delay should assert valid after the same two-edge delay when ready is high")
     _expect(sim, "ready_o", 1, "stream_delay should expose ready once the delayed transfer becomes valid")
     _expect(sim, "data_o", 0x56, "stream_delay should preserve the second payload through the delay")

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -47,10 +47,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -70,37 +66,35 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "inp_data_i", 0)
-    step_drive(sim, engine, "inp_valid_i", 0)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("inp_data_i", 0)
+    sim.drive("inp_valid_i", 0)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _check_round_robin(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "inp_data_i", _pack_inputs(0xA0, 0xB1, 0xC2, 0xD3))
-    step_drive(sim, engine, "inp_valid_i", 0b0101)
-    step_drive(sim, engine, "oup_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("inp_data_i", _pack_inputs(0xA0, 0xB1, 0xC2, 0xD3))
+    sim.drive("inp_valid_i", 0b0101)
+    sim.drive("oup_ready_i", 1)
+    sim.settle()
     _expect(sim, "oup_valid_o", 1, "stream_arbiter should assert output valid when any input is valid")
     _expect(sim, "oup_data_o", 0xA0, "stream_arbiter should grant input 0 first from reset priority")
     _expect(sim, "inp_ready_o", 0b0001, "stream_arbiter should return ready only to the granted input")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_arbiter first grant edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xC2, "stream_arbiter should rotate to input 2 on the next accepted cycle")
     _expect(sim, "inp_ready_o", 0b0100, "stream_arbiter should move ready to the next granted input")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_arbiter second grant edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xA0, "stream_arbiter should wrap back to input 0 after the second accepted cycle")
     _expect(
         sim, "inp_ready_o", 0b0001, "stream_arbiter should wrap ready back to input 0 after the second accepted cycle"
@@ -108,41 +102,41 @@ def _check_round_robin(sim: Simulator, engine: str) -> None:
 
 
 def _check_stall_lock(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "inp_valid_i", 0b1110)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b1110)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     _expect(sim, "oup_valid_o", 1, "stream_arbiter should keep output valid while a request is pending")
     _expect(sim, "oup_data_o", 0xB1, "stream_arbiter should select input 1 after the previous accepted grant")
     _expect(sim, "inp_ready_o", 0b0000, "stream_arbiter should not return ready while the output is stalled")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_arbiter stall edge not observed")
 
-    step_drive(sim, engine, "inp_valid_i", 0b1100)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b1100)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xB1, "stream_arbiter should hold the selected payload stable while stalled")
     _expect(sim, "oup_valid_o", 1, "stream_arbiter should keep output valid asserted while locked")
     _expect(sim, "inp_ready_o", 0b0000, "stream_arbiter should keep ready low for every input while stalled")
 
-    step_drive(sim, engine, "oup_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("oup_ready_i", 1)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xB1, "stream_arbiter should present the locked payload until acceptance")
     _expect(sim, "inp_ready_o", 0b0010, "stream_arbiter should release ready only to the locked requester")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_arbiter locked grant edge not observed")
-    _settle_drives(sim, engine)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xC2, "stream_arbiter should advance to the next active requester after acceptance")
     _expect(sim, "inp_ready_o", 0b0100, "stream_arbiter should move ready to the next requester after acceptance")
 
 
 def _check_single_request_and_idle(sim: Simulator, engine: str) -> None:
-    step_drive(sim, engine, "inp_valid_i", 0b1000)
-    step_drive(sim, engine, "oup_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b1000)
+    sim.drive("oup_ready_i", 1)
+    sim.settle()
     _expect(sim, "oup_data_o", 0xD3, "stream_arbiter should route the lone active requester payload")
     _expect(sim, "oup_valid_o", 1, "stream_arbiter should keep output valid high for a single active requester")
     _expect(sim, "inp_ready_o", 0b1000, "stream_arbiter should return ready only to the lone active requester")
 
-    step_drive(sim, engine, "inp_valid_i", 0)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0, "stream_arbiter should return to idle when no requesters are active")
     _expect(sim, "inp_ready_o", 0b0000, "idle stream_arbiter should not assert any input ready")
 

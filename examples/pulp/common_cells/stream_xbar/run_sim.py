@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -46,10 +46,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -69,22 +65,20 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "data_i", 0)
-    step_drive(sim, engine, "sel_i", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("data_i", 0)
+    sim.drive("sel_i", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -98,21 +92,21 @@ def _check_nospill(design, engine: str) -> None:
     _expect(sim, "valid_o", 0, "stream_xbar no-spill should be idle after reset")
     _expect(sim, "ready_o", 0, "stream_xbar no-spill should not assert input ready until valids exist")
 
-    step_drive(sim, engine, "ready_i", 0b11)
-    step_drive(sim, engine, "data_i", _pack_inputs(0xA0, 0xB1, 0xC2))
-    step_drive(sim, engine, "sel_i", 0b100)
-    step_drive(sim, engine, "valid_i", 0b101)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b11)
+    sim.drive("data_i", _pack_inputs(0xA0, 0xB1, 0xC2))
+    sim.drive("sel_i", 0b100)
+    sim.drive("valid_i", 0b101)
+    sim.settle()
     _expect(sim, "valid_o", 0b11, "stream_xbar no-spill should route two independent outputs simultaneously")
     _expect(sim, "data_o", 0xC2A0, "stream_xbar no-spill payload routing mismatch for independent outputs")
     _expect(sim, "idx_o", 0b1000, "stream_xbar no-spill idx routing mismatch for independent outputs")
     _expect(sim, "ready_o", 0b101, "stream_xbar no-spill should ready both selected inputs")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "independent-output handshake edge not observed")
 
-    step_drive(sim, engine, "data_i", _pack_inputs(0x10, 0x21, 0x32))
-    step_drive(sim, engine, "sel_i", 0b000)
-    step_drive(sim, engine, "valid_i", 0b011)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", _pack_inputs(0x10, 0x21, 0x32))
+    sim.drive("sel_i", 0b000)
+    sim.drive("valid_i", 0b011)
+    sim.settle()
     _expect(sim, "valid_o", 0b01, "stream_xbar no-spill should only drive output 0 during contention")
     _expect(sim, "data_o", 0x0010, "stream_xbar no-spill should choose input 0 first on output 0")
     _expect(sim, "idx_o", 0b0000, "stream_xbar no-spill should report input 0 as first winner")
@@ -123,11 +117,11 @@ def _check_nospill(design, engine: str) -> None:
     _expect(sim, "idx_o", 0b0001, "stream_xbar no-spill should report input 1 after round-robin rotation")
     _expect(sim, "ready_o", 0b010, "stream_xbar no-spill should ready the second contender after rotation")
 
-    step_drive(sim, engine, "flush", 1)
-    _settle_drives(sim, engine)
+    sim.drive("flush", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "flush edge not observed")
-    step_drive(sim, engine, "flush", 0)
-    _settle_drives(sim, engine)
+    sim.drive("flush", 0)
+    sim.settle()
 
     _expect(sim, "data_o", 0x0010, "stream_xbar no-spill flush should reset the output 0 round-robin pointer")
     _expect(sim, "idx_o", 0b0000, "stream_xbar no-spill flush should reset the granted input index")
@@ -136,11 +130,11 @@ def _check_nospill(design, engine: str) -> None:
 def _check_spill(design, engine: str) -> None:
     sim = _make_step_sim(design, "sx1_tb", engine)
 
-    step_drive(sim, engine, "ready_i", 0b00)
-    step_drive(sim, engine, "data_i", _pack_inputs(0x44, 0x55, 0x66))
-    step_drive(sim, engine, "sel_i", 0b000)
-    step_drive(sim, engine, "valid_i", 0b011)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b00)
+    sim.drive("data_i", _pack_inputs(0x44, 0x55, 0x66))
+    sim.drive("sel_i", 0b000)
+    sim.drive("valid_i", 0b011)
+    sim.settle()
     _expect(sim, "valid_o", 0b00, "stream_xbar spill outputs should stay empty before the first capture edge")
     _expect(sim, "ready_o", 0b001, "stream_xbar spill should only grant the first contender before capture")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill first capture edge not observed")
@@ -154,8 +148,8 @@ def _check_spill(design, engine: str) -> None:
     _expect(sim, "data_o", 0x0044, "stream_xbar spill should preserve the head payload while stalled")
     _expect(sim, "ready_o", 0b000, "stream_xbar spill should backpressure once both spill stages are occupied")
 
-    step_drive(sim, engine, "ready_i", 0b01)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0b01)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill drain edge not observed")
     _expect(sim, "valid_o", 0b01, "stream_xbar spill should keep output 0 valid after draining the first buffered item")
     _expect(sim, "data_o", 0x0055, "stream_xbar spill should surface the second buffered contender after drain")

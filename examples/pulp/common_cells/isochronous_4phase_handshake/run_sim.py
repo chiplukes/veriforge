@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -39,10 +39,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -74,24 +70,24 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "src_clk_i", 0)
-    step_drive(sim, engine, "dst_clk_i", 0)
-    step_drive(sim, engine, "src_rst_ni", 0)
-    step_drive(sim, engine, "dst_rst_ni", 0)
-    step_drive(sim, engine, "src_valid_i", 0)
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_clk_i", 0)
+    sim.drive("dst_clk_i", 0)
+    sim.drive("src_rst_ni", 0)
+    sim.drive("dst_rst_ni", 0)
+    sim.drive("src_valid_i", 0)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
     sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=20), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 36)
     _expect(sim, "src_ready_o", 1, "source should be ready after reset")
     _expect(sim, "dst_valid_o", 0, "destination should be idle after reset")
@@ -101,11 +97,11 @@ def _run_round_trip(design, engine: str, *, stall_first: bool) -> None:
     sim = _make_step_sim(design, engine)
     _release_reset(sim, engine)
 
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 60, "source request edge not observed")
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
     _expect(sim, "src_ready_o", 0, "source ready should drop after a request")
     _expect(sim, "dst_valid_o", 0, "destination should not see a request before a destination edge")
 
@@ -121,13 +117,13 @@ def _run_round_trip(design, engine: str, *, stall_first: bool) -> None:
         _run_until_rising_edge(sim, "dst_clk_i", 110, "second destination edge not observed while stalled")
         _expect(sim, "dst_valid_o", 1, "destination valid should hold while not ready")
 
-    step_drive(sim, engine, "dst_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "dst_clk_i", 130, "destination acknowledge edge not observed")
     _expect(sim, "dst_valid_o", 0, "destination valid should clear after acknowledgement")
 
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         160,

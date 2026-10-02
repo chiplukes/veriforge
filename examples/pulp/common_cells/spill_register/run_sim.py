@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -45,10 +45,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -68,20 +64,18 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -89,14 +83,14 @@ def _pulse_cycle(
     sim: Simulator, engine: str, *, valid: int = 0, ready: int | None = None, data: int | None = None
 ) -> None:
     if ready is not None:
-        step_drive(sim, engine, "ready_i", ready)
+        sim.drive("ready_i", ready)
     if data is not None:
-        step_drive(sim, engine, "data_i", data)
-    step_drive(sim, engine, "valid_i", valid)
-    _settle_drives(sim, engine)
+        sim.drive("data_i", data)
+    sim.drive("valid_i", valid)
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "next rising clock edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
 
 
 def _run_non_bypass(design, engine: str) -> None:
@@ -105,15 +99,15 @@ def _run_non_bypass(design, engine: str) -> None:
     _expect(sim, "valid_o", 0, "spill register should be empty after reset")
     _expect(sim, "ready_o", 1, "spill register should accept input after reset")
 
-    step_drive(sim, engine, "ready_i", 1)
-    step_drive(sim, engine, "data_i", 0x11)
-    step_drive(sim, engine, "valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.drive("data_i", 0x11)
+    sim.drive("valid_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 0, "spill register should cut valid combinationally")
     _expect(sim, "ready_o", 1, "spill register should still be ready before first capture")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "first capture edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "spill register should present captured data after one edge")
     _expect(sim, "data_o", 0x11, "spill register captured payload mismatch")
     _expect(sim, "ready_o", 1, "spill register should still accept a second item while b is empty")
@@ -137,8 +131,8 @@ def _run_non_bypass(design, engine: str) -> None:
     _expect(sim, "data_o", 0x22, "blocked third item should not replace the head")
     _expect(sim, "ready_o", 0, "blocked third item should leave backpressure asserted")
 
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "ready_o", 0, "spill register should stay full until a drain clock edge occurs")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "spill drain edge not observed")
     _expect(sim, "valid_o", 1, "second queued item should remain valid after first drain")
@@ -153,23 +147,23 @@ def _run_non_bypass(design, engine: str) -> None:
 def _run_bypass(design, engine: str) -> None:
     sim = _make_step_sim(design, "spill_reg_bp_tb", engine)
 
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0x5A)
-    step_drive(sim, engine, "valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0x5A)
+    sim.drive("valid_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 1, "bypass mode should pass valid combinationally")
     _expect(sim, "ready_o", 0, "bypass mode should pass ready combinationally")
     _expect(sim, "data_o", 0x5A, "bypass mode should pass data combinationally")
 
-    step_drive(sim, engine, "ready_i", 1)
-    step_drive(sim, engine, "data_i", 0xA5)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.drive("data_i", 0xA5)
+    sim.settle()
     _expect(sim, "ready_o", 1, "bypass mode should reopen immediately with downstream ready")
     _expect(sim, "valid_o", 1, "bypass mode should keep valid high while input is valid")
     _expect(sim, "data_o", 0xA5, "bypass mode should update data immediately")
 
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "bypass mode should clear valid immediately")
 
 

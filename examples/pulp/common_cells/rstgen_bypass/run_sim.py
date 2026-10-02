@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -45,10 +45,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
     while sim.time < target_time:
         if predicate(sim):
@@ -66,15 +62,15 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "rst_test_mode_ni", 1)
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine)
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("rst_test_mode_ni", 1)
+    sim.drive("test_mode_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
@@ -84,8 +80,8 @@ def _run_engine_checks(design, engine: str) -> None:
     _expect(sim, "init_no", 0, "functional reset should hold init_no low initially")
 
     step_run_until(sim, RESET_RELEASE_TIME)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 0, "synchronized reset output should stay low immediately after release")
     _expect(sim, "init_no", 0, "synchronized init output should stay low immediately after release")
 
@@ -99,28 +95,28 @@ def _run_engine_checks(design, engine: str) -> None:
         "outputs never asserted after the synchronized release window",
     )
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "functional reset reassertion should clear rst_no immediately")
     _expect(sim, "init_no", 0, "functional reset reassertion should clear init_no immediately")
 
-    step_drive(sim, engine, "test_mode_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("test_mode_i", 1)
+    sim.settle()
     _expect(sim, "rst_no", 1, "test mode should bypass rst_no immediately from rst_test_mode_ni")
     _expect(sim, "init_no", 1, "test mode should force init_no high immediately")
 
-    step_drive(sim, engine, "rst_test_mode_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_test_mode_ni", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "test-mode reset low should clear rst_no immediately")
     _expect(sim, "init_no", 1, "init_no should stay high in test mode even when rst_test_mode_ni is low")
 
-    step_drive(sim, engine, "rst_test_mode_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_test_mode_ni", 1)
+    sim.settle()
     _expect(sim, "rst_no", 1, "test-mode reset high should restore rst_no immediately")
     _expect(sim, "init_no", 1, "init_no should remain high while test mode stays enabled")
 
-    step_drive(sim, engine, "test_mode_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("test_mode_i", 0)
+    sim.settle()
     _expect(sim, "rst_no", 0, "leaving test mode should return rst_no to the functional reset path")
     _expect(sim, "init_no", 0, "leaving test mode should return init_no to the functional reset path")
 

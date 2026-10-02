@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,10 +44,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -67,35 +63,33 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "data_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _tx(sim: Simulator, engine: str, values: dict[str, int]) -> None:
-    step_drive(sim, engine, "data_i", values.get("data_i", 0))
-    step_drive(sim, engine, "valid_i", values.get("valid_i", 0))
-    step_drive(sim, engine, "ready_i", values.get("ready_i", 0))
-    step_drive(sim, engine, "flush", values.get("flush", 0))
-    _settle_drives(sim, engine)
+    sim.drive("data_i", values.get("data_i", 0))
+    sim.drive("valid_i", values.get("valid_i", 0))
+    sim.drive("ready_i", values.get("ready_i", 0))
+    sim.drive("flush", values.get("flush", 0))
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "next rising clock edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    step_drive(sim, engine, "flush", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.drive("flush", 0)
+    sim.settle()
 
 
 def _check_reset_state(sim: Simulator) -> None:
@@ -108,10 +102,10 @@ def _run_depth2(design, engine: str) -> None:
     _check_reset_state(sim)
 
     step_run_until(sim, 30)
-    step_drive(sim, engine, "data_i", 0x11)
-    step_drive(sim, engine, "valid_i", 1)
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0x11)
+    sim.drive("valid_i", 1)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(
         sim,
         "valid_o",
@@ -120,9 +114,9 @@ def _run_depth2(design, engine: str) -> None:
     )
     _expect(sim, "ready_o", 1, "stream_fifo_optimal_wrap depth2 should stay ready before the first capture")
     _run_until_rising_edge(sim, "clk", sim.time + 20, "stream_fifo_optimal_wrap depth2 first edge not observed")
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_fifo_optimal_wrap depth2 should present the captured head")
     _expect(sim, "data_o", 0x11, "stream_fifo_optimal_wrap depth2 head payload mismatch")
     _expect(sim, "ready_o", 1, "stream_fifo_optimal_wrap depth2 should still accept a second word")

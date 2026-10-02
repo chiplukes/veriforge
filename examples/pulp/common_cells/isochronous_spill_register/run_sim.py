@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -43,10 +43,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -78,25 +74,25 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "src_clk_i", 0)
-    step_drive(sim, engine, "dst_clk_i", 0)
-    step_drive(sim, engine, "src_rst_ni", 0)
-    step_drive(sim, engine, "dst_rst_ni", 0)
-    step_drive(sim, engine, "src_data_i", 0)
-    step_drive(sim, engine, "src_valid_i", 0)
-    step_drive(sim, engine, "dst_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_clk_i", 0)
+    sim.drive("dst_clk_i", 0)
+    sim.drive("src_rst_ni", 0)
+    sim.drive("dst_rst_ni", 0)
+    sim.drive("src_data_i", 0)
+    sim.drive("src_valid_i", 0)
+    sim.drive("dst_ready_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("src_clk_i"), period=10), MAX_TIME)
     sim.schedule_clock(Clock(sim.signal("dst_clk_i"), period=20), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "src_rst_ni", 1)
-    step_drive(sim, engine, "dst_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_rst_ni", 1)
+    sim.drive("dst_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 36)
 
 
@@ -120,21 +116,21 @@ def _run_non_bypass(design, engine: str) -> None:
     _release_non_bypass_reset(sim, engine)
 
     _wait_for_source_low(sim)
-    step_drive(sim, engine, "src_data_i", FIRST_WORD)
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_data_i", FIRST_WORD)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 60, "source write edge not observed for first queued item")
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
     _expect(sim, "src_ready_o", 1, "source should still have one free slot after the first write")
 
     _wait_for_source_low(sim)
-    step_drive(sim, engine, "src_data_i", SECOND_WORD)
-    step_drive(sim, engine, "src_valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("src_data_i", SECOND_WORD)
+    sim.drive("src_valid_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, "src_clk_i", 80, "source write edge not observed for second queued item")
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
     _run_until_condition(
         sim,
         90,
@@ -150,8 +146,8 @@ def _run_non_bypass(design, engine: str) -> None:
     )
     _expect(sim, "src_ready_o", 0, "source should stay blocked while both entries remain occupied")
 
-    step_drive(sim, engine, "dst_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         170,
@@ -176,23 +172,23 @@ def _run_bypass(design, engine: str) -> None:
     sim = _make_step_sim(design, "isochronous_spill_register_bypass_tb_local", engine)
     _release_reset(sim, engine)
 
-    step_drive(sim, engine, "dst_ready_i", 0)
-    step_drive(sim, engine, "src_valid_i", 1)
-    step_drive(sim, engine, "src_data_i", BYPASS_WORD0)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 0)
+    sim.drive("src_valid_i", 1)
+    sim.drive("src_data_i", BYPASS_WORD0)
+    sim.settle()
     _expect(sim, "src_ready_o", 0, "bypass mode should pass destination ready combinationally")
     _expect(sim, "dst_valid_o", 1, "bypass mode should pass source valid combinationally")
     _expect(sim, "dst_data_o", BYPASS_WORD0, "bypass mode should pass source data combinationally")
 
-    step_drive(sim, engine, "dst_ready_i", 1)
-    step_drive(sim, engine, "src_data_i", BYPASS_WORD1)
-    _settle_drives(sim, engine)
+    sim.drive("dst_ready_i", 1)
+    sim.drive("src_data_i", BYPASS_WORD1)
+    sim.settle()
     _expect(sim, "src_ready_o", 1, "bypass mode should reopen immediately")
     _expect(sim, "dst_valid_o", 1, "bypass mode should remain transparent while valid is asserted")
     _expect(sim, "dst_data_o", BYPASS_WORD1, "bypass mode should update data immediately")
 
-    step_drive(sim, engine, "src_valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("src_valid_i", 0)
+    sim.settle()
     _expect(sim, "dst_valid_o", 0, "bypass mode should clear valid immediately")
 
 

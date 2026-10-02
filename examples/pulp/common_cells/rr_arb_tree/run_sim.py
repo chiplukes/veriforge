@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines, display_lines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -78,13 +78,13 @@ def _make_step_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "rr", 0)
-    step_drive(sim, engine, "req", 0)
-    step_drive(sim, engine, "gnt_oup", 0)
-    step_drive(sim, engine, "data_bus", 0xD3C2B1A0)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("rr", 0)
+    sim.drive("req", 0)
+    sim.drive("gnt_oup", 0)
+    sim.drive("data_bus", 0xD3C2B1A0)
     sim.settle()
     return sim
 
@@ -95,13 +95,13 @@ def _run_step_engine(design, engine: str) -> int:
         sim = _make_step_sim(design, engine)
 
         step_run_until(sim, 22)
-        step_drive(sim, engine, "rst_n", 1)
+        sim.drive("rst_n", 1)
         sim.settle()
         step_run_until(sim, 26)
         _expect_state(sim, 0, 0, 0x00, 0b0000, "idle after reset")
 
-        step_drive(sim, engine, "req", 0b0101)
-        step_drive(sim, engine, "gnt_oup", 1)
+        sim.drive("req", 0b0101)
+        sim.drive("gnt_oup", 1)
         sim.settle()
         _expect_state(sim, 1, 0, 0xA0, 0b0001, "first round robin grant")
         step_run_until(sim, 36)
@@ -109,14 +109,14 @@ def _run_step_engine(design, engine: str) -> int:
         step_run_until(sim, 46)
         _expect_state(sim, 1, 0, 0xA0, 0b0001, "wrapped round robin grant")
 
-        step_drive(sim, engine, "req", 0b0110)
-        step_drive(sim, engine, "gnt_oup", 0)
+        sim.drive("req", 0b0110)
+        sim.drive("gnt_oup", 0)
         sim.settle()
         _expect_state(sim, 1, 1, 0xB1, 0b0000, "lock selection while stalled")
         step_run_until(sim, 56)
         _expect_state(sim, 1, 1, 0xB1, 0b0000, "locked selection remains stable")
 
-        step_drive(sim, engine, "gnt_oup", 1)
+        sim.drive("gnt_oup", 1)
         sim.settle()
         _expect_state(sim, 1, 1, 0xB1, 0b0010, "locked request granted")
         step_run_until(sim, 66)
@@ -124,22 +124,22 @@ def _run_step_engine(design, engine: str) -> int:
         step_run_until(sim, 76)
         _expect_state(sim, 1, 2, 0xC2, 0b0100, "round robin advances on the next accepted cycle")
 
-        step_drive(sim, engine, "flush", 1)
+        sim.drive("flush", 1)
         step_run_until(sim, 85)
-        step_drive(sim, engine, "flush", 0)
-        step_drive(sim, engine, "req", 0b0011)
+        sim.drive("flush", 0)
+        sim.drive("req", 0b0011)
         sim.settle()
         step_run_until(sim, 86)
         _expect_state(sim, 1, 0, 0xA0, 0b0001, "flush resets priority state")
 
-        step_drive(sim, engine, "req", 0b1000)
+        sim.drive("req", 0b1000)
         sim.settle()
         step_run_until(sim, 87)
         _expect_state(sim, 1, 3, 0xD3, 0b1000, "single active requester routes data")
 
         step_run_until(sim, 95)
-        step_drive(sim, engine, "req", 0)
-        step_drive(sim, engine, "gnt_oup", 0)
+        sim.drive("req", 0)
+        sim.drive("gnt_oup", 0)
         sim.settle()
         step_run_until(sim, 96)
         _expect_state(sim, 0, 0, 0x00, 0b0000, "returns idle")

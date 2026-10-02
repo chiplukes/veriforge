@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -41,10 +41,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -64,22 +60,20 @@ def _make_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "req_valid_i", 0)
-    step_drive(sim, engine, "req_ready_i", 0)
-    step_drive(sim, engine, "rsp_valid_i", 0)
-    step_drive(sim, engine, "rsp_ready_i", 0)
-    step_drive(sim, engine, "credit_i", 2)
-    _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("req_valid_i", 0)
+    sim.drive("req_ready_i", 0)
+    sim.drive("rsp_valid_i", 0)
+    sim.drive("rsp_ready_i", 0)
+    sim.drive("credit_i", 2)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
@@ -93,12 +87,12 @@ def _drive(
     rsp_valid: int = 0,
     rsp_ready: int = 0,
 ) -> None:
-    step_drive(sim, engine, "credit_i", credit)
-    step_drive(sim, engine, "req_valid_i", req_valid)
-    step_drive(sim, engine, "req_ready_i", req_ready)
-    step_drive(sim, engine, "rsp_valid_i", rsp_valid)
-    step_drive(sim, engine, "rsp_ready_i", rsp_ready)
-    _settle_drives(sim, engine)
+    sim.drive("credit_i", credit)
+    sim.drive("req_valid_i", req_valid)
+    sim.drive("req_ready_i", req_ready)
+    sim.drive("rsp_valid_i", rsp_valid)
+    sim.drive("rsp_ready_i", rsp_ready)
+    sim.settle()
 
 
 def _tick(sim: Simulator) -> None:

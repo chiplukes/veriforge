@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 
@@ -41,10 +41,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _run_until_rising_edge(sim: Simulator, signal_name: str, limit: int, message: str) -> None:
     previous = _read_int(sim, signal_name)
     while sim.time < limit:
@@ -64,38 +60,33 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk", 0)
-    step_drive(sim, engine, "rst_n", 0)
-    step_drive(sim, engine, "flush", 0)
-    step_drive(sim, engine, "push", 0)
-    step_drive(sim, engine, "pop", 0)
-    step_drive(sim, engine, "data_i", 0)
-    if engine == "reference":
-        sim.run(max_time=0)
-    else:
-        _settle_drives(sim, engine)
+    sim.drive("clk", 0)
+    sim.drive("rst_n", 0)
+    sim.drive("flush", 0)
+    sim.drive("push", 0)
+    sim.drive("pop", 0)
+    sim.drive("data_i", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     step_run_until(sim, 22)
-    step_drive(sim, engine, "rst_n", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_n", 1)
+    sim.settle()
     step_run_until(sim, 26)
-    if engine == "reference":
-        sim.run(max_time=0)
     return sim
 
 
 def _tx(sim: Simulator, engine: str, values: dict[str, int]) -> None:
-    step_drive(sim, engine, "data_i", values.get("data_i", 0))
-    step_drive(sim, engine, "push", values.get("push", 0))
-    step_drive(sim, engine, "pop", values.get("pop", 0))
-    step_drive(sim, engine, "flush", values.get("flush", 0))
-    _settle_drives(sim, engine)
+    sim.drive("data_i", values.get("data_i", 0))
+    sim.drive("push", values.get("push", 0))
+    sim.drive("pop", values.get("pop", 0))
+    sim.drive("flush", values.get("flush", 0))
+    sim.settle()
     _run_until_rising_edge(sim, "clk", sim.time + 20, "next rising clock edge not observed")
-    step_drive(sim, engine, "push", 0)
-    step_drive(sim, engine, "pop", 0)
-    step_drive(sim, engine, "flush", 0)
-    _settle_drives(sim, engine)
+    sim.drive("push", 0)
+    sim.drive("pop", 0)
+    sim.drive("flush", 0)
+    sim.settle()
 
 
 def _check_reset_state(sim: Simulator) -> None:
@@ -151,17 +142,17 @@ def _run_ft_depth3(design, engine: str) -> None:
     _check_reset_state(sim)
 
     step_run_until(sim, 30)
-    step_drive(sim, engine, "data_i", 0xA1)
-    step_drive(sim, engine, "push", 1)
-    step_drive(sim, engine, "pop", 1)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0xA1)
+    sim.drive("push", 1)
+    sim.drive("pop", 1)
+    sim.settle()
     _expect(sim, "empty", 0, "fall-through depth3 should make empty deassert immediately on push")
     _expect(sim, "usage", 0, "fall-through depth3 pass-through should not pre-increment usage")
     _expect(sim, "data_o", 0xA1, "fall-through depth3 should expose input data immediately")
     step_run_until(sim, 36)
-    step_drive(sim, engine, "push", 0)
-    step_drive(sim, engine, "pop", 0)
-    _settle_drives(sim, engine)
+    sim.drive("push", 0)
+    sim.drive("pop", 0)
+    sim.settle()
     _expect(sim, "usage", 0, "fall-through depth3 empty pass-through should leave fifo empty")
     _expect(sim, "empty", 1, "fall-through depth3 empty pass-through should drain immediately")
 
@@ -198,15 +189,15 @@ def _run_ft_depth1(design, engine: str) -> None:
     _check_reset_state(sim)
 
     step_run_until(sim, 30)
-    step_drive(sim, engine, "data_i", 0xC3)
-    step_drive(sim, engine, "push", 1)
-    _settle_drives(sim, engine)
+    sim.drive("data_i", 0xC3)
+    sim.drive("push", 1)
+    sim.settle()
     _expect(sim, "empty", 0, "fall-through depth1 should expose a pushed word immediately")
     _expect(sim, "full", 0, "fall-through depth1 should not look full before the clock edge")
     _expect(sim, "data_o", 0xC3, "fall-through depth1 should drive input data directly when empty")
     step_run_until(sim, 36)
-    step_drive(sim, engine, "push", 0)
-    _settle_drives(sim, engine)
+    sim.drive("push", 0)
+    sim.settle()
     _expect(sim, "usage", 1, "fall-through depth1 should store the word after the clock edge")
     _expect(sim, "full", 1, "fall-through depth1 should become full after storing one word")
     _expect(sim, "data_o", 0xC3, "fall-through depth1 stored word should remain at the output")

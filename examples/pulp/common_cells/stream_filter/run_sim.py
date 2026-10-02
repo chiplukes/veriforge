@@ -15,7 +15,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -39,10 +38,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _make_sim(design, engine: str) -> Simulator:
     top = design.get_module("stream_filter_tb_local")
     if top is None:
@@ -50,10 +45,10 @@ def _make_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "valid_i", 0)
-    step_drive(sim, engine, "drop_i", 0)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.drive("drop_i", 0)
+    sim.drive("ready_i", 0)
+    sim.settle()
     return sim
 
 
@@ -61,29 +56,29 @@ def _run_checks(sim: Simulator, engine: str) -> None:
     _expect(sim, "valid_o", 0, "stream_filter should be idle when input valid is low")
     _expect(sim, "ready_o", 0, "stream_filter should follow downstream ready in pass-through mode")
 
-    step_drive(sim, engine, "valid_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_filter should pass valid through when drop is low")
     _expect(sim, "ready_o", 0, "stream_filter should keep ready low while downstream is not ready")
 
-    step_drive(sim, engine, "ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("ready_i", 1)
+    sim.settle()
     _expect(sim, "valid_o", 1, "stream_filter should keep valid asserted in pass-through mode")
     _expect(sim, "ready_o", 1, "stream_filter should pass ready through when drop is low")
 
-    step_drive(sim, engine, "drop_i", 1)
-    step_drive(sim, engine, "ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("drop_i", 1)
+    sim.drive("ready_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_filter should suppress downstream valid when drop is high")
     _expect(sim, "ready_o", 1, "stream_filter should force upstream ready high when drop is high")
 
-    step_drive(sim, engine, "valid_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("valid_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_filter drop mode should stay invalid when input valid is low")
     _expect(sim, "ready_o", 1, "stream_filter drop mode should keep upstream ready high")
 
-    step_drive(sim, engine, "drop_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("drop_i", 0)
+    sim.settle()
     _expect(sim, "valid_o", 0, "stream_filter should return to pass-through mode when drop clears")
     _expect(sim, "ready_o", 0, "stream_filter should resume following downstream ready when drop clears")
 

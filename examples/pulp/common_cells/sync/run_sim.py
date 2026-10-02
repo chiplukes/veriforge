@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -43,10 +43,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -87,21 +83,21 @@ def _make_step_sim(design, top_name: str, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "clk_i", 0)
-    step_drive(sim, engine, "rst_ni", 1)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine)
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("clk_i", 0)
+    sim.drive("rst_ni", 1)
+    sim.drive("serial_i", 0)
+    sim.settle()
+    sim.drive("rst_ni", 0)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("clk_i"), period=10), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 1)
+    sim.settle()
 
 
 def _run_default_reset_case(design, engine: str) -> None:
@@ -112,8 +108,8 @@ def _run_default_reset_case(design, engine: str) -> None:
     _expect(sim, "serial_o", 0, "default reset case should stay low immediately after release")
 
     _wait_for_clock_low(sim)
-    step_drive(sim, engine, "serial_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("serial_i", 1)
+    sim.settle()
     _run_until_rising_edge(sim, 60, "first rising sample edge not observed")
     _expect(sim, "serial_o", 0, "stage 1 should not reach the output immediately")
     _run_until_rising_edge(sim, 80, "second rising sample edge not observed")
@@ -122,8 +118,8 @@ def _run_default_reset_case(design, engine: str) -> None:
     _expect(sim, "serial_o", 1, "three-stage synchronizer should propagate a rising input on the third edge")
 
     _wait_for_clock_low(sim)
-    step_drive(sim, engine, "serial_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("serial_i", 0)
+    sim.settle()
     _run_until_rising_edge(sim, 140, "first falling sample edge not observed")
     _expect(sim, "serial_o", 1, "output should hold high for the first falling sample edge")
     _run_until_rising_edge(sim, 160, "second falling sample edge not observed")
@@ -145,8 +141,8 @@ def _run_reset_one_case(design, engine: str) -> None:
     _run_until_rising_edge(sim, RISE_DEADLINE, "third drain edge not observed")
     _expect(sim, "serial_o", 0, "RESET_VALUE=1 should drain to zero on the third edge when serial_i stays low")
 
-    step_drive(sim, engine, "rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("rst_ni", 0)
+    sim.settle()
     _expect(sim, "serial_o", 1, "async reset reassertion should immediately restore RESET_VALUE=1")
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive, step_run_until
+from veriforge.sim.step_harness import step_run_until
 from veriforge.sim.testbench import Clock, Simulator
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -45,10 +45,6 @@ def _expect(sim: Simulator, signal_name: str, expected: int, message: str) -> No
     actual = _read_int(sim, signal_name)
     if actual != expected:
         raise RuntimeError(f"{message}: expected {expected:#x}, got {actual:#x}")
-
-
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
 
 
 def _run_until_condition(sim: Simulator, target_time: int, predicate, message: str) -> None:
@@ -92,19 +88,19 @@ def _make_step_sim(design, engine: str, top_name: str = "cdc_reset_ctrlr_tb_loca
         ("a_isolate_ack_i", 0),
         ("b_isolate_ack_i", 0),
     ]:
-        step_drive(sim, engine, signal_name, value)
-    _settle_drives(sim, engine)
+        sim.drive(signal_name, value)
+    sim.settle()
     sim.schedule_clock(Clock(sim.signal("a_clk_i"), period=10), MAX_TIME)
     sim.schedule_clock(Clock(sim.signal("b_clk_i"), period=14), MAX_TIME)
-    _settle_drives(sim, engine)
+    sim.settle()
     return sim
 
 
 def _release_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "a_rst_ni", 1)
-    step_drive(sim, engine, "b_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 1)
+    sim.drive("b_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _expect(sim, "a_isolate_o", 0, "a side should start idle after reset release")
     _expect(sim, "a_clear_o", 0, "a side clear should start low after reset release")
@@ -122,9 +118,9 @@ def _complete_symmetric_round(sim: Simulator, engine: str, *, label: str) -> Non
     _expect(sim, "a_clear_o", 0, f"{label} a-side clear should stay low before isolate acknowledgements")
     _expect(sim, "b_clear_o", 0, f"{label} b-side clear should stay low before isolate acknowledgements")
 
-    step_drive(sim, engine, "a_isolate_ack_i", 1)
-    step_drive(sim, engine, "b_isolate_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 1)
+    sim.drive("b_isolate_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_ASSERT_WINDOW,
@@ -134,9 +130,9 @@ def _complete_symmetric_round(sim: Simulator, engine: str, *, label: str) -> Non
     _expect(sim, "a_isolate_o", 1, f"{label} a-side isolate should stay high during clear")
     _expect(sim, "b_isolate_o", 1, f"{label} b-side isolate should stay high during clear")
 
-    step_drive(sim, engine, "a_clear_ack_i", 1)
-    step_drive(sim, engine, "b_clear_ack_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_clear_ack_i", 1)
+    sim.drive("b_clear_ack_i", 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + ASYNC_CLEAR_COMPLETE_WINDOW,
@@ -150,18 +146,18 @@ def _complete_symmetric_round(sim: Simulator, engine: str, *, label: str) -> Non
         f"{label} isolate phase never released after post-clear",
     )
 
-    step_drive(sim, engine, "a_isolate_ack_i", 0)
-    step_drive(sim, engine, "b_isolate_ack_i", 0)
-    step_drive(sim, engine, "a_clear_ack_i", 0)
-    step_drive(sim, engine, "b_clear_ack_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("a_isolate_ack_i", 0)
+    sim.drive("b_isolate_ack_i", 0)
+    sim.drive("a_clear_ack_i", 0)
+    sim.drive("b_clear_ack_i", 0)
+    sim.settle()
 
 
 def _release_async_reset(sim: Simulator, engine: str) -> None:
     step_run_until(sim, 31)
-    step_drive(sim, engine, "a_rst_ni", 1)
-    step_drive(sim, engine, "b_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 1)
+    sim.drive("b_rst_ni", 1)
+    sim.settle()
     step_run_until(sim, 45)
     _complete_symmetric_round(sim, engine, label="startup async reset")
 
@@ -185,11 +181,11 @@ def _run_clear_round(
     local_clear_ack = f"{side}_clear_ack_i"
     remote_clear_ack = f"{other_side}_clear_ack_i"
 
-    step_drive(sim, engine, trigger_signal, 1)
-    _settle_drives(sim, engine)
+    sim.drive(trigger_signal, 1)
+    sim.settle()
     _run_until_rising_edge(sim, trigger_clock, sim.time + 30, f"{label} trigger edge not observed")
-    step_drive(sim, engine, trigger_signal, 0)
-    _settle_drives(sim, engine)
+    sim.drive(trigger_signal, 0)
+    sim.settle()
 
     _run_until_condition(
         sim,
@@ -209,9 +205,9 @@ def _run_clear_round(
     _expect(sim, local_clear, 0, f"{label} local clear should still be low before isolate acknowledgements")
     _expect(sim, remote_clear, 0, f"{label} remote clear should still be low before isolate acknowledgements")
 
-    step_drive(sim, engine, local_isolate_ack, 1)
-    step_drive(sim, engine, remote_isolate_ack, 1)
-    _settle_drives(sim, engine)
+    sim.drive(local_isolate_ack, 1)
+    sim.drive(remote_isolate_ack, 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 220,
@@ -221,9 +217,9 @@ def _run_clear_round(
     _expect(sim, local_isolate, 1, f"{label} local isolate should stay high during clear")
     _expect(sim, remote_isolate, 1, f"{label} remote isolate should stay high during clear")
 
-    step_drive(sim, engine, local_clear_ack, 1)
-    step_drive(sim, engine, remote_clear_ack, 1)
-    _settle_drives(sim, engine)
+    sim.drive(local_clear_ack, 1)
+    sim.drive(remote_clear_ack, 1)
+    sim.settle()
     _run_until_condition(
         sim,
         sim.time + 220,
@@ -237,11 +233,11 @@ def _run_clear_round(
         f"{label} isolate phase never released after post-clear",
     )
 
-    step_drive(sim, engine, local_isolate_ack, 0)
-    step_drive(sim, engine, remote_isolate_ack, 0)
-    step_drive(sim, engine, local_clear_ack, 0)
-    step_drive(sim, engine, remote_clear_ack, 0)
-    _settle_drives(sim, engine)
+    sim.drive(local_isolate_ack, 0)
+    sim.drive(remote_isolate_ack, 0)
+    sim.drive(local_clear_ack, 0)
+    sim.drive(remote_clear_ack, 0)
+    sim.settle()
 
 
 def _run_engine_checks(design, engine: str) -> None:
@@ -263,22 +259,22 @@ def _run_engine_checks(design, engine: str) -> None:
     sim = _make_step_sim(design, engine, top_name="cdc_reset_ctrlr_async_reset_tb_local")
     _release_async_reset(sim, engine)
 
-    step_drive(sim, engine, "a_rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 0)
+    sim.settle()
     _expect(sim, "a_isolate_o", 1, "a-side async reset should assert isolate immediately")
     _expect(sim, "a_clear_o", 0, "a-side async reset should not assert clear immediately")
     step_run_until(sim, sim.time + 24)
-    step_drive(sim, engine, "a_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("a_rst_ni", 1)
+    sim.settle()
     _complete_symmetric_round(sim, engine, label="a-side async reset")
 
-    step_drive(sim, engine, "b_rst_ni", 0)
-    _settle_drives(sim, engine)
+    sim.drive("b_rst_ni", 0)
+    sim.settle()
     _expect(sim, "b_isolate_o", 1, "b-side async reset should assert isolate immediately")
     _expect(sim, "b_clear_o", 0, "b-side async reset should not assert clear immediately")
     step_run_until(sim, sim.time + 24)
-    step_drive(sim, engine, "b_rst_ni", 1)
-    _settle_drives(sim, engine)
+    sim.drive("b_rst_ni", 1)
+    sim.settle()
     _complete_symmetric_round(sim, engine, label="b-side async reset")
 
 

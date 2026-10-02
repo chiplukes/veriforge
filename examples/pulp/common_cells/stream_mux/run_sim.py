@@ -15,7 +15,6 @@ from pathlib import Path
 
 from veriforge.project import parse_files
 from veriforge.sim.example_runner import available_engines
-from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Simulator
 
 
@@ -44,10 +43,6 @@ def _pack_inputs(d0: int, d1: int, d2: int) -> int:
     return (d2 << 16) | (d1 << 8) | d0
 
 
-def _settle_drives(sim: Simulator, engine: str) -> None:
-    sim.settle()
-
-
 def _make_sim(design, engine: str) -> Simulator:
     top = design.get_module("stream_mux_tb_local")
     if top is None:
@@ -55,11 +50,11 @@ def _make_sim(design, engine: str) -> Simulator:
 
     sim = Simulator(top, engine=engine, design=design)
     sim.run(max_time=0)
-    step_drive(sim, engine, "inp_data_i", 0)
-    step_drive(sim, engine, "inp_valid_i", 0)
-    step_drive(sim, engine, "inp_sel_i", 0)
-    step_drive(sim, engine, "oup_ready_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_data_i", 0)
+    sim.drive("inp_valid_i", 0)
+    sim.drive("inp_sel_i", 0)
+    sim.drive("oup_ready_i", 0)
+    sim.settle()
     return sim
 
 
@@ -67,33 +62,33 @@ def _run_checks(sim: Simulator, engine: str) -> None:
     _expect(sim, "oup_valid_o", 0, "stream_mux should be idle when the selected input is invalid")
     _expect(sim, "inp_ready_o", 0, "stream_mux should not fan out ready while downstream stalls")
 
-    step_drive(sim, engine, "inp_data_i", _pack_inputs(0x11, 0x22, 0x33))
-    step_drive(sim, engine, "inp_valid_i", 0b010)
-    step_drive(sim, engine, "inp_sel_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("inp_data_i", _pack_inputs(0x11, 0x22, 0x33))
+    sim.drive("inp_valid_i", 0b010)
+    sim.drive("inp_sel_i", 1)
+    sim.settle()
     _expect(sim, "oup_data_o", 0x22, "stream_mux should route selected input 1 data")
     _expect(sim, "oup_valid_o", 1, "stream_mux should route selected input 1 valid")
     _expect(sim, "inp_ready_o", 0, "stream_mux should keep ready low while downstream stalls")
 
-    step_drive(sim, engine, "oup_ready_i", 1)
-    _settle_drives(sim, engine)
+    sim.drive("oup_ready_i", 1)
+    sim.settle()
     _expect(sim, "inp_ready_o", 0b010, "stream_mux should fan ready only to the selected input")
 
-    step_drive(sim, engine, "inp_valid_i", 0b101)
-    step_drive(sim, engine, "inp_sel_i", 0)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b101)
+    sim.drive("inp_sel_i", 0)
+    sim.settle()
     _expect(sim, "oup_data_o", 0x11, "stream_mux should reroute data immediately when select changes")
     _expect(sim, "oup_valid_o", 1, "stream_mux should reroute valid immediately when select changes")
     _expect(sim, "inp_ready_o", 0b001, "stream_mux should move ready fanout with the selection")
 
-    step_drive(sim, engine, "inp_sel_i", 2)
-    _settle_drives(sim, engine)
+    sim.drive("inp_sel_i", 2)
+    sim.settle()
     _expect(sim, "oup_data_o", 0x33, "stream_mux should route selected input 2 data")
     _expect(sim, "oup_valid_o", 1, "stream_mux should route selected input 2 valid")
     _expect(sim, "inp_ready_o", 0b100, "stream_mux should fan ready only to selected input 2")
 
-    step_drive(sim, engine, "inp_valid_i", 0b001)
-    _settle_drives(sim, engine)
+    sim.drive("inp_valid_i", 0b001)
+    sim.settle()
     _expect(sim, "oup_valid_o", 0, "non-selected valids should not assert output valid")
     _expect(sim, "oup_data_o", 0x33, "selected data path should remain selected even when invalid")
 
