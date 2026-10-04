@@ -787,12 +787,15 @@ def _build_stream_bundle(
 
     bundle_signals: dict[str, Port] = {"valid": valid_port, "ready": ready_port}
     data_pdir = PortDirection.INPUT if data_dir == "i" else PortDirection.OUTPUT
-    data_port = signals_by_stem.get(("data", data_dir))
+    # Pulp cells use both data_i/o and payload_i/o for the primary beat.
+    # Normalize either spelling to the endpoint's canonical "data" role.
+    data_stem = "data" if ("data", data_dir) in signals_by_stem else "payload"
+    data_port = signals_by_stem.get((data_stem, data_dir))
     if data_port is not None and data_port.direction == data_pdir:
         bundle_signals["data"] = data_port
     # Same-direction ports at this prefix become sideband payloads.
     for (stem, dchar), port in signals_by_stem.items():
-        if stem in {"valid", "ready", "data"} or dchar != data_dir:
+        if stem in {"valid", "ready", data_stem} or dchar != data_dir:
             continue
         if port.direction == data_pdir:
             bundle_signals[stem] = port

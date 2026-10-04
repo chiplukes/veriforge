@@ -1,11 +1,8 @@
 """Tests for the Wave D-4 pulp axi_to_axi_lite migration.
 
-The bridge example exposes an AXI-Lite slave (``slv``) and an AXI-Lite
-master (``mst``). Because the bridge has internal ``aw_pending_q`` /
-``ar_pending_q`` flops that gate the slave-side handshake, the bench
-drives ``slv`` with manual ``step_drive`` pokes (mirroring the original
-pulp ``run_sim.py``) and consumes ``mst`` with the auto-tick
-AXILiteResponder.
+The bridge example exposes an AXI-Lite slave (``slv``) and master
+(``mst``). The bench uses high-level proxies on both sides for a
+write/read sweep; signal-level timing remains covered separately.
 """
 
 from __future__ import annotations

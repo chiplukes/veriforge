@@ -13,6 +13,7 @@ both stream bundles bind with `confidence='sole-domain'`.
 
 ```powershell
 uv run python examples/pulp/common_cells/spill_register/bench/spill_register_bench.py
+uv run python examples/pulp/common_cells/spill_register/bench/spill_register_bench.py --engine vm-fast
 uv run python examples/pulp/common_cells/spill_register/bench/spill_register_bench.py --vcd waves.vcd
 ```
 

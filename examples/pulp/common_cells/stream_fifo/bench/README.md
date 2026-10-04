@@ -14,6 +14,7 @@ classifies the bound interfaces as `confidence='sole-domain'`.
 
 ```powershell
 uv run python examples/pulp/common_cells/stream_fifo/bench/stream_fifo_bench.py
+uv run python examples/pulp/common_cells/stream_fifo/bench/stream_fifo_bench.py --engine vm-fast
 uv run python examples/pulp/common_cells/stream_fifo/bench/stream_fifo_bench.py --vcd waves.vcd
 ```
 

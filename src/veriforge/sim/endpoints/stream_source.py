@@ -101,5 +101,5 @@ class StreamSource:
     def tick_post(self) -> None:
         if self._paused_this_cycle or self._current is None:
             return
-        if self._sampled_handshake or int(self.ready.value) == 1:
+        if self._sampled_handshake:
             self._current = None

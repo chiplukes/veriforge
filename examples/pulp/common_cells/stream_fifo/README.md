@@ -33,6 +33,8 @@ examples/pulp/common_cells/stream_fifo/
 │   └── stream_fifo.sv
 ├── tb/
 │   └── stream_fifo_tb_local.sv
+├── bench/
+│   └── stream_fifo_bench.py
 └── run_sim.py
 ```
 
@@ -51,10 +53,14 @@ The checks cover:
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench checks an ordered eight-beat transfer through the FIFO.
+The directed runner retains the fill, full, flush, and fall-through checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_fifo/run_sim.py
+uv run python examples/pulp/common_cells/stream_fifo/bench/stream_fifo_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

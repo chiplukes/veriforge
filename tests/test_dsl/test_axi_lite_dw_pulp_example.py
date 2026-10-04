@@ -3,6 +3,7 @@
 Five converter variants are exercised:
   - downsize 32->16, upsize 16->32, passthrough 32->32,
     typed upsize 32->128, typed upsize 64->128.
+Each also runs a transaction-level write/read roundtrip.
 """
 
 from __future__ import annotations
@@ -55,3 +56,11 @@ def test_axi_lite_dw_bench_all_variants_pass():
     assert "passthrough (32->32) passed" in proc.stdout
     assert "typed upsize (32->128) passed" in proc.stdout
     assert "typed upsize (64->128) passed" in proc.stdout
+    for top_name in (
+        "axi_lite_dw_down_tb",
+        "axi_lite_dw_up_tb",
+        "axi_lite_dw_same_tb",
+        "axi_lite_dw_typed_up32_128_tb",
+        "axi_lite_dw_typed_up64_128_tb",
+    ):
+        assert f"axi_lite_dw {top_name} transaction roundtrip passed" in proc.stdout

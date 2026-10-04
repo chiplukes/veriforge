@@ -10,9 +10,10 @@ Five variants are exercised, each on its own fresh ``Testbench`` instance:
 * **typed_up32_128** 32-bit slv → 128-bit mst: replication + strobe shift.
 * **typed_up64_128** 64-bit slv → 128-bit mst: replication + strobe shift.
 
-All signals are driven manually via ``sim.drive()``.  The bench acts as both
-AXI-Lite master (driving ``slv_*`` inputs) and AXI-Lite slave responder
-(driving ``mst_*`` response inputs back into the DUT).
+The signal-level checks drive both sides manually to inspect intermediate
+beats and response codes. A separate transaction sweep uses ``bench.iface()``
+to write and read through each variant, allowing the absent AXI-Lite
+protection pins through a planner override.
 
 Run with::
 
@@ -25,7 +26,7 @@ import argparse
 from pathlib import Path
 
 from veriforge.project import parse_files
-from veriforge.sim.bench import Testbench
+from veriforge.sim.bench import PlannerOverrides, Testbench
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EX_ROOT = SCRIPT_DIR.parent
@@ -53,7 +54,8 @@ def _build_bench(top_name: str, design) -> Testbench:
     dut = design.get_module(top_name)
     if dut is None:
         raise RuntimeError(f"Top module {top_name!r} not found")
-    return Testbench(dut, design=design, engine="reference", strict=False)
+    overrides = PlannerOverrides(relaxed_iface_signals={"axi_lite": ["awprot", "arprot"]})
+    return Testbench(dut, design=design, engine="reference", strict=False, overrides=overrides)
 
 
 def _read(bench: Testbench, name: str) -> int:
@@ -400,6 +402,34 @@ VARIANTS = [
     ("axi_lite_dw_typed_up64_128_tb", check_typed_up64_128),
 ]
 
+TRANSACTION_CASES = {
+    "axi_lite_dw_down_tb": (0x2, 0x61112222, [(0x0, 0x2222, 0x3), (0x2, 0x6111, 0x3)], [0x0, 0x2]),
+    "axi_lite_dw_up_tb": (0x2, 0x1EEF, [(0x2, 0x1EEF1EEF, 0xC)], [0x2]),
+    "axi_lite_dw_same_tb": (0x8, 0xCAFEBABE, [(0x8, 0xCAFEBABE, 0xF)], [0x8]),
+    "axi_lite_dw_typed_up32_128_tb": (0x8, 0x89ABCDEF, [(0x8, WIDE_REPEAT_32, 0x0F00)], [0x8]),
+    "axi_lite_dw_typed_up64_128_tb": (0x8, 0x0123456789ABCDEF, [(0x8, WIDE_REPEAT_64, 0xFF00)], [0x8]),
+}
+
+
+def exercise_transaction(bench: Testbench, top_name: str) -> None:
+    """Verify an end-to-end write/read and the responder's observed beats."""
+    addr, value, expected_writes, expected_reads = TRANSACTION_CASES[top_name]
+    slv = bench.iface("slv")
+    mst = bench.iface("mst")
+
+    response = slv.write(addr, value, timeout_cycles=100)
+    if response != 0:
+        raise AssertionError(f"{top_name}: write returned {response:#x}, expected OKAY")
+    if mst.write_log != expected_writes:
+        raise AssertionError(f"{top_name}: downstream writes {mst.write_log!r}, expected {expected_writes!r}")
+
+    actual = slv.read(addr, timeout_cycles=100)
+    if actual != value:
+        raise AssertionError(f"{top_name}: read returned {actual:#x}, expected {value:#x}")
+    if mst.read_log != expected_reads:
+        raise AssertionError(f"{top_name}: downstream reads {mst.read_log!r}, expected {expected_reads!r}")
+    print(f"axi_lite_dw {top_name} transaction roundtrip passed")
+
 
 def run_smoke_test() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -423,6 +453,16 @@ def run_smoke_test() -> None:
                 print(f"VCD tracing -> {vcd_path}")
             bench.reset_all()
             check_fn(bench)
+
+        transaction_vcd = None
+        if args.vcd is not None:
+            transaction_vcd = args.vcd.with_name(f"{args.vcd.stem}_{top_name}_transactions{args.vcd.suffix}")
+        transaction_bench = _build_bench(top_name, design)
+        with transaction_bench.run(vcd=transaction_vcd):
+            if transaction_vcd is not None:
+                print(f"VCD tracing -> {transaction_vcd}")
+            transaction_bench.reset_all()
+            exercise_transaction(transaction_bench, top_name)
 
 
 if __name__ == "__main__":

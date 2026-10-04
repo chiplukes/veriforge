@@ -818,7 +818,8 @@ class AXILiteMasterLowering:
         # DUT drives (bench reads): awready, wready, bresp, bvalid, arready,
         # rdata, rresp, rvalid
         port_map[sigs["awaddr"]] = awaddr
-        port_map[sigs["awprot"]] = 0
+        if "awprot" in sigs:
+            port_map[sigs["awprot"]] = 0
         port_map[sigs["awvalid"]] = awvalid
         port_map[sigs["awready"]] = awready
         port_map[sigs["wdata"]] = wdata
@@ -829,7 +830,8 @@ class AXILiteMasterLowering:
         port_map[sigs["bvalid"]] = bvalid
         port_map[sigs["bready"]] = bready
         port_map[sigs["araddr"]] = araddr
-        port_map[sigs["arprot"]] = 0
+        if "arprot" in sigs:
+            port_map[sigs["arprot"]] = 0
         port_map[sigs["arvalid"]] = arvalid
         port_map[sigs["arready"]] = arready
         port_map[sigs["rdata"]] = rdata

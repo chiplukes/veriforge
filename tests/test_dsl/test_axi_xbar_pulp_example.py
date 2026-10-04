@@ -1,8 +1,8 @@
 """Tests for the Wave D-9 pulp axi_xbar migration.
 
 The axi_xbar example exercises a 2x2 AXI4 crossbar with fixed address map.
-The bench drives slave ports manually and verifies routing, decode errors,
-and write arbitration.
+The bench checks signal-level routing and arbitration, then exercises
+transaction-level routing and decode errors through both slave ports.
 """
 
 from __future__ import annotations
@@ -51,3 +51,4 @@ def test_axi_xbar_bench_all_exercises_pass():
     assert "parallel routes passed" in proc.stdout
     assert "decode errors passed" in proc.stdout
     assert "arbitration passed" in proc.stdout
+    assert "transaction routes passed" in proc.stdout

@@ -11,9 +11,10 @@ Both master ports have internal target registers inside the TB that respond
 automatically, so the bench only needs to drive the two slave ports
 (``slv0_*`` / ``slv1_*``) and observe the outputs.
 
-The bench uses ``Testbench`` for clock/reset scaffolding and drives all
-slave-side signals manually (the TB uses struct-packed AXI buses internally,
-so auto-responders are not used here).
+The signal-level checks drive the slave ports manually to verify response
+IDs and arbitration timing. A separate single-beat routing sweep uses
+``bench.iface()`` on the AXI-Lite subset of the slave ports; the TB's
+internal target registers supply the responses.
 
 Generate the scaffold with::
 
@@ -327,6 +328,57 @@ def exercise_same_target_write_arbitration(bench: Testbench) -> None:
     print("axi_xbar arbitration passed: same-target write collision serialized correctly")
 
 
+def exercise_transactions(bench: Testbench) -> None:
+    """Route single-beat writes/reads from both ports and check decode errors."""
+    _drive(
+        bench,
+        slv0_aw_id=1,
+        slv0_aw_len=0,
+        slv0_w_last=1,
+        slv0_ar_id=1,
+        slv0_ar_len=0,
+        slv1_aw_id=2,
+        slv1_aw_len=0,
+        slv1_w_last=1,
+        slv1_ar_id=2,
+        slv1_ar_len=0,
+    )
+    port0 = bench.iface("slv0")
+    port1 = bench.iface("slv1")
+
+    for port, addr, value in (
+        (port0, ADDR_TARGET0, TARGET0_WRITE),
+        (port1, ADDR_TARGET1, TARGET1_WRITE),
+    ):
+        response = port.write(addr, value, timeout_cycles=80)
+        if response != 0:
+            raise AssertionError(f"write to {addr:#x}: expected OKAY, got {response:#x}")
+    _expect(bench, "target0_data", TARGET0_WRITE, "target0 transaction write")
+    _expect(bench, "target1_data", TARGET1_WRITE, "target1 transaction write")
+    _expect(bench, "mst0_last_aw_id", 1, "port0 write ID forwarding")
+    _expect(bench, "mst1_last_aw_id", 6, "port1 write ID forwarding")
+
+    for port, addr, expected in (
+        (port0, ADDR_TARGET1, TARGET1_WRITE),
+        (port1, ADDR_TARGET0, TARGET0_WRITE),
+    ):
+        actual = port.read(addr, timeout_cycles=80)
+        if actual != expected:
+            raise AssertionError(f"read from {addr:#x}: expected {expected:#x}, got {actual:#x}")
+    _expect(bench, "mst0_last_ar_id", 6, "port1 cross-read ID forwarding")
+    _expect(bench, "mst1_last_ar_id", 1, "port0 cross-read ID forwarding")
+
+    response = port0.write(ADDR_INVALID, 0x55AA55AA, expected_resp=3, timeout_cycles=80)
+    if response != 3:
+        raise AssertionError(f"unmapped write: expected DECERR, got {response:#x}")
+    data = port1.read(ADDR_INVALID, expected_resp=3, timeout_cycles=80)
+    if data != 0xBADCAB1E:
+        raise AssertionError(f"unmapped read: expected 0xbadcab1e, got {data:#x}")
+    _expect(bench, "target0_data", TARGET0_WRITE, "target0 after decode error")
+    _expect(bench, "target1_data", TARGET1_WRITE, "target1 after decode error")
+    print("axi_xbar transaction routes passed: write, cross-read, and decode error")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -349,6 +401,16 @@ def run_smoke_test() -> None:
         exercise_parallel_routes(bench)
         exercise_decode_errors(bench)
         exercise_same_target_write_arbitration(bench)
+
+    transaction_vcd = None
+    if args.vcd is not None:
+        transaction_vcd = args.vcd.with_name(f"{args.vcd.stem}_transactions{args.vcd.suffix}")
+    transaction_bench = build_bench()
+    with transaction_bench.run(vcd=transaction_vcd):
+        if transaction_vcd is not None:
+            print(f"VCD tracing -> {transaction_vcd}")
+        transaction_bench.reset_all()
+        exercise_transactions(transaction_bench)
 
 
 if __name__ == "__main__":

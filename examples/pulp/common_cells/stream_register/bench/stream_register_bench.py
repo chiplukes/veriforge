@@ -1,22 +1,11 @@
-"""Auto-generated Python testbench scaffold (bench framework).
-
-Edit the TODO markers below with stimulus and expectations.
-
-Plan summary:
-  TestbenchPlan(top='stream_register')
-    domains:
-      - clk_i: clock=clk_i (posedge, period=?); reset=rst_ni (active-low, async)
-    interfaces:
-      - in (stream, role=slave) -> domain=clk_i [structural]
-      - out (stream, role=master) -> domain=clk_i [structural]
-"""
+"""Send an ordered ready/valid sequence through the PULP stream register."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from veriforge.sim.bench import BenchTimeoutError, PlannerOverrides, Testbench
+from veriforge.sim.bench import Testbench
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
@@ -31,16 +20,10 @@ def parse_dut():
     return design.get_module("stream_register")
 
 
-def build_bench() -> Testbench:
-    """Construct the multi-domain Testbench from the parsed DUT."""
+def build_bench(*, engine: str = "reference") -> Testbench:
+    """Construct a bench with the DUT's inferred clock and stream ports."""
     dut = parse_dut()
-    overrides = PlannerOverrides(
-        iface_domains={
-            "in": "clk_i",
-            "out": "clk_i",
-        },
-    )
-    return Testbench(dut, overrides=overrides, engine="reference")
+    return Testbench(dut, engine=engine)
 
 
 def drive_in(bench: Testbench) -> None:
@@ -63,8 +46,9 @@ def expect_out(bench: Testbench) -> None:
 
 
 def run_smoke_test() -> None:
-    """Auto-generated entry point for the 'stream_register' testbench."""
+    """Run the ordered round-trip check."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--engine", default="reference", choices=("reference", "vm", "vm-fast", "compiled"))
     parser.add_argument(
         "--vcd",
         type=Path,
@@ -73,7 +57,7 @@ def run_smoke_test() -> None:
     )
     args = parser.parse_args()
 
-    bench = build_bench()
+    bench = build_bench(engine=args.engine)
     print("Discovered testbench plan:\n")
     print(bench.plan.summary())
     print()

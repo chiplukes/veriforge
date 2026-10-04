@@ -36,6 +36,8 @@ examples/pulp/common_cells/stream_register/
 │   └── stream_register.sv
 ├── tb/
 │   └── stream_register_tb_local.sv
+├── bench/
+│   └── stream_register_bench.py
 └── run_sim.py
 ```
 
@@ -57,10 +59,14 @@ The checks cover:
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench uses `StreamProxy` to check an ordered four-beat transfer.
+The directed runner retains the capture, backpressure, refill, and clear checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_register/run_sim.py
+uv run python examples/pulp/common_cells/stream_register/bench/stream_register_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

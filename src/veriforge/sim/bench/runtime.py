@@ -135,11 +135,13 @@ class Domain:  # cm:e3f1b5
         return gen_fn
 
     def step(self, cycles: int = 1) -> bool:
-        """Advance the shared runner until this domain has ``cycles`` rising edges.
+        """Advance this domain by ``cycles`` clock edges or combinational samples.
 
-        Returns ``True`` if all requested edges occurred; ``False`` if the
+        Returns ``True`` if all requested steps occurred; ``False`` if the
         simulator stalled (no more events scheduled).
         """
+        if self._is_combinational:
+            return self.bench.step(cycles)
         for _ in range(cycles):
             if not self.bench._step_until_domain_edge(self):
                 return False

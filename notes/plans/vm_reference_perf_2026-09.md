@@ -498,3 +498,22 @@ clock edges, simultaneous signals, declaration order, and deduplication.
 
 Next: profile evaluator and `Value.resize` costs on mixed and active workloads
 before attempting a broader expression-execution change.
+
+### Callback-driven VM settling and large AXI4 crossbar
+
+The 4x4 AXI4 crossbar example took more than 90 seconds with its Python VM
+setting; its native VM extension cut startup to about 28 seconds, including
+roughly 19 seconds of parsing. The faster run exposed a read deadlock after
+the first transaction. A callback-driven AXI4 responder deasserted `RVALID`
+after the VM's delta loop, leaving a continuous-assignment request stale until
+the next clock edge. The read arbiter briefly granted the completed response
+again and then waited forever for an acknowledgment that could not arrive.
+
+The VM now settles callback drives at the current simulation time, matching
+the reference scheduler's behavior. A small callback/continuous-assignment
+regression covers `run()` and `run_step()` on reference, VM, and vm-fast. The
+4x4 bench now uses vm-fast and passes all 16 routes in about 29 seconds. Its
+end-to-end pytest check is gated by `--run-slow` and requires the native VM
+extension. The focused, VCD, AXI responder, master, and multi-domain checks
+passed (143 in the broader regression run); ordinary test collection skips
+the large crossbar case.

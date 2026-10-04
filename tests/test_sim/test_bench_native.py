@@ -17,6 +17,7 @@ from veriforge.sim.bench import (
     MemBusMasterLowering,
     MemBusOp,
     MemBusResponderLowering,
+    PlannerOverrides,
     Testbench,
     compile_native,
 )
@@ -335,6 +336,35 @@ class TestAXILiteMasterLowering:
                 bench,
                 lowerings={"s_axi": AXILiteMasterLowering(operations=[])},
             )
+
+    @pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
+    def test_axi_lite_master_without_protection_ports(self, engine):
+        src = AXI_LITE_REGS_SRC.replace("    input  wire [2:0]  s_axi_awprot,\n", "").replace(
+            "    input  wire [2:0]  s_axi_arprot,\n", ""
+        )
+        assert "s_axi_awprot" not in src and "s_axi_arprot" not in src
+        bench = Testbench(
+            _parse(src),
+            overrides=PlannerOverrides(relaxed_iface_signals={"axi_lite": ["awprot", "arprot"]}),
+        )
+        assert {interface.prefix for interface in bench.plan.interfaces} == {"s_axi"}
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "s_axi": AXILiteMasterLowering(
+                    operations=[AXILiteOp.write(0, 0x12345678), AXILiteOp.read(0)],
+                    addr_width=4,
+                )
+            },
+        )
+        sim = Simulator(lowered.wrapper, design=lowered.design, engine=engine)
+        sim.fork(Clock(sim.signal("clk"), period=10))
+        sim.signal("rst_n").value = 0
+        sim.run(max_time=40)
+        sim.signal("rst_n").value = 1
+        sim.run(max_time=200)
+        assert _read_signal(sim, "s_axi_master_done") == 1
+        assert _read_signal(sim, "s_axi_op_1_rdata") == 0x12345678
 
     @pytest.mark.parametrize("engine", ["reference", "vm", "compiled"])
     def test_axi_lite_master_write_then_read(self, engine):

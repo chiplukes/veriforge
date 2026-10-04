@@ -35,6 +35,8 @@ examples/pulp/common_cells/passthrough_stream_fifo/
 │   └── passthrough_stream_fifo.sv
 ├── tb/
 │   └── passthrough_stream_fifo_tb_local.sv
+├── bench/
+│   └── passthrough_stream_fifo_bench.py
 └── run_sim.py
 ```
 
@@ -54,10 +56,15 @@ The checks cover:
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench fills the FIFO while the sink is stalled, checks
+backpressure, then releases the sink and verifies that all four beats arrive
+in order. The directed script retains the exact full pop/push and flush checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/passthrough_stream_fifo/run_sim.py
+uv run python examples/pulp/common_cells/passthrough_stream_fifo/bench/passthrough_stream_fifo_bench.py
 ```
 
 Success is indicated by:

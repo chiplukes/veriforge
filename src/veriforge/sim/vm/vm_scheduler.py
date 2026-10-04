@@ -695,8 +695,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Fire time-step callback at t=0 (after initial blocks + bootstrap)
         # so VCD recording captures the t=0 state.
-        if self._on_time_step is not None:
-            self._on_time_step(self)
+        self._fire_time_step_callback()
 
         # Run event loop
         self._run_event_loop(max_time)
@@ -919,8 +918,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
             # Fire time-step callback (also fires on the stop iteration so VCD
             # captures the final blocking-assignment state before $finish).
-            if self._on_time_step is not None:
-                self._on_time_step(self)
+            self._fire_time_step_callback()
 
             if stopped:
                 break
@@ -1016,10 +1014,19 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Fire time-step callback (also fires on the stop iteration so VCD
         # captures the final blocking-assignment state before $finish).
-        if self._on_time_step is not None:
-            self._on_time_step(self)
+        self._fire_time_step_callback()
 
         return not stopped
+
+    def _fire_time_step_callback(self) -> None:
+        if self._on_time_step is None:
+            return
+        self._on_time_step(self)
+        # Python responders may drive DUT inputs after the event's delta loop.
+        # Propagate those drives now so an arbiter does not sample stale
+        # continuous assignments at the next clock edge.
+        if self._pending_drives:
+            self.settle()
 
     def _drain_cy_display(self) -> None:
         """Drain display events from the Cython buffer and format them."""

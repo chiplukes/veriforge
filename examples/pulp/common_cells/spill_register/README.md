@@ -40,6 +40,8 @@ examples/pulp/common_cells/spill_register/
 │   └── spill_register.sv
 ├── tb/
 │   └── spill_register_tb_local.sv
+├── bench/
+│   └── spill_register_bench.py
 └── run_sim.py
 ```
 
@@ -63,10 +65,14 @@ The Python runner checks:
 - ordered drain of buffered data
 - immediate combinational propagation in bypass mode
 
+The high-level bench checks an ordered four-beat transfer through the
+non-bypass stream interface.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/spill_register/run_sim.py
+uv run python examples/pulp/common_cells/spill_register/bench/spill_register_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

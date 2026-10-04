@@ -32,6 +32,8 @@ examples/pulp/common_cells/stream_delay/
 │   └── stream_delay.sv
 ├── tb/
 │   └── stream_delay_tb_local.sv
+├── bench/
+│   └── stream_delay_bench.py
 └── run_sim.py
 ```
 
@@ -51,10 +53,15 @@ The checks cover:
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench sends several ready/valid beats and checks their payloads
+in order. The directed `run_sim.py` checks above retain the exact two-cycle
+timing and stalled-sink assertions.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_delay/run_sim.py
+uv run python examples/pulp/common_cells/stream_delay/bench/stream_delay_bench.py
 ```
 
 Success is indicated by:

@@ -32,6 +32,8 @@ examples/pulp/common_cells/stream_filter/
 │   └── stream_filter.sv
 ├── tb/
 │   └── stream_filter_tb_local.sv
+├── bench/
+│   └── stream_filter_bench.py
 └── run_sim.py
 ```
 
@@ -50,10 +52,15 @@ The checks cover:
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench uses stream transactions to show that an accepted beat
+passes through when `drop_i` is clear and disappears when `drop_i` is set.
+The directed checks in `run_sim.py` retain the immediate signal-level checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_filter/run_sim.py
+uv run python examples/pulp/common_cells/stream_filter/bench/stream_filter_bench.py
 ```
 
 Success is indicated by:

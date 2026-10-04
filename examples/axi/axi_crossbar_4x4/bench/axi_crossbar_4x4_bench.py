@@ -4,6 +4,9 @@ Exercises all 16 source→sink routes by having each of the 4 slave-port
 masters write a unique data word to each of the 4 master-port memory
 regions, then reading back and verifying every word.
 
+The native VM keeps reset settling and transaction execution practical
+for this large crossbar. Parsing and elaboration still take noticeable time.
+
 Originally scaffolded with:
 
     uv run veriforge generate-python-testbench \\
@@ -80,7 +83,7 @@ def build_bench() -> Testbench:
     overrides = PlannerOverrides(
         iface_domains={name: "clk" for name in [*_MASTER_PORTS, *_SLAVE_PORTS]},
     )
-    return Testbench(dut, design=design, overrides=overrides, engine="vm")
+    return Testbench(dut, design=design, overrides=overrides, engine="vm-fast")
 
 
 def exercise_all_routes(bench: Testbench) -> None:

@@ -23,6 +23,32 @@ STREAM_REGISTER_RTL = (
 STREAM_REGISTER_BENCH = (
     REPO_ROOT / "examples" / "pulp" / "common_cells" / "stream_register" / "bench" / "stream_register_bench.py"
 )
+STREAM_DELAY_RTL = REPO_ROOT / "examples" / "pulp" / "common_cells" / "stream_delay" / "rtl" / "stream_delay.sv"
+STREAM_DELAY_BENCH = (
+    REPO_ROOT / "examples" / "pulp" / "common_cells" / "stream_delay" / "bench" / "stream_delay_bench.py"
+)
+STREAM_FILTER_RTL = REPO_ROOT / "examples" / "pulp" / "common_cells" / "stream_filter" / "rtl" / "stream_filter.sv"
+STREAM_FILTER_BENCH = (
+    REPO_ROOT / "examples" / "pulp" / "common_cells" / "stream_filter" / "bench" / "stream_filter_bench.py"
+)
+PASSTHROUGH_FIFO_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "passthrough_stream_fifo"
+    / "bench"
+    / "passthrough_stream_fifo_bench.py"
+)
+SPILL_FLUSHABLE_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "spill_register_flushable"
+    / "bench"
+    / "spill_register_flushable_bench.py"
+)
 
 
 def _parse(path: Path):
@@ -130,17 +156,77 @@ def test_stream_proxy_role_misuse_raises():
             bench.iface("in").get(timeout=1)
 
 
+@pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast"])
+def test_stream_delay_payload_round_trip(engine):
+    design = _parse(STREAM_DELAY_RTL)
+    mod = design.get_module("stream_delay")
+    assert mod is not None
+    bench = Testbench(mod, engine=engine, design=design)
+    bindings = {binding.prefix: dict(binding.signals) for binding in bench.plan.interfaces}
+    assert bindings["in"]["data"] == "payload_i"
+    assert bindings["out"]["data"] == "payload_o"
+
+    payloads = [0x00, 0x34, 0x56, 0xA5, 0xFF]
+    with bench.run():
+        bench.reset_all()
+        bench.iface("in").write(payloads)
+        bench.iface("out").expect_sequence(payloads, timeout=100)
+        bench.iface("in").wait_drain(timeout=100)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm", "vm-fast"])
+def test_stream_filter_pass_and_drop_via_proxy(engine):
+    design = _parse(STREAM_FILTER_RTL)
+    mod = design.get_module("stream_filter")
+    assert mod is not None
+    bench = Testbench(mod, engine=engine, design=design)
+    with bench.run():
+        source = bench.iface("in")
+        sink = bench.iface("out")
+        source.put(sideband={"drop": 0})
+        sink.get(timeout=5)
+        source.put(sideband={"drop": 1})
+        source.wait_drain(timeout=5)
+        assert sink.pending() == 0
+        source.put(sideband={"drop": 0})
+        sink.get(timeout=5)
+        bench.step(2)
+        assert sink.pending() == 0
+
+
 # --------------------------------------------------------------- example
 
 
-@pytest.mark.skipif(not STREAM_REGISTER_BENCH.exists(), reason="example not present")
-def test_stream_register_bench_example_runs_end_to_end():
+def _run_bench_script(path: Path, expected: str, *, engine: str = "reference") -> None:
     proc = subprocess.run(  # noqa: S603 - trusted path, fixed argv
-        [sys.executable, str(STREAM_REGISTER_BENCH)],
+        [sys.executable, str(path), "--engine", engine],
         check=False,
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-    assert "stream_register passed" in proc.stdout
+    assert expected in proc.stdout
+
+
+@pytest.mark.skipif(not STREAM_REGISTER_BENCH.exists(), reason="example not present")
+def test_stream_register_bench_example_runs_end_to_end():
+    _run_bench_script(STREAM_REGISTER_BENCH, "stream_register passed")
+
+
+def test_stream_delay_bench_example_runs_end_to_end():
+    _run_bench_script(STREAM_DELAY_BENCH, "stream_delay passed")
+
+
+def test_stream_filter_bench_example_runs_end_to_end():
+    _run_bench_script(STREAM_FILTER_BENCH, "stream_filter passed")
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_passthrough_fifo_bench_example_runs_end_to_end(engine):
+    _run_bench_script(PASSTHROUGH_FIFO_BENCH, "passthrough_stream_fifo passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_spill_register_flushable_bench_example_runs_end_to_end(engine):
+    _run_bench_script(SPILL_FLUSHABLE_BENCH, "spill_register_flushable passed", engine=engine)

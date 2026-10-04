@@ -40,6 +40,8 @@ examples/pulp/common_cells/spill_register_flushable/
 │   └── spill_register_flushable.sv
 ├── tb/
 │   └── spill_register_flushable_tb_local.sv
+├── bench/
+│   └── spill_register_flushable_bench.py
 └── run_sim.py
 ```
 
@@ -61,10 +63,15 @@ The Python runner checks:
 - clean refill and final drain after flush
 - bypass mode remaining purely combinational regardless of `flush_i`
 
+The high-level bench fills the two slots under sink backpressure, flushes both
+beats, then checks that two new beats transfer in order. The directed runner
+retains the edge-level and bypass-mode checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/spill_register_flushable/run_sim.py
+uv run python examples/pulp/common_cells/spill_register_flushable/bench/spill_register_flushable_bench.py
 ```
 
 Success is indicated by:

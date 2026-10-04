@@ -19,6 +19,7 @@ proxy names `"in"` (slave-side) and `"out"` (master-side).
 
 ```powershell
 uv run python examples/pulp/common_cells/stream_register/bench/stream_register_bench.py
+uv run python examples/pulp/common_cells/stream_register/bench/stream_register_bench.py --engine vm-fast
 uv run python examples/pulp/common_cells/stream_register/bench/stream_register_bench.py --vcd waves.vcd
 ```
 
