@@ -32,6 +32,9 @@ examples/pulp/common_cells/stream_demux/
 │   └── stream_demux.sv
 ├── tb/
 │   └── stream_demux_tb_local.sv
+├── bench/
+│   ├── stream_demux_bench.py
+│   └── stream_demux_bench_top.sv
 └── run_sim.py
 ```
 
@@ -39,6 +42,11 @@ examples/pulp/common_cells/stream_demux/
 
 The imported subset fixes the demux to three outputs and checks the
 combinational routing directly with a Python-driven harness.
+
+The transaction-level bench in `bench/stream_demux_bench.py` exposes each
+packed handshake lane as a ready/valid sink. Its wrapper wires the payload
+in parallel; the DUT itself routes only valid and ready. The bench checks
+selected-output backpressure and delivery to each lane.
 
 The checks cover:
 
@@ -54,6 +62,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_demux/run_sim.py
+uv run python examples/pulp/common_cells/stream_demux/bench/stream_demux_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

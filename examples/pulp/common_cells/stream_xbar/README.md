@@ -42,6 +42,9 @@ examples/pulp/common_cells/stream_xbar/
 │   └── stream_xbar.sv
 ├── tb/
 │   └── sx_tb.sv
+├── bench/
+│   ├── stream_xbar_bench.py
+│   └── stream_xbar_bench_top.sv
 └── run_sim.py
 ```
 
@@ -61,10 +64,16 @@ The Python runner checks:
 - flush restoring the initial grant priority
 - spill capture, backpressure, and ordered drain on a stalled output
 
+The transaction-level bench in `bench/stream_xbar_bench.py` uses the
+no-spill configuration. It exposes each input's destination select as a stream
+sideband and each output's source index as a received sideband, checking
+simultaneous independent routes and ordered grants under contention.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_xbar/run_sim.py
+uv run python examples/pulp/common_cells/stream_xbar/bench/stream_xbar_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

@@ -43,11 +43,19 @@ examples/pulp/common_cells/cdc_fifo_gray/
 │   └── sync.sv
 ├── tb/
 │   └── cdc_fifo_gray_tb_local.sv
+├── bench/
+│   └── cdc_fifo_gray_bench.py
 └── run_sim.py
 ```
+
+The high-level bench uses source and destination clock periods 10 and 14. It
+fills the gray FIFO and destination spill stage under backpressure, then checks
+that a fifth beat follows the first four in order when the destination resumes.
+The directed runner retains the signal-level CDC checks.
 
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/cdc_fifo_gray/run_sim.py
+uv run python examples/pulp/common_cells/cdc_fifo_gray/bench/cdc_fifo_gray_bench.py
 ```

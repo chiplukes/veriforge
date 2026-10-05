@@ -39,11 +39,19 @@ examples/pulp/common_cells/cdc_2phase/
 │   └── cdc_2phase.sv
 ├── tb/
 │   └── cdc_2phase_tb_local.sv
+├── bench/
+│   └── cdc_2phase_bench.py
 └── run_sim.py
 ```
+
+The high-level bench uses the 8-bit wrapper with source and destination clock
+periods 10 and 14. It holds the destination stalled, checks that a second
+source beat waits, then verifies both payloads in order. The directed runner
+checks the exact first-valid-cycle payload and acknowledgement timing.
 
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/cdc_2phase/run_sim.py
+uv run python examples/pulp/common_cells/cdc_2phase/bench/cdc_2phase_bench.py
 ```

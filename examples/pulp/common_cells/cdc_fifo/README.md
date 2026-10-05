@@ -36,6 +36,8 @@ examples/pulp/common_cells/cdc_fifo/
 │   └── cdc_fifo_2phase.sv
 ├── tb/
 │   └── cdc_fifo_tb_local.sv
+├── bench/
+│   └── cdc_fifo_bench.py
 └── run_sim.py
 ```
 
@@ -54,10 +56,16 @@ source clock and a destination clock directly from Python, then checks:
 - ordered drain of queued data across the destination clock domain
 - source-side ready reopening after the queued data drains
 
+The high-level bench runs the source and destination clocks at periods 10 and
+14, fills the FIFO under destination backpressure, then checks that three
+beats cross in order. The directed runner retains the detailed pointer and
+reset checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/cdc_fifo/run_sim.py
+uv run python examples/pulp/common_cells/cdc_fifo/bench/cdc_fifo_bench.py
 ```
 
 Success is indicated by:

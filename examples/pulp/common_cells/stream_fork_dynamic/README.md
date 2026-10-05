@@ -36,6 +36,9 @@ examples/pulp/common_cells/stream_fork_dynamic/
 │   └── stream_fork_dynamic.sv
 ├── tb/
 │   └── stream_fork_dynamic_tb_local.sv
+├── bench/
+│   ├── stream_fork_dynamic_bench.py
+│   └── stream_fork_dynamic_bench_top.sv
 └── run_sim.py
 ```
 
@@ -43,6 +46,10 @@ examples/pulp/common_cells/stream_fork_dynamic/
 
 The imported subset fixes the design to three outputs and checks the sequential
 ready/valid behavior with a Python-driven stepped clock harness.
+
+The transaction-level bench in `bench/stream_fork_dynamic_bench.py` drives
+data and selector masks as paired stream sources. Its wrapper carries payload
+data beside the DUT's handshake signals and exposes each output as a sink.
 
 The checks cover:
 
@@ -58,6 +65,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_fork_dynamic/run_sim.py
+uv run python examples/pulp/common_cells/stream_fork_dynamic/bench/stream_fork_dynamic_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

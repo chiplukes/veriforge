@@ -37,6 +37,9 @@ examples/pulp/common_cells/stream_to_mem/
 ├── tb/
 │   ├── stream_to_mem_tb_local.sv
 │   └── stream_to_mem_tb_vm_local.sv
+├── bench/
+│   ├── stream_to_mem_bench.py
+│   └── stream_to_mem_bench_top.sv
 └── run_sim.py
 ```
 
@@ -58,6 +61,12 @@ The stand-in memory behavior is deterministic:
 - `BufDepth = 1`: one-cycle response latency
 - `BufDepth = 2`: two-cycle response latency
 
+The transaction-level bench in `bench/stream_to_mem_bench.py` uses the
+`BufDepth = 2` configuration. It exposes requests, memory requests, and
+responses as streams, then checks the outstanding limit and ordered buffered
+responses while the response sink stalls. Memory response inputs remain
+clocked valid/data pulses because they have no ready handshake.
+
 For the VM and compiled engines, the example uses a separate wrapper that only
 exposes fixed `BufDepth = 0`, `1`, and `2` DUT instances. The runner then drives
 clock, reset, requests, and synthetic memory responses from Python instead of
@@ -76,6 +85,7 @@ Current checks focus on:
 
 ```text
 uv run python examples/pulp/common_cells/stream_to_mem/run_sim.py
+uv run python examples/pulp/common_cells/stream_to_mem/bench/stream_to_mem_bench.py --engine vm-fast
 ```
 
 Expected pass markers:

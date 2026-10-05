@@ -43,11 +43,19 @@ examples/pulp/common_cells/cdc_4phase/
 │   └── sync.sv
 ├── tb/
 │   └── cdc_4phase_tb_local.sv
+├── bench/
+│   └── cdc_4phase_bench.py
 └── run_sim.py
 ```
+
+The high-level bench runs the source and destination at periods 10 and 14. It
+checks that decoupled mode reopens the source while the destination stalls,
+then verifies two beats arrive in order. The directed runner retains the
+non-decoupled and edge-level checks.
 
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/cdc_4phase/run_sim.py
+uv run python examples/pulp/common_cells/cdc_4phase/bench/cdc_4phase_bench.py
 ```

@@ -37,6 +37,9 @@ examples/pulp/common_cells/stream_arbiter/
 │   └── stream_arbiter.sv
 ├── tb/
 │   └── stream_arbiter_tb_local.sv
+├── bench/
+│   ├── stream_arbiter_bench.py
+│   └── stream_arbiter_bench_top.sv
 └── run_sim.py
 ```
 
@@ -44,6 +47,10 @@ examples/pulp/common_cells/stream_arbiter/
 
 The imported subset fixes the design to four 8-bit inputs and checks the
 sequential ready/valid behavior with a Python-driven stepped clock harness.
+
+The transaction-level bench in `bench/stream_arbiter_bench.py` exposes each
+packed input lane as a separate source, stalls the output on its first grant,
+then checks two round-robin passes across all four lanes.
 
 The checks cover:
 
@@ -59,6 +66,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_arbiter/run_sim.py
+uv run python examples/pulp/common_cells/stream_arbiter/bench/stream_arbiter_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

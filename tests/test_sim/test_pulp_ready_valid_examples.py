@@ -2667,9 +2667,10 @@ def test_cdc_2phase_cross_engine(tmp_path, engine):
     _run_until_condition(
         sim,
         160,
-        lambda s: _read_int(s, "dst_valid_o") == 1 and _read_int(s, "dst_data_o") == 0x11,
+        lambda s: _read_int(s, "dst_valid_o") == 1,
         "first transfer never became visible at the destination",
     )
+    _expect(sim, "dst_data_o", 0x11, "first valid cycle should carry the first payload")
     _expect(sim, "src_ready_o", 0, "source should remain blocked until the destination acknowledges")
 
     sim.drive("src_data_i", 0x22)
@@ -2707,9 +2708,10 @@ def test_cdc_2phase_cross_engine(tmp_path, engine):
     _run_until_condition(
         sim,
         310,
-        lambda s: _read_int(s, "dst_valid_o") == 1 and _read_int(s, "dst_data_o") == 0x33,
+        lambda s: _read_int(s, "dst_valid_o") == 1,
         "second transfer never became visible at the destination",
     )
+    _expect(sim, "dst_data_o", 0x33, "second valid cycle should carry the second payload")
 
 
 @pytest.mark.parametrize("engine", ENGINES)

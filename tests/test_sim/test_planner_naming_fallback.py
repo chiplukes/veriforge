@@ -29,6 +29,7 @@ PULP = REPO_ROOT / "examples" / "pulp" / "common_cells"
 STREAM_FIFO = PULP / "stream_fifo"
 SPILL_REGISTER = PULP / "spill_register"
 STREAM_FILTER = PULP / "stream_filter"
+ISOCHRONOUS_SPILL = PULP / "isochronous_spill_register"
 
 
 def _design_from(*sv_paths: Path):
@@ -97,6 +98,20 @@ def test_naming_fallback_returns_empty_when_no_clock_port():
     info = _naming_fallback_clocks_resets(mod)
     assert info.clocks == []
     assert info.resets == []
+
+
+def test_naming_fallback_pairs_prefixed_clocks_and_resets():
+    design = _design_from(ISOCHRONOUS_SPILL / "rtl" / "isochronous_spill_register.sv")
+    mod = design.get_module("isochronous_spill_register")
+    plan = build_plan(mod, design=design)
+    domains = {domain.name: domain for domain in plan.domains}
+    assert set(domains) == {"src_clk_i", "dst_clk_i"}
+    assert domains["src_clk_i"].reset.name == "src_rst_ni"
+    assert domains["dst_clk_i"].reset.name == "dst_rst_ni"
+    assert {binding.prefix: binding.domain_name for binding in plan.interfaces} == {
+        "src": "src_clk_i",
+        "dst": "dst_clk_i",
+    }
 
 
 # --------------------------------------------------------------- planner

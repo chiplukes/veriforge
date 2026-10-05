@@ -36,6 +36,8 @@ examples/pulp/common_cells/stream_fifo_optimal_wrap/
 │   └── stream_fifo_optimal_wrap.sv
 ├── tb/
 │   └── stream_fifo_optimal_wrap_tb_local.sv
+├── bench/
+│   └── stream_fifo_optimal_wrap_bench.py
 └── run_sim.py
 ```
 
@@ -50,10 +52,16 @@ matching the upstream module's unsupported usage signal on that path.
 Shared pytest coverage for the imported wrapper also lives in
 `tests/test_sim/test_pulp_ready_valid_examples.py`.
 
+The high-level bench exercises the default depth-eight FIFO path: it fills the
+queue under sink backpressure, verifies a ninth beat stalls, then drains all
+nine beats in order. The directed runner retains the depth-two, depth-three,
+and flush checks.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_fifo_optimal_wrap/run_sim.py
+uv run python examples/pulp/common_cells/stream_fifo_optimal_wrap/bench/stream_fifo_optimal_wrap_bench.py
 ```
 
 Success is indicated by:

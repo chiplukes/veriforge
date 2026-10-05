@@ -35,6 +35,8 @@ examples/pulp/common_cells/lossy_valid_to_stream/
 │   └── lossy_valid_to_stream.sv
 ├── tb/
 │   └── lossy_valid_to_stream_tb_local.sv
+├── bench/
+│   └── lossy_valid_to_stream_bench.py
 └── run_sim.py
 ```
 
@@ -42,6 +44,10 @@ examples/pulp/common_cells/lossy_valid_to_stream/
 
 The imported subset fixes the payload to 8 bits and uses a Python-driven
 stepped clock harness.
+
+The transaction-level bench in `bench/lossy_valid_to_stream_bench.py` uses a
+stream sink for the output. It drives the valid-only input as clocked pulses,
+since that input has no ready signal, then checks pass-through and overwrite.
 
 The checks cover:
 
@@ -58,6 +64,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/lossy_valid_to_stream/run_sim.py
+uv run python examples/pulp/common_cells/lossy_valid_to_stream/bench/lossy_valid_to_stream_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

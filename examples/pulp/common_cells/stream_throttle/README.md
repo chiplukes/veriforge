@@ -32,6 +32,9 @@ examples/pulp/common_cells/stream_throttle/
 │   └── stream_throttle.sv
 ├── tb/
 │   └── stream_throttle_tb_local.sv
+├── bench/
+│   ├── stream_throttle_bench.py
+│   └── stream_throttle_bench_top.sv
 └── run_sim.py
 ```
 
@@ -39,6 +42,11 @@ examples/pulp/common_cells/stream_throttle/
 
 The imported subset fixes `MaxNumPending = 3` with a 2-bit credit input and
 uses a Python-driven stepped clock harness.
+
+The transaction-level bench in `bench/stream_throttle_bench.py` exposes the
+request path as a data-carrying stream, then checks queued requests against
+credit exhaustion and runtime credit reduction. Response completions remain
+explicit clocked pulses because the RTL exposes both response signals as inputs.
 
 The checks cover:
 
@@ -55,6 +63,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_throttle/run_sim.py
+uv run python examples/pulp/common_cells/stream_throttle/bench/stream_throttle_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

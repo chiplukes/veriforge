@@ -744,10 +744,12 @@ def _detect_membus_interfaces(module: Module, claimed: set[str]) -> list[Detecte
 _STREAM_DIR_SUFFIXES = ("_i", "_o")
 # Signals whose stem (after stripping ``_i``/``_o``) we ignore even if they
 # happen to share a prefix with a stream bundle. Clocks and resets are not
-# part of the bundle; ``flush``/``clr``/``testmode`` are common control
+# part of the bundle; ``flush``/``clear``/``clr``/``testmode`` are common control
 # inputs on Pulp stream cells (e.g. ``stream_fifo``) that are also not part
 # of any one bundle.
-_STREAM_NON_BUNDLE_STEMS = frozenset({"clk", "rst_n", "rst", "reset", "resetn", "flush", "clr", "testmode", "usage"})
+_STREAM_NON_BUNDLE_STEMS = frozenset(
+    {"clk", "rst_n", "rst", "reset", "resetn", "flush", "clear", "clr", "testmode", "usage"}
+)
 
 
 def _stream_split(name: str) -> tuple[str, str, str] | None:

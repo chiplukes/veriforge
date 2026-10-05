@@ -33,6 +33,9 @@ examples/pulp/common_cells/stream_arbiter_flushable/
 │   └── stream_arbiter_flushable.sv
 ├── tb/
 │   └── stream_arbiter_flushable_tb_local.sv
+├── bench/
+│   ├── stream_arbiter_flushable_bench.py
+│   └── stream_arbiter_flushable_bench_top.sv
 └── run_sim.py
 ```
 
@@ -40,6 +43,10 @@ examples/pulp/common_cells/stream_arbiter_flushable/
 
 The imported subset fixes the design to four 8-bit inputs and checks the
 sequential ready/valid behavior with a Python-driven stepped clock harness.
+
+The transaction-level bench in `bench/stream_arbiter_flushable_bench.py`
+exposes separate input sources, stalls a selected grant, then flushes to
+verify reset priority and delivery of both pending requests.
 
 The checks cover:
 
@@ -55,6 +62,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_arbiter_flushable/run_sim.py
+uv run python examples/pulp/common_cells/stream_arbiter_flushable/bench/stream_arbiter_flushable_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

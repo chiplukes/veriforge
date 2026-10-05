@@ -112,9 +112,10 @@ def _run_engine_checks(design, engine: str) -> None:
     _run_until_condition(
         sim,
         160,
-        lambda s: _read_int(s, "dst_valid_o") == 1 and _read_int(s, "dst_data_o") == FIRST_WORD,
+        lambda s: _read_int(s, "dst_valid_o") == 1,
         "first transfer never became visible at the destination",
     )
+    _expect(sim, "dst_data_o", FIRST_WORD, "first valid cycle should carry the first payload")
     _expect(sim, "src_ready_o", 0, "source should remain blocked until the destination acknowledges")
 
     sim.drive("src_data_i", BLOCKED_WORD)
@@ -153,9 +154,10 @@ def _run_engine_checks(design, engine: str) -> None:
     _run_until_condition(
         sim,
         310,
-        lambda s: _read_int(s, "dst_valid_o") == 1 and _read_int(s, "dst_data_o") == SECOND_WORD,
+        lambda s: _read_int(s, "dst_valid_o") == 1,
         "second transfer never became visible at the destination",
     )
+    _expect(sim, "dst_data_o", SECOND_WORD, "second valid cycle should carry the second payload")
 
 
 def _run_engine(design, engine: str) -> int:

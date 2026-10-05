@@ -18,6 +18,10 @@ The current checkpoint covers two local wrappers:
   mirrored source-side and destination-side async-reset-driven clear recovery
   (`CLEAR_ON_ASYNC_RESET = 1`)
 
+The transaction-level bench in `bench/cdc_2phase_clearable_bench.py` sends
+beats into a stalled destination, clears one from each clock domain, and
+checks that fresh traffic transfers after each clear sequence.
+
 ## Upstream Source
 
 - Repository: `pulp-platform/common_cells`
@@ -55,6 +59,8 @@ examples/pulp/common_cells/cdc_2phase_clearable/
 │   └── sync.sv
 ├── tb/
 │   └── cdc_2phase_clearable_tb_local.sv
+├── bench/
+│   └── cdc_2phase_clearable_bench.py
 └── run_sim.py
 ```
 
@@ -62,4 +68,5 @@ examples/pulp/common_cells/cdc_2phase_clearable/
 
 ```text
 uv run python examples/pulp/common_cells/cdc_2phase_clearable/run_sim.py
+uv run python examples/pulp/common_cells/cdc_2phase_clearable/bench/cdc_2phase_clearable_bench.py --engine vm-fast
 ```

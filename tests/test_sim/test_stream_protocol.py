@@ -49,6 +49,84 @@ SPILL_FLUSHABLE_BENCH = (
     / "bench"
     / "spill_register_flushable_bench.py"
 )
+FIFO_OPTIMAL_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "stream_fifo_optimal_wrap"
+    / "bench"
+    / "stream_fifo_optimal_wrap_bench.py"
+)
+FALL_THROUGH_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "fall_through_register"
+    / "bench"
+    / "fall_through_register_bench.py"
+)
+ISOCHRONOUS_SPILL_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "isochronous_spill_register"
+    / "bench"
+    / "isochronous_spill_register_bench.py"
+)
+CDC_FIFO_BENCH = REPO_ROOT / "examples" / "pulp" / "common_cells" / "cdc_fifo" / "bench" / "cdc_fifo_bench.py"
+CDC_FIFO_GRAY_BENCH = (
+    REPO_ROOT / "examples" / "pulp" / "common_cells" / "cdc_fifo_gray" / "bench" / "cdc_fifo_gray_bench.py"
+)
+CDC_4PHASE_BENCH = REPO_ROOT / "examples" / "pulp" / "common_cells" / "cdc_4phase" / "bench" / "cdc_4phase_bench.py"
+CDC_2PHASE_BENCH = REPO_ROOT / "examples" / "pulp" / "common_cells" / "cdc_2phase" / "bench" / "cdc_2phase_bench.py"
+CDC_2PHASE_CLEARABLE_RTL = (
+    REPO_ROOT / "examples" / "pulp" / "common_cells" / "cdc_2phase_clearable" / "rtl" / "cdc_2phase_clearable.sv"
+)
+CDC_2PHASE_CLEARABLE_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "cdc_2phase_clearable"
+    / "bench"
+    / "cdc_2phase_clearable_bench.py"
+)
+STREAM_ROUTING_BENCHES = [
+    (
+        REPO_ROOT / "examples" / "pulp" / "common_cells" / name / "bench" / f"{name}_bench.py",
+        f"{name} passed",
+    )
+    for name in (
+        "stream_mux",
+        "stream_demux",
+        "stream_join",
+        "stream_arbiter",
+        "stream_arbiter_flushable",
+        "stream_fork",
+        "stream_fork_dynamic",
+        "stream_xbar",
+        "stream_omega_net",
+    )
+]
+LOSSY_STREAM_BENCH = (
+    REPO_ROOT
+    / "examples"
+    / "pulp"
+    / "common_cells"
+    / "lossy_valid_to_stream"
+    / "bench"
+    / "lossy_valid_to_stream_bench.py"
+)
+STREAM_CONTROL_BENCHES = [
+    (
+        REPO_ROOT / "examples" / "pulp" / "common_cells" / name / "bench" / f"{name}_bench.py",
+        f"{name} passed",
+    )
+    for name in ("stream_throttle", "stream_to_mem")
+]
 
 
 def _parse(path: Path):
@@ -91,6 +169,15 @@ def test_stream_detection_does_not_swallow_clock_or_reset_ports():
     assert "rst_ni" not in all_signals
     assert "clr_i" not in all_signals
     assert "testmode_i" not in all_signals
+
+
+def test_stream_detection_keeps_clear_control_outside_cdc_stream():
+    design = _parse(CDC_2PHASE_CLEARABLE_RTL)
+    mod = design.get_module("cdc_2phase_clearable")
+    bundles = detect_stream_interfaces(mod)
+    by_prefix = {bundle.prefix: bundle.signal_names() for bundle in bundles}
+    assert by_prefix["src"] == {"valid": "src_valid_i", "ready": "src_ready_o", "data": "src_data_i"}
+    assert by_prefix["dst"] == {"valid": "dst_valid_o", "ready": "dst_ready_i", "data": "dst_data_o"}
 
 
 def test_stream_detection_skipped_when_axis_naming_present():
@@ -230,3 +317,60 @@ def test_passthrough_fifo_bench_example_runs_end_to_end(engine):
 @pytest.mark.parametrize("engine", ["reference", "vm-fast"])
 def test_spill_register_flushable_bench_example_runs_end_to_end(engine):
     _run_bench_script(SPILL_FLUSHABLE_BENCH, "spill_register_flushable passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_stream_fifo_optimal_wrap_bench_example_runs_end_to_end(engine):
+    _run_bench_script(FIFO_OPTIMAL_BENCH, "stream_fifo_optimal_wrap passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_fall_through_register_bench_example_runs_end_to_end(engine):
+    _run_bench_script(FALL_THROUGH_BENCH, "fall_through_register passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_isochronous_spill_register_bench_example_runs_end_to_end(engine):
+    _run_bench_script(ISOCHRONOUS_SPILL_BENCH, "isochronous_spill_register passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_cdc_fifo_bench_example_runs_end_to_end(engine):
+    _run_bench_script(CDC_FIFO_BENCH, "cdc_fifo passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_cdc_fifo_gray_bench_example_runs_end_to_end(engine):
+    _run_bench_script(CDC_FIFO_GRAY_BENCH, "cdc_fifo_gray passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_cdc_4phase_bench_example_runs_end_to_end(engine):
+    _run_bench_script(CDC_4PHASE_BENCH, "cdc_4phase passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_cdc_2phase_bench_example_runs_end_to_end(engine):
+    _run_bench_script(CDC_2PHASE_BENCH, "cdc_2phase passed", engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_cdc_2phase_clearable_bench_example_runs_end_to_end(engine):
+    _run_bench_script(CDC_2PHASE_CLEARABLE_BENCH, "cdc_2phase_clearable passed", engine=engine)
+
+
+@pytest.mark.parametrize("path,expected", STREAM_ROUTING_BENCHES)
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_stream_routing_bench_examples_run_end_to_end(path, expected, engine):
+    _run_bench_script(path, expected, engine=engine)
+
+
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_lossy_valid_to_stream_bench_example_runs_end_to_end(engine):
+    _run_bench_script(LOSSY_STREAM_BENCH, "lossy_valid_to_stream passed", engine=engine)
+
+
+@pytest.mark.parametrize("path,expected", STREAM_CONTROL_BENCHES)
+@pytest.mark.parametrize("engine", ["reference", "vm-fast"])
+def test_stream_control_bench_examples_run_end_to_end(path, expected, engine):
+    _run_bench_script(path, expected, engine=engine)

@@ -44,6 +44,9 @@ examples/pulp/common_cells/stream_omega_net/
 │   └── stream_omega_net.sv
 ├── tb/
 │   └── so_tb.sv
+├── bench/
+│   ├── stream_omega_net_bench.py
+│   └── stream_omega_net_bench_top.sv
 └── run_sim.py
 ```
 
@@ -63,10 +66,16 @@ The Python runner checks:
 - flush restoring the initial winner after round-robin rotation
 - staged spill latency and drain behavior under a stalled sink
 
+The transaction-level bench in `bench/stream_omega_net_bench.py` uses the
+no-spill configuration. It exposes destination selection as an input stream
+sideband and source index as an output sideband. The bench checks a four-way
+permutation plus contention at each of the two switching stages.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/stream_omega_net/run_sim.py
+uv run python examples/pulp/common_cells/stream_omega_net/bench/stream_omega_net_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

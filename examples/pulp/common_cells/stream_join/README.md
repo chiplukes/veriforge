@@ -34,6 +34,9 @@ examples/pulp/common_cells/stream_join/
 │   └── stream_join_dynamic.sv
 ├── tb/
 │   └── stream_join_tb_local.sv
+├── bench/
+│   ├── stream_join_bench.py
+│   └── stream_join_bench_top.sv
 └── run_sim.py
 ```
 
@@ -41,6 +44,10 @@ examples/pulp/common_cells/stream_join/
 
 The imported subset fixes the join to three inputs and checks the handshake
 behavior directly with a Python-driven combinational harness.
+
+The transaction-level bench in `bench/stream_join_bench.py` exposes the three
+packed handshake lanes as independent, data-less streams. It checks partial
+input availability, output backpressure, and two complete joined handshakes.
 
 The checks cover:
 
@@ -57,6 +64,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_join/run_sim.py
+uv run python examples/pulp/common_cells/stream_join/bench/stream_join_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

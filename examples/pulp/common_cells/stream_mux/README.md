@@ -34,6 +34,9 @@ examples/pulp/common_cells/stream_mux/
 │   └── stream_mux.sv
 ├── tb/
 │   └── stream_mux_tb_local.sv
+├── bench/
+│   ├── stream_mux_bench.py
+│   └── stream_mux_bench_top.sv
 └── run_sim.py
 ```
 
@@ -41,6 +44,10 @@ examples/pulp/common_cells/stream_mux/
 
 The imported subset fixes the mux to three 8-bit inputs and checks the
 combinational routing directly with a Python-driven harness.
+
+The transaction-level bench in `bench/stream_mux_bench.py` exposes the three
+packed lanes as independent ready/valid sources. It queues one beat on each,
+stalls the output, then accepts them in a different select order.
 
 The checks cover:
 
@@ -56,6 +63,7 @@ Shared pytest coverage for the imported wrapper also lives in
 
 ```text
 uv run python examples/pulp/common_cells/stream_mux/run_sim.py
+uv run python examples/pulp/common_cells/stream_mux/bench/stream_mux_bench.py --engine vm-fast
 ```
 
 Success is indicated by:

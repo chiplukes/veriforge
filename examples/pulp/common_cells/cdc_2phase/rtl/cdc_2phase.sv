@@ -61,8 +61,12 @@ module cdc_2phase #(
         end else begin
             req_dst_q0 <= async_req;
             req_dst_q1 <= req_dst_q0;
-            if (req_dst_q1 != ack_dst_q) begin
+            // Capture the held asynchronous payload as the second request
+            // synchronizer stage updates, so data is ready when valid rises.
+            if (req_dst_q0 != ack_dst_q) begin
                 data_dst_q <= async_data;
+            end
+            if (req_dst_q1 != ack_dst_q) begin
                 if (dst_ready_i) begin
                     ack_dst_q <= req_dst_q1;
                 end

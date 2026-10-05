@@ -43,6 +43,8 @@ examples/pulp/common_cells/fall_through_register/
 │   └── fall_through_register.sv
 ├── tb/
 │   └── ft_reg_tb.sv
+├── bench/
+│   └── fall_through_register_bench.py
 └── run_sim.py
 ```
 
@@ -61,10 +63,15 @@ The checks cover:
 - drain behavior once downstream becomes ready again
 - synchronous clear of a buffered item
 
+The high-level bench checks an ordinary transfer, then stalls the sink to
+exercise the one-slot buffer and backpressure. The directed runner retains the
+same-cycle pass-through and clear timing assertions.
+
 ## Running It
 
 ```text
 uv run python examples/pulp/common_cells/fall_through_register/run_sim.py
+uv run python examples/pulp/common_cells/fall_through_register/bench/fall_through_register_bench.py
 ```
 
 Success is indicated by:

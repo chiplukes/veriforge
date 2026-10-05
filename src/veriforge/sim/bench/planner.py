@@ -226,6 +226,7 @@ _CLOCK_PORT_NAMES: tuple[str, ...] = (
     "clk",
     "clock",
 )
+_PREFIXED_CLOCK_SUFFIXES = ("_clk_i", "_clk")
 
 # Canonical reset port names: ``(name, active_low, style)``.
 _RESET_PORT_NAMES: tuple[tuple[str, bool, str], ...] = (
@@ -239,6 +240,14 @@ _RESET_PORT_NAMES: tuple[tuple[str, bool, str], ...] = (
     ("rst", False, "async"),
     ("reset", False, "async"),
 )
+_PREFIXED_RESET_SUFFIXES: tuple[tuple[str, bool], ...] = (
+    ("_rst_ni", True),
+    ("_rst_n", True),
+    ("_reset_n", True),
+    ("_resetn", True),
+    ("_rst", False),
+    ("_reset", False),
+)
 
 
 def _naming_fallback_clocks_resets(module: Module) -> ClockResetInfo:
@@ -247,10 +256,8 @@ def _naming_fallback_clocks_resets(module: Module) -> ClockResetInfo:
     Last-resort fallback when neither :func:`extract_clocks_resets` nor
     the hierarchical structural extractor surface anything (e.g. the
     module is a stub, blackbox, or its instances couldn't be linked).
-    Only canonical names (``clk``, ``clk_i``, ``rst_n``, ...) are
-    recognized — for prefixed names like ``src_clk_i``, prefer
-    :func:`extract_clocks_resets_hier` which discovers them via
-    instance port maps.
+    Canonical names (``clk``, ``clk_i``, ``rst_n``, ...) and paired
+    prefixed names (``src_clk_i``/``src_rst_ni``) are recognized.
     """
     input_ports = {p.name for p in module.ports if p.direction == PortDirection.INPUT}
     lower_to_actual = {name.lower(): name for name in input_ports}
@@ -262,6 +269,17 @@ def _naming_fallback_clocks_resets(module: Module) -> ClockResetInfo:
         if actual is not None and actual not in seen:
             clocks.append(ClockSignal(name=actual, edge="posedge"))
             seen.add(actual)
+    prefixed_clocks: dict[str, str] = {}
+    for actual in sorted(input_ports):
+        lower = actual.lower()
+        for suffix in _PREFIXED_CLOCK_SUFFIXES:
+            if lower.endswith(suffix) and len(lower) > len(suffix):
+                stem = lower[: -len(suffix)]
+                prefixed_clocks[stem] = actual
+                if actual not in seen:
+                    clocks.append(ClockSignal(name=actual, edge="posedge"))
+                    seen.add(actual)
+                break
 
     resets: list[ResetSignal] = []
     seen_r: set[str] = set()
@@ -279,6 +297,24 @@ def _naming_fallback_clocks_resets(module: Module) -> ClockResetInfo:
                 )
             )
             seen_r.add(actual)
+    for actual in sorted(input_ports):
+        lower = actual.lower()
+        for suffix, active_low in _PREFIXED_RESET_SUFFIXES:
+            if lower.endswith(suffix) and len(lower) > len(suffix):
+                stem = lower[: -len(suffix)]
+                clock = prefixed_clocks.get(stem, sole_clock)
+                if clock is not None and actual not in seen_r:
+                    resets.append(
+                        ResetSignal(
+                            name=actual,
+                            style="async",
+                            active_low=active_low,
+                            edge="negedge" if active_low else "posedge",
+                            clock=clock,
+                        )
+                    )
+                    seen_r.add(actual)
+                break
 
     return ClockResetInfo(clocks=clocks, resets=resets)
 
