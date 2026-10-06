@@ -2,7 +2,41 @@
 
 ## Status
 
-Investigation complete, no code changes made yet (this document is the hand-off).
+**Stage 0 (reproducer, confirm hypothesis) and Stage 1 (secondary fix) are
+done, committed, and verified** (see `56b8366` and `d667ac3`). **Stage 2
+(the work-queue rewrite) has not been started** -- paused here on purpose,
+per the Effort Assessment below, to switch to Opus before writing it.
+
+- Stage 0: `benchmarks/wide_bench_gen.py` + `benchmarks/scan_vs_activity_bench.py`
+  added; results in `notes/benchmarks_work_queue.md`. Gate confirmed: Sweep A
+  (fixed activity, N_LANES 8->384) throughput drops 37.6x for a 48x size
+  increase; Sweep B (fixed size=256, activity 1->256 lanes) only varies
+  2.6x. The plan's own suggested sweep top values (N_LANES 1024/2048/4096)
+  had to be scaled back to {8,64,256,384}/256 -- both 1024 and 4096 exceeded
+  a 600s Cython/C compile timeout on the dev machine, and even 512 didn't
+  finish in 300s. **This is a separate compile-time scaling wall** (not the
+  delta-loop runtime cost this plan targets) worth factoring into Stage 2's
+  own design and testing -- the real `gfwx-fpga` design (3112 cont
+  processes) sits in a size range where this may already bite.
+- Stage 1: `_cont_settle_first_cycle_lines()`'s separate, cont-only,
+  unconditional `N_cont`-bounded settle replaced with a call through
+  `delta_loop()` itself (snapshot-then-settle, mirroring the pre-existing
+  `ev_applied` branch's identical pattern -- see `d667ac3`'s commit message
+  for why this is safe: `sv[sid] == c.val[sid]` for every signal at the
+  point of the call, so no seq process can spuriously fire during this
+  settle). Verified against `TestContinuousAssignSnapshotConvergence`,
+  full `tests/test_sim/compiled/` (793 passed), and full `tests/test_sim/`
+  (5617 passed, 0 failed, 3853 skipped).
+
+**Next step for whoever picks this up: Stage 2** (`_gen_delta_loop()`
+rewrite to a runtime work-queue/activity-list dispatch) -- read the
+"Proposed Fix" and "Secondary... subtleties" sections below in full before
+writing any code; the cold-start wake-up path and the livelock/oscillation
+detector are the two places flagged as needing real design decisions, not
+just porting.
+
+---
+
 Found while stress-testing the compiled engine against `gfwx-fpga`'s real
 full-scale target (a large, deeply-composed DSL design — see "Provenance"
 below). This is a **sequel** to `notes/plans/compiled_engine_perf_2026-09.md`:
