@@ -23,12 +23,11 @@ def delta_engine_mode() -> str:
     ``"scan"`` (default): each delta iteration scans all signals and checks
     every continuous-assign/combinational process -- per-iteration cost
     scales with total design size. ``"queue"`` (opt-in): per-iteration cost
-    proportional to real activity (see
-    ``notes/plans/work_queue_delta_engine.md``) -- 3-5x faster on large,
-    low-activity designs, but slower than ``scan`` when most of a design is
-    active every cycle. Both run the identical set of processes in the
-    identical order each iteration, so results and delta-iteration counts
-    are identical; only speed differs.
+    proportional to real activity, and redundant reruns of pure processes
+    skipped (see ``notes/plans/work_queue_delta_engine.md``) -- 1.5-5x
+    faster on larger designs at low-to-moderate activity, slower when most
+    of a design is active every cycle or the design is tiny. Results and
+    delta-iteration counts are identical either way; only speed differs.
     """
     mode = (get_env("DELTA_ENGINE", "scan") or "scan").strip().lower()
     if mode not in DELTA_ENGINE_MODES:

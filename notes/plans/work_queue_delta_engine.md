@@ -2,17 +2,16 @@
 
 ## Status
 
-**Stages 0, 1, and 2 are done.** Stage 2's queue engine is implemented,
-verified *equivalent* to the scan engine (identical signal values and
-identical delta-iteration counts on every step), and shipped **opt-in**
-(`VERIFORGE_DELTA_ENGINE=queue`; default stays `scan`). It is 3-5x faster
-in the regime this plan targets (many continuous assigns, low per-cycle
-activity) but *slower* when most of a design is active every cycle -- see
-"Stage 2 results" below. **Open decision before changing the default:**
-whether to eliminate the scan engine's redundant reruns in the queue engine
-(measured: makes queue win even at 100% activity), which trades the current
-"identical by construction" guarantee for "identical by test". See "Stage 2
-results -> Open decision".
+**Stages 0, 1, and 2 are done, plus redundant-rerun elimination.** The queue
+engine is implemented, verified equivalent to the scan engine (identical
+signal values and identical delta-iteration counts on every step), and
+shipped **opt-in** (`VERIFORGE_DELTA_ENGINE=queue`; default stays `scan`).
+With redundant-rerun elimination (2026-10-06, see that section below) it is
+1.5-5.6x faster than scan on larger designs at low-to-moderate activity,
+roughly at parity to 0.65x when most of a design toggles every cycle, and
+~0.73x on the tiny `benchmark.py` DUT. **Default unchanged pending a
+measurement of `gfwx-fpga` with both engines** -- see "Recommendation" and
+"Possible next steps" at the end of the Stage 2 results.
 
 ### Stage 2 results (2026-10-05)
 
@@ -77,7 +76,7 @@ below roughly 50% activity and loses above it.
    inlined call site per process, like the scan engine's straight-line
    dispatch); the wall noted in Stage 0 remains.
 
-**Open decision: eliminate redundant reruns?** To stay identical by
+**Redundant reruns (resolved 2026-10-06 -- implemented, see below).** To stay identical by
 construction, the queue engine reproduces the scan engine's redundant
 reruns: a process re-runs in iteration `k+1` because an input was written
 in iteration `k` even if it already ran *after* that write. In dense
@@ -104,10 +103,70 @@ dirties nothing), so the existing A/B suite -- values *and* iteration counts
 -- plus the differential fuzz remain the check.
 
 **Recommendation for `gfwx-fpga`**: measure it directly with
-`VERIFORGE_DELTA_ENGINE=queue` vs `scan` before anything else. Its profile
-(3112 conts, 21 seq processes) is the target regime, but a streaming image
-pipeline may well be *dense* (most of the datapath active every cycle), in
-which case the queue engine without rerun elimination won't help it.
+`VERIFORGE_DELTA_ENGINE=queue` vs `scan` before changing the default. Its
+profile (3112 conts, 21 seq processes) is the target regime, but a streaming
+image pipeline may well be *dense* (most of the datapath active every
+cycle), where queue is at parity or somewhat slower.
+
+### Redundant-rerun elimination (2026-10-06)
+
+Implemented in the queue engine only; the scan engine is unchanged.
+
+- **Purity, decided on the IR** (`_cont_assign_is_rerun_pure` in
+  `_process_compiler.py`) once per `assign`, then applied to every process
+  that assign compiles to (all ~60 emission sites run inside one loop, so
+  per-assign marks cover them without touching any site). Allowlist: the
+  LHS writes only plain signals (no memory targets -- those toggle marker
+  signals on every write); the RHS calls nothing outside a short list of
+  side-effect-free system functions (no user functions -- they write
+  function-internal signals; no `$random`/`$time`); non-empty sensitivity.
+  Combinational `always` blocks are never pure (intermediate blocking
+  writes re-mark signals dirty even when end values don't change). Anything
+  unrecognized is impure and keeps the exact scan schedule.
+- **Engine.** Iteration 0 seeds every reader of the externally dirtied sids
+  (nothing has run yet in the call). Later iterations seed only *impure*
+  readers of `T_k` (via a second, impure-only reader index, so pure readers
+  aren't walked just to be skipped), plus a next-iteration bitmap `_pnext`.
+  After each process at rank `w`, every sid it changed -- from a per-call
+  write log kept by `mark_dirty` (deduped by an epoch bumped per call), so a
+  second write to a sid in the same iteration counts too -- marks its
+  readers with rank `> w` pending now and its *pure* readers with rank
+  `<= w` in `_pnext`: those already ran before the write and need exactly
+  one more run.
+- **Correctness.** A skipped rerun is a no-op that dirties nothing, so
+  values and iteration counts stay identical; the A/B suite (now 31 tests,
+  adding a continuous assign that reads a combinational block's output --
+  the `_pnext` path -- and a unit test of the purity classifier) asserts
+  both on every step. The compiled suite and differential fuzz suites pass
+  in queue mode.
+- **Performance** (queue / scan, same build; before -> after elimination):
+
+| Case | before | after |
+|---|---|---|
+| Sweep A 64 / 256 / 384 lanes (8 active) | 0.74 / 0.99 / 1.15x | 1.56 / 1.61 / 1.76x |
+| Sweep B 256 lanes, 1 / 8 active | 1.25 / 1.01x | 1.92 / 1.78x |
+| Sweep B 256 lanes, 64 / 256 active | 0.47 / 0.34x | 0.81 / 0.65x |
+| Sweep C k=1: 64 / 256 / 512 lanes | 3.06 / 5.08 / 3.40x | 2.43 / 5.62 / 4.16x |
+| Sweep C k=8: 256 / 512 lanes | 1.94 / 2.27x | 2.11 / 2.61x |
+| Sweep C k=64: 64 / 256 / 512 lanes | 0.95 / 0.77 / 1.19x | 0.83 / 0.90 / 1.45x |
+| `make_wide_bench(64, 64)`, fully active | 0.64x | 1.01x |
+| `benchmark.py` DUT (9 processes) | ~0.80x | ~0.73x |
+
+  Full tables in `notes/benchmarks_work_queue.md`.
+
+**Possible next steps.**
+1. Measure `gfwx-fpga` with both engines; set the default from that.
+2. If dense designs matter: the remaining per-executed-process cost is the
+   indirect `switch` dispatch plus write-log bookkeeping (~2x scan's cost
+   per process it actually runs). A density-adaptive traversal (walk ranks
+   in order with direct calls when most are pending) would remove the
+   indirect jump, at the cost of a second call site per process (code size
+   and compile time).
+3. A codegen-time `auto` mode (queue above some process count) would avoid
+   the tiny-design regression, but can't see activity, so large dense
+   designs would still lose up to ~35%.
+4. The `sv`/`sm` snapshot-copy reduction (see "Two remaining size-dependent
+   costs" above).
 
 - Stage 0: `benchmarks/wide_bench_gen.py` + `benchmarks/scan_vs_activity_bench.py`
   added; results in `notes/benchmarks_work_queue.md`. Gate confirmed: Sweep A
@@ -130,11 +189,9 @@ which case the queue engine without rerun elimination won't help it.
   full `tests/test_sim/compiled/` (793 passed), and full `tests/test_sim/`
   (5617 passed, 0 failed, 3853 skipped).
 
-**Next steps** (see "Stage 2 results" above): (1) measure `gfwx-fpga` with
-both engines; (2) decide on redundant-rerun elimination; (3) the
-`sv`/`sm` snapshot-copy reduction, now the dominant remaining size-dependent
-cost in the low-activity regime. Changing the default engine waits on (1)
-and (2).
+**Next steps**: see "Possible next steps" at the end of "Redundant-rerun
+elimination" above. Changing the default engine waits on measuring
+`gfwx-fpga` with both engines.
 
 ---
 

@@ -7,16 +7,19 @@ CythonCodegen inherits from _ProcessCompilerMixin.
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from veriforge._env import get_env
 from veriforge.model.assignments import ContinuousAssign
+from veriforge.model.base import VerilogNode
 from veriforge.model.expressions import (
     AssignmentPattern,
     BinaryOp,
     BitSelect,
     Concatenation,
     Expression,
+    FunctionCall,
     Identifier,
     Literal,
     PartSelect,
@@ -47,10 +50,99 @@ if TYPE_CHECKING:
     from veriforge.model.design import Module
 
 
+# System functions with no side effects and no hidden state: a continuous
+# assign calling only these computes a pure function of its inputs.
+# ($random/$urandom carry state; $time/$realtime/$stime read time; anything
+# not listed -- including every user-defined function, which writes its own
+# internal port/local/return signals -- is treated as impure.)
+_PURE_SYSTEM_FUNCTIONS = frozenset(
+    {
+        "$signed",
+        "$unsigned",
+        "$clog2",
+        "$bits",
+        "$size",
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$high",
+        "$low",
+        "$left",
+        "$right",
+    }
+)
+
+
+def _has_impure_call(node: object) -> bool:
+    """True if *node*'s expression tree contains any call outside
+    ``_PURE_SYSTEM_FUNCTIONS``. Walks every ``__slots__`` field generically,
+    so a new expression type can't silently hide a call from this check."""
+    if isinstance(node, FunctionCall) and node.name not in _PURE_SYSTEM_FUNCTIONS:
+        return True
+    if isinstance(node, VerilogNode):
+        for slot in getattr(type(node), "__slots__", ()):
+            child = getattr(node, slot, None)
+            if isinstance(child, (VerilogNode, list, tuple)) and _has_impure_call(child):
+                return True
+    elif isinstance(node, (list, tuple)):
+        return any(_has_impure_call(item) for item in node)
+    return False
+
+
 class _ProcessCompilerMixin:
     """Mixin providing continuous-assign and process-block compilation for CythonCodegen."""
 
     __slots__ = ()
+
+    def _lhs_signal_names(self, lhs: Expression) -> list[str] | None:
+        """Base signal names a continuous-assign LHS writes, or ``None`` if
+        the LHS has any shape this doesn't recognize."""
+        if isinstance(lhs, Identifier):
+            name = lhs.name
+            if lhs.hierarchy:
+                name = ".".join(lhs.hierarchy) + "." + name
+            return [name]
+        if isinstance(lhs, (BitSelect, RangeSelect, PartSelect)):
+            return self._lhs_signal_names(lhs.target)
+        if isinstance(lhs, Concatenation):
+            names: list[str] = []
+            for part in lhs.parts:
+                sub = self._lhs_signal_names(part)
+                if sub is None:
+                    return None
+                names.extend(sub)
+            return names
+        return None
+
+    def _cont_assign_is_rerun_pure(self, assign: ContinuousAssign, sensitivity: set[int]) -> bool:
+        """Whether every process compiled from *assign* may skip a rerun when
+        none of its inputs changed since it last ran (the queue delta
+        engine's redundant-rerun elimination -- see
+        notes/plans/work_queue_delta_engine.md).
+
+        Requires that running it again on unchanged inputs is a no-op. A
+        conservative allowlist on the IR -- anything not positively
+        recognized is impure and keeps the exact scan-engine schedule:
+        - the LHS writes only plain signals (memory targets toggle their
+          marker signal on every write, so a rerun isn't a no-op);
+        - the RHS calls no user function (those write their own internal
+          signals) and no stateful/time system function;
+        - the sensitivity set is non-empty (an empty one means the process
+          runs every iteration by design).
+        Signal writes in continuous-assign bodies are change-guarded (they
+        only write, and only mark dirty, when the value differs), so with
+        these conditions a rerun recomputes the same values and does nothing.
+        """
+        if not sensitivity:
+            return False
+        names = self._lhs_signal_names(assign.lhs)
+        if not names:
+            return False
+        for name in names:
+            if name in self._mem_map or self._signal_map.get(name) is None:
+                return False
+        return not _has_impure_call(assign.rhs)
 
     def _compile_continuous_assigns(self, module: Module) -> None:
         import sys
@@ -87,9 +179,13 @@ class _ProcessCompilerMixin:
                 flush=True,
             )
 
+        # (first process index, rerun-pure) per assign; every process an
+        # assign compiles to is appended within its own loop iteration below.
+        purity_marks: list[tuple[int, bool]] = []
         for _ca_idx, assign in enumerate(module.continuous_assigns):
             sensitivity: set[int] = set()
             self._walk_signals(assign.rhs, sensitivity)
+            purity_marks.append((len(self._processes), self._cont_assign_is_rerun_pure(assign, sensitivity)))
 
             if _profile and _ca_idx % _interval == 0:
                 _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)
@@ -528,6 +624,11 @@ class _ProcessCompilerMixin:
                 f"        mark_dirty(c, {lhs_sid})",
             ]
             self._processes.append((sensitivity, lines))
+
+        purity_marks.append((len(self._processes), False))  # end sentinel
+        for (start, pure), (end, _next_pure) in pairwise(purity_marks):
+            if pure:
+                self._pure_conts.update(range(start, end))
 
         if _profile:
             _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)

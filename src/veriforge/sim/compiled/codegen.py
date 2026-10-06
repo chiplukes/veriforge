@@ -212,6 +212,7 @@ class CythonCodegen(
         "_param_env",
         "_param_init",
         "_processes",
+        "_pure_conts",
         "_py_mask_cache",
         "_py_val_cache",
         "_scratch_peak",
@@ -240,6 +241,9 @@ class CythonCodegen(
         self._n_sigs: int = 0
         self._unmasked_signal_ids: set[int] = set()
         self._processes: list[tuple[set[int], list[str]]] = []
+        # Indices into _processes whose rerun on unchanged inputs is a no-op
+        # (see _cont_assign_is_rerun_pure).
+        self._pure_conts: set[int] = set()
         self._combo_processes: list[tuple[set[int], object]] = []
         self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
         self._module: Module | None = None

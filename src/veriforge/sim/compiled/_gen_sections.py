@@ -106,7 +106,7 @@ def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     return order, acyclic
 
 
-def _gen_dirty_helpers() -> list[str]:
+def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     """The only code allowed to write ``SimCtx.dbit``/``dlist``/``dcount``
     and ``nba_bit``/``nba_list``/``nba_count``.
 
@@ -117,9 +117,27 @@ def _gen_dirty_helpers() -> list[str]:
     ``mark_nba`` deliberately does not set ``nba_pending`` -- call sites set
     it themselves, as they always have (memory NBAs set it without staging a
     scalar sid at all).
+
+    *write_log* (queue delta engine only): also record each distinct sid
+    written since ``wepoch`` was last bumped into ``wlog`` -- the queue
+    engine bumps it before every process call, so after the call ``wlog``
+    holds every sid that call changed (not just the first write of each sid
+    per iteration, which is all ``dlist`` records). Dedup by epoch bounds
+    ``wlog`` at ``N_SIGS`` entries.
     """
+    log = (
+        [
+            "    if c.wmark[sid] != c.wepoch:",
+            "        c.wmark[sid] = c.wepoch",
+            "        c.wlog[c.wcount] = sid",
+            "        c.wcount += 1",
+        ]
+        if write_log
+        else []
+    )
     return [
         "cdef inline void mark_dirty(SimCtx *c, int sid) noexcept nogil:",
+        *log,
         "    if not c.dbit[sid]:",
         "        c.dbit[sid] = 1",
         "        c.dlist[c.dcount] = sid",
@@ -842,6 +860,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    int       dbit[N_SIGS]",
             "    int       dlist[N_SIGS]",
             "    int       dcount",
+            # Queue delta engine's per-process-call write log (see
+            # _gen_dirty_helpers); unused by the scan engine.
+            "    long long wmark[N_SIGS]",
+            "    int       wlog[N_SIGS]",
+            "    int       wcount",
+            "    long long wepoch",
             "    int       nba_pending",
             "    unsigned long long wide_val[N_WIDE_WORDS]",
             "    unsigned long long wide_mask[N_WIDE_WORDS]",
@@ -942,7 +966,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines: list[str] = []
         # Emitted first: every later helper (narrow templates, wide/memory
         # helpers) and every process body marks signals dirty through these.
-        lines.extend(_gen_dirty_helpers())
+        lines.extend(_gen_dirty_helpers(write_log=delta_engine_mode() == "queue"))
         lines.extend(_gen_narrow_accessor_code())
         lines.extend(_gen_narrow_stage_code())
         lines.extend(_gen_narrow_assign_code())
@@ -1486,10 +1510,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     #
     # Two engines (codegen option, see `delta_engine_mode()`) share every
     # piece below except how each iteration decides which cont/combo
-    # processes run. Both run the identical set of processes in the identical
-    # order every iteration -- so results AND delta_loop's return value (the
-    # iteration count) are identical, and DELTA_LIMIT / DELTA_CONV_CHECK_START
-    # / the value-convergence detector behave identically. See
+    # processes run. Both run the same processes in the same rank order every
+    # iteration, except that the queue engine skips no-op reruns of pure
+    # processes -- so results AND delta_loop's return value (the iteration
+    # count) are identical, and DELTA_LIMIT / DELTA_CONV_CHECK_START / the
+    # value-convergence detector behave identically. See
     # notes/plans/work_queue_delta_engine.md, "Stage 2 design decisions".
 
     def _gen_delta_loop(self) -> str:
@@ -1497,13 +1522,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             return self._gen_delta_loop_scan()
         return self._gen_delta_loop_queue()
 
-    def _delta_ranked_processes(self) -> list[tuple[str, set[int]]]:
-        """``(call, sens)`` per rank, in dispatch order: continuous assigns in
-        dependency (topological) order, then combinational always blocks in
-        declaration order. A process's rank is its position in this list."""
+    def _delta_ranked_processes(self) -> list[tuple[str, set[int], bool]]:
+        """``(call, sens, pure)`` per rank, in dispatch order: continuous
+        assigns in dependency (topological) order, then combinational always
+        blocks in declaration order. A process's rank is its position in this
+        list. ``pure``: a rerun on unchanged inputs is a no-op (see
+        ``_cont_assign_is_rerun_pure``); combinational always blocks are never
+        treated as pure (intermediate blocking writes re-mark signals dirty
+        even when the end values don't change)."""
         cont_order, _acyclic = _cont_dependency_order(self._processes)
-        ranked = [(f"cont_{i}(c)", self._processes[i][0]) for i in cont_order]
-        ranked.extend((f"combo_{i}(c)", sens) for i, (sens, _b) in enumerate(self._combo_processes))
+        ranked = [(f"cont_{i}(c)", self._processes[i][0], i in self._pure_conts) for i in cont_order]
+        ranked.extend((f"combo_{i}(c)", sens, False) for i, (sens, _b) in enumerate(self._combo_processes))
         return ranked
 
     def _delta_interesting_sids(self) -> list[int]:
@@ -1760,7 +1789,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # if an input was dirtied last iteration (trigger) or earlier this
         # iteration (dirty -- so a multi-hop chain in rank order settles in
         # one pass instead of one hop per iteration).
-        for call, sens in ranked:
+        for call, sens, _pure in ranked:
             if sens:
                 lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
                 lines.append(f"            {call}")
@@ -1795,7 +1824,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         )
         return "\n".join(lines)
 
-    def _delta_queue_static_lines(self, ranked: list[tuple[str, set[int]]]) -> list[str]:
+    def _delta_queue_static_lines(self, ranked: list[tuple[str, set[int], bool]]) -> list[str]:
         """The queue engine's static tables, baked into the module as C
         arrays (zero runtime construction cost):
 
@@ -1805,11 +1834,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         - ``DL_ALWAYS_RANK``: processes with an empty sensitivity set, which run
           every iteration.
         - ``DL_IS_INTERESTING``: the early-exit set (`_delta_interesting_sids`).
+        - ``DL_PURE``: per rank, whether the process may skip a no-op rerun.
+        - ``DL_IREADER_OFF``/``DL_IREADER_RANK``: the reader index restricted to
+          impure readers.
         """
         n = max(self._n_sigs, 1)
         readers: list[set[int]] = [set() for _ in range(n)]
         always: list[int] = []
-        for rank, (_call, sens) in enumerate(ranked):
+        for rank, (_call, sens, _pure) in enumerate(ranked):
             if sens:
                 for s in sens:
                     readers[s].add(rank)
@@ -1820,6 +1852,15 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         for rs in readers:
             flat.extend(sorted(rs))
             off.append(len(flat))
+        # Same index restricted to impure readers: iterations after the first
+        # seed only those from T_k, so this keeps that seeding from walking
+        # (and skipping) every pure reader.
+        pure_ranks = {rank for rank, (_c, _s, pure) in enumerate(ranked) if pure}
+        ioff = [0]
+        iflat: list[int] = []
+        for rs in readers:
+            iflat.extend(sorted(rs - pure_ranks))
+            ioff.append(len(iflat))
         interesting = set(self._delta_interesting_sids())
         is_int = [1 if s in interesting else 0 for s in range(n)]
 
@@ -1832,8 +1873,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         arrays = [
             c_array("int", "DL_READER_OFF", off),
             c_array("int", "DL_READER_RANK", flat),
+            c_array("int", "DL_IREADER_OFF", ioff),
+            c_array("int", "DL_IREADER_RANK", iflat),
             c_array("int", "DL_ALWAYS_RANK", always),
             c_array("unsigned char", "DL_IS_INTERESTING", is_int),
+            c_array("unsigned char", "DL_PURE", [1 if pure else 0 for _c, _s, pure in ranked]),
         ]
         lines = [
             "cdef extern from *:",
@@ -1850,7 +1894,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             '    """',
             "    int dl_ctz64(unsigned long long x) noexcept nogil",
         ]
-        ctypes = {"DL_IS_INTERESTING": "unsigned char"}
+        ctypes = {"DL_IS_INTERESTING": "unsigned char", "DL_PURE": "unsigned char"}
         for _text, name, length in arrays:
             lines.append(f"    {ctypes.get(name, 'int')} {name}[{length}]")
         lines.append("")
@@ -1859,62 +1903,77 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _gen_delta_loop_queue(self) -> str:
         """Queue engine: per-iteration cost proportional to real activity.
 
-        Runs exactly the processes the scan engine would, in the same order.
-        Process ``P`` at rank ``r`` runs in iteration ``k`` iff it has an
+        Runs the processes the scan engine would, in the same rank order,
+        minus *redundant reruns of pure processes*. In the scan engine,
+        process ``P`` at rank ``r`` runs in iteration ``k`` iff it has an
         empty sensitivity set, or one of its inputs was dirtied during
         iteration ``k-1`` (``T_k``) or earlier in iteration ``k`` before
-        ``P``'s turn. Realized with a per-iteration pending bitmap over ranks:
-        seeded from ``T_k``'s readers, the always-run processes, and readers of
-        sids dirtied by the seq/NBA phase (which precedes every cont); then,
-        after running rank ``w``, the readers with rank ``> w`` of each sid it
-        newly dirtied. Readers with rank ``<= w`` are not marked -- exactly as
-        in the scan engine, they run next iteration via ``T_{k+1}``. Marks
-        only ever land ahead of the cursor, so a forward bitmap scan visits
-        pending ranks in order, each once.
+        ``P``'s turn. The ``T_k`` rule re-runs ``P`` even when it already ran
+        *after* that write in iteration ``k-1`` -- with unchanged inputs. For
+        pure processes (``DL_PURE``: rerun on unchanged inputs is a no-op) the
+        queue engine skips exactly those: since a no-op rerun dirties nothing,
+        signal values *and* iteration counts are unchanged.
+
+        Realized with two pending bitmaps over ranks. The current one is
+        seeded at iteration start from: every reader of ``T_k`` on iteration
+        0 (nothing has run yet in this call) or on a cold start, else only
+        the impure readers (exact scan schedule) plus the next-iteration
+        bitmap ``_pnext``; the always-run processes; and readers of sids
+        dirtied by the seq/NBA phase (which precedes every process). After
+        running rank ``w``, each sid it wrote (per-call write log, so a
+        second write in the same iteration counts too) marks its readers
+        with rank ``> w`` in the current bitmap -- they run later this
+        iteration, after the write -- and its *pure* readers with rank
+        ``<= w`` in ``_pnext``: they already ran before the write, so they
+        need exactly one more run, next iteration. (Impure readers with rank
+        ``<= w`` get theirs from ``T_{k+1}``, as in the scan engine.) Marks in
+        the current bitmap only land ahead of the cursor, so a forward scan
+        visits pending ranks in order, each once.
         """
         ranked = self._delta_ranked_processes()
         n_ranks = len(ranked)
         n_words = max((n_ranks + 63) // 64, 1)
-        n_always = sum(1 for _call, sens in ranked if not sens)
+        n_always = sum(1 for _call, sens, _pure in ranked if not sens)
+        any_pure = any(pure for _call, _sens, pure in ranked)
         set_bit = "_pend[_p >> 6] |= (<unsigned long long>1) << (_p & 63)"
+        set_next_bit = "_pnext[_p >> 6] |= (<unsigned long long>1) << (_p & 63)"
 
-        def push_readers(indent: str, sid_expr: str, *, ahead_of_cursor: bool) -> list[str]:
+        def seed_readers(indent: str, sid_expr: str, *, impure_only: bool = False) -> list[str]:
+            off, rank = ("DL_IREADER_OFF", "DL_IREADER_RANK") if impure_only else ("DL_READER_OFF", "DL_READER_RANK")
             body = [
                 f"{indent}_s = {sid_expr}",
-                f"{indent}for _e in range(DL_READER_OFF[_s], DL_READER_OFF[_s + 1]):",
-                f"{indent}    _p = DL_READER_RANK[_e]",
+                f"{indent}for _e in range({off}[_s], {off}[_s + 1]):",
+                f"{indent}    _p = {rank}[_e]",
             ]
-            if ahead_of_cursor:
-                return [
-                    *body,
-                    f"{indent}    if _p > _r:",
-                    f"{indent}        {set_bit}",
-                    f"{indent}        if _p > _pmax:",
-                    f"{indent}            _pmax = _p",
-                ]
+            inner = indent + "    "
             return [
                 *body,
-                f"{indent}    {set_bit}",
-                f"{indent}    if _p < _pmin:",
-                f"{indent}        _pmin = _p",
-                f"{indent}    if _p > _pmax:",
-                f"{indent}        _pmax = _p",
+                f"{inner}{set_bit}",
+                f"{inner}if _p < _pmin:",
+                f"{inner}    _pmin = _p",
+                f"{inner}if _p > _pmax:",
+                f"{inner}    _pmax = _p",
             ]
 
         lines = [
             *self._delta_queue_static_lines(ranked),
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
             "    cdef int it, i, changed, _j, _k, _e, _s, _p, _r, _w, _wchg, _stable",
-            "    cdef int _tcount, _seen, _pmin, _pmax, _bootstrap, _any_int",
+            "    cdef int _tcount, _pmin, _pmax, _nmin, _nmax, _bootstrap, _any_int",
             "    cdef long long _nbaw",
             "    cdef unsigned long long _x",
             f"    cdef int _tlist[{max(self._n_sigs, 1)}]",
             f"    cdef unsigned long long _pend[{n_words}]",
+            f"    cdef unsigned long long _pnext[{n_words}]",
             *self._delta_common_local_lines(),
-            # Every pending bit is popped before an iteration ends (see the
-            # dispatch loop), so clearing once per call suffices; an early
-            # return mid-dispatch can leave bits set, hence per call, not never.
+            # Every bit of the current bitmap is popped before an iteration
+            # ends, and _pnext is folded into it at the next iteration's start;
+            # only an early return mid-dispatch (or a loop exit) can leave bits
+            # set, so both are cleared once per call.
             f"    memset(_pend, 0, {n_words} * sizeof(unsigned long long))",
+            f"    memset(_pnext, 0, {n_words} * sizeof(unsigned long long))",
+            f"    _nmin = {n_ranks}",
+            "    _nmax = -1",
             "",
             "    for it in range(DELTA_LIMIT):",
             # T_k: the sids marked dirty since the previous iteration (or, for
@@ -1950,11 +2009,34 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     f"                {set_bit}",
                     "            _pmin = 0",
                     f"            _pmax = {n_ranks - 1}",
-                    "        else:",
+                    # Iteration 0: no process has run yet in this call, so every
+                    # reader of every externally dirtied sid must run.
+                    "        elif it == 0:",
                     "            for _k in range(_tcount):",
-                    *push_readers("                ", "_tlist[_k]", ahead_of_cursor=False),
+                    *seed_readers("                ", "_tlist[_k]"),
+                    "        else:",
+                    # Impure readers keep the scan engine's T_k schedule exactly.
+                    "            for _k in range(_tcount):",
+                    *seed_readers("                ", "_tlist[_k]", impure_only=True),
                 ]
             )
+            if any_pure:
+                lines.extend(
+                    [
+                        # Pure readers that still owe a run (marked during the
+                        # previous iteration's dispatch).
+                        "            if _nmax >= 0:",
+                        "                for _w in range(_nmin >> 6, (_nmax >> 6) + 1):",
+                        "                    _pend[_w] |= _pnext[_w]",
+                        "                    _pnext[_w] = 0",
+                        "                if _nmin < _pmin:",
+                        "                    _pmin = _nmin",
+                        "                if _nmax > _pmax:",
+                        "                    _pmax = _nmax",
+                        f"                _nmin = {n_ranks}",
+                        "                _nmax = -1",
+                    ]
+                )
             if n_always:
                 lines.extend(
                     [
@@ -1972,8 +2054,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     # Sids dirtied by the seq-fire/NBA-apply phase, which
                     # precedes every cont/combo: all their readers are pending.
                     "        for _k in range(c.dcount):",
-                    *push_readers("            ", "c.dlist[_k]", ahead_of_cursor=False),
-                    "        _seen = c.dcount",
+                    *seed_readers("            ", "c.dlist[_k]"),
                     "",
                     "        _r = _pmin",
                     "        while _r <= _pmax:",
@@ -1984,12 +2065,15 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "                continue",
                     "            _r = (_w << 6) + dl_ctz64(_x)",
                     "            _pend[_w] &= ~((<unsigned long long>1) << (_r & 63))",
+                    # Fresh per-call write log (mark_dirty dedups by epoch).
+                    "            c.wepoch += 1",
+                    "            c.wcount = 0",
                 ]
             )
             # Rank -> process call. Cython lowers this if/elif chain on one C
             # int into a C switch (O(1) dispatch); each body still has a single
             # call site, so inlining is the same as the scan engine's.
-            for rank, (call, _sens) in enumerate(ranked):
+            for rank, (call, _sens, _pure) in enumerate(ranked):
                 kw = "if" if rank == 0 else "elif"
                 lines.append(f"            {kw} _r == {rank}:")
                 lines.append(f"                {call}")
@@ -1999,12 +2083,20 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "                return it",
                     "            if c.error_code != ERR_NONE:",
                     "                return it",
-                    # Readers ahead of the cursor of each sid that call newly
-                    # dirtied. (A sid already dirty this iteration had its
-                    # ahead-of-cursor readers marked by its first write.)
-                    "            for _k in range(_seen, c.dcount):",
-                    *push_readers("                ", "c.dlist[_k]", ahead_of_cursor=True),
-                    "            _seen = c.dcount",
+                    "            for _k in range(c.wcount):",
+                    "                _s = c.wlog[_k]",
+                    "                for _e in range(DL_READER_OFF[_s], DL_READER_OFF[_s + 1]):",
+                    "                    _p = DL_READER_RANK[_e]",
+                    "                    if _p > _r:",
+                    f"                        {set_bit}",
+                    "                        if _p > _pmax:",
+                    "                            _pmax = _p",
+                    "                    elif DL_PURE[_p]:",
+                    f"                        {set_next_bit}",
+                    "                        if _p < _nmin:",
+                    "                            _nmin = _p",
+                    "                        if _p > _nmax:",
+                    "                            _nmax = _p",
                     "            _r += 1",
                 ]
             )
@@ -2013,10 +2105,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "",
                 # Early exit: nothing dirtied this iteration that any process
                 # (or any seq edge check) could react to -> no further
-                # iteration can do anything. A genuine combinational loop keeps
-                # some interesting sid dirty forever, so this never fires for
-                # one -- DELTA_LIMIT and the value-convergence check remain the
-                # safety net.
+                # iteration can do anything. (A _pnext mark implies its sid was
+                # dirtied and has a reader, so it can't be pending here.) A
+                # genuine combinational loop keeps some interesting sid dirty
+                # forever, so this never fires for one -- DELTA_LIMIT and the
+                # value-convergence check remain the safety net.
                 "        _any_int = 0",
                 "        for _k in range(c.dcount):",
                 "            if DL_IS_INTERESTING[c.dlist[_k]]:",
@@ -2052,6 +2145,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # Sparse-set counts first: init lines below may mark_dirty().
             "        self.ctx.dcount = 0",
             "        self.ctx.nba_count = 0",
+            "        self.ctx.wcount = 0",
+            "        self.ctx.wepoch = 1",
             "        for i in range(N_SIGS):",
             "            self.ctx.val[i] = 0",
             "            self.ctx.mask[i] = 0",
@@ -2059,6 +2154,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            self.ctx.wide_words[i] = 0",
             "            self.ctx.wide_offset[i] = 0",
             "            self.ctx.dbit[i] = 0",
+            "            self.ctx.wmark[i] = 0",
             "            self.ctx.nba_val[i] = 0",
             "            self.ctx.nba_mask[i] = 0",
             "            self.ctx.nba_bit[i] = 0",

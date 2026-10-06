@@ -1,14 +1,17 @@
 """A/B equivalence of the compiled engine's two ``delta_loop`` engines.
 
-The queue engine (default) and the scan engine (``VERIFORGE_DELTA_ENGINE=scan``)
-are designed to run *exactly the same processes in exactly the same order in
-every delta iteration* -- only the bookkeeping that decides which processes run
-differs (see notes/plans/work_queue_delta_engine.md, "Stage 2 design
-decisions"). That makes equivalence directly checkable: on every step, both
-engines must produce identical signal values AND an identical ``delta_loop``
-iteration count (``CompiledSim.step()``'s return value). Identical iteration
-counts are what guarantee ``DELTA_LIMIT``, ``DELTA_CONV_CHECK_START`` and the
-value-convergence detector behave identically under both engines.
+The scan engine (default) and the queue engine (``VERIFORGE_DELTA_ENGINE=queue``)
+run the same processes in the same rank order every delta iteration, except
+that the queue engine skips *redundant reruns of pure processes* -- reruns on
+inputs unchanged since the process last ran, which are no-ops (see
+notes/plans/work_queue_delta_engine.md, "Stage 2 design decisions" and
+"Redundant-rerun elimination"). A skipped no-op dirties nothing, so
+equivalence stays directly checkable: on every step, both engines must produce
+identical signal values AND an identical ``delta_loop`` iteration count
+(``CompiledSim.step()``'s return value). Identical iteration counts are what
+guarantee ``DELTA_LIMIT``, ``DELTA_CONV_CHECK_START`` and the value-convergence
+detector behave identically under both engines -- and they would expose a
+"pure" process whose rerun was not actually a no-op.
 
 Designs are chosen for the risky surfaces: continuous-assign chains declared
 out of dependency order, combinational always blocks, a combinational block
@@ -204,6 +207,21 @@ module t(input s, input r, output q, output qn);
 endmodule
 """
 
+# Continuous assigns that read a combinational block's output. Combos are
+# ranked after every continuous assign, so these readers rank *below* their
+# writer: under the queue engine's redundant-rerun elimination they are pure
+# readers that must be re-run next iteration (the `_pnext` path), not skipped.
+_CONT_READS_COMBO = """
+module t(input clk, input [7:0] a, input [7:0] b, output reg [7:0] r, output [7:0] z);
+  reg [7:0] y;
+  wire [7:0] u = a ^ b;
+  always @(*) y = u + 8'd3;
+  wire [7:0] v = y ^ a;
+  assign z = v + y;
+  always @(posedge clk) r <= z;
+endmodule
+"""
+
 # A genuine combinational cycle: a three-inverter ring, enabled by `en`.
 _RING_OSCILLATOR = """
 module t(input en, output a);
@@ -248,6 +266,11 @@ def test_constant_driver_async_reset_negedge(monkeypatch):
         steps.append({"clk": Value(1, width=1)})
         steps.append({"clk": Value(0, width=1)})
     _ab(_CONST_ASYNC_NEGEDGE, steps, monkeypatch, label="const_async_negedge")
+
+
+def test_cont_reads_combo_output(monkeypatch):
+    steps = _clocked_steps({"a": 8, "b": 8}, 40, seed=6)
+    _ab(_CONT_READS_COMBO, steps, monkeypatch, label="cont_reads_combo")
 
 
 def test_sr_latch_convergent_feedback(monkeypatch):
@@ -340,3 +363,51 @@ def test_random_statement_modules(batch_idx, monkeypatch):
     inputs = {name: width for name, width, _signed in td.FIXED_SIGNALS}
     steps = _clocked_steps(inputs, 12, seed=200 + batch_idx)
     _ab(source, steps, monkeypatch, label=f"diff_stmt[{batch_idx}]")
+
+
+# ── rerun-purity classification ──────────────────────────────────────
+
+_PURITY_MODULE = """
+module t(input [7:0] a, input [7:0] b, output [7:0] p_plain, output [7:0] p_sys,
+         output [7:0] i_func, output [7:0] i_const, output [3:0] p_slice);
+  reg [7:0] mem [0:3];
+  function [7:0] f(input [7:0] x);
+    f = x + 8'd1;
+  endfunction
+  assign p_plain = a ^ b;
+  assign p_sys = $unsigned(a) + $signed(b);
+  assign i_func = f(a);
+  assign i_const = 8'd5;
+  assign p_slice[3:0] = a[3:0];
+  assign mem[0] = a;
+endmodule
+"""
+
+
+def test_rerun_purity_classification():
+    """Only processes whose rerun on unchanged inputs is a provable no-op may
+    skip it: plain signal targets with pure RHS. Memory targets (marker
+    toggles), user-function calls (function-internal writes), and constant
+    drivers (empty sensitivity) keep the exact scan-engine schedule."""
+    from veriforge.sim.compiled.codegen import CythonCodegen
+
+    design = td._parse_design(_PURITY_MODULE)
+    cg = CythonCodegen()
+    cg.generate(design.modules[0])
+    # Each process writes exactly one signal here; map it back via its body.
+    pure_by_target = {}
+    names = {sid: name for name, sid in cg._signal_map.items()}
+    for idx, (_sens, body) in enumerate(cg._processes):
+        text = "\n".join(body)
+        targets = [names[sid] for sid in names if f"mark_dirty(c, {sid})" in text]
+        for t in targets:
+            pure_by_target[t] = idx in cg._pure_conts
+    assert pure_by_target["p_plain"] is True
+    assert pure_by_target["p_sys"] is True
+    assert pure_by_target["p_slice"] is True
+    assert pure_by_target["i_func"] is False
+    assert pure_by_target["i_const"] is False
+    # The memory-target assign is impure too (its body toggles a marker).
+    mem_procs = [i for i, (_s, body) in enumerate(cg._processes) if any("mem_" in line for line in body)]
+    assert mem_procs
+    assert not any(i in cg._pure_conts for i in mem_procs)

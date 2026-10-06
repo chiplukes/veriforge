@@ -166,15 +166,15 @@ implementations, chosen at codegen time:
   actually executed.
 - `queue` (opt-in, `VERIFORGE_DELTA_ENGINE=queue`): sparse dirty lists plus a
   static reader index, so each iteration only touches processes whose inputs
-  changed. Per-iteration cost scales with real activity.
+  changed, and pure continuous assigns skip reruns on unchanged inputs.
+  Per-iteration cost scales with real activity.
 
-Both run exactly the same processes in the same order every iteration, so
-results and delta-iteration counts are identical (enforced by
+Results and delta-iteration counts are identical either way (enforced by
 `tests/test_sim/compiled/test_delta_engine_equivalence.py`); only speed
-differs. `queue` is 3-5x faster on large designs where a small fraction of the
-logic changes per cycle, and slower when most of the design is active every
-cycle or the design is small. Try both on a large design. See
-`notes/plans/work_queue_delta_engine.md` for measurements.
+differs. `queue` is roughly 1.5-5x faster on larger designs at low-to-moderate
+activity, and slower (down to ~0.65x measured) when most of the design is
+active every cycle, or when the design is tiny. Try both on a large design.
+See `notes/plans/work_queue_delta_engine.md` for measurements.
 
 ## Test Coverage
 
