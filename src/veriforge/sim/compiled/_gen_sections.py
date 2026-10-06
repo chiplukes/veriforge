@@ -542,10 +542,43 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                    self.ctx.mask[clk_sid] = 0",
         ]
 
-    def _cont_settle_first_cycle_lines(self, indent: str) -> list[str]:
-        """`_cont_settle_fixpoint_lines`, guarded to loop iteration 0 only."""
-        body = self._cont_settle_fixpoint_lines(indent + "    ")
-        return [f"{indent}if i == 0:", *body] if body else []
+    def _settle_via_delta_loop_lines(self, sn: int, indent: str) -> list[str]:
+        """Settle pending external perturbation by snapshotting the CURRENT
+        (pre-settle) ``ctx.val``/``ctx.mask`` into ``sv``/``sm`` and calling
+        ``delta_loop()`` itself, instead of a second, separate, cont-only,
+        unconditional ``N_cont``-bounded implementation
+        (``_cont_settle_fixpoint_lines``).
+
+        Taking the snapshot from the CURRENT state first, rather than
+        letting the caller's own upcoming "real" snapshot double as it, is
+        what makes this safe to use for a pre-edge settle: it makes
+        ``sv[sid] == c.val[sid]`` for every signal, including any clock,
+        so ``delta_loop()``'s own edge-detection can never see a spurious
+        transition here -- nothing has genuinely toggled anything yet, so
+        this can only run cont/combo work gated by whatever dirty bits an
+        external perturbation (an applied event, or a reactive ``drive()``
+        before a fresh ``batch_run()`` call) left behind. It can never
+        spuriously fire a sequential process. The caller's own real
+        pre-edge snapshot that follows immediately after then captures the
+        now-settled state, exactly as it always has.
+
+        This is also exactly what ``batch_run()``'s own ``ev_applied``
+        branch already does inline for a mid-batch scheduled event --
+        factored out here so the "settle before this call's first real
+        edge" case (see ``notes/plans/work_queue_delta_engine.md``, Stage
+        1) can reuse the identical, already-tested pattern instead of
+        ``_cont_settle_fixpoint_lines()``'s separate mechanism, which never
+        dispatches combo blocks at all and pays for every cont process
+        unconditionally regardless of design size.
+        """
+        return [
+            f"{indent}memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
+            f"{indent}memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
+            f"{indent}memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+            f"{indent}memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+            *self._mem_snap_memcpy_lines(indent),
+            f"{indent}delta_loop(&self.ctx, sv, sm)",
+        ]
 
     def _mem_snap_memcpy_lines(self, indent: str) -> list[str]:
         """Lines that copy every memory's live val/mask arrays into their
@@ -2238,8 +2271,16 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # Snapshot before posedge.  Only the first cycle can",
                 "                # enter with un-settled continuous assigns (reactive",
                 "                # drives before this call); every later cycle follows a",
-                "                # delta_loop() that already ran to convergence.",
-                *self._cont_settle_first_cycle_lines("                "),
+                "                # delta_loop() that already ran to convergence. Settle",
+                "                # through delta_loop() itself (dirty-gated, activity-",
+                "                # proportional) rather than a separate cont-only,",
+                "                # unconditional N_cont-bounded pass -- see",
+                "                # notes/plans/work_queue_delta_engine.md, Stage 1.",
+                "                if i == 0:",
+                *(f"    {ln}" for ln in self._settle_via_delta_loop_lines(sn, "                ")),
+                "                    if self.ctx.error_code != ERR_NONE:",
+                "                        cycles_run = i + 1",
+                "                        break",
                 f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
                 f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
