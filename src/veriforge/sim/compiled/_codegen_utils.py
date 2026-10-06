@@ -13,25 +13,42 @@ _PROCESS_LOOP_LIMIT = 100_000
 _I32_MAX = 0x7FFFFFFF
 _I32_MIN = -0x80000000
 
-DELTA_ENGINE_MODES = ("scan", "queue")
+DELTA_ENGINE_MODES = ("auto", "scan", "queue")
+
+# `auto` picks the queue engine for designs with more than this many
+# continuous-assign + combinational processes. Measured crossover (see
+# notes/benchmarks_work_queue.md): queue loses ~25% on a 9-process design and
+# ~10% at ~40 processes, and wins 1.5x+ at ~320 processes unless nearly all of
+# the design is active every cycle.
+AUTO_QUEUE_MIN_PROCESSES = 64
 
 
 def delta_engine_mode() -> str:
-    """Which ``delta_loop`` implementation codegen emits
-    (``VERIFORGE_DELTA_ENGINE``).
+    """The requested ``delta_loop`` implementation (``VERIFORGE_DELTA_ENGINE``).
 
-    ``"scan"`` (default): each delta iteration scans all signals and checks
-    every continuous-assign/combinational process -- per-iteration cost
-    scales with total design size. ``"queue"`` (opt-in): per-iteration cost
-    proportional to real activity, and redundant reruns of pure processes
-    skipped (see ``notes/plans/work_queue_delta_engine.md``) -- 1.5-5x
-    faster on larger designs at low-to-moderate activity, slower when most
-    of a design is active every cycle or the design is tiny. Results and
+    ``"scan"``: each delta iteration scans all signals and checks every
+    continuous-assign/combinational process -- per-iteration cost scales with
+    total design size; cheapest per process actually run. ``"queue"``:
+    per-iteration cost proportional to real activity, and redundant reruns of
+    pure processes skipped (see ``notes/plans/work_queue_delta_engine.md``) --
+    1.5-5x faster on larger designs at low-to-moderate activity, slower on
+    tiny designs or when nearly everything is active every cycle. ``"auto"``
+    (default): ``queue`` above ``AUTO_QUEUE_MIN_PROCESSES`` processes, else
+    ``scan`` -- resolved per design by ``resolve_delta_engine``. Results and
     delta-iteration counts are identical either way; only speed differs.
     """
-    mode = (get_env("DELTA_ENGINE", "scan") or "scan").strip().lower()
+    mode = (get_env("DELTA_ENGINE", "auto") or "auto").strip().lower()
     if mode not in DELTA_ENGINE_MODES:
         raise ValueError(f"VERIFORGE_DELTA_ENGINE must be one of {DELTA_ENGINE_MODES}, got {mode!r}")
+    return mode
+
+
+def resolve_delta_engine(n_processes: int) -> str:
+    """The engine actually emitted for a design with *n_processes*
+    continuous-assign + combinational processes: ``"scan"`` or ``"queue"``."""
+    mode = delta_engine_mode()
+    if mode == "auto":
+        return "queue" if n_processes > AUTO_QUEUE_MIN_PROCESSES else "scan"
     return mode
 
 

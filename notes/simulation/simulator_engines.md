@@ -158,13 +158,16 @@ blocks run on every `run()` call to propagate external `drive()` changes.
 ### Compiled Delta-Loop Engines (`VERIFORGE_DELTA_ENGINE`)
 
 The compiled engine's `delta_loop` (the per-edge settle loop) has two
-implementations, chosen at codegen time:
+implementations, chosen per design at codegen time. The default, `auto`, uses
+`queue` for designs with more than 64 continuous-assign/combinational
+processes and `scan` otherwise; set `VERIFORGE_DELTA_ENGINE=scan` or `=queue`
+to force one.
 
-- `scan` (default): every delta iteration scans all signals for dirty flags
+- `scan`: every delta iteration scans all signals for dirty flags
   and checks every continuous-assign/combinational process's sensitivity.
   Per-iteration cost scales with total design size; cheapest per process
   actually executed.
-- `queue` (opt-in, `VERIFORGE_DELTA_ENGINE=queue`): sparse dirty lists plus a
+- `queue`: sparse dirty lists plus a
   static reader index, so each iteration only touches processes whose inputs
   changed, and pure continuous assigns skip reruns on unchanged inputs.
   Per-iteration cost scales with real activity.
@@ -173,8 +176,9 @@ Results and delta-iteration counts are identical either way (enforced by
 `tests/test_sim/compiled/test_delta_engine_equivalence.py`); only speed
 differs. `queue` is roughly 1.5-5x faster on larger designs at low-to-moderate
 activity, and slower (down to ~0.65x measured) when most of the design is
-active every cycle, or when the design is tiny. Try both on a large design.
-See `notes/plans/work_queue_delta_engine.md` for measurements.
+active every cycle, or when the design is tiny. On a real 3112-process
+streaming pipeline that keeps most of its datapath busy, `queue` measured
+~1.03x. See `notes/plans/work_queue_delta_engine.md` for measurements.
 
 ## Test Coverage
 

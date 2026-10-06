@@ -3,15 +3,21 @@
 ## Status
 
 **Stages 0, 1, and 2 are done, plus redundant-rerun elimination.** The queue
-engine is implemented, verified equivalent to the scan engine (identical
-signal values and identical delta-iteration counts on every step), and
-shipped **opt-in** (`VERIFORGE_DELTA_ENGINE=queue`; default stays `scan`).
-With redundant-rerun elimination (2026-10-06, see that section below) it is
-1.5-5.6x faster than scan on larger designs at low-to-moderate activity,
-roughly at parity to 0.65x when most of a design toggles every cycle, and
-~0.73x on the tiny `benchmark.py` DUT. **Default unchanged pending a
-measurement of `gfwx-fpga` with both engines** -- see "Recommendation" and
-"Possible next steps" at the end of the Stage 2 results.
+engine is verified equivalent to the scan engine (identical signal values and
+identical delta-iteration counts on every step). **Default (2026-10-06):
+`auto`** -- queue for designs with more than 64 continuous-assign/combinational
+processes, scan otherwise (`AUTO_QUEUE_MIN_PROCESSES`); `VERIFORGE_DELTA_ENGINE`
+forces either. Measured queue/scan: 1.5-5.6x on larger designs at
+low-to-moderate activity, 0.65-1.0x on synthetic fully-active designs, ~0.73x
+on the tiny `benchmark.py` DUT (which `auto` keeps on scan).
+
+**`gfwx-fpga` result (2026-10-06):** scan ~444.9 us/cycle, queue ~431.0
+us/cycle (~1.03x), with faster compiles (290.5 s vs 371.1 s). So the
+delta-loop bookkeeping this plan targeted is *not* what dominates that
+design: removing nearly all of it saved ~14 us of ~445 us per cycle. The
+remaining ~430 us/cycle lies elsewhere (process bodies, sequential bodies,
+wide-signal operations, per-cycle snapshot copies) -- the next step is to
+profile where, before choosing an optimization.
 
 ### Stage 2 results (2026-10-05)
 

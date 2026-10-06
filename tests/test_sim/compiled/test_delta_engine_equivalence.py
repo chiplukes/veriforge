@@ -1,6 +1,6 @@
 """A/B equivalence of the compiled engine's two ``delta_loop`` engines.
 
-The scan engine (default) and the queue engine (``VERIFORGE_DELTA_ENGINE=queue``)
+The scan and queue engines (``VERIFORGE_DELTA_ENGINE=scan``/``queue``; default ``auto`` picks per design)
 run the same processes in the same rank order every delta iteration, except
 that the queue engine skips *redundant reruns of pure processes* -- reruns on
 inputs unchanged since the process last ran, which are no-ops (see
@@ -411,3 +411,35 @@ def test_rerun_purity_classification():
     mem_procs = [i for i, (_s, body) in enumerate(cg._processes) if any("mem_" in line for line in body)]
     assert mem_procs
     assert not any(i in cg._pure_conts for i in mem_procs)
+
+
+# ── engine selection ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("env", "n_lanes", "expected"),
+    [
+        (None, 4, "scan"),  # auto, 20 processes
+        (None, 20, "queue"),  # auto, 100 processes
+        ("scan", 20, "scan"),
+        ("queue", 4, "queue"),
+    ],
+)
+def test_engine_selection(env, n_lanes, expected, monkeypatch):
+    """`auto` (the default) emits the queue engine only above
+    AUTO_QUEUE_MIN_PROCESSES processes; an explicit setting always wins."""
+    from veriforge.sim.compiled._codegen_utils import AUTO_QUEUE_MIN_PROCESSES
+    from veriforge.sim.compiled.codegen import CythonCodegen
+
+    if env is None:
+        monkeypatch.delenv("VERIFORGE_DELTA_ENGINE", raising=False)
+    else:
+        monkeypatch.setenv("VERIFORGE_DELTA_ENGINE", env)
+    gen = _load_benchmarks_module("wide_bench_gen")
+    design = td._parse_design(gen.make_cont_bench(n_lanes, 4))
+    cg = CythonCodegen()
+    pyx = cg.generate(design.modules[0])
+    n_procs = len(cg._processes) + len(cg._combo_processes)
+    if env is None:
+        assert (n_procs > AUTO_QUEUE_MIN_PROCESSES) == (expected == "queue")
+    assert ("DL_READER_OFF" in pyx) == (expected == "queue")

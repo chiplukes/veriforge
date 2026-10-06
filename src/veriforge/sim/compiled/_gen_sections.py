@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from veriforge.sim.compiled._codegen_utils import delta_engine_mode
+from veriforge.sim.compiled._codegen_utils import resolve_delta_engine
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _PROCESS_LOOP_LIMIT,
@@ -966,7 +966,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines: list[str] = []
         # Emitted first: every later helper (narrow templates, wide/memory
         # helpers) and every process body marks signals dirty through these.
-        lines.extend(_gen_dirty_helpers(write_log=delta_engine_mode() == "queue"))
+        lines.extend(_gen_dirty_helpers(write_log=self._delta_engine() == "queue"))
         lines.extend(_gen_narrow_accessor_code())
         lines.extend(_gen_narrow_stage_code())
         lines.extend(_gen_narrow_assign_code())
@@ -1508,7 +1508,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     # ── delta_loop ──────────────────────────────────────────────────────
     #
-    # Two engines (codegen option, see `delta_engine_mode()`) share every
+    # Two engines (codegen option, see `delta_engine_mode()`/`_delta_engine()`) share every
     # piece below except how each iteration decides which cont/combo
     # processes run. Both run the same processes in the same rank order every
     # iteration, except that the queue engine skips no-op reruns of pure
@@ -1517,8 +1517,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     # value-convergence detector behave identically. See
     # notes/plans/work_queue_delta_engine.md, "Stage 2 design decisions".
 
+    def _delta_engine(self) -> str:
+        """``"scan"`` or ``"queue"`` for this design (``auto`` resolved by
+        process count). Both the delta loop and ``mark_dirty``'s write log
+        depend on it, so they must agree -- hence one place decides."""
+        return resolve_delta_engine(len(self._processes) + len(self._combo_processes))
+
     def _gen_delta_loop(self) -> str:
-        if delta_engine_mode() == "scan":
+        if self._delta_engine() == "scan":
             return self._gen_delta_loop_scan()
         return self._gen_delta_loop_queue()
 
