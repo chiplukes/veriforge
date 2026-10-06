@@ -66,3 +66,34 @@ def make_wide_bench(n_lanes: int, active_lanes: int) -> str:
         ]
     lines.append("endmodule")
     return "\n".join(lines)
+
+
+def make_cont_bench(n_lanes: int, depth: int = 4) -> str:
+    """Self-contained `module bench(...)`: `n_lanes` independent continuous-
+    assign chains (`depth` hops each), each fed by its own input port, plus a
+    single clocked counter.
+
+    Unlike `make_wide_bench`, real per-cycle activity is fully controlled by
+    the stimulus: a lane's chain re-evaluates only when its own input port is
+    driven to a new value (e.g. via `batch_run` events), and there is exactly
+    one sequential process -- no per-lane always block and no signal fanning
+    out to every lane. Cost beyond what the driven lanes need is therefore
+    pure delta-loop bookkeeping. This mirrors the profile of the design that
+    motivated the work-queue engine (`gfwx-fpga`: 3112 continuous assigns, 21
+    sequential processes).
+    """
+    if n_lanes <= 0 or depth <= 0:
+        raise ValueError("n_lanes and depth must be positive")
+    ports = ["    input clk", "    input rst"]
+    ports += [f"    input [15:0] in_{i}" for i in range(n_lanes)]
+    ports += [f"    output [15:0] out_{i}" for i in range(n_lanes)]
+    lines = ["module bench(", ",\n".join(ports), ");", "  reg [15:0] cnt;"]
+    lines.append("  always @(posedge clk) cnt <= rst ? 16'd0 : cnt + 16'd1;")
+    for i in range(n_lanes):
+        prev = f"in_{i}"
+        for d in range(depth):
+            lines.append(f"  wire [15:0] w{d}_{i} = ({prev} ^ 16'h{(0xABCD + 7 * d) & 0xFFFF:04X}) + 16'd{d + 1};")
+            prev = f"w{d}_{i}"
+        lines.append(f"  assign out_{i} = {prev};")
+    lines.append("endmodule")
+    return "\n".join(lines)

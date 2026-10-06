@@ -43,7 +43,7 @@ cdef inline void _whole_assign_signal(SimCtx *c, int dst_sid, int src_sid) noexc
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -136,7 +136,7 @@ cdef inline void _whole_assign_signal_s(SimCtx *c, int dst_sid, int src_sid) noe
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 
 cdef inline void _whole_stage_and_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
@@ -165,7 +165,7 @@ cdef inline void _whole_stage_and_signal(SimCtx *c, int dst_sid, int lhs_sid, in
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm | rm) & ~(~lv & ~lm) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
@@ -194,7 +194,7 @@ cdef inline void _whole_stage_or_signal(SimCtx *c, int dst_sid, int lhs_sid, int
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm | rm) & ~(lv & ~lm) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
@@ -223,7 +223,7 @@ cdef inline void _whole_stage_xor_signal(SimCtx *c, int dst_sid, int lhs_sid, in
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_and_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
@@ -249,7 +249,7 @@ cdef inline void _whole_stage_and_const(SimCtx *c, int dst_sid, int lhs_sid, uns
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv & rhs_const) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm & rhs_const) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
@@ -275,7 +275,7 @@ cdef inline void _whole_stage_or_const(SimCtx *c, int dst_sid, int lhs_sid, unsi
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv | rhs_const) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm & ~rhs_const) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
@@ -301,7 +301,7 @@ cdef inline void _whole_stage_xor_const(SimCtx *c, int dst_sid, int lhs_sid, uns
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv ^ rhs_const) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_or_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -333,7 +333,7 @@ cdef inline void _whole_stage_mask_or_signal(SimCtx *c, int dst_sid, int left_si
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv & rhs_const) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((((lm & rhs_const) | rm) & ~((lv & rhs_const) & ~(lm & rhs_const)) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_and_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -365,7 +365,7 @@ cdef inline void _whole_stage_mask_and_signal(SimCtx *c, int dst_sid, int left_s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv & rhs_const) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((((lm & rhs_const) | rm) & ~(~(lv & rhs_const) & ~(lm & rhs_const)) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_xor_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -397,7 +397,7 @@ cdef inline void _whole_stage_mask_xor_signal(SimCtx *c, int dst_sid, int left_s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv & rhs_const) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_mask_xor_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -429,7 +429,7 @@ cdef inline void _whole_stage_or_mask_xor_signal(SimCtx *c, int dst_sid, int lef
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv | rhs_const) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & ~rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_add_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -472,7 +472,7 @@ cdef inline void _whole_stage_mask_add_signal(SimCtx *c, int dst_sid, int left_s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv & rhs_const) + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_mask_add_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -515,7 +515,7 @@ cdef inline void _whole_stage_or_mask_add_signal(SimCtx *c, int dst_sid, int lef
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv | rhs_const) + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & ~rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_or_mask(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long rhs_const) noexcept nogil:
@@ -557,7 +557,7 @@ cdef inline void _whole_stage_sub_signal_or_mask(SimCtx *c, int dst_sid, int sub
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (tv | rhs_const)) & tail_mask))
         c.nba_mask[dst_sid] = <long long>((sm | (tm & ~rhs_const)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_mask(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long rhs_const) noexcept nogil:
@@ -599,7 +599,7 @@ cdef inline void _whole_stage_sub_signal_mask(SimCtx *c, int dst_sid, int sub_si
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (tv & rhs_const)) & tail_mask))
         c.nba_mask[dst_sid] = <long long>((sm | (tm & rhs_const)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_sub_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -641,7 +641,7 @@ cdef inline void _whole_stage_mask_sub_signal(SimCtx *c, int dst_sid, int left_s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv & rhs_const) - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_mask_sub_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -683,7 +683,7 @@ cdef inline void _whole_stage_or_mask_sub_signal(SimCtx *c, int dst_sid, int lef
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv | rhs_const) - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((lm & ~rhs_const) | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_mask_and_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -715,7 +715,7 @@ cdef inline void _whole_stage_or_mask_and_signal(SimCtx *c, int dst_sid, int lef
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv | rhs_const) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((((lm & ~rhs_const) | rm) & ~(~(lv | rhs_const) & ~(lm & ~rhs_const)) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_mask_or_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
@@ -747,7 +747,7 @@ cdef inline void _whole_stage_or_mask_or_signal(SimCtx *c, int dst_sid, int left
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((lv | rhs_const) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((((lm & ~rhs_const) | rm) & ~((lv | rhs_const) & ~(lm & ~rhs_const)) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_add_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -801,7 +801,7 @@ cdef inline void _whole_stage_add_const_add_signal(SimCtx *c, int dst_sid, int a
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((av + const_word) + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((am | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_sub_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -855,7 +855,7 @@ cdef inline void _whole_stage_add_const_sub_signal(SimCtx *c, int dst_sid, int a
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((av + const_word) - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((am | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_add_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
@@ -907,7 +907,7 @@ cdef inline void _whole_stage_sub_signal_add_const(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (mv + const_word))) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | mm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_xor_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
@@ -949,7 +949,7 @@ cdef inline void _whole_stage_sub_signal_xor_const(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (mv ^ const_word))) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | mm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_add_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1002,7 +1002,7 @@ cdef inline void _whole_stage_sub_const_add_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - const_word) + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_add_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1055,7 +1055,7 @@ cdef inline void _whole_stage_const_sub_add_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((const_word - sv) + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_sub_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1106,7 +1106,7 @@ cdef inline void _whole_stage_const_sub_sub_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((const_word - sv) - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_sub_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1157,7 +1157,7 @@ cdef inline void _whole_stage_sub_const_sub_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - const_word) - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_sub_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
@@ -1208,7 +1208,7 @@ cdef inline void _whole_stage_sub_signal_sub_const(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (mv - const_word)) & tail_mask))
         c.nba_mask[dst_sid] = <long long>((sm | mm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_const_sub(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int mix_sid) noexcept nogil:
@@ -1259,7 +1259,7 @@ cdef inline void _whole_stage_sub_signal_const_sub(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - (const_word - mv)) & tail_mask))
         c.nba_mask[dst_sid] = <long long>((sm | mm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_sub_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int sub_sid) noexcept nogil:
@@ -1300,7 +1300,7 @@ cdef inline void _whole_stage_xor_const_sub_signal(SimCtx *c, int dst_sid, int x
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((xv ^ const_word) - sv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((xm | sm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_xor_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1342,7 +1342,7 @@ cdef inline void _whole_stage_sub_const_xor_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - const_word) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_xor_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1384,7 +1384,7 @@ cdef inline void _whole_stage_const_sub_xor_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((const_word - sv) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((sm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_and_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1426,7 +1426,7 @@ cdef inline void _whole_stage_sub_const_and_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - const_word) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((sm | rm) & ~(~(sv - const_word) & ~sm) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_or_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1468,7 +1468,7 @@ cdef inline void _whole_stage_sub_const_or_signal(SimCtx *c, int dst_sid, int su
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((sv - const_word) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((sm | rm) & ~((sv - const_word) & ~sm) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_and_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1510,7 +1510,7 @@ cdef inline void _whole_stage_const_sub_and_signal(SimCtx *c, int dst_sid, int s
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((const_word - sv) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((sm | rm) & ~(~(const_word - sv) & ~sm) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_or_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1552,7 +1552,7 @@ cdef inline void _whole_stage_const_sub_or_signal(SimCtx *c, int dst_sid, int su
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((const_word - sv) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((sm | rm) & ~((const_word - sv) & ~sm) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_add_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int add_sid) noexcept nogil:
@@ -1594,7 +1594,7 @@ cdef inline void _whole_stage_xor_const_add_signal(SimCtx *c, int dst_sid, int x
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((xv ^ const_word) + av) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((xm | am) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_and_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1625,7 +1625,7 @@ cdef inline void _whole_stage_xor_const_and_signal(SimCtx *c, int dst_sid, int x
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((xv ^ const_word) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((xm | rm) & ~(~(xv ^ const_word) & ~xm) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_or_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1656,7 +1656,7 @@ cdef inline void _whole_stage_xor_const_or_signal(SimCtx *c, int dst_sid, int xo
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((xv ^ const_word) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((xm | rm) & ~((xv ^ const_word) & ~xm) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_xor_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1687,7 +1687,7 @@ cdef inline void _whole_stage_xor_const_xor_signal(SimCtx *c, int dst_sid, int x
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((xv ^ const_word) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((xm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_and_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1731,7 +1731,7 @@ cdef inline void _whole_stage_add_const_and_signal(SimCtx *c, int dst_sid, int a
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((av + const_word) & rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((am | rm) & ~(~(av + const_word) & ~am) & ~(~rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_or_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1775,7 +1775,7 @@ cdef inline void _whole_stage_add_const_or_signal(SimCtx *c, int dst_sid, int ad
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((av + const_word) | rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(((am | rm) & ~((av + const_word) & ~am) & ~(rv & ~rm)) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_xor_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -1819,7 +1819,7 @@ cdef inline void _whole_stage_add_const_xor_signal(SimCtx *c, int dst_sid, int a
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(((av + const_word) ^ rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((am | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
@@ -1859,7 +1859,7 @@ cdef inline void _whole_stage_add_signal(SimCtx *c, int dst_sid, int lhs_sid, in
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv + rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
@@ -1898,7 +1898,7 @@ cdef inline void _whole_stage_sub_signal(SimCtx *c, int dst_sid, int lhs_sid, in
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>((lm | rm) & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long const_word) noexcept nogil:
@@ -1937,7 +1937,7 @@ cdef inline void _whole_stage_add_const(SimCtx *c, int dst_sid, int lhs_sid, uns
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv + const_word) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(lm & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -1999,7 +1999,7 @@ cdef inline void _whole_stage_add_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2086,7 +2086,7 @@ cdef inline void _whole_stage_add_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2147,7 +2147,7 @@ cdef inline void _whole_stage_sub_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2232,7 +2232,7 @@ cdef inline void _whole_stage_sub_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_and_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2283,7 +2283,7 @@ cdef inline void _whole_stage_and_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_and_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2350,7 +2350,7 @@ cdef inline void _whole_stage_and_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2401,7 +2401,7 @@ cdef inline void _whole_stage_or_signal_shl(SimCtx *c, int dst_sid, int lhs_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2468,7 +2468,7 @@ cdef inline void _whole_stage_or_signal_shr(SimCtx *c, int dst_sid, int lhs_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2519,7 +2519,7 @@ cdef inline void _whole_stage_xor_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2586,7 +2586,7 @@ cdef inline void _whole_stage_xor_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_not_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
@@ -2631,7 +2631,7 @@ cdef inline void _whole_stage_not_shl(SimCtx *c, int dst_sid, int signal_sid, in
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _umul64_addcarry(unsigned long long a, unsigned long long b, unsigned long long carry_in, unsigned long long *out_lo, unsigned long long *out_carry) noexcept nogil:
@@ -2754,7 +2754,7 @@ cdef inline void _whole_stage_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
         if dst_words > 0:
             c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
             c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-        c.nba_dirty[dst_sid] = 1
+        mark_nba(c, dst_sid)
         c.nba_pending = 1
         return
     for i in range(out_words):
@@ -2791,7 +2791,7 @@ cdef inline void _whole_stage_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
@@ -2841,7 +2841,7 @@ cdef inline void _whole_stage_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
         if dst_words > 0:
             c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
             c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-        c.nba_dirty[dst_sid] = 1
+        mark_nba(c, dst_sid)
         c.nba_pending = 1
         return
     if next_index < prod_words:
@@ -2889,7 +2889,7 @@ cdef inline void _whole_stage_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mul_const_shl(SimCtx *c, int dst_sid, int mul_sid, unsigned long long rhs_const, int rhs_width, int shift) noexcept nogil:
@@ -2939,7 +2939,7 @@ cdef inline void _whole_stage_mul_const_shl(SimCtx *c, int dst_sid, int mul_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid, unsigned long long rhs_const, int rhs_width, int shift) noexcept nogil:
@@ -2975,7 +2975,7 @@ cdef inline void _whole_stage_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid,
             if dst_words > 0:
                 c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
                 c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-            c.nba_dirty[dst_sid] = 1
+            mark_nba(c, dst_sid)
             c.nba_pending = 1
             return
     if next_index < prod_words:
@@ -3028,7 +3028,7 @@ cdef inline void _whole_stage_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline object _sig_py_unsigned(SimCtx *c, int sid):
@@ -3549,7 +3549,7 @@ cdef inline void _whole_stage_all_x(SimCtx *c, int dst_sid):
     if dst_words > 0:
         c.nba_val[dst_sid] = 0
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_py_value(SimCtx *c, int dst_sid, object value):
@@ -3570,7 +3570,7 @@ cdef inline void _whole_stage_py_value(SimCtx *c, int dst_sid, object value):
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_py_bits(SimCtx *c, int dst_sid, object value, object mask):
@@ -3592,7 +3592,7 @@ cdef inline void _whole_stage_py_bits(SimCtx *c, int dst_sid, object value, obje
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_shl(SimCtx *c, int dst_sid, int mask_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3638,7 +3638,7 @@ cdef inline void _whole_stage_mask_shl(SimCtx *c, int dst_sid, int mask_sid, uns
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mask_shr(SimCtx *c, int dst_sid, int mask_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3696,7 +3696,7 @@ cdef inline void _whole_stage_mask_shr(SimCtx *c, int dst_sid, int mask_sid, uns
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_const_shl(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3742,7 +3742,7 @@ cdef inline void _whole_stage_or_const_shl(SimCtx *c, int dst_sid, int signal_si
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_or_const_shr(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3800,7 +3800,7 @@ cdef inline void _whole_stage_or_const_shr(SimCtx *c, int dst_sid, int signal_si
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_shl(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3846,7 +3846,7 @@ cdef inline void _whole_stage_xor_const_shl(SimCtx *c, int dst_sid, int signal_s
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_xor_const_shr(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -3904,7 +3904,7 @@ cdef inline void _whole_stage_xor_const_shr(SimCtx *c, int dst_sid, int signal_s
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_div_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift):
@@ -4024,7 +4024,7 @@ cdef inline void _whole_stage_div_const_shl(SimCtx *c, int dst_sid, int div_sid,
         c.wide_nba_mask[dst_offset + out_index] = 0
     c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
     c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_div_const_shr(SimCtx *c, int dst_sid, int div_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -4079,7 +4079,7 @@ cdef inline void _whole_stage_div_const_shr(SimCtx *c, int dst_sid, int div_sid,
         c.wide_nba_mask[dst_offset + i] = 0
     c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
     c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mod_const_shl(SimCtx *c, int dst_sid, int mod_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -4127,7 +4127,7 @@ cdef inline void _whole_stage_mod_const_shl(SimCtx *c, int dst_sid, int mod_sid,
         c.wide_nba_mask[dst_offset + out_index] = 0
     c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
     c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_mod_const_shr(SimCtx *c, int dst_sid, int mod_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -4172,7 +4172,7 @@ cdef inline void _whole_stage_mod_const_shr(SimCtx *c, int dst_sid, int mod_sid,
         c.wide_nba_mask[dst_offset + i] = 0
     c.nba_val[dst_sid] = <long long>c.wide_nba_val[dst_offset]
     c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_not_shr(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
@@ -4222,7 +4222,7 @@ cdef inline void _whole_stage_not_shr(SimCtx *c, int dst_sid, int signal_sid, in
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_lnot_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
@@ -4259,7 +4259,7 @@ cdef inline void _whole_stage_lnot_shl(SimCtx *c, int dst_sid, int signal_sid, i
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_x_signal_shl(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
@@ -4297,7 +4297,7 @@ cdef inline void _whole_stage_x_signal_shl(SimCtx *c, int dst_sid, int src_sid, 
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_x_signal_shr(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
@@ -4342,7 +4342,7 @@ cdef inline void _whole_stage_x_signal_shr(SimCtx *c, int dst_sid, int src_sid, 
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_neg_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
@@ -4407,7 +4407,7 @@ cdef inline void _whole_stage_reduce_or_shift(SimCtx *c, int dst_sid, int signal
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_reduce_and_shift(SimCtx *c, int dst_sid, int signal_sid, int shift, int invert) noexcept nogil:
@@ -4449,7 +4449,7 @@ cdef inline void _whole_stage_reduce_and_shift(SimCtx *c, int dst_sid, int signa
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_reduce_xor_shift(SimCtx *c, int dst_sid, int signal_sid, int shift, int invert) noexcept nogil:
@@ -4488,7 +4488,7 @@ cdef inline void _whole_stage_reduce_xor_shift(SimCtx *c, int dst_sid, int signa
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_shl(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int shift) noexcept nogil:
@@ -4545,7 +4545,7 @@ cdef inline void _whole_stage_add_const_shl(SimCtx *c, int dst_sid, int add_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_add_const_shr(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int shift) noexcept nogil:
@@ -4623,7 +4623,7 @@ cdef inline void _whole_stage_add_const_shr(SimCtx *c, int dst_sid, int add_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_shl(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int shift) noexcept nogil:
@@ -4679,7 +4679,7 @@ cdef inline void _whole_stage_sub_const_shl(SimCtx *c, int dst_sid, int sub_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const_shr(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int shift) noexcept nogil:
@@ -4755,7 +4755,7 @@ cdef inline void _whole_stage_sub_const_shr(SimCtx *c, int dst_sid, int sub_sid,
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sub_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long const_word) noexcept nogil:
@@ -4793,7 +4793,7 @@ cdef inline void _whole_stage_sub_const(SimCtx *c, int dst_sid, int lhs_sid, uns
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((lv - const_word) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(lm & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_shl(SimCtx *c, int dst_sid, unsigned long long const_word, int sub_sid, int shift) noexcept nogil:
@@ -4852,7 +4852,7 @@ cdef inline void _whole_stage_const_sub_shl(SimCtx *c, int dst_sid, unsigned lon
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_shr(SimCtx *c, int dst_sid, unsigned long long const_word, int sub_sid, int shift) noexcept nogil:
@@ -4934,7 +4934,7 @@ cdef inline void _whole_stage_const_sub_shr(SimCtx *c, int dst_sid, unsigned lon
     if dst_words > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_sub_signal(SimCtx *c, int dst_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
@@ -4972,7 +4972,7 @@ cdef inline void _whole_stage_const_sub_signal(SimCtx *c, int dst_sid, unsigned 
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>((const_word - rv) & tail_mask)
         c.nba_mask[dst_sid] = <long long>(rm & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_shl_signal(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
@@ -5015,7 +5015,7 @@ cdef inline void _whole_stage_shl_signal(SimCtx *c, int dst_sid, int src_sid, in
             tail_mask = _word_mask64(c.width[dst_sid])
             c.nba_val[dst_sid] = <long long>(out_v & tail_mask)
             c.nba_mask[dst_sid] = <long long>(out_m & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_shr_signal(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
@@ -5067,7 +5067,7 @@ cdef inline void _whole_stage_shr_signal(SimCtx *c, int dst_sid, int src_sid, in
             tail_mask = _word_mask64(c.width[dst_sid])
             c.nba_val[dst_sid] = <long long>(out_v & tail_mask)
             c.nba_mask[dst_sid] = <long long>(out_m & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_ternary_shl_signal(SimCtx *c, int dst_sid, int cond_sid, int true_sid, int false_sid, int shift) noexcept nogil:
@@ -5116,7 +5116,7 @@ cdef inline void _whole_stage_ternary_shl_signal(SimCtx *c, int dst_sid, int con
     else:
         c.nba_val[dst_sid] = 0
         c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_ternary_shr_signal(SimCtx *c, int dst_sid, int cond_sid, int true_sid, int false_sid, int shift) noexcept nogil:
@@ -5161,7 +5161,7 @@ cdef inline void _whole_stage_ternary_shr_signal(SimCtx *c, int dst_sid, int con
     else:
         c.nba_val[dst_sid] = 0
         c.nba_mask[dst_sid] = 0
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_sar_signal(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
@@ -5233,5 +5233,5 @@ cdef inline void _whole_stage_sar_signal(SimCtx *c, int dst_sid, int src_sid, in
                     out_v |= fill_mask
             c.nba_val[dst_sid] = <long long>(out_v & tail_mask)
             c.nba_mask[dst_sid] = <long long>(out_m & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1

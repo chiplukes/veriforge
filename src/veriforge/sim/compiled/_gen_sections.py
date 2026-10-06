@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from veriforge.sim.compiled._codegen_utils import delta_engine_mode
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _PROCESS_LOOP_LIMIT,
@@ -53,15 +54,15 @@ _WMEM_EXTRACT_MASK_RE = re.compile(r"_wmem(\d+)_extract_mask\(c,")
 _MAX_INLINE_SENS = 6
 
 
-_DIRTY_WRITE_RE = re.compile(r"\bdirty\[(\d+)\]\s*=")
+_DIRTY_WRITE_RE = re.compile(r"\bmark_dirty\(c,\s*(\d+)\)")
 
 
 def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     """Indices of continuous-assign processes in dependency (topological) order.
 
     Edge ``i -> j`` when ``i`` writes a signal in ``j``'s sensitivity set.
-    Writes are recovered from the ``dirty[N] = ...`` stores in the generated
-    body.  This only affects *ordering* (performance): ``delta_loop`` still
+    Writes are recovered from the ``mark_dirty(c, N)`` calls in the generated
+    body (writes through shared helpers with a runtime sid aren't visible here).  This only affects *ordering* (performance): ``delta_loop`` still
     iterates to a fixpoint, so an imprecise write set can never change
     results.  Ties keep declaration order; nodes on a combinational cycle are
     appended in declaration order.  Returns ``(order, acyclic)``.
@@ -105,6 +106,34 @@ def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     return order, acyclic
 
 
+def _gen_dirty_helpers() -> list[str]:
+    """The only code allowed to write ``SimCtx.dbit``/``dlist``/``dcount``
+    and ``nba_bit``/``nba_list``/``nba_count``.
+
+    Each is a sparse set: setting a bit that was clear appends the sid to the
+    list, so the list holds exactly the sids whose bit is set, without
+    duplicates (and so never more than ``N_SIGS`` entries). Consumers that
+    clear bits must clear every listed bit and reset the count together.
+    ``mark_nba`` deliberately does not set ``nba_pending`` -- call sites set
+    it themselves, as they always have (memory NBAs set it without staging a
+    scalar sid at all).
+    """
+    return [
+        "cdef inline void mark_dirty(SimCtx *c, int sid) noexcept nogil:",
+        "    if not c.dbit[sid]:",
+        "        c.dbit[sid] = 1",
+        "        c.dlist[c.dcount] = sid",
+        "        c.dcount += 1",
+        "",
+        "cdef inline void mark_nba(SimCtx *c, int sid) noexcept nogil:",
+        "    if not c.nba_bit[sid]:",
+        "        c.nba_bit[sid] = 1",
+        "        c.nba_list[c.nba_count] = sid",
+        "        c.nba_count += 1",
+        "",
+    ]
+
+
 def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool = False) -> list[str]:
     """Return a Cython sensitivity check ending in an ``if`` body opener.
 
@@ -112,7 +141,7 @@ def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool
     large sensitivity sets into separate shallow statements instead, while
     preserving short-circuit evaluation after a hit.
     """
-    term = (lambda s: f"trigger[{s}] or c.dirty[{s}]") if also_dirty else (lambda s: f"trigger[{s}]")
+    term = (lambda s: f"trigger[{s}] or c.dbit[{s}]") if also_dirty else (lambda s: f"trigger[{s}]")
     if len(sorted_sids) <= _MAX_INLINE_SENS:
         cond = " or ".join(term(s) for s in sorted_sids)
         return [f"{indent}if {cond}:"]
@@ -135,7 +164,7 @@ def _emit_no_dirty_check_lines(sorted_sids: list[int], indent: str) -> list[str]
     paying for one more iteration just to rediscover that via the normal
     dirty[]->trigger[] top-of-loop bookkeeping.
 
-    Emitted as a flat sequence of simple ``if c.dirty[s]: _any_int = 1``
+    Emitted as a flat sequence of simple ``if c.dbit[s]: _any_int = 1``
     statements rather than one large ``or``-chained boolean expression
     (however line-wrapped): a single expression is one left-deep AST node
     per term regardless of how many display lines it's spread across, and
@@ -151,7 +180,7 @@ def _emit_no_dirty_check_lines(sorted_sids: list[int], indent: str) -> list[str]
         return [f"{indent}break"]
     lines = [f"{indent}_any_interesting_dirty = 0"]
     for s in sorted_sids:
-        lines.append(f"{indent}if c.dirty[{s}]:")
+        lines.append(f"{indent}if c.dbit[{s}]:")
         lines.append(f"{indent}    _any_interesting_dirty = 1")
     lines.append(f"{indent}if not _any_interesting_dirty:")
     lines.append(f"{indent}    break")
@@ -236,7 +265,7 @@ def _seq_body_to_sv_reads(
     originally suspected to be an RTL bug, root-caused via VCD tracing to this
     compiled-engine pre-edge-snapshot gap instead.
 
-    Substitutions performed (safe because NBA writes use c.nba_val/c.nba_mask/c.nba_dirty):
+    Substitutions performed (safe because NBA writes use c.nba_val/c.nba_mask/mark_nba):
       c.val[N]                      → sv[N]    (only if N not blocking-written or async here)
       c.mask[N]                     → sm[N]    (only if N not blocking-written or async here)
       _sig_extract_word_val(c, …)   → _sig_extract_word_val_sv(sv, sm, c, …)
@@ -505,7 +534,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                # Negedge: drive clk low",
             "                self.ctx.val[clk_sid] = 0",
             "                self.ctx.mask[clk_sid] = 0",
-            "                self.ctx.dirty[clk_sid] = 1",
+            "                mark_dirty(&self.ctx, clk_sid)",
             "                delta_loop(&self.ctx, sv, sm)",
             "                if self.ctx.error_code != ERR_NONE:",
             "                    cycles_run = i + 1",
@@ -801,8 +830,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    long long nba_mask[N_SIGS]",
             "    unsigned long long wide_nba_val[N_WIDE_WORDS]",
             "    unsigned long long wide_nba_mask[N_WIDE_WORDS]",
-            "    int       nba_dirty[N_SIGS]",
-            "    int       dirty[N_SIGS]",
+            # Sparse sets: a bit per sid plus a list of the sids whose bit is
+            # set, so consumers iterate what's actually dirty instead of
+            # scanning all N_SIGS. Written ONLY via mark_dirty()/mark_nba()
+            # (see _gen_dirty_helpers) -- the fields were renamed from
+            # dirty/nba_dirty so any write site that bypasses the helpers is
+            # a Cython compile error, not a silently lost trigger.
+            "    int       nba_bit[N_SIGS]",
+            "    int       nba_list[N_SIGS]",
+            "    int       nba_count",
+            "    int       dbit[N_SIGS]",
+            "    int       dlist[N_SIGS]",
+            "    int       dcount",
             "    int       nba_pending",
             "    unsigned long long wide_val[N_WIDE_WORDS]",
             "    unsigned long long wide_mask[N_WIDE_WORDS]",
@@ -901,6 +940,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     def _gen_wmask(self) -> str:
         lines: list[str] = []
+        # Emitted first: every later helper (narrow templates, wide/memory
+        # helpers) and every process body marks signals dirty through these.
+        lines.extend(_gen_dirty_helpers())
         lines.extend(_gen_narrow_accessor_code())
         lines.extend(_gen_narrow_stage_code())
         lines.extend(_gen_narrow_assign_code())
@@ -956,7 +998,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "        c.mask[dst_sid] = new_m",
                     "        changed = 1",
                     "    if changed:",
-                    "        c.dirty[dst_sid] = 1",
+                    "        mark_dirty(c, dst_sid)",
                     "",
                 ]
             )
@@ -1440,267 +1482,212 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 else:
                     target_write_fn("\n" + chunk)
 
-    def _gen_delta_loop(self) -> str:  # noqa: PLR0912, PLR0915
-        has_seq = bool(self._seq_processes)
-        # Every sid some cont/combo process's sensitivity check tests, plus
-        # every seq process's own edge-trigger sid (needed so a delayed
-        # clock edge -- propagated through several cont-assign hops -- still
-        # gets another iteration to be detected, even if nothing else reads
-        # that sid combinationally). A dirty sid outside this set can never
-        # cause anything to happen: nothing ever inspects it. See the
-        # early-exit check after the cont/combo dispatch below.
-        interesting_sids = sorted(
+    # ── delta_loop ──────────────────────────────────────────────────────
+    #
+    # Two engines (codegen option, see `delta_engine_mode()`) share every
+    # piece below except how each iteration decides which cont/combo
+    # processes run. Both run the identical set of processes in the identical
+    # order every iteration -- so results AND delta_loop's return value (the
+    # iteration count) are identical, and DELTA_LIMIT / DELTA_CONV_CHECK_START
+    # / the value-convergence detector behave identically. See
+    # notes/plans/work_queue_delta_engine.md, "Stage 2 design decisions".
+
+    def _gen_delta_loop(self) -> str:
+        if delta_engine_mode() == "scan":
+            return self._gen_delta_loop_scan()
+        return self._gen_delta_loop_queue()
+
+    def _delta_ranked_processes(self) -> list[tuple[str, set[int]]]:
+        """``(call, sens)`` per rank, in dispatch order: continuous assigns in
+        dependency (topological) order, then combinational always blocks in
+        declaration order. A process's rank is its position in this list."""
+        cont_order, _acyclic = _cont_dependency_order(self._processes)
+        ranked = [(f"cont_{i}(c)", self._processes[i][0]) for i in cont_order]
+        ranked.extend((f"combo_{i}(c)", sens) for i, (sens, _b) in enumerate(self._combo_processes))
+        return ranked
+
+    def _delta_interesting_sids(self) -> list[int]:
+        """Every sid some cont/combo sensitivity check tests, plus every seq
+        process's own edge-trigger sid (so a delayed clock edge -- propagated
+        through several cont-assign hops -- still gets another iteration to be
+        detected, even if nothing reads that sid combinationally). A dirty sid
+        outside this set can never cause anything to happen: nothing ever
+        inspects it."""
+        return sorted(
             {s for sens, _b in self._processes for s in sens}
             | {s for sens, _b in self._combo_processes for s in sens}
             | {s for edges, _sens, _body in self._seq_processes for s in edges}
         )
-        lines = [
-            "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
-            "    cdef int it, i, changed, _j, _stable, _any_interesting_dirty, _sens_hit",
-            "    cdef long long _nbaw",
-            f"    cdef int trigger[{max(self._n_sigs, 1)}]",
-        ]
 
-        # Declare locals for NBA memory range drain (partial byte-lane writes)
+    def _delta_common_local_lines(self) -> list[str]:
+        lines: list[str] = []
+        # Locals for NBA memory range drain (partial byte-lane writes)
         if self._n_mems > 0:
             lines.append("    cdef int _rmr_msb, _rmr_lsb")
             lines.append("    cdef long long _rmr_mask")
-
-        # Edge detection: compute fire_seq_N flags inside the delta loop
+        # Edge detection: fire_seq_N flags are computed inside the delta loop
         # so that edges propagated through continuous assigns are detected.
-        if has_seq:
-            for i, (_edges, _sens, _body) in enumerate(self._seq_processes):
-                lines.append(f"    cdef int fire_seq_{i} = 0")
-                lines.append(f"    cdef int done_seq_{i} = 0")
+        for i in range(len(self._seq_processes)):
+            lines.append(f"    cdef int fire_seq_{i} = 0")
+            lines.append(f"    cdef int done_seq_{i} = 0")
+        return lines
 
-        lines.append("")
-        lines.append("    for it in range(DELTA_LIMIT):")
-
-        # Copy dirty ΓåÆ trigger, then clear dirty
-        lines.append("        changed = 0")
-        lines.append("        memcpy(trigger, c.dirty, N_SIGS * sizeof(int))")
-        lines.append("        memset(c.dirty, 0, N_SIGS * sizeof(int))")
-        lines.append("        for i in range(N_SIGS):")
-        lines.append("            changed |= trigger[i]")
-        lines.append("        changed = changed != 0")
-        lines.append("")
-        # On the very first iteration, if nothing was externally dirtied
-        # we still need to run all assigns once (bootstrap).
-        lines.append("        if it == 0 and not changed:")
-        lines.append("            for i in range(N_SIGS):")
-        lines.append("                trigger[i] = 1")
-        lines.append("            changed = 1")
-        lines.append("")
-        lines.append("        if not changed:")
-        lines.append("            break")
-        lines.append("")
+    def _delta_conv_snapshot_lines(self) -> list[str]:
         # Value-level convergence: once past DELTA_CONV_CHECK_START iterations,
         # snapshot all signal values at the top of the iteration.  If the
         # iteration produces no value change, the state is a fixpoint — the
         # processes are deterministic functions of state, so further
         # iterations cannot change anything even if dirty flags survive
         # (combo loops with intermediate writes keep re-marking dirty).
-        lines.append("        if it >= DELTA_CONV_CHECK_START:")
-        lines.append("            memcpy(c.conv_val, c.val, N_SIGS * sizeof(long long))")
-        lines.append("            memcpy(c.conv_mask, c.mask, N_SIGS * sizeof(long long))")
-        lines.append("            memcpy(c.conv_wide_val, c.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))")
-        lines.append("            memcpy(c.conv_wide_mask, c.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))")
+        return [
+            "        if it >= DELTA_CONV_CHECK_START:",
+            "            memcpy(c.conv_val, c.val, N_SIGS * sizeof(long long))",
+            "            memcpy(c.conv_mask, c.mask, N_SIGS * sizeof(long long))",
+            "            memcpy(c.conv_wide_val, c.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
+            "            memcpy(c.conv_wide_mask, c.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+        ]
 
-        # Edge detection inside the delta loop ΓÇö check each iteration
-        # so edges propagated through continuous assigns are caught.
-        # Each sequential process fires at most once per step.
-        if has_seq:
-            lines.append("")
-            for i, (edges, _sens, _body) in enumerate(self._seq_processes):
-                edge_checks = []
-                for sid, edge_type in edges.items():
-                    if edge_type == "posedge":
-                        edge_checks.append(f"((c.val[{sid}] & 1) == 1 and (sv[{sid}] & 1) == 0)")
-                    else:  # negedge
-                        edge_checks.append(f"((c.val[{sid}] & 1) == 0 and (sv[{sid}] & 1) == 1)")
-                if edge_checks:
-                    if len(edge_checks) <= _MAX_INLINE_SENS:
-                        cond = " or ".join(edge_checks)
-                        lines.append(f"        if not done_seq_{i} and ({cond}):")
+    def _delta_seq_fire_lines(self) -> list[str]:
+        """Edge detection, checked every iteration so edges propagated through
+        continuous assigns are caught; each sequential process fires at most
+        once per delta_loop call, in index order."""
+        if not self._seq_processes:
+            return []
+        lines = [""]
+        for i, (edges, _sens, _body) in enumerate(self._seq_processes):
+            edge_checks = []
+            for sid, edge_type in edges.items():
+                if edge_type == "posedge":
+                    edge_checks.append(f"((c.val[{sid}] & 1) == 1 and (sv[{sid}] & 1) == 0)")
+                else:  # negedge
+                    edge_checks.append(f"((c.val[{sid}] & 1) == 0 and (sv[{sid}] & 1) == 1)")
+            if edge_checks:
+                if len(edge_checks) <= _MAX_INLINE_SENS:
+                    cond = " or ".join(edge_checks)
+                    lines.append(f"        if not done_seq_{i} and ({cond}):")
+                    lines.append(f"            fire_seq_{i} = 1")
+                else:
+                    for j in range(0, len(edge_checks), _MAX_INLINE_SENS):
+                        cond = " or ".join(edge_checks[j : j + _MAX_INLINE_SENS])
+                        lines.append(f"        if not done_seq_{i} and not fire_seq_{i} and ({cond}):")
                         lines.append(f"            fire_seq_{i} = 1")
-                    else:
-                        for j in range(0, len(edge_checks), _MAX_INLINE_SENS):
-                            cond = " or ".join(edge_checks[j : j + _MAX_INLINE_SENS])
-                            lines.append(f"        if not done_seq_{i} and not fire_seq_{i} and ({cond}):")
-                            lines.append(f"            fire_seq_{i} = 1")
+        lines.append("")
+        for i in range(len(self._seq_processes)):
+            lines.append(f"        if fire_seq_{i}:")
+            lines.append(f"            seq_{i}(c, sv, sm)")
+            lines.append("            if c.finished:")
+            lines.append("                return it")
+            lines.append("            if c.error_code != ERR_NONE:")
+            lines.append("                return it")
+            lines.append(f"            fire_seq_{i} = 0")
+            lines.append(f"            done_seq_{i} = 1")
+        lines.append("")
+        return lines
 
-        # Fire sequential processes (once per step, guarded by fire flag)
-        if has_seq:
-            lines.append("")
-            for i in range(len(self._seq_processes)):
-                lines.append(f"        if fire_seq_{i}:")
-                lines.append(f"            seq_{i}(c, sv, sm)")
-                lines.append("            if c.finished:")
-                lines.append("                return it")
-                lines.append("            if c.error_code != ERR_NONE:")
-                lines.append("                return it")
-                lines.append(f"            fire_seq_{i} = 0")
-                lines.append(f"            done_seq_{i} = 1")
-            lines.append("")
-
-            # Apply NBA: copy nba_val ΓåÆ val for signals with nba_dirty set
-            lines.append("        if c.nba_pending:")
-            lines.append("            for i in range(N_SIGS):")
-            lines.append("                if c.nba_dirty[i]:")
-            lines.append("                    if c.wide_words[i] > 0:")
-            lines.append("                        changed = 0")
-            lines.append("                        for _j in range(c.wide_words[i]):")
-            lines.append(
-                "                            if c.wide_val[c.wide_offset[i] + _j] != c.wide_nba_val[c.wide_offset[i] + _j] or c.wide_mask[c.wide_offset[i] + _j] != c.wide_nba_mask[c.wide_offset[i] + _j]:"
-            )
-            lines.append(
-                "                                c.wide_val[c.wide_offset[i] + _j] = c.wide_nba_val[c.wide_offset[i] + _j]"
-            )
-            lines.append(
-                "                                c.wide_mask[c.wide_offset[i] + _j] = c.wide_nba_mask[c.wide_offset[i] + _j]"
-            )
-            lines.append("                                changed = 1")
-            lines.append("                        if c.nba_val[i] != c.val[i] or c.nba_mask[i] != c.mask[i]:")
-            lines.append("                            c.val[i] = c.nba_val[i]")
-            lines.append("                            c.mask[i] = c.nba_mask[i]")
-            lines.append("                            changed = 1")
-            lines.append("                        if changed:")
-            lines.append("                            c.dirty[i] = 1")
-            lines.append("                    else:")
-            lines.append("                        _nbaw = wmask(c.width[i])")
-            lines.append(
-                "                        if (c.nba_val[i] & _nbaw) != c.val[i] or (c.nba_mask[i] & _nbaw) != c.mask[i]:"
-            )
-            lines.append("                            c.val[i] = c.nba_val[i] & _nbaw")
-            lines.append("                            c.mask[i] = c.nba_mask[i] & _nbaw")
-            lines.append("                            c.dirty[i] = 1")
-            lines.append("                    c.nba_dirty[i] = 0")
+    def _delta_nba_apply_lines(self) -> list[str]:
+        """Commit staged NBAs. Iterates only the staged sids (``nba_list``),
+        not all N_SIGS; per-sid commits are independent, so the order they're
+        visited in can't affect the result."""
+        if not self._seq_processes:
+            return []
+        lines = [
+            "        if c.nba_pending:",
+            "            for _k in range(c.nba_count):",
+            "                i = c.nba_list[_k]",
+            "                if not c.nba_bit[i]:",
+            "                    continue",
+            "                if c.wide_words[i] > 0:",
+            "                    _wchg = 0",
+            "                    for _j in range(c.wide_words[i]):",
+            "                        if c.wide_val[c.wide_offset[i] + _j] != c.wide_nba_val[c.wide_offset[i] + _j]"
+            " or c.wide_mask[c.wide_offset[i] + _j] != c.wide_nba_mask[c.wide_offset[i] + _j]:",
+            "                            c.wide_val[c.wide_offset[i] + _j] = c.wide_nba_val[c.wide_offset[i] + _j]",
+            "                            c.wide_mask[c.wide_offset[i] + _j] = c.wide_nba_mask[c.wide_offset[i] + _j]",
+            "                            _wchg = 1",
+            "                    if c.nba_val[i] != c.val[i] or c.nba_mask[i] != c.mask[i]:",
+            "                        c.val[i] = c.nba_val[i]",
+            "                        c.mask[i] = c.nba_mask[i]",
+            "                        _wchg = 1",
+            "                    if _wchg:",
+            "                        mark_dirty(c, i)",
+            "                else:",
+            "                    _nbaw = wmask(c.width[i])",
+            "                    if (c.nba_val[i] & _nbaw) != c.val[i] or (c.nba_mask[i] & _nbaw) != c.mask[i]:",
+            "                        c.val[i] = c.nba_val[i] & _nbaw",
+            "                        c.mask[i] = c.nba_mask[i] & _nbaw",
+            "                        mark_dirty(c, i)",
+            "                c.nba_bit[i] = 0",
+            "            c.nba_count = 0",
+        ]
+        if self._n_mems > 0:
             # Drain NBA memory queue
-            if self._n_mems > 0:
-                lines.append("            for i in range(c.nba_mem_count):")
-                for mid in range(self._n_mems):
-                    marker_sid = self._mem_marker_sigs[mid]
-                    elem_w, _depth = self._mem_info[mid]
-                    cond_kw = "if" if mid == 0 else "elif"
-                    lines.append(f"                {cond_kw} c.nba_mem_mid[i] == {mid}:")
-                    if elem_w > _WORD_BITS:
-                        lines.append(
-                            f"                    c.wide_mem_{mid}_val[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_val[i]"
-                        )
-                        lines.append(
-                            f"                    c.wide_mem_{mid}_mask[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_mask[i]"
-                        )
-                    else:
-                        lines.append(f"                    c.mem_{mid}_val[c.nba_mem_addr[i]] = c.nba_mem_val[i]")
-                        lines.append(f"                    c.mem_{mid}_mask[c.nba_mem_addr[i]] = c.nba_mem_mask[i]")
-                    lines.append(f"                    c.val[{marker_sid}] ^= 1")
-                    lines.append(f"                    c.dirty[{marker_sid}] = 1")
-                lines.append("            c.nba_mem_count = 0")
+            lines.append("            for i in range(c.nba_mem_count):")
+            for mid in range(self._n_mems):
+                marker_sid = self._mem_marker_sigs[mid]
+                elem_w, _depth = self._mem_info[mid]
+                cond_kw = "if" if mid == 0 else "elif"
+                lines.append(f"                {cond_kw} c.nba_mem_mid[i] == {mid}:")
+                if elem_w > _WORD_BITS:
+                    lines.append(
+                        f"                    c.wide_mem_{mid}_val[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_val[i]"
+                    )
+                    lines.append(
+                        f"                    c.wide_mem_{mid}_mask[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_mask[i]"
+                    )
+                else:
+                    lines.append(f"                    c.mem_{mid}_val[c.nba_mem_addr[i]] = c.nba_mem_val[i]")
+                    lines.append(f"                    c.mem_{mid}_mask[c.nba_mem_addr[i]] = c.nba_mem_mask[i]")
+                lines.append(f"                    c.val[{marker_sid}] ^= 1")
+                lines.append(f"                    mark_dirty(c, {marker_sid})")
+            lines.append("            c.nba_mem_count = 0")
             # Drain NBA memory range queue (partial byte-lane writes)
-            if self._n_mems > 0:
-                lines.append("            for i in range(c.nba_mem_range_count):")
-                lines.append("                _rmr_msb = c.nba_mem_range_msb[i]")
-                lines.append("                _rmr_lsb = c.nba_mem_range_lsb[i]")
-                lines.append("                _rmr_mask = wmask(_rmr_msb - _rmr_lsb + 1) << _rmr_lsb")
-                for mid in range(self._n_mems):
-                    marker_sid = self._mem_marker_sigs[mid]
-                    elem_w, _depth = self._mem_info[mid]
-                    cond_kw = "if" if mid == 0 else "elif"
-                    addr_expr = "c.nba_mem_range_addr[i]"
-                    lines.append(f"                {cond_kw} c.nba_mem_range_mid[i] == {mid}:")
-                    if elem_w > _WORD_BITS:
-                        lines.append(
-                            f"                    c.wide_mem_{mid}_val[{addr_expr}] ="
-                            f" (c.wide_mem_{mid}_val[{addr_expr}] & ~_rmr_mask)"
-                            f" | ((((<unsigned long long>c.nba_mem_range_val[i]) & ~(<unsigned long long>c.nba_mem_range_mask[i])) << _rmr_lsb) & _rmr_mask)"
-                        )
-                        lines.append(
-                            f"                    c.wide_mem_{mid}_mask[{addr_expr}] ="
-                            f" (c.wide_mem_{mid}_mask[{addr_expr}] & ~_rmr_mask)"
-                            f" | ((((<unsigned long long>c.nba_mem_range_mask[i])) << _rmr_lsb) & _rmr_mask)"
-                        )
-                    else:
-                        lines.append(
-                            f"                    c.mem_{mid}_val[{addr_expr}] ="
-                            f" (c.mem_{mid}_val[{addr_expr}] & ~_rmr_mask)"
-                            f" | (((c.nba_mem_range_val[i] & ~c.nba_mem_range_mask[i]) << _rmr_lsb) & _rmr_mask)"
-                        )
-                        lines.append(
-                            f"                    c.mem_{mid}_mask[{addr_expr}] ="
-                            f" (c.mem_{mid}_mask[{addr_expr}] & ~_rmr_mask)"
-                            f" | ((c.nba_mem_range_mask[i] << _rmr_lsb) & _rmr_mask)"
-                        )
-                    lines.append(f"                    c.dirty[{marker_sid}] = 1")
-                lines.append("            c.nba_mem_range_count = 0")
-            lines.append("            c.nba_pending = 0")
+            lines.append("            for i in range(c.nba_mem_range_count):")
+            lines.append("                _rmr_msb = c.nba_mem_range_msb[i]")
+            lines.append("                _rmr_lsb = c.nba_mem_range_lsb[i]")
+            lines.append("                _rmr_mask = wmask(_rmr_msb - _rmr_lsb + 1) << _rmr_lsb")
+            for mid in range(self._n_mems):
+                marker_sid = self._mem_marker_sigs[mid]
+                elem_w, _depth = self._mem_info[mid]
+                cond_kw = "if" if mid == 0 else "elif"
+                addr_expr = "c.nba_mem_range_addr[i]"
+                lines.append(f"                {cond_kw} c.nba_mem_range_mid[i] == {mid}:")
+                if elem_w > _WORD_BITS:
+                    lines.append(
+                        f"                    c.wide_mem_{mid}_val[{addr_expr}] ="
+                        f" (c.wide_mem_{mid}_val[{addr_expr}] & ~_rmr_mask)"
+                        f" | ((((<unsigned long long>c.nba_mem_range_val[i]) & ~(<unsigned long long>c.nba_mem_range_mask[i])) << _rmr_lsb) & _rmr_mask)"
+                    )
+                    lines.append(
+                        f"                    c.wide_mem_{mid}_mask[{addr_expr}] ="
+                        f" (c.wide_mem_{mid}_mask[{addr_expr}] & ~_rmr_mask)"
+                        f" | ((((<unsigned long long>c.nba_mem_range_mask[i])) << _rmr_lsb) & _rmr_mask)"
+                    )
+                else:
+                    lines.append(
+                        f"                    c.mem_{mid}_val[{addr_expr}] ="
+                        f" (c.mem_{mid}_val[{addr_expr}] & ~_rmr_mask)"
+                        f" | (((c.nba_mem_range_val[i] & ~c.nba_mem_range_mask[i]) << _rmr_lsb) & _rmr_mask)"
+                    )
+                    lines.append(
+                        f"                    c.mem_{mid}_mask[{addr_expr}] ="
+                        f" (c.mem_{mid}_mask[{addr_expr}] & ~_rmr_mask)"
+                        f" | ((c.nba_mem_range_mask[i] << _rmr_lsb) & _rmr_mask)"
+                    )
+                lines.append(f"                    mark_dirty(c, {marker_sid})")
+            lines.append("            c.nba_mem_range_count = 0")
+        lines.append("            c.nba_pending = 0")
+        return lines
 
-        # Invoke each continuous assign guarded by trigger flags
-        # Emitted in dependency order and also gated on dirty[] (set by an
-        # earlier cont this iteration), so a multi-hop chain settles in one
-        # pass instead of one hop per delta iteration.
-        cont_order, _cont_acyclic = _cont_dependency_order(self._processes)
-        for i in cont_order:
-            sens, _body = self._processes[i]
-            if sens:
-                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
-                lines.append(f"            cont_{i}(c)")
-                lines.append("            if c.finished:")
-                lines.append("                return it")
-                lines.append("            if c.error_code != ERR_NONE:")
-                lines.append("                return it")
-            else:
-                lines.append(f"        cont_{i}(c)")
-                lines.append("        if c.finished:")
-                lines.append("            return it")
-                lines.append("        if c.error_code != ERR_NONE:")
-                lines.append("            return it")
-
-        # Invoke combinational always blocks guarded by trigger flags.
-        # also_dirty=True for the same reason cont gets it above: a combo
-        # block reading a signal a cont assign just wrote earlier THIS
-        # iteration should fire immediately rather than waiting for that
-        # write to appear in trigger[] next iteration.
-        for i, (sens, _body) in enumerate(self._combo_processes):
-            if sens:
-                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
-                lines.append(f"            combo_{i}(c)")
-                lines.append("            if c.finished:")
-                lines.append("                return it")
-                lines.append("            if c.error_code != ERR_NONE:")
-                lines.append("                return it")
-            else:
-                lines.append(f"        combo_{i}(c)")
-                lines.append("        if c.finished:")
-                lines.append("            return it")
-                lines.append("        if c.error_code != ERR_NONE:")
-                lines.append("            return it")
-
-        # Early exit: if this iteration's dispatch left no dirty flag on any
-        # sid anything could ever react to (interesting_sids), no further
-        # iteration can do anything -- stop now instead of paying for one
-        # more iteration (dirty[]->trigger[] copy, then the sens re-checks
-        # above finding nothing) to rediscover that. Safe: interesting_sids
-        # is the exact set of sids any process's own sensitivity check ever
-        # tests, not an approximation, so this can never skip a real
-        # re-trigger. A genuine combinational loop keeps some interesting
-        # sid dirty forever, so this never fires for one -- DELTA_LIMIT and
-        # the value-convergence check below remain the safety net for that.
-        lines.extend(_emit_no_dirty_check_lines(interesting_sids, "        "))
-
-        # Dirty flags produced by the cont/combo functions in this
-        # iteration will be consumed at the TOP of the NEXT iteration
-        # (copied into trigger[], then cleared).  The convergence check
-        # is there: if no dirty flags survive, the loop breaks.
-
-        # Value-level convergence check (see snapshot above): if this
+    def _delta_value_convergence_lines(self) -> list[str]:
+        # Value-level convergence check (see the snapshot above): if this
         # iteration changed no signal value, we are at a fixpoint — stop
         # even though dirty flags may survive.  When the NBA-apply block is
-        # emitted (has_seq), skip the check while an NBA is pending — its
-        # application next iteration may still change state.  Without seq
-        # processes there is no apply block, so nba_pending can never clear
-        # and must not gate the check.
-        lines.append("")
-        if has_seq:
+        # emitted (seq processes exist), skip the check while an NBA is
+        # pending — its application next iteration may still change state.
+        # Without seq processes there is no apply block, so nba_pending can
+        # never clear and must not gate the check.
+        lines = [""]
+        if self._seq_processes:
             lines.append("        if it >= DELTA_CONV_CHECK_START and not c.nba_pending:")
         else:
             lines.append("        if it >= DELTA_CONV_CHECK_START:")
@@ -1713,32 +1700,342 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         for marker_sid in self._mem_marker_sigs:
             lines.append(f"            c.conv_val[{marker_sid}] = c.val[{marker_sid}]")
             lines.append(f"            c.conv_mask[{marker_sid}] = c.mask[{marker_sid}]")
-        lines.append("            _stable = 1")
-        lines.append("            for i in range(N_SIGS):")
-        lines.append("                if c.val[i] != c.conv_val[i] or c.mask[i] != c.conv_mask[i]:")
-        lines.append("                    _stable = 0")
-        lines.append("                    break")
-        lines.append("            if _stable:")
-        lines.append("                for i in range(N_WIDE_WORDS):")
-        lines.append(
-            "                    if c.wide_val[i] != c.conv_wide_val[i] or c.wide_mask[i] != c.conv_wide_mask[i]:"
+        lines.extend(
+            [
+                "            _stable = 1",
+                "            for i in range(N_SIGS):",
+                "                if c.val[i] != c.conv_val[i] or c.mask[i] != c.conv_mask[i]:",
+                "                    _stable = 0",
+                "                    break",
+                "            if _stable:",
+                "                for i in range(N_WIDE_WORDS):",
+                "                    if c.wide_val[i] != c.conv_wide_val[i] or c.wide_mask[i] != c.conv_wide_mask[i]:",
+                "                        _stable = 0",
+                "                        break",
+                "            if _stable:",
+                "                break",
+            ]
         )
-        lines.append("                        _stable = 0")
-        lines.append("                        break")
-        lines.append("            if _stable:")
-        lines.append("                break")
+        return lines
 
-        # If the loop ran to completion without converging, report it.
-        # The else-clause fires only when the for loop is NOT exited via break.
-        lines.append("    else:")
-        lines.append("        c.error_code = ERR_DELTA_LIMIT")
+    def _gen_delta_loop_scan(self) -> str:
+        """Scan engine (the default): each iteration scans all N_SIGS for dirty
+        sids and walks every cont/combo dispatch site, so per-iteration cost
+        scales with total design size. Cheapest per executed process, so it
+        wins on small designs and when most of a design is active."""
+        ranked = self._delta_ranked_processes()
+        lines = [
+            "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
+            "    cdef int it, i, changed, _j, _k, _wchg, _stable, _any_interesting_dirty, _sens_hit",
+            "    cdef long long _nbaw",
+            f"    cdef int trigger[{max(self._n_sigs, 1)}]",
+            *self._delta_common_local_lines(),
+            "",
+            "    for it in range(DELTA_LIMIT):",
+            # Copy dirty -> trigger, then clear dirty (bits and list together,
+            # keeping the sparse set consistent).
+            "        changed = 0",
+            "        memcpy(trigger, c.dbit, N_SIGS * sizeof(int))",
+            "        memset(c.dbit, 0, N_SIGS * sizeof(int))",
+            "        c.dcount = 0",
+            "        for i in range(N_SIGS):",
+            "            changed |= trigger[i]",
+            "        changed = changed != 0",
+            "",
+            # On the very first iteration, if nothing was externally dirtied
+            # we still need to run all assigns once (bootstrap).
+            "        if it == 0 and not changed:",
+            "            for i in range(N_SIGS):",
+            "                trigger[i] = 1",
+            "            changed = 1",
+            "",
+            "        if not changed:",
+            "            break",
+            "",
+            *self._delta_conv_snapshot_lines(),
+            *self._delta_seq_fire_lines(),
+            *self._delta_nba_apply_lines(),
+        ]
+        # Each cont/combo, in rank order, gated on its sensitivity set: fires
+        # if an input was dirtied last iteration (trigger) or earlier this
+        # iteration (dirty -- so a multi-hop chain in rank order settles in
+        # one pass instead of one hop per iteration).
+        for call, sens in ranked:
+            if sens:
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
+                lines.append(f"            {call}")
+                lines.append("            if c.finished:")
+                lines.append("                return it")
+                lines.append("            if c.error_code != ERR_NONE:")
+                lines.append("                return it")
+            else:
+                lines.append(f"        {call}")
+                lines.append("        if c.finished:")
+                lines.append("            return it")
+                lines.append("        if c.error_code != ERR_NONE:")
+                lines.append("            return it")
+        # Early exit: if this iteration's dispatch left no dirty flag on any
+        # sid anything could ever react to, no further iteration can do
+        # anything -- stop now. A genuine combinational loop keeps some
+        # interesting sid dirty forever, so this never fires for one --
+        # DELTA_LIMIT and the value-convergence check remain the safety net.
+        lines.extend(_emit_no_dirty_check_lines(self._delta_interesting_sids(), "        "))
+        lines.extend(self._delta_value_convergence_lines())
+        lines.extend(
+            [
+                # for-else: fires only when the loop is NOT exited via break.
+                "    else:",
+                "        c.error_code = ERR_DELTA_LIMIT",
+                "",
+                # Leave a clean slate for the next call.
+                "    memset(c.dbit, 0, N_SIGS * sizeof(int))",
+                "    c.dcount = 0",
+                "    return it",
+            ]
+        )
+        return "\n".join(lines)
 
-        # After the loop, clear any remaining dirty flags so the caller
-        # starts the next time-step with a clean slate.
+    def _delta_queue_static_lines(self, ranked: list[tuple[str, set[int]]]) -> list[str]:
+        """The queue engine's static tables, baked into the module as C
+        arrays (zero runtime construction cost):
+
+        - ``DL_READER_OFF``/``DL_READER_RANK``: CSR reader index -- the ranks of
+          the processes whose sensitivity set contains each sid (the relation
+          ``_cont_dependency_order`` builds as ``readers`` for the topo sort).
+        - ``DL_ALWAYS_RANK``: processes with an empty sensitivity set, which run
+          every iteration.
+        - ``DL_IS_INTERESTING``: the early-exit set (`_delta_interesting_sids`).
+        """
+        n = max(self._n_sigs, 1)
+        readers: list[set[int]] = [set() for _ in range(n)]
+        always: list[int] = []
+        for rank, (_call, sens) in enumerate(ranked):
+            if sens:
+                for s in sens:
+                    readers[s].add(rank)
+            else:
+                always.append(rank)
+        off = [0]
+        flat: list[int] = []
+        for rs in readers:
+            flat.extend(sorted(rs))
+            off.append(len(flat))
+        interesting = set(self._delta_interesting_sids())
+        is_int = [1 if s in interesting else 0 for s in range(n)]
+
+        def c_array(ctype: str, name: str, values: list[int]) -> tuple[str, str, int]:
+            vals = values or [0]  # C forbids zero-length arrays
+            rows = [", ".join(str(v) for v in vals[i : i + 24]) for i in range(0, len(vals), 24)]
+            body = ",\n        ".join(rows)
+            return f"    static const {ctype} {name}[{len(vals)}] = {{\n        {body}\n    }};", name, len(vals)
+
+        arrays = [
+            c_array("int", "DL_READER_OFF", off),
+            c_array("int", "DL_READER_RANK", flat),
+            c_array("int", "DL_ALWAYS_RANK", always),
+            c_array("unsigned char", "DL_IS_INTERESTING", is_int),
+        ]
+        lines = [
+            "cdef extern from *:",
+            '    """',
+            "    #if defined(_MSC_VER)",
+            "    #include <intrin.h>",
+            "    static __inline int dl_ctz64(unsigned long long x) {",
+            "        unsigned long i; _BitScanForward64(&i, x); return (int)i;",
+            "    }",
+            "    #else",
+            "    static inline int dl_ctz64(unsigned long long x) { return __builtin_ctzll(x); }",
+            "    #endif",
+            *(text for text, _name, _len in arrays),
+            '    """',
+            "    int dl_ctz64(unsigned long long x) noexcept nogil",
+        ]
+        ctypes = {"DL_IS_INTERESTING": "unsigned char"}
+        for _text, name, length in arrays:
+            lines.append(f"    {ctypes.get(name, 'int')} {name}[{length}]")
         lines.append("")
-        lines.append("    for i in range(N_SIGS):")
-        lines.append("        c.dirty[i] = 0")
-        lines.append("    return it")
+        return lines
+
+    def _gen_delta_loop_queue(self) -> str:
+        """Queue engine: per-iteration cost proportional to real activity.
+
+        Runs exactly the processes the scan engine would, in the same order.
+        Process ``P`` at rank ``r`` runs in iteration ``k`` iff it has an
+        empty sensitivity set, or one of its inputs was dirtied during
+        iteration ``k-1`` (``T_k``) or earlier in iteration ``k`` before
+        ``P``'s turn. Realized with a per-iteration pending bitmap over ranks:
+        seeded from ``T_k``'s readers, the always-run processes, and readers of
+        sids dirtied by the seq/NBA phase (which precedes every cont); then,
+        after running rank ``w``, the readers with rank ``> w`` of each sid it
+        newly dirtied. Readers with rank ``<= w`` are not marked -- exactly as
+        in the scan engine, they run next iteration via ``T_{k+1}``. Marks
+        only ever land ahead of the cursor, so a forward bitmap scan visits
+        pending ranks in order, each once.
+        """
+        ranked = self._delta_ranked_processes()
+        n_ranks = len(ranked)
+        n_words = max((n_ranks + 63) // 64, 1)
+        n_always = sum(1 for _call, sens in ranked if not sens)
+        set_bit = "_pend[_p >> 6] |= (<unsigned long long>1) << (_p & 63)"
+
+        def push_readers(indent: str, sid_expr: str, *, ahead_of_cursor: bool) -> list[str]:
+            body = [
+                f"{indent}_s = {sid_expr}",
+                f"{indent}for _e in range(DL_READER_OFF[_s], DL_READER_OFF[_s + 1]):",
+                f"{indent}    _p = DL_READER_RANK[_e]",
+            ]
+            if ahead_of_cursor:
+                return [
+                    *body,
+                    f"{indent}    if _p > _r:",
+                    f"{indent}        {set_bit}",
+                    f"{indent}        if _p > _pmax:",
+                    f"{indent}            _pmax = _p",
+                ]
+            return [
+                *body,
+                f"{indent}    {set_bit}",
+                f"{indent}    if _p < _pmin:",
+                f"{indent}        _pmin = _p",
+                f"{indent}    if _p > _pmax:",
+                f"{indent}        _pmax = _p",
+            ]
+
+        lines = [
+            *self._delta_queue_static_lines(ranked),
+            "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
+            "    cdef int it, i, changed, _j, _k, _e, _s, _p, _r, _w, _wchg, _stable",
+            "    cdef int _tcount, _seen, _pmin, _pmax, _bootstrap, _any_int",
+            "    cdef long long _nbaw",
+            "    cdef unsigned long long _x",
+            f"    cdef int _tlist[{max(self._n_sigs, 1)}]",
+            f"    cdef unsigned long long _pend[{n_words}]",
+            *self._delta_common_local_lines(),
+            # Every pending bit is popped before an iteration ends (see the
+            # dispatch loop), so clearing once per call suffices; an early
+            # return mid-dispatch can leave bits set, hence per call, not never.
+            f"    memset(_pend, 0, {n_words} * sizeof(unsigned long long))",
+            "",
+            "    for it in range(DELTA_LIMIT):",
+            # T_k: the sids marked dirty since the previous iteration (or, for
+            # it == 0, since the previous call). Take them and clear their bits,
+            # so this iteration's marks accumulate fresh in dlist.
+            "        _tcount = c.dcount",
+            "        memcpy(_tlist, c.dlist, _tcount * sizeof(int))",
+            "        for _k in range(_tcount):",
+            "            c.dbit[_tlist[_k]] = 0",
+            "        c.dcount = 0",
+            "        changed = _tcount > 0",
+            # Cold start: nothing dirty on the very first iteration -> every
+            # process is pending (same as the scan engine's trigger-everything).
+            "        _bootstrap = 0",
+            "        if it == 0 and not changed:",
+            "            _bootstrap = 1",
+            "            changed = 1",
+            "        if not changed:",
+            "            break",
+            "",
+            *self._delta_conv_snapshot_lines(),
+            *self._delta_seq_fire_lines(),
+            *self._delta_nba_apply_lines(),
+        ]
+        if n_ranks > 0:
+            lines.extend(
+                [
+                    "",
+                    f"        _pmin = {n_ranks}",
+                    "        _pmax = -1",
+                    "        if _bootstrap:",
+                    f"            for _p in range({n_ranks}):",
+                    f"                {set_bit}",
+                    "            _pmin = 0",
+                    f"            _pmax = {n_ranks - 1}",
+                    "        else:",
+                    "            for _k in range(_tcount):",
+                    *push_readers("                ", "_tlist[_k]", ahead_of_cursor=False),
+                ]
+            )
+            if n_always:
+                lines.extend(
+                    [
+                        f"        for _k in range({n_always}):",
+                        "            _p = DL_ALWAYS_RANK[_k]",
+                        f"            {set_bit}",
+                        "            if _p < _pmin:",
+                        "                _pmin = _p",
+                        "            if _p > _pmax:",
+                        "                _pmax = _p",
+                    ]
+                )
+            lines.extend(
+                [
+                    # Sids dirtied by the seq-fire/NBA-apply phase, which
+                    # precedes every cont/combo: all their readers are pending.
+                    "        for _k in range(c.dcount):",
+                    *push_readers("            ", "c.dlist[_k]", ahead_of_cursor=False),
+                    "        _seen = c.dcount",
+                    "",
+                    "        _r = _pmin",
+                    "        while _r <= _pmax:",
+                    "            _w = _r >> 6",
+                    "            _x = _pend[_w] & ((~(<unsigned long long>0)) << (_r & 63))",
+                    "            if _x == 0:",
+                    "                _r = (_w + 1) << 6",
+                    "                continue",
+                    "            _r = (_w << 6) + dl_ctz64(_x)",
+                    "            _pend[_w] &= ~((<unsigned long long>1) << (_r & 63))",
+                ]
+            )
+            # Rank -> process call. Cython lowers this if/elif chain on one C
+            # int into a C switch (O(1) dispatch); each body still has a single
+            # call site, so inlining is the same as the scan engine's.
+            for rank, (call, _sens) in enumerate(ranked):
+                kw = "if" if rank == 0 else "elif"
+                lines.append(f"            {kw} _r == {rank}:")
+                lines.append(f"                {call}")
+            lines.extend(
+                [
+                    "            if c.finished:",
+                    "                return it",
+                    "            if c.error_code != ERR_NONE:",
+                    "                return it",
+                    # Readers ahead of the cursor of each sid that call newly
+                    # dirtied. (A sid already dirty this iteration had its
+                    # ahead-of-cursor readers marked by its first write.)
+                    "            for _k in range(_seen, c.dcount):",
+                    *push_readers("                ", "c.dlist[_k]", ahead_of_cursor=True),
+                    "            _seen = c.dcount",
+                    "            _r += 1",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                # Early exit: nothing dirtied this iteration that any process
+                # (or any seq edge check) could react to -> no further
+                # iteration can do anything. A genuine combinational loop keeps
+                # some interesting sid dirty forever, so this never fires for
+                # one -- DELTA_LIMIT and the value-convergence check remain the
+                # safety net.
+                "        _any_int = 0",
+                "        for _k in range(c.dcount):",
+                "            if DL_IS_INTERESTING[c.dlist[_k]]:",
+                "                _any_int = 1",
+                "                break",
+                "        if not _any_int:",
+                "            break",
+                *self._delta_value_convergence_lines(),
+                # for-else: fires only when the loop is NOT exited via break.
+                "    else:",
+                "        c.error_code = ERR_DELTA_LIMIT",
+                "",
+                # Leave a clean slate for the next call.
+                "    for _k in range(c.dcount):",
+                "        c.dbit[c.dlist[_k]] = 0",
+                "    c.dcount = 0",
+                "    return it",
+            ]
+        )
         return "\n".join(lines)
 
     def _gen_compiled_sim(self) -> str:
@@ -1752,16 +2049,19 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "",
             "    def __init__(self):",
             "        cdef int i",
+            # Sparse-set counts first: init lines below may mark_dirty().
+            "        self.ctx.dcount = 0",
+            "        self.ctx.nba_count = 0",
             "        for i in range(N_SIGS):",
             "            self.ctx.val[i] = 0",
             "            self.ctx.mask[i] = 0",
             "            self.ctx.width[i] = 0",
             "            self.ctx.wide_words[i] = 0",
             "            self.ctx.wide_offset[i] = 0",
-            "            self.ctx.dirty[i] = 0",
+            "            self.ctx.dbit[i] = 0",
             "            self.ctx.nba_val[i] = 0",
             "            self.ctx.nba_mask[i] = 0",
-            "            self.ctx.nba_dirty[i] = 0",
+            "            self.ctx.nba_bit[i] = 0",
             "            self._snap_v[i] = 0",
             "            self._snap_m[i] = 0",
             "        for i in range(N_WIDE_WORDS):",
@@ -1917,7 +2217,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "        if v != self.ctx.val[sid] or m != self.ctx.mask[sid]:",
                 "            self.ctx.val[sid] = v",
                 "            self.ctx.mask[sid] = m",
-                "            self.ctx.dirty[sid] = 1",
+                "            mark_dirty(&self.ctx, sid)",
             ]
         )
 
@@ -1927,7 +2227,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "    cpdef void mark_all_dirty(self):",
                 "        cdef int i",
                 "        for i in range(N_SIGS):",
-                "            self.ctx.dirty[i] = 1",
+                "            mark_dirty(&self.ctx, i)",
             ]
         )
 
@@ -1961,7 +2261,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "            self.ctx.mask[sid] = low_m",
                 "            changed = 1",
                 "        if changed:",
-                "            self.ctx.dirty[sid] = 1",
+                "            mark_dirty(&self.ctx, sid)",
             ]
         )
 
@@ -2132,7 +2432,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     lines.append(f"            self.ctx.mem_{mid}_val[addr] = v")
                     lines.append(f"            self.ctx.mem_{mid}_mask[addr] = m")
                 lines.append(f"            self.ctx.val[{marker_sid}] ^= 1")
-                lines.append(f"            self.ctx.dirty[{marker_sid}] = 1")
+                lines.append(f"            mark_dirty(&self.ctx, {marker_sid})")
             lines.extend(
                 [
                     "",
@@ -2157,7 +2457,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     lines.append(f"            self.ctx.mem_{mid}_val[addr] = <long long>v")
                     lines.append(f"            self.ctx.mem_{mid}_mask[addr] = <long long>m")
                 lines.append(f"            self.ctx.val[{marker_sid}] ^= 1")
-                lines.append(f"            self.ctx.dirty[{marker_sid}] = 1")
+                lines.append(f"            mark_dirty(&self.ctx, {marker_sid})")
 
         # batch_run method ΓÇö multi-cycle execution entirely in C
         sn = max(self._n_sigs, 1)
@@ -2180,7 +2480,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     f"                        self.ctx.mem_{mid}_val[ev_mem_addrs[mem_ev_idx]] = ev_mem_vals[mem_ev_idx]",
                     f"                        self.ctx.mem_{mid}_mask[ev_mem_addrs[mem_ev_idx]] = 0",
                     f"                        self.ctx.val[{marker_sid}] ^= 1",
-                    f"                        self.ctx.dirty[{marker_sid}] = 1",
+                    f"                        mark_dirty(&self.ctx, {marker_sid})",
                 ]
             )
         lines.extend(
@@ -2220,7 +2520,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 *self._mem_snap_memcpy_lines("                "),
                 "                self.ctx.val[clk_sid] = 0",
                 "                self.ctx.mask[clk_sid] = 0",
-                "                self.ctx.dirty[clk_sid] = 1",
+                "                mark_dirty(&self.ctx, clk_sid)",
                 "                delta_loop(&self.ctx, sv, sm)",
                 "                if self.ctx.error_code != ERR_NONE:",
                 "                    cycles_run = 0",
@@ -2230,7 +2530,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                while ev_idx < n_events and ev_cycles[ev_idx] == i:",
                 "                    self.ctx.val[ev_sids[ev_idx]] = ev_vals[ev_idx]",
                 "                    self.ctx.mask[ev_sids[ev_idx]] = 0",
-                "                    self.ctx.dirty[ev_sids[ev_idx]] = 1",
+                "                    mark_dirty(&self.ctx, ev_sids[ev_idx])",
                 "                    ev_applied = 1",
                 "                    ev_idx += 1",
                 "                while mem_ev_idx < n_mem_events and ev_mem_cycles[mem_ev_idx] == i:",
@@ -2289,7 +2589,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # Posedge: drive clk high",
                 "                self.ctx.val[clk_sid] = 1",
                 "                self.ctx.mask[clk_sid] = 0",
-                "                self.ctx.dirty[clk_sid] = 1",
+                "                mark_dirty(&self.ctx, clk_sid)",
                 "                delta_loop(&self.ctx, sv, sm)",
                 "                if self.ctx.error_code != ERR_NONE:",
                 "                    cycles_run = i + 1",

@@ -75,7 +75,7 @@ class _ExprEmitterMixin:
         else:
             lines.append(f"        self.ctx.val[{sid}] = {val}")
             lines.append(f"        self.ctx.mask[{sid}] = {mask}")
-        lines.append(f"        self.ctx.dirty[{sid}] = 1")
+        lines.append(f"        mark_dirty(&self.ctx, {sid})")
 
     # Expression codegen
 

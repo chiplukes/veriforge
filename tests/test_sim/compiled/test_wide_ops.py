@@ -148,13 +148,13 @@ class TestWideUnifiedPhase0Codegen:
         cg = CythonCodegen()
         cg.generate(self._wide_module())
         code = cg._gen_wide_adapters()
-        assert "c.dirty[sid]" in code
+        assert "mark_dirty(c, sid)" in code
 
     def test_adapters_stage_sets_nba_flags(self):
         cg = CythonCodegen()
         cg.generate(self._wide_module())
         code = cg._gen_wide_adapters()
-        assert "c.nba_dirty[sid]" in code
+        assert "mark_nba(c, sid)" in code
         assert "c.nba_pending" in code
 
     # ── Sections list wires up primitives and adapters ────────────────────────

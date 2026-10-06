@@ -1154,7 +1154,7 @@ class _GenWideSectionsMixin:
             "        c.mask[sid] = new_m",
             "        changed = 1",
             "    if changed:",
-            "        c.dirty[sid] = 1",
+            "        mark_dirty(c, sid)",
             "",
         ]
 
@@ -1178,7 +1178,7 @@ class _GenWideSectionsMixin:
             "    else:",
             "        c.nba_val[sid]  = <long long>(sv[0] & <unsigned long long>wmask(w) & ~sm[0])",
             "        c.nba_mask[sid] = <long long>(sm[0] & <unsigned long long>wmask(w))",
-            "    c.nba_dirty[sid] = 1",
+            "    mark_nba(c, sid)",
             "    c.nba_pending   = 1",
             "",
         ]
@@ -1391,7 +1391,7 @@ class _GenWideSectionsMixin:
                     "            changed = 1",
                     "    if changed:",
                     "        c.val[marker_sid] ^= 1",
-                    "        c.dirty[marker_sid] = 1",
+                    "        mark_dirty(c, marker_sid)",
                     "",
                     f"cdef inline void wide_load_wmem{mid}(",
                     "    SimCtx *c, int addr,",

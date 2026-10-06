@@ -118,19 +118,14 @@ def _codegen_infra_hash() -> str:
         return _codegen_infra_hash_cache
     h = hashlib.sha256()
     compiled_dir = Path(__file__).resolve().parent
-    # Hash all codegen source files — captures any codegen logic changes
-    for fname in (
-        "codegen.py",
-        "_expr_emitter.py",
-        "_gen_sections.py",
-        "_process_compiler.py",
-        "_stmt_emitters.py",
-        "_wide_emitter.py",
-        "_codegen_utils.py",
-    ):
-        p = compiled_dir / fname
-        if p.exists():
-            h.update(p.read_bytes())
+    # Hash every codegen source file and template -- captures any codegen
+    # logic change. Globbed rather than listed: a hardcoded list once
+    # silently omitted _gen_wide_section.py, every _gen_narrow_*.py
+    # generator, their templates/*.pxi, and compiler.py (build flags), so
+    # editing any of those reused stale compiled modules from the cache.
+    for p in sorted([*compiled_dir.glob("*.py"), *(compiled_dir / "templates").glob("*.pxi")]):
+        h.update(p.name.encode("utf-8"))
+        h.update(p.read_bytes())
     # Hash elaborate.py — captures flattening/struct env changes
     elaborate_path = compiled_dir.parent / "elaborate.py"
     if elaborate_path.exists():
@@ -166,6 +161,12 @@ def _compute_elab_hash(module: Module, source_files: list[str]) -> str:
     h = hashlib.sha256()
     h.update(module.name.encode("utf-8"))
     h.update(_codegen_infra_hash().encode("utf-8"))
+    # Codegen options that change the generated source without changing any
+    # hashed file. Read per call (not folded into the memoized infra hash)
+    # so a mode switch within one process -- e.g. an A/B test -- takes effect.
+    from .codegen import delta_engine_mode  # noqa: PLC0415
+
+    h.update(delta_engine_mode().encode("utf-8"))
     for sf in sorted(source_files):
         try:
             h.update(Path(sf).read_bytes())

@@ -155,6 +155,27 @@ Initial blocks and always-with-timing scheduling run only once (guarded by
 `_bootstrapped` flag). Continuous assign re-evaluation and combinational always
 blocks run on every `run()` call to propagate external `drive()` changes.
 
+### Compiled Delta-Loop Engines (`VERIFORGE_DELTA_ENGINE`)
+
+The compiled engine's `delta_loop` (the per-edge settle loop) has two
+implementations, chosen at codegen time:
+
+- `scan` (default): every delta iteration scans all signals for dirty flags
+  and checks every continuous-assign/combinational process's sensitivity.
+  Per-iteration cost scales with total design size; cheapest per process
+  actually executed.
+- `queue` (opt-in, `VERIFORGE_DELTA_ENGINE=queue`): sparse dirty lists plus a
+  static reader index, so each iteration only touches processes whose inputs
+  changed. Per-iteration cost scales with real activity.
+
+Both run exactly the same processes in the same order every iteration, so
+results and delta-iteration counts are identical (enforced by
+`tests/test_sim/compiled/test_delta_engine_equivalence.py`); only speed
+differs. `queue` is 3-5x faster on large designs where a small fraction of the
+logic changes per cycle, and slower when most of the design is active every
+cycle or the design is small. Try both on a large design. See
+`notes/plans/work_queue_delta_engine.md` for measurements.
+
 ## Test Coverage
 
 ### Testing Strategy

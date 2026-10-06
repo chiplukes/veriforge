@@ -800,12 +800,14 @@ class TestCharStorageLayout:
         pyx = CythonCodegen().generate(_make_counter())
         assert "nba_pending" in pyx
         assert "nba_val[" in pyx
-        assert "nba_dirty[" in pyx
+        assert "nba_bit[" in pyx
+        assert "mark_nba(" in pyx
 
     def test_dirty_flag_array_present(self):
         """dirty[] array tracks which signals have changed."""
         pyx = CythonCodegen().generate(_make_adder())
-        assert "dirty[" in pyx
+        assert "dbit[" in pyx
+        assert "dlist[" in pyx
 
     def test_compiled_sim_class_present(self):
         """CompiledSim Python-extension class wraps the struct."""

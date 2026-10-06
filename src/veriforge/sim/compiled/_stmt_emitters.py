@@ -419,7 +419,7 @@ class _StmtEmittersMixin:
                             f"{pad}_sfv = ({rhs_val}) & {fmask}",
                             f"{pad}c.nba_val[{base_sid}] = (c.val[{base_sid}] & {clear_mask}) | (_sfv << {offset})",
                             f"{pad}c.nba_mask[{base_sid}] = 0",
-                            f"{pad}c.nba_dirty[{base_sid}] = 1",
+                            f"{pad}mark_nba(c, {base_sid})",
                             f"{pad}c.nba_pending = 1",
                         ]
                     return [
@@ -428,7 +428,7 @@ class _StmtEmittersMixin:
                         f"{pad}if _cdv != c.val[{base_sid}] or c.mask[{base_sid}]:",
                         f"{pad}    c.val[{base_sid}] = _cdv",
                         f"{pad}    c.mask[{base_sid}] = 0",
-                        f"{pad}    c.dirty[{base_sid}] = 1",
+                        f"{pad}    mark_dirty(c, {base_sid})",
                     ]
                 # Local loop variable assignment ΓÇö use width 64 so
                 # wmask(64) == -1 and masking is effectively a no-op,
@@ -584,7 +584,7 @@ class _StmtEmittersMixin:
                     *et_lines,
                     f"{pad}c.nba_val[{sid}] = {assign_rhs}",
                     f"{pad}c.nba_mask[{sid}] = {assign_mask}",
-                    f"{pad}c.nba_dirty[{sid}] = 1",
+                    f"{pad}mark_nba(c, {sid})",
                     f"{pad}c.nba_pending = 1",
                 ]
             return [
@@ -594,7 +594,7 @@ class _StmtEmittersMixin:
                 f"{pad}if _cdv != c.val[{sid}] or _cdm != c.mask[{sid}]:",
                 f"{pad}    c.val[{sid}] = _cdv",
                 f"{pad}    c.mask[{sid}] = _cdm",
-                f"{pad}    c.dirty[{sid}] = 1",
+                f"{pad}    mark_dirty(c, {sid})",
             ]
 
         # ΓöÇΓöÇ BitSelect ΓÇö memory or scalar bit ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -652,10 +652,10 @@ class _StmtEmittersMixin:
                 if is_nba:
                     # Read from nba_val if already dirty, else from val
                     return [
-                        f"{pad}_bbase = c.nba_val[{sid}] if c.nba_dirty[{sid}] else c.val[{sid}]",
+                        f"{pad}_bbase = c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}]",
                         f"{pad}c.nba_val[{sid}] = (_bbase & ~(1 << ({idx}))) | ((({rhs_val}) & 1) << ({idx}))",
                         f"{pad}c.nba_mask[{sid}] = 0",
-                        f"{pad}c.nba_dirty[{sid}] = 1",
+                        f"{pad}mark_nba(c, {sid})",
                         f"{pad}c.nba_pending = 1",
                     ]
                 return [
@@ -663,7 +663,7 @@ class _StmtEmittersMixin:
                     f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
                     f"{pad}    c.val[{sid}] = _cdv",
                     f"{pad}    c.mask[{sid}] = 0",
-                    f"{pad}    c.dirty[{sid}] = 1",
+                    f"{pad}    mark_dirty(c, {sid})",
                 ]
             raise NotImplementedError(
                 f"Compiled engine does not support bit-select write on "
@@ -858,7 +858,7 @@ class _StmtEmittersMixin:
         ]
         store_arr = "nba_val" if is_nba else "val"
         if is_nba:
-            base_read = f"(c.nba_val[{sid}] if c.nba_dirty[{sid}] else c.val[{sid}])"
+            base_read = f"(c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}])"
         else:
             base_read = f"c.val[{sid}]"
         new_val_expr = f"({base_read} & ~_rmw_mask) | ((({rhs_val}) << _rmw_lsb) & _rmw_mask)"
@@ -867,7 +867,7 @@ class _StmtEmittersMixin:
             lines.extend(
                 [
                     f"{pad}c.nba_mask[{sid}] = 0",
-                    f"{pad}c.nba_dirty[{sid}] = 1",
+                    f"{pad}mark_nba(c, {sid})",
                     f"{pad}c.nba_pending = 1",
                 ]
             )
@@ -878,7 +878,7 @@ class _StmtEmittersMixin:
                     f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
                     f"{pad}    c.val[{sid}] = _cdv",
                     f"{pad}    c.mask[{sid}] = 0",
-                    f"{pad}    c.dirty[{sid}] = 1",
+                    f"{pad}    mark_dirty(c, {sid})",
                 ]
             )
         return lines
@@ -984,7 +984,7 @@ class _StmtEmittersMixin:
         sel_mask = _cy_hex((1 << sel_w) - 1)
         store_arr = "nba_val" if is_nba else "val"
         if is_nba:
-            base_read = f"(c.nba_val[{sid}] if c.nba_dirty[{sid}] else c.val[{sid}])"
+            base_read = f"(c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}])"
         else:
             base_read = f"c.val[{sid}]"
         new_val_expr = f"({base_read} & ~{range_mask}) | ((({rhs_val}) & {sel_mask}) << {lsb_val})"
@@ -993,7 +993,7 @@ class _StmtEmittersMixin:
             lines.extend(
                 [
                     f"{pad}c.nba_mask[{sid}] = 0",
-                    f"{pad}c.nba_dirty[{sid}] = 1",
+                    f"{pad}mark_nba(c, {sid})",
                     f"{pad}c.nba_pending = 1",
                 ]
             )
@@ -1003,7 +1003,7 @@ class _StmtEmittersMixin:
                 f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
                 f"{pad}    c.val[{sid}] = _cdv",
                 f"{pad}    c.mask[{sid}] = 0",
-                f"{pad}    c.dirty[{sid}] = 1",
+                f"{pad}    mark_dirty(c, {sid})",
             ]
         return lines
 
@@ -1681,8 +1681,8 @@ class _StmtEmittersMixin:
             wmask_val = f"wmask({sig_w})"
             if is_nba:
                 # Read current: use nba_val if already dirty, else val
-                lines.append(f"{pad}_cacc_val = c.nba_val[{sid}] if c.nba_dirty[{sid}] else c.val[{sid}]")
-                lines.append(f"{pad}_cacc_mask = c.nba_mask[{sid}] if c.nba_dirty[{sid}] else c.mask[{sid}]")
+                lines.append(f"{pad}_cacc_val = c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}]")
+                lines.append(f"{pad}_cacc_mask = c.nba_mask[{sid}] if c.nba_bit[{sid}] else c.mask[{sid}]")
                 for extract, mask_extract, msb_str, lsb_str in ops:
                     if msb_str is None:
                         # Full signal write
@@ -1703,7 +1703,7 @@ class _StmtEmittersMixin:
                         )
                 lines.append(f"{pad}c.nba_val[{sid}] = _cacc_val & {wmask_val}")
                 lines.append(f"{pad}c.nba_mask[{sid}] = _cacc_mask & {wmask_val}")
-                lines.append(f"{pad}c.nba_dirty[{sid}] = 1")
+                lines.append(f"{pad}mark_nba(c, {sid})")
                 lines.append(f"{pad}c.nba_pending = 1")
             else:
                 # Blocking: accumulate into val directly
@@ -1730,7 +1730,7 @@ class _StmtEmittersMixin:
                 lines.append(f"{pad}if _cacc_val != c.val[{sid}] or _cacc_mask != c.mask[{sid}]:")
                 lines.append(f"{pad}    c.val[{sid}] = _cacc_val")
                 lines.append(f"{pad}    c.mask[{sid}] = _cacc_mask")
-                lines.append(f"{pad}    c.dirty[{sid}] = 1")
+                lines.append(f"{pad}    mark_dirty(c, {sid})")
 
         lines.extend(signal_part_lines)
         lines.extend(mem_part_lines)
@@ -1942,7 +1942,7 @@ class _StmtEmittersMixin:
                     [
                         f"{pad}if _mchg:",
                         f"{pad}    c.val[{marker_sid}] ^= 1",
-                        f"{pad}    c.dirty[{marker_sid}] = 1",
+                        f"{pad}    mark_dirty(c, {marker_sid})",
                     ]
                 )
             return lines
@@ -1972,7 +1972,7 @@ class _StmtEmittersMixin:
             f"{pad}    c.mem_{mid}_val[_mwi] = _mwv",
             f"{pad}    c.mem_{mid}_mask[_mwi] = _mwm",
             f"{pad}    c.val[{marker_sid}] ^= 1",
-            f"{pad}    c.dirty[{marker_sid}] = 1",
+            f"{pad}    mark_dirty(c, {marker_sid})",
         ]
 
     def _emit_dynamic_mem_range_write_lines(  # noqa: PLR0913
@@ -2035,7 +2035,7 @@ class _StmtEmittersMixin:
             f"{pad}    c.mem_{mid}_val[_mwi] = _mwv",
             f"{pad}    c.mem_{mid}_mask[_mwi] = _mwm",
             f"{pad}    c.val[{marker_sid}] ^= 1",
-            f"{pad}    c.dirty[{marker_sid}] = 1",
+            f"{pad}    mark_dirty(c, {marker_sid})",
         ]
 
     def _emit_mem_range_write(  # noqa: PLR0913

@@ -53,6 +53,7 @@ from veriforge.model.statements import (
     WaitStatement,
     WhileLoop,
 )
+from veriforge.sim.compiled._codegen_utils import delta_engine_mode  # noqa: F401 -- re-exported for compiled_scheduler
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _PROCESS_LOOP_LIMIT,

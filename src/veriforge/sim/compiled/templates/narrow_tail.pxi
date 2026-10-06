@@ -70,7 +70,7 @@ cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int sr
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline long long _sign_ext(long long v, int w) noexcept nogil:
     if w >= 64:

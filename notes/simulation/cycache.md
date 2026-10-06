@@ -54,8 +54,13 @@ Caches the codegen step — generating `.pyx` from the Verilog model.
 - Module name
 - All source file contents (sorted)
 - All codegen infrastructure files (hashed together via `_codegen_infra_hash()`):
-  `codegen.py`, `_expr_emitter.py`, `_gen_sections.py`, `_process_compiler.py`,
-  `_stmt_emitters.py`, `_wide_emitter.py`, `_codegen_utils.py`, and `elaborate.py`
+  every `*.py` in `sim/compiled/`, every `sim/compiled/templates/*.pxi`, and
+  `elaborate.py`. (Globbed, not listed: a hardcoded list once omitted
+  `_gen_wide_section.py`, the `_gen_narrow_*.py` generators, their templates,
+  and `compiler.py`, so editing those silently reused stale modules.)
+- Codegen options that change the generated source without changing any file
+  above -- currently `VERIFORGE_DELTA_ENGINE` (read per call, so switching it
+  within one process takes effect)
 - `_CACHE_VERSION`
 - Cython version
 - Platform tag

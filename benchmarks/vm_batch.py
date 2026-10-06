@@ -5,6 +5,7 @@ Run: .venv/bin/python benchmarks/vm_batch.py --cycles 50000 --repeat 3
 Parsing, construction, and execution are reported separately. Both execution modes
 include two reset cycles and run exactly the same number of rising/falling edges.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,8 +64,7 @@ def main():
         setup = statistics.median(row[0] for row in rows)
         elapsed = statistics.median(row[1] for row in rows)
         durations[mode] = elapsed
-        print(f"VM {mode}: setup {setup:.4f}s; execution {elapsed:.4f}s; "
-              f"{(args.cycles + 2) / elapsed:,.0f} cycles/s")
+        print(f"VM {mode}: setup {setup:.4f}s; execution {elapsed:.4f}s; {(args.cycles + 2) / elapsed:,.0f} cycles/s")
     print(f"Batch speedup: {durations['step'] / durations['batch']:.2f}x; all final states match")
 
 

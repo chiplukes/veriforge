@@ -92,7 +92,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if changed:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -114,7 +114,7 @@ class _WideEmitterMixin:
             [
                 f"{pad}if _mchg:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -171,7 +171,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if changed:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -195,7 +195,7 @@ class _WideEmitterMixin:
             [
                 f"{pad}if _mchg:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -239,7 +239,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if changed:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -259,7 +259,7 @@ class _WideEmitterMixin:
             [
                 f"{pad}if _mchg:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -298,7 +298,7 @@ class _WideEmitterMixin:
                 f"{pad}    c.mem_{mid}_val[idx] = rval",
                 f"{pad}    c.mem_{mid}_mask[idx] = rmask",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
 
         return [
@@ -309,7 +309,7 @@ class _WideEmitterMixin:
             f"{pad}    c.mem_{mid}_val[_mwi] = _mwv",
             f"{pad}    c.mem_{mid}_mask[_mwi] = _mwm",
             f"{pad}    c.val[{marker_sid}] ^= 1",
-            f"{pad}    c.dirty[{marker_sid}] = 1",
+            f"{pad}    mark_dirty(c, {marker_sid})",
         ]
 
     def _emit_mem_bit_write_lines(
@@ -371,7 +371,7 @@ class _WideEmitterMixin:
                     f"{pad}    c.wide_mem_{mid}_val[word_addr] = new_v",
                     f"{pad}    c.wide_mem_{mid}_mask[word_addr] = new_m",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -405,7 +405,7 @@ class _WideEmitterMixin:
                 f"{pad}    c.mem_{mid}_val[idx] = new_v",
                 f"{pad}    c.mem_{mid}_mask[idx] = new_m",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -485,7 +485,7 @@ class _WideEmitterMixin:
                 f"{pad}    word_index += 1",
                 f"{pad}if _mchg:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -588,7 +588,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if _mchg:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
         self._reset_scratch()
@@ -680,7 +680,7 @@ class _WideEmitterMixin:
                 f"{pad}        _word_index += 1",
                 f"{pad}    if _mchg:",
                 f"{pad}        c.val[{marker_sid}] ^= 1",
-                f"{pad}        c.dirty[{marker_sid}] = 1",
+                f"{pad}        mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -733,7 +733,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if changed:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -767,7 +767,7 @@ class _WideEmitterMixin:
             [
                 f"{pad}if changed:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -842,7 +842,7 @@ class _WideEmitterMixin:
                 [
                     f"{pad}if changed:",
                     f"{pad}    c.val[{marker_sid}] ^= 1",
-                    f"{pad}    c.dirty[{marker_sid}] = 1",
+                    f"{pad}    mark_dirty(c, {marker_sid})",
                 ]
             )
             return lines
@@ -877,7 +877,7 @@ class _WideEmitterMixin:
             [
                 f"{pad}if changed:",
                 f"{pad}    c.val[{marker_sid}] ^= 1",
-                f"{pad}    c.dirty[{marker_sid}] = 1",
+                f"{pad}    mark_dirty(c, {marker_sid})",
             ]
         )
         return lines
@@ -897,7 +897,7 @@ class _WideEmitterMixin:
                         f"    if {masked_v} != c.wide_val[{wide_index}] or {masked_m} != c.wide_mask[{wide_index}]:",
                         f"        c.wide_val[{wide_index}] = {masked_v}",
                         f"        c.wide_mask[{wide_index}] = {masked_m}",
-                        f"        c.dirty[{dst_sid}] = 1",
+                        f"        mark_dirty(c, {dst_sid})",
                     ]
                 )
 
@@ -909,7 +909,7 @@ class _WideEmitterMixin:
                     f"    if {low_v} != c.val[{dst_sid}] or {low_m} != c.mask[{dst_sid}]:",
                     f"        c.val[{dst_sid}] = {low_v}",
                     f"        c.mask[{dst_sid}] = {low_m}",
-                    f"        c.dirty[{dst_sid}] = 1",
+                    f"        mark_dirty(c, {dst_sid})",
                 ]
             )
             return lines
@@ -921,7 +921,7 @@ class _WideEmitterMixin:
             f"    if {masked_v} != c.val[{dst_sid}] or {masked_m} != c.mask[{dst_sid}]:",
             f"        c.val[{dst_sid}] = {masked_v}",
             f"        c.mask[{dst_sid}] = {masked_m}",
-            f"        c.dirty[{dst_sid}] = 1",
+            f"        mark_dirty(c, {dst_sid})",
         ]
 
     @staticmethod
@@ -997,7 +997,7 @@ class _WideEmitterMixin:
                 [
                     f"{indent}c.nba_val[{dst_sid}] = {low_v}",
                     f"{indent}c.nba_mask[{dst_sid}] = {low_m}",
-                    f"{indent}c.nba_dirty[{dst_sid}] = 1",
+                    f"{indent}mark_nba(c, {dst_sid})",
                     f"{indent}c.nba_pending = 1",
                 ]
             )
@@ -1017,7 +1017,7 @@ class _WideEmitterMixin:
                         f"{indent}if {masked_v} != c.wide_val[{wide_index}] or {masked_m} != c.wide_mask[{wide_index}]:",
                         f"{indent}    c.wide_val[{wide_index}] = {masked_v}",
                         f"{indent}    c.wide_mask[{wide_index}] = {masked_m}",
-                        f"{indent}    c.dirty[{dst_sid}] = 1",
+                        f"{indent}    mark_dirty(c, {dst_sid})",
                     ]
                 )
 
@@ -1028,7 +1028,7 @@ class _WideEmitterMixin:
                     f"{indent}if {low_v} != c.val[{dst_sid}] or {low_m} != c.mask[{dst_sid}]:",
                     f"{indent}    c.val[{dst_sid}] = {low_v}",
                     f"{indent}    c.mask[{dst_sid}] = {low_m}",
-                    f"{indent}    c.dirty[{dst_sid}] = 1",
+                    f"{indent}    mark_dirty(c, {dst_sid})",
                 ]
             )
             return lines
@@ -1039,7 +1039,7 @@ class _WideEmitterMixin:
             f"{indent}if {masked_v} != c.val[{dst_sid}] or {masked_m} != c.mask[{dst_sid}]:",
             f"{indent}    c.val[{dst_sid}] = {masked_v}",
             f"{indent}    c.mask[{dst_sid}] = {masked_m}",
-            f"{indent}    c.dirty[{dst_sid}] = 1",
+            f"{indent}    mark_dirty(c, {dst_sid})",
         ]
 
     def _emit_signed_literal_xor_shift_lines(

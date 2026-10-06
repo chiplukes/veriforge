@@ -78,7 +78,7 @@ cdef inline void _whole_assign_sar_signal(SimCtx *c, int dst_sid, int src_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 
 cdef inline void _whole_assign_ternary_shl_signal(SimCtx *c, int dst_sid, int cond_sid, int true_sid, int false_sid, int shift) noexcept nogil:
@@ -137,7 +137,7 @@ cdef inline void _whole_assign_ternary_shl_signal(SimCtx *c, int dst_sid, int co
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_ternary_shr_signal(SimCtx *c, int dst_sid, int cond_sid, int true_sid, int false_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -191,7 +191,7 @@ cdef inline void _whole_assign_ternary_shr_signal(SimCtx *c, int dst_sid, int co
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_shl_signal(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -243,7 +243,7 @@ cdef inline void _whole_assign_shl_signal(SimCtx *c, int dst_sid, int src_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_shr_signal(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -304,7 +304,7 @@ cdef inline void _whole_assign_shr_signal(SimCtx *c, int dst_sid, int src_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_and_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -339,7 +339,7 @@ cdef inline void _whole_assign_and_const(SimCtx *c, int dst_sid, int lhs_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -374,7 +374,7 @@ cdef inline void _whole_assign_or_const(SimCtx *c, int dst_sid, int lhs_sid, uns
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long rhs_const) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -409,7 +409,7 @@ cdef inline void _whole_assign_xor_const(SimCtx *c, int dst_sid, int lhs_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_or_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -450,7 +450,7 @@ cdef inline void _whole_assign_mask_or_signal(SimCtx *c, int dst_sid, int left_s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_and_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -491,7 +491,7 @@ cdef inline void _whole_assign_mask_and_signal(SimCtx *c, int dst_sid, int left_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_xor_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -532,7 +532,7 @@ cdef inline void _whole_assign_mask_xor_signal(SimCtx *c, int dst_sid, int left_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_mask_xor_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -573,7 +573,7 @@ cdef inline void _whole_assign_or_mask_xor_signal(SimCtx *c, int dst_sid, int le
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_add_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -625,7 +625,7 @@ cdef inline void _whole_assign_mask_add_signal(SimCtx *c, int dst_sid, int left_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_or_mask(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long rhs_const) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -676,7 +676,7 @@ cdef inline void _whole_assign_sub_signal_or_mask(SimCtx *c, int dst_sid, int su
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_mask_add_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -728,7 +728,7 @@ cdef inline void _whole_assign_or_mask_add_signal(SimCtx *c, int dst_sid, int le
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_sub_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -779,7 +779,7 @@ cdef inline void _whole_assign_mask_sub_signal(SimCtx *c, int dst_sid, int left_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_mask_sub_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -830,7 +830,7 @@ cdef inline void _whole_assign_or_mask_sub_signal(SimCtx *c, int dst_sid, int le
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_mask(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long rhs_const) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -881,7 +881,7 @@ cdef inline void _whole_assign_sub_signal_mask(SimCtx *c, int dst_sid, int sub_s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_and_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -932,7 +932,7 @@ cdef inline void _whole_assign_sub_const_and_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_or_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -983,7 +983,7 @@ cdef inline void _whole_assign_sub_const_or_signal(SimCtx *c, int dst_sid, int s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_and_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1034,7 +1034,7 @@ cdef inline void _whole_assign_const_sub_and_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_or_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1085,7 +1085,7 @@ cdef inline void _whole_assign_const_sub_or_signal(SimCtx *c, int dst_sid, int s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_mask_and_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1126,7 +1126,7 @@ cdef inline void _whole_assign_or_mask_and_signal(SimCtx *c, int dst_sid, int le
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_mask_or_signal(SimCtx *c, int dst_sid, int left_sid, unsigned long long rhs_const, int right_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1167,7 +1167,7 @@ cdef inline void _whole_assign_or_mask_or_signal(SimCtx *c, int dst_sid, int lef
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_add_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1230,7 +1230,7 @@ cdef inline void _whole_assign_add_const_add_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_sub_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1293,7 +1293,7 @@ cdef inline void _whole_assign_add_const_sub_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_add_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1354,7 +1354,7 @@ cdef inline void _whole_assign_sub_signal_add_const(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_xor_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1405,7 +1405,7 @@ cdef inline void _whole_assign_sub_signal_xor_const(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_add_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1467,7 +1467,7 @@ cdef inline void _whole_assign_sub_const_add_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_add_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1529,7 +1529,7 @@ cdef inline void _whole_assign_const_sub_add_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_sub_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1589,7 +1589,7 @@ cdef inline void _whole_assign_const_sub_sub_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_sub_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1649,7 +1649,7 @@ cdef inline void _whole_assign_sub_const_sub_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_sub_const(SimCtx *c, int dst_sid, int sub_sid, int mix_sid, unsigned long long const_word) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1709,7 +1709,7 @@ cdef inline void _whole_assign_sub_signal_sub_const(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_const_sub(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int mix_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1769,7 +1769,7 @@ cdef inline void _whole_assign_sub_signal_const_sub(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_sub_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int sub_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1819,7 +1819,7 @@ cdef inline void _whole_assign_xor_const_sub_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_xor_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1870,7 +1870,7 @@ cdef inline void _whole_assign_sub_const_xor_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_xor_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1921,7 +1921,7 @@ cdef inline void _whole_assign_const_sub_xor_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_add_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int add_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -1972,7 +1972,7 @@ cdef inline void _whole_assign_xor_const_add_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_and_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2012,7 +2012,7 @@ cdef inline void _whole_assign_xor_const_and_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_or_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2052,7 +2052,7 @@ cdef inline void _whole_assign_xor_const_or_signal(SimCtx *c, int dst_sid, int x
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_xor_signal(SimCtx *c, int dst_sid, int xor_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2092,7 +2092,7 @@ cdef inline void _whole_assign_xor_const_xor_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_and_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2145,7 +2145,7 @@ cdef inline void _whole_assign_add_const_and_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_or_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2198,7 +2198,7 @@ cdef inline void _whole_assign_add_const_or_signal(SimCtx *c, int dst_sid, int a
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_xor_signal(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2251,7 +2251,7 @@ cdef inline void _whole_assign_add_const_xor_signal(SimCtx *c, int dst_sid, int 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long const_word) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2299,7 +2299,7 @@ cdef inline void _whole_assign_add_const(SimCtx *c, int dst_sid, int lhs_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 
 cdef inline void _whole_assign_mask_shl(SimCtx *c, int dst_sid, int mask_sid, unsigned long long rhs_const, int shift) noexcept nogil:
@@ -2355,7 +2355,7 @@ cdef inline void _whole_assign_mask_shl(SimCtx *c, int dst_sid, int mask_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mask_shr(SimCtx *c, int dst_sid, int mask_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2422,7 +2422,7 @@ cdef inline void _whole_assign_mask_shr(SimCtx *c, int dst_sid, int mask_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_const_shl(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2477,7 +2477,7 @@ cdef inline void _whole_assign_or_const_shl(SimCtx *c, int dst_sid, int signal_s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_const_shr(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2544,7 +2544,7 @@ cdef inline void _whole_assign_or_const_shr(SimCtx *c, int dst_sid, int signal_s
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_shl(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2599,7 +2599,7 @@ cdef inline void _whole_assign_xor_const_shl(SimCtx *c, int dst_sid, int signal_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_const_shr(SimCtx *c, int dst_sid, int signal_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2666,7 +2666,7 @@ cdef inline void _whole_assign_xor_const_shr(SimCtx *c, int dst_sid, int signal_
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_not_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2720,7 +2720,7 @@ cdef inline void _whole_assign_not_shl(SimCtx *c, int dst_sid, int signal_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_not_shr(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2779,7 +2779,7 @@ cdef inline void _whole_assign_not_shr(SimCtx *c, int dst_sid, int signal_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_lnot_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2825,7 +2825,7 @@ cdef inline void _whole_assign_lnot_shl(SimCtx *c, int dst_sid, int signal_sid, 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_x_signal_shl(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2874,7 +2874,7 @@ cdef inline void _whole_assign_x_signal_shl(SimCtx *c, int dst_sid, int src_sid,
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_x_signal_shr(SimCtx *c, int dst_sid, int src_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -2930,7 +2930,7 @@ cdef inline void _whole_assign_x_signal_shr(SimCtx *c, int dst_sid, int src_sid,
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_neg_shl(SimCtx *c, int dst_sid, int signal_sid, int shift) noexcept nogil:
     cdef int src_words = c.wide_words[signal_sid] if c.wide_words[signal_sid] > 0 else 1
@@ -2981,7 +2981,7 @@ cdef inline void _whole_assign_all_x(SimCtx *c, int dst_sid):
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_py_value(SimCtx *c, int dst_sid, object value):
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3007,7 +3007,7 @@ cdef inline void _whole_assign_py_value(SimCtx *c, int dst_sid, object value):
         c.mask[dst_sid] = 0
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_py_bits(SimCtx *c, int dst_sid, object value, object mask):
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3036,7 +3036,7 @@ cdef inline void _whole_assign_py_bits(SimCtx *c, int dst_sid, object value, obj
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sar_sub_const_xor_signal(SimCtx *c, int dst_sid, int sub_sid, unsigned long long sub_const, int sub_const_width, int xor_sid, int shift):
     cdef int sub_width = c.width[sub_sid] if c.width[sub_sid] >= sub_const_width else sub_const_width
@@ -3648,7 +3648,7 @@ cdef inline void _whole_assign_div_const_shl(SimCtx *c, int dst_sid, int div_sid
         c.mask[dst_sid] = 0
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_div_const_shr(SimCtx *c, int dst_sid, int div_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3710,7 +3710,7 @@ cdef inline void _whole_assign_div_const_shr(SimCtx *c, int dst_sid, int div_sid
         c.mask[dst_sid] = 0
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mod_const_shl(SimCtx *c, int dst_sid, int mod_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3765,7 +3765,7 @@ cdef inline void _whole_assign_mod_const_shl(SimCtx *c, int dst_sid, int mod_sid
         c.mask[dst_sid] = 0
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mod_const_shr(SimCtx *c, int dst_sid, int mod_sid, unsigned long long rhs_const, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3817,7 +3817,7 @@ cdef inline void _whole_assign_mod_const_shr(SimCtx *c, int dst_sid, int mod_sid
         c.mask[dst_sid] = 0
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3876,7 +3876,7 @@ cdef inline void _whole_assign_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_si
             c.mask[dst_sid] = new_m
             changed = 1
         if changed:
-            c.dirty[dst_sid] = 1
+            mark_dirty(c, dst_sid)
         return
     for i in range(out_words):
         src_index = i - word_shift
@@ -3921,7 +3921,7 @@ cdef inline void _whole_assign_mul_signal_shl(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -3980,7 +3980,7 @@ cdef inline void _whole_assign_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_si
             c.mask[dst_sid] = new_m
             changed = 1
         if changed:
-            c.dirty[dst_sid] = 1
+            mark_dirty(c, dst_sid)
         return
     if next_index < prod_words:
         next_v = _mul_signal_next_word(c, lhs_sid, rhs_sid, lhs_digits, rhs_digits, prod_digits, &digit_index, &carry)
@@ -4036,7 +4036,7 @@ cdef inline void _whole_assign_mul_signal_shr(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mul_const_shl(SimCtx *c, int dst_sid, int mul_sid, unsigned long long rhs_const, int rhs_width, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4095,7 +4095,7 @@ cdef inline void _whole_assign_mul_const_shl(SimCtx *c, int dst_sid, int mul_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid, unsigned long long rhs_const, int rhs_width, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4140,7 +4140,7 @@ cdef inline void _whole_assign_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid
                 c.mask[dst_sid] = new_m
                 changed = 1
             if changed:
-                c.dirty[dst_sid] = 1
+                mark_dirty(c, dst_sid)
             return
     if next_index < prod_words:
         av = _sig_word_val(c, mul_sid, next_index) if next_index < src_words else 0
@@ -4201,7 +4201,7 @@ cdef inline void _whole_assign_mul_const_shr(SimCtx *c, int dst_sid, int mul_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_reduce_or_shift(SimCtx *c, int dst_sid, int signal_sid, int shift, int invert) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4251,7 +4251,7 @@ cdef inline void _whole_assign_reduce_or_shift(SimCtx *c, int dst_sid, int signa
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_reduce_and_shift(SimCtx *c, int dst_sid, int signal_sid, int shift, int invert) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4302,7 +4302,7 @@ cdef inline void _whole_assign_reduce_and_shift(SimCtx *c, int dst_sid, int sign
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_reduce_xor_shift(SimCtx *c, int dst_sid, int signal_sid, int shift, int invert) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4350,7 +4350,7 @@ cdef inline void _whole_assign_reduce_xor_shift(SimCtx *c, int dst_sid, int sign
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_shl(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4416,7 +4416,7 @@ cdef inline void _whole_assign_add_const_shl(SimCtx *c, int dst_sid, int add_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_const_shr(SimCtx *c, int dst_sid, int add_sid, unsigned long long const_word, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4503,7 +4503,7 @@ cdef inline void _whole_assign_add_const_shr(SimCtx *c, int dst_sid, int add_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_shl(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4568,7 +4568,7 @@ cdef inline void _whole_assign_sub_const_shl(SimCtx *c, int dst_sid, int sub_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const_shr(SimCtx *c, int dst_sid, int sub_sid, unsigned long long const_word, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4653,7 +4653,7 @@ cdef inline void _whole_assign_sub_const_shr(SimCtx *c, int dst_sid, int sub_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_const(SimCtx *c, int dst_sid, int lhs_sid, unsigned long long const_word) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4700,7 +4700,7 @@ cdef inline void _whole_assign_sub_const(SimCtx *c, int dst_sid, int lhs_sid, un
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_shl(SimCtx *c, int dst_sid, unsigned long long const_word, int sub_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4768,7 +4768,7 @@ cdef inline void _whole_assign_const_sub_shl(SimCtx *c, int dst_sid, unsigned lo
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_shr(SimCtx *c, int dst_sid, unsigned long long const_word, int sub_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4859,7 +4859,7 @@ cdef inline void _whole_assign_const_sub_shr(SimCtx *c, int dst_sid, unsigned lo
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_const_sub_signal(SimCtx *c, int dst_sid, unsigned long long const_word, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4906,7 +4906,7 @@ cdef inline void _whole_assign_const_sub_signal(SimCtx *c, int dst_sid, unsigned
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -4954,7 +4954,7 @@ cdef inline void _whole_assign_sub_signal(SimCtx *c, int dst_sid, int lhs_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5003,7 +5003,7 @@ cdef inline void _whole_assign_add_signal(SimCtx *c, int dst_sid, int lhs_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5074,7 +5074,7 @@ cdef inline void _whole_assign_add_signal_shl(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_add_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5170,7 +5170,7 @@ cdef inline void _whole_assign_add_signal_shr(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5240,7 +5240,7 @@ cdef inline void _whole_assign_sub_signal_shl(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_sub_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5334,7 +5334,7 @@ cdef inline void _whole_assign_sub_signal_shr(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_and_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5394,7 +5394,7 @@ cdef inline void _whole_assign_and_signal_shl(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_and_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5470,7 +5470,7 @@ cdef inline void _whole_assign_and_signal_shr(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5530,7 +5530,7 @@ cdef inline void _whole_assign_or_signal_shl(SimCtx *c, int dst_sid, int lhs_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5606,7 +5606,7 @@ cdef inline void _whole_assign_or_signal_shr(SimCtx *c, int dst_sid, int lhs_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_signal_shl(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5666,7 +5666,7 @@ cdef inline void _whole_assign_xor_signal_shl(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_signal_shr(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid, int shift) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5742,7 +5742,7 @@ cdef inline void _whole_assign_xor_signal_shr(SimCtx *c, int dst_sid, int lhs_si
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_and_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5780,7 +5780,7 @@ cdef inline void _whole_assign_and_signal(SimCtx *c, int dst_sid, int lhs_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_or_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5818,7 +5818,7 @@ cdef inline void _whole_assign_or_signal(SimCtx *c, int dst_sid, int lhs_sid, in
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_xor_signal(SimCtx *c, int dst_sid, int lhs_sid, int rhs_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5856,7 +5856,7 @@ cdef inline void _whole_assign_xor_signal(SimCtx *c, int dst_sid, int lhs_sid, i
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_concat2_signal(SimCtx *c, int dst_sid, int hi_sid, int lo_sid, int lo_width) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5900,7 +5900,7 @@ cdef inline void _whole_assign_concat2_signal(SimCtx *c, int dst_sid, int hi_sid
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_concat3_signal(SimCtx *c, int dst_sid, int a_sid, int b_sid, int c_sid, int b_width, int c_width) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5957,7 +5957,7 @@ cdef inline void _whole_assign_concat3_signal(SimCtx *c, int dst_sid, int a_sid,
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_stage_signal(SimCtx *c, int dst_sid, int src_sid) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -5993,7 +5993,7 @@ cdef inline void _whole_stage_signal(SimCtx *c, int dst_sid, int src_sid) noexce
     else:
         c.nba_val[dst_sid] = c.val[src_sid] & wmask(c.width[dst_sid])
         c.nba_mask[dst_sid] = c.mask[src_sid] & wmask(c.width[dst_sid])
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_signal_s(SimCtx *c, int dst_sid, int src_sid) noexcept nogil:
@@ -6068,7 +6068,7 @@ cdef inline void _whole_stage_signal_s(SimCtx *c, int dst_sid, int src_sid) noex
     else:
         c.nba_val[dst_sid] = _sign_ext(c.val[src_sid], c.width[src_sid]) & wmask(c.width[dst_sid])
         c.nba_mask[dst_sid] = c.mask[src_sid] & wmask(c.width[dst_sid])
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_signal_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int src_sid) noexcept nogil:
@@ -6117,7 +6117,7 @@ cdef inline void _whole_stage_signal_sv(SimCtx *c, long long *sv, long long *sm,
     else:
         c.nba_val[dst_sid] = sv[src_sid] & wmask(c.width[dst_sid])
         c.nba_mask[dst_sid] = sm[src_sid] & wmask(c.width[dst_sid])
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_signal_s_sv(SimCtx *c, long long *sv, long long *sm, int dst_sid, int src_sid) noexcept nogil:
@@ -6180,7 +6180,7 @@ cdef inline void _whole_stage_signal_s_sv(SimCtx *c, long long *sv, long long *s
     else:
         c.nba_val[dst_sid] = _sign_ext(sv[src_sid], c.width[src_sid]) & wmask(c.width[dst_sid])
         c.nba_mask[dst_sid] = sm[src_sid] & wmask(c.width[dst_sid])
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_const_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m) noexcept nogil:
@@ -6202,7 +6202,7 @@ cdef inline void _whole_stage_const_word(SimCtx *c, int dst_sid, unsigned long l
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(word_v & tail_mask)
         c.nba_mask[dst_sid] = <long long>(word_m & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_insert_word(SimCtx *c, int dst_sid, int lsb, int width, unsigned long long word_v, unsigned long long word_m) noexcept nogil:
@@ -6211,7 +6211,7 @@ cdef inline void _whole_stage_insert_word(SimCtx *c, int dst_sid, int lsb, int w
     cdef int bit = lsb
     cdef int word_idx, word_shift, chunk, dst_offset, i
     cdef unsigned long long chunk_mask, clear_mask, base_v, base_m, out_v, out_m
-    if c.nba_dirty[dst_sid] == 0:
+    if c.nba_bit[dst_sid] == 0:
         if c.wide_words[dst_sid] > 0:
             for i in range(c.wide_words[dst_sid]):
                 dst_offset = c.wide_offset[dst_sid] + i
@@ -6247,7 +6247,7 @@ cdef inline void _whole_stage_insert_word(SimCtx *c, int dst_sid, int lsb, int w
     if c.wide_words[dst_sid] > 0:
         c.nba_val[dst_sid] = <long long>c.wide_nba_val[c.wide_offset[dst_sid]]
         c.nba_mask[dst_sid] = <long long>c.wide_nba_mask[c.wide_offset[dst_sid]]
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_stage_repeat_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m, int elem_width, int count) noexcept nogil:
@@ -6364,7 +6364,7 @@ cdef inline void _whole_assign_const_word(SimCtx *c, int dst_sid, unsigned long 
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_assign_repeat_word(SimCtx *c, int dst_sid, unsigned long long word_v, unsigned long long word_m, int elem_width, int count) noexcept nogil:
     cdef int i
@@ -6454,7 +6454,7 @@ cdef inline void _whole_assign_insert_word(SimCtx *c, int dst_sid, int lsb, int 
         c.val[dst_sid] = <long long>c.wide_val[c.wide_offset[dst_sid]]
         c.mask[dst_sid] = <long long>c.wide_mask[c.wide_offset[dst_sid]]
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)
 
 cdef inline void _whole_stage_slice_width_signal(SimCtx *c, int dst_sid, int src_sid, int lsb, int src_width) noexcept nogil:
     cdef int dst_words = c.wide_words[dst_sid]
@@ -6512,7 +6512,7 @@ cdef inline void _whole_stage_slice_width_signal(SimCtx *c, int dst_sid, int src
         tail_mask = _word_mask64(c.width[dst_sid])
         c.nba_val[dst_sid] = <long long>(out_v & tail_mask)
         c.nba_mask[dst_sid] = <long long>(out_m & tail_mask)
-    c.nba_dirty[dst_sid] = 1
+    mark_nba(c, dst_sid)
     c.nba_pending = 1
 
 cdef inline void _whole_assign_slice_width_signal(SimCtx *c, int dst_sid, int src_sid, int lsb, int src_width) noexcept nogil:
@@ -6580,4 +6580,4 @@ cdef inline void _whole_assign_slice_width_signal(SimCtx *c, int dst_sid, int sr
         c.mask[dst_sid] = new_m
         changed = 1
     if changed:
-        c.dirty[dst_sid] = 1
+        mark_dirty(c, dst_sid)

@@ -525,7 +525,7 @@ class _ProcessCompilerMixin:
                 f"    if v != c.val[{lhs_sid}] or m != c.mask[{lhs_sid}]:",
                 f"        c.val[{lhs_sid}] = v",
                 f"        c.mask[{lhs_sid}] = m",
-                f"        c.dirty[{lhs_sid}] = 1",
+                f"        mark_dirty(c, {lhs_sid})",
             ]
             self._processes.append((sensitivity, lines))
 
@@ -624,7 +624,7 @@ class _ProcessCompilerMixin:
             f"    if new_val != c.val[{base_sid}] or new_mask != c.mask[{base_sid}]:",
             f"        c.val[{base_sid}] = new_val",
             f"        c.mask[{base_sid}] = new_mask",
-            f"        c.dirty[{base_sid}] = 1",
+            f"        mark_dirty(c, {base_sid})",
         ]
         self._processes.append((sensitivity, lines))
         return True
@@ -821,7 +821,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -848,7 +848,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -955,7 +955,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -982,7 +982,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -1067,7 +1067,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -1094,7 +1094,7 @@ class _ProcessCompilerMixin:
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
                                 f"        c.mask[{sid}] = new_mask",
-                                f"        c.dirty[{sid}] = 1",
+                                f"        mark_dirty(c, {sid})",
                             ]
                         self._processes.append((sensitivity, lines))
                         continue
@@ -1220,7 +1220,7 @@ class _ProcessCompilerMixin:
                         f"    if new_val != c.val[{base_sid}] or new_mask != c.mask[{base_sid}]:",
                         f"        c.val[{base_sid}] = new_val",
                         f"        c.mask[{base_sid}] = new_mask",
-                        f"        c.dirty[{base_sid}] = 1",
+                        f"        mark_dirty(c, {base_sid})",
                     ]
                 self._processes.append((sensitivity, lines))
                 continue
@@ -1258,7 +1258,7 @@ class _ProcessCompilerMixin:
                 f"    if v != c.val[{sid}] or m != c.mask[{sid}]:",
                 f"        c.val[{sid}] = v",
                 f"        c.mask[{sid}] = m",
-                f"        c.dirty[{sid}] = 1",
+                f"        mark_dirty(c, {sid})",
             ]
             self._processes.append((sensitivity, lines))
 
@@ -1422,7 +1422,7 @@ class _ProcessCompilerMixin:
             f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
             f"        c.val[{sid}] = new_val",
             f"        c.mask[{sid}] = new_mask",
-            f"        c.dirty[{sid}] = 1",
+            f"        mark_dirty(c, {sid})",
         ]
         self._processes.append((sensitivity, lines))
 

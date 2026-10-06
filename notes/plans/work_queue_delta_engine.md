@@ -2,10 +2,112 @@
 
 ## Status
 
-**Stage 0 (reproducer, confirm hypothesis) and Stage 1 (secondary fix) are
-done, committed, and verified** (see `56b8366` and `d667ac3`). **Stage 2
-(the work-queue rewrite) has not been started** -- paused here on purpose,
-per the Effort Assessment below, to switch to Opus before writing it.
+**Stages 0, 1, and 2 are done.** Stage 2's queue engine is implemented,
+verified *equivalent* to the scan engine (identical signal values and
+identical delta-iteration counts on every step), and shipped **opt-in**
+(`VERIFORGE_DELTA_ENGINE=queue`; default stays `scan`). It is 3-5x faster
+in the regime this plan targets (many continuous assigns, low per-cycle
+activity) but *slower* when most of a design is active every cycle -- see
+"Stage 2 results" below. **Open decision before changing the default:**
+whether to eliminate the scan engine's redundant reruns in the queue engine
+(measured: makes queue win even at 100% activity), which trades the current
+"identical by construction" guarantee for "identical by test". See "Stage 2
+results -> Open decision".
+
+### Stage 2 results (2026-10-05)
+
+**Correctness.** New `tests/test_sim/compiled/test_delta_engine_equivalence.py`
+(29 tests) runs identical stimulus through both engines and asserts
+identical signal values *and identical `step()` iteration counts* every
+step, on designs chosen for the risky surfaces (D6) plus 12 randomized
+modules from the cross-engine differential generators. A genuine
+combinational cycle (ring oscillator) still raises the delta-limit error in
+both engines; the value-convergence path (>= `DELTA_CONV_CHECK_START`
+iterations, via a combinational block that clear-then-rewrites a memory it
+reads) is exercised and guarded so the test can't silently stop covering it.
+Full `tests/test_sim/compiled/` plus the differential fuzz suites with the
+compiled engine enabled (`VERIFORGE_DIFF_COMPILED=1`,
+`VERIFORGE_DIFF_STMT_COMPILED=1` -- note these are *off* by default, so the
+default suite does not fuzz the compiled engine against the reference) all
+pass with the queue engine; four codegen-text assertions on the old field
+names were updated.
+
+**Reproducer flaw found.** Sweeps A/B's `make_wide_bench` cannot isolate
+bookkeeping cost: every lane's `en_i` reads `rr_base_reg`, which changes
+every cycle, so every lane's enable process re-runs every cycle regardless
+of `ACTIVE_LANES`; and every lane has its own always block, all of which
+fire on every clock edge. Real per-cycle work there grows with `N_LANES`,
+so Stage 0's gate confirmed "cost scales with size", not "cost scales with
+size *because of bookkeeping*". Added `make_cont_bench` + Sweep C
+(independent continuous-assign chains fed by input ports, one clocked
+process, `batch_run` events changing exactly `k` lanes per cycle) to
+measure the latter.
+
+**Performance** (queue / scan throughput, same build):
+
+| Sweep C: lanes (conts) | k=1 driven/cycle | k=8 | k=64 |
+|---|---|---|---|
+| 64 (320) | 3.06x | 1.23x | 0.95x |
+| 256 (1280) | **5.08x** | 1.94x | 0.77x |
+| 512 (2560) | 3.40x | 2.27x | 1.19x |
+
+| Sweep A/B (`make_wide_bench`) | queue / scan |
+|---|---|
+| 8 lanes, 8 active | 0.72x |
+| 384 lanes, 8 active | 1.15x |
+| 256 lanes, 1 active | 1.25x |
+| 256 lanes, 256 active (full) | 0.34x |
+| `benchmark.py` DUT (9 processes) | ~0.80x |
+
+Interpretation: per executed process, the queue engine costs ~2.3 ns more
+than scan (bitmap pop, indirect `switch` jump, reader pushes); scan pays
+~3-4 ns per process *per iteration whether or not it runs*. So queue wins
+below roughly 50% activity and loses above it.
+
+**Two remaining size-dependent costs**, both engines:
+1. Sweep C at fixed `k=1`, queue still slows with size (3.0M -> 1.1M ->
+   0.43M cyc/s for 64 -> 256 -> 512 lanes). Most likely `batch_run`'s
+   per-cycle `sv`/`sm` snapshot `memcpy`s, which are O(N_SIGS) (~100 KB per
+   cycle at 512 lanes). Restricting them to the sids sequential processes
+   actually read pre-edge was investigated during the 2026-09 perf work and
+   declined as negligible -- true then, when the scan engine's own costs
+   dominated; not true once those are gone. It needs exact read sets from
+   several emitters (see that session's notes), so it's its own task.
+2. Compile time: unchanged in character (the dispatch `switch` keeps one
+   inlined call site per process, like the scan engine's straight-line
+   dispatch); the wall noted in Stage 0 remains.
+
+**Open decision: eliminate redundant reruns?** To stay identical by
+construction, the queue engine reproduces the scan engine's redundant
+reruns: a process re-runs in iteration `k+1` because an input was written
+in iteration `k` even if it already ran *after* that write. In dense
+regimes that's about half of all executions. A throwaway experiment
+skipping them (valid only for that all-pure design; not committed) took
+the fully-active `make_wide_bench(64, 64)` case from 0.64x to **1.13x of
+scan** -- i.e. queue would win at every activity level measured. Doing it
+for real means pushing, after each process at rank `w` writes `s`, the
+readers of `s` with rank `<= w` into a *next-iteration* pending set (and
+catching every write, not just the first per iteration), instead of
+re-seeding from all readers of `T_{k+1}`. Two new assumptions come with it:
+- **Purity**: only processes whose rerun with unchanged inputs is a no-op
+  may skip it. Not all continuous assigns qualify (memory-writing assigns
+  toggle marker signals; user-function calls write function-internal
+  signals), so purity must be classified -- preferably as an allowlist at
+  the emission sites in `_process_compiler.py` (default: impure, keep
+  exact semantics), not by scanning generated text.
+- **Complete sensitivity sets**: today's redundant reruns can mask a
+  sensitivity gap (a process re-running because one input changed picks up
+  another input that changed without triggering it). Eliminating them
+  would expose any such pre-existing gap as a divergence.
+Iteration counts would still be identical (a skipped rerun is a no-op that
+dirties nothing), so the existing A/B suite -- values *and* iteration counts
+-- plus the differential fuzz remain the check.
+
+**Recommendation for `gfwx-fpga`**: measure it directly with
+`VERIFORGE_DELTA_ENGINE=queue` vs `scan` before anything else. Its profile
+(3112 conts, 21 seq processes) is the target regime, but a streaming image
+pipeline may well be *dense* (most of the datapath active every cycle), in
+which case the queue engine without rerun elimination won't help it.
 
 - Stage 0: `benchmarks/wide_bench_gen.py` + `benchmarks/scan_vs_activity_bench.py`
   added; results in `notes/benchmarks_work_queue.md`. Gate confirmed: Sweep A
@@ -28,12 +130,11 @@ per the Effort Assessment below, to switch to Opus before writing it.
   full `tests/test_sim/compiled/` (793 passed), and full `tests/test_sim/`
   (5617 passed, 0 failed, 3853 skipped).
 
-**Next step for whoever picks this up: Stage 2** (`_gen_delta_loop()`
-rewrite to a runtime work-queue/activity-list dispatch) -- read the
-"Proposed Fix" and "Secondary... subtleties" sections below in full before
-writing any code; the cold-start wake-up path and the livelock/oscillation
-detector are the two places flagged as needing real design decisions, not
-just porting.
+**Next steps** (see "Stage 2 results" above): (1) measure `gfwx-fpga` with
+both engines; (2) decide on redundant-rerun elimination; (3) the
+`sv`/`sm` snapshot-copy reduction, now the dominant remaining size-dependent
+cost in the low-activity regime. Changing the default engine waits on (1)
+and (2).
 
 ---
 
@@ -189,6 +290,108 @@ real activity-driven dispatcher needs at runtime.
    (behind a flag, or simply uncommitted dead code) for direct A/B
    correctness comparison until the new path passes the full existing
    suite — do not remove the old implementation until then.
+
+### Stage 2 design decisions (settled before implementation)
+
+**D1 — Preserve the iteration structure exactly; change only per-iteration
+cost.** The queue engine keeps `delta_loop`'s outer `for it in
+range(DELTA_LIMIT)` loop and runs *exactly the same set of processes, in
+exactly the same order, in each iteration* as the scan engine. Only the
+bookkeeping that decides which processes run changes. Consequences:
+
+- Results are bit-identical, and **`delta_loop`'s return value (the
+  iteration count) is identical** — which makes the equivalence directly
+  testable (D6).
+- **Both subtleties flagged above dissolve rather than needing new
+  designs.** Because `it` counts the same iterations, `DELTA_LIMIT`,
+  `DELTA_CONV_CHECK_START`, and the value-convergence detector (with its
+  memory-marker handling) are kept *verbatim*. No new livelock detector is
+  invented, so there is nothing new to get subtly wrong: a genuine
+  combinational cycle hits `ERR_DELTA_LIMIT` at the same iteration it did
+  before. Cold start (`it == 0` with nothing dirty) is kept verbatim as
+  "every process is pending in iteration 0".
+- Rejected alternative: a free-running event queue (pop a process, run it,
+  push its readers, no iterations). Simpler loop, but it changes process
+  execution order and count, which (a) can change which stable state a
+  design with combinational feedback (latch-like structures) settles into,
+  and (b) forces a new livelock detector with different trip points.
+
+**D2 — The exact per-iteration rule being preserved.** In the scan engine,
+process `P` at static rank `r` (its position in the emitted dispatch order:
+topo-sorted conts, then combos in declaration order) runs in iteration `k`
+iff it has an empty sensitivity list, or some `s in sens(P)` is in
+`T_k ∪ D_k(<r)`, where `T_k` is the set of sids marked dirty during
+iteration `k-1` (or at entry, for `k = 0`; or every sid, for the cold
+start) and `D_k(<r)` is the set marked dirty during iteration `k` before
+`P`'s turn (by seq bodies, NBA apply, or processes of rank `< r`).
+
+The queue engine reproduces this with a per-iteration pending bitmap over
+ranks, scanned forward:
+- iteration start: mark pending every reader of every sid in `T_k`, every
+  empty-sensitivity process, and every reader of every sid dirtied by the
+  seq-fire/NBA-apply phase (which precedes all conts, i.e. rank `-1`);
+- after running the process at rank `w`: for each sid it newly dirtied,
+  mark pending each reader with rank `> w`. Readers with rank `<= w` are
+  *not* marked — exactly as in the scan engine, they run next iteration
+  via `T_{k+1}`;
+- pop the lowest pending rank `>= ` the cursor; pushes only ever go
+  forward of the cursor, so a forward bitmap scan visits ranks in order.
+
+Equivalence: both engines visit ranks in increasing order, run each rank
+at most once per iteration, and run `P` iff the rule above holds. Note this
+deliberately *preserves* the scan engine's redundant reruns (a process
+re-running in iteration `k+1` because an input was written in iteration `k`
+even though it already ran after that write) — eliminating them would
+change the execution count of impure combo blocks (`$display`, memory
+writes that toggle marker signals). That is a possible follow-up, not part
+of this stage.
+
+**D3 — Sparse dirty/NBA tracking via helpers, enforced by a field
+rename.** `dirty[N]` becomes `dbit[N]` + `dlist[N]` + `dcount` (a
+sparse set), and `nba_dirty[N]` becomes `nba_bit[N]` + `nba_list[N]` +
+`nba_count`. Every one of the ~300 write sites (`c.dirty[X] = 1`,
+`self.ctx.dirty[X] = 1`, `c.nba_dirty[X] = 1`, across five emitter `.py`
+files and three `.pxi` templates) goes through `mark_dirty(c, X)` /
+`mark_nba(c, X)`. **Renaming the struct fields is the safety net**: any
+site the rewrite misses becomes a Cython *compile error* (no such field)
+rather than a silently lost trigger — the failure mode that made the
+earlier regex-based dirty-clearing attempt unsafe. The test suite compiles
+hundreds of designs exercising every emitter.
+
+**D4 — Static reader index baked into the module.** `_cont_dependency_order`
+already builds `readers[sid]` to compute the topo sort; the same relation
+(over ranks) is emitted as CSR arrays (`READER_OFF[N_SIGS+1]`,
+`READER_RANK[E]`), plus `ALWAYS_RANK[]` (empty-sensitivity processes) and
+`IS_INTERESTING[N_SIGS]` (the existing early-exit set), as `static const`
+C arrays via a verbatim `cdef extern from *` block — zero runtime
+construction cost. Dispatch from a rank to its `cont_i`/`combo_i` call is
+an `if r == 0: ... elif r == 1: ...` chain, which Cython lowers to a C
+`switch` (verified in the generated C, not assumed) so per-call dispatch is
+O(1) and each body is still inlined at a single call site — compile-time
+characteristics unchanged from today.
+
+**D5 — Seq edge detection stays O(N_seq) per iteration, unchanged.**
+Restricting it to processes whose edge sids were just dirtied would rely
+on the invariant "every change to `c.val[e]` also marks `e` dirty", which
+nothing currently enforces. `N_seq` is small in the target design (21),
+and when a clock edge fires, running the seq bodies is itself O(N_seq)
+real work, so this doesn't change the asymptotics. Possible follow-up.
+
+**D6 — Keep the scan engine selectable for A/B, and test equivalence
+directly.** `VERIFORGE_DELTA_ENGINE=scan` selects the legacy loop (default:
+`queue`). Both share the renamed fields and helpers. The mode is folded
+into the elaboration-cache key — which also required fixing a pre-existing
+latent cache bug found while scoping this: the elab cache's
+"codegen infrastructure" hash covered a hardcoded file list that omitted
+`_gen_wide_section.py`, all four `_gen_narrow_*.py` generators, their
+`templates/*.pxi`, and `compiler.py`, so editing any of those reused stale
+compiled modules. New A/B tests run the same stimulus through both engines
+and assert identical signal values **and identical `step()` iteration
+counts** every cycle, across designs chosen for the risky surfaces: deep
+cont chains declared out of order, combo blocks, memories with combo
+writes (the marker-toggle / value-convergence path), wide signals, and
+genuine combinational cycles — which must raise the delta-limit error in
+both engines (no existing compiled test covered this).
 
 ## Secondary Fix (independent, do first — much smaller)
 
