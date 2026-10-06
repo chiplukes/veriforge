@@ -215,6 +215,7 @@ class Testbench:  # cm:8a7c9d
         # handles modules with no ``always`` blocks of their own.
         # ``design`` is forwarded to ``Simulator`` for actual elaboration.
         self.module = module
+        self.design = design
         self._strict = strict
         coerced_overrides = PlannerOverrides.coerce(overrides)
         self._iface_layouts: dict[str, dict[str, object]] = {

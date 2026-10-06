@@ -69,6 +69,8 @@ examples, signal naming conventions, and performance guidance.
 
 from __future__ import annotations
 
+import array
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +98,7 @@ __all__ = [
     "AXILiteSlaveLowering",
     "AXIStreamSinkLowering",
     "AXIStreamSourceLowering",
+    "FileStreamBinding",
     "InterfaceLowering",
     "LoweredDesign",
     "LoweringError",
@@ -239,12 +242,17 @@ def _build_lfsr_pause(
 
 @dataclass
 class AXIStreamSourceLowering:  # cm:2b9f4c
-    """Lower a fixed list of beats (or a PRNG stream) to an AXI-Stream source FSM.
+    """Lower a fixed list of beats (or a PRNG stream, or a file-backed stream)
+    to an AXI-Stream source FSM.
 
-    Two data modes — exactly one must be active:
+    Three data modes — exactly one must be active:
 
     **ROM mode** (default): set ``beats`` to a non-empty sequence of integers.
-    The lowering encodes them in a ROM keyed on the beat counter.
+    The lowering encodes them in a ROM keyed on the beat counter. Scales to at
+    most a few hundred beats — the ROM is a case-statement register reload (one
+    branch per beat), so the generated source size grows linearly with ``len(beats)``
+    and large counts blow up compile time. For large, real stimulus use **file
+    mode** instead.
 
     **PRNG mode**: set ``n_prng_beats`` to a positive integer.  ``tdata`` is
     driven by a 32-bit Galois LFSR that advances once per accepted beat.  Pair
@@ -252,11 +260,35 @@ class AXIStreamSourceLowering:  # cm:2b9f4c
     to check data integrity end-to-end entirely inside the simulator engine.
     For ``data_width > 32``, upper bits of ``tdata`` are zero-extended.
 
+    **File mode**: set ``file_path`` to a readable file containing ``n_file_beats``
+    raw, flat-binary words (each ``ceil(data_width/8)`` bytes, little-endian, no
+    header/framing). ``tdata`` is read from a small on-chip ``chunk_beats``-deep
+    memory window (must be a power of 2) instead of a per-beat ROM, so the
+    generated source size is independent of ``n_file_beats`` — this is the only
+    mode that scales to millions of beats. The memory window is refilled from the
+    file in ``chunk_beats``-sized chunks by :meth:`LoweredDesign.batch_run_streaming`
+    between C-level ``batch_run`` calls (not per-beat and not per-cycle), so file
+    I/O stays bounded regardless of total stream length. Plain :meth:`LoweredDesign.run`
+    / ``batch_run`` cannot drive this mode — they never refill the window, so the
+    source would silently replay the chunk-0 contents forever. Use
+    ``batch_run_streaming`` whenever any interface uses file mode.
+
     Args:
         beats: Sequence of integer beat values to drive in order (ROM mode).
-            Must be non-empty when ``n_prng_beats == 0``.
+            Must be non-empty when both ``n_prng_beats`` and ``n_file_beats``
+            are ``0``.
         n_prng_beats: Number of beats to generate in PRNG mode.  Set to a
-            positive integer to enable PRNG mode; ``beats`` must be empty.
+            positive integer to enable PRNG mode; ``beats`` must be empty and
+            ``n_file_beats`` must be ``0``.
+        n_file_beats: Number of beats to stream in file mode.  Set to a
+            positive integer (together with ``file_path``) to enable file
+            mode; ``beats`` must be empty and ``n_prng_beats`` must be ``0``.
+        file_path: Path to the file mode's backing file.  Required (and only
+            used) when ``n_file_beats > 0``.
+        chunk_beats: Depth of the file-mode on-chip window memory, in beats.
+            Must be a power of 2.  Also the unit `batch_run_streaming` uses to
+            decide how many cycles to run per C-level `batch_run` call between
+            refills (see that method). Ignored outside file mode.
         data_prng_seed: Initial seed for the data LFSR used in PRNG mode.
             Defaults to ``0xACE1``; ``0`` is treated as ``0xACE1``.
         data_width: Width (in bits) of ``tdata``.
@@ -273,13 +305,17 @@ class AXIStreamSourceLowering:  # cm:2b9f4c
 
     * holds ``tvalid`` high until all beats have been transferred (gated by
       the optional pause generator so ``tvalid`` drops when the LFSR fires),
-    * exposes ``tdata`` from the ROM (ROM mode) or data LFSR (PRNG mode),
+    * exposes ``tdata`` from the ROM (ROM mode), data LFSR (PRNG mode), or
+      chunk window memory (file mode),
     * raises ``tlast`` on the final beat (also gated by pause),
     * advances the counter only when ``tvalid && tready`` are both high.
     """
 
     beats: Sequence[int] = ()
     n_prng_beats: int = 0
+    n_file_beats: int = 0
+    file_path: "str | Path | None" = None
+    chunk_beats: int = 65536
     data_prng_seed: int = 0xACE1
     data_width: int = 8
     protocol: str = "axi_stream"
@@ -303,19 +339,30 @@ class AXIStreamSourceLowering:  # cm:2b9f4c
                 f"AXIStreamSourceLowering expects DUT role={self.role!r} "
                 f"for interface {binding.prefix!r}, got {binding.role!r}"
             )
-        # Validate mode: exactly one of beats or n_prng_beats must be active.
+        # Validate mode: exactly one of beats / n_prng_beats / n_file_beats
+        # must be active.
         prng_mode = self.n_prng_beats > 0
-        if prng_mode and len(self.beats) > 0:
+        file_mode = self.n_file_beats > 0
+        active_modes = sum((len(self.beats) > 0, prng_mode, file_mode))
+        if active_modes > 1:
             raise LoweringError(
                 f"AXIStreamSourceLowering[{binding.prefix}]: "
-                "set either 'beats' (ROM mode) or 'n_prng_beats' (PRNG mode), not both"
+                "set exactly one of 'beats' (ROM mode), 'n_prng_beats' (PRNG mode), "
+                "or 'n_file_beats' (file mode), not more than one"
             )
-        if not prng_mode and len(self.beats) == 0:
+        if active_modes == 0:
             raise LoweringError(
                 f"AXIStreamSourceLowering[{binding.prefix}]: "
-                "beats must be non-empty (or set n_prng_beats > 0 for PRNG mode)"
+                "beats must be non-empty, or set n_prng_beats > 0 (PRNG mode), "
+                "or set n_file_beats > 0 with file_path (file mode)"
             )
-        n = self.n_prng_beats if prng_mode else len(self.beats)
+        if file_mode and self.file_path is None:
+            raise LoweringError(f"AXIStreamSourceLowering[{binding.prefix}]: n_file_beats > 0 requires file_path")
+        if file_mode and (self.chunk_beats <= 0 or (self.chunk_beats & (self.chunk_beats - 1)) != 0):
+            raise LoweringError(
+                f"AXIStreamSourceLowering[{binding.prefix}]: chunk_beats must be a power of 2, got {self.chunk_beats}"
+            )
+        n = self.n_file_beats if file_mode else (self.n_prng_beats if prng_mode else len(self.beats))
         if not 0 <= self.prng_bits <= 32:
             raise LoweringError(
                 f"AXIStreamSourceLowering[{binding.prefix}]: prng_bits must be 0..32, got {self.prng_bits}"
@@ -376,6 +423,26 @@ class AXIStreamSourceLowering:  # cm:2b9f4c
                 with wrapper.else_():
                     with wrapper.if_(tvalid & tready):
                         cnt <<= cnt + 1
+        elif file_mode:
+            # File mode: tdata is a combinational read of a small on-chip
+            # chunk_beats-deep window memory, addressed by cnt's own
+            # low-order bits (chunk_beats is a power of 2, so `& mask`
+            # is exactly `% chunk_beats`). The window is refilled from the
+            # backing file by LoweredDesign.batch_run_streaming() between
+            # C-level batch_run calls -- this apply() call only wires the
+            # memory and the counter; it does no file I/O itself (the DSL
+            # has no file-I/O construct, and the simulator's own compiled
+            # extension never calls back into Python mid-batch_run).
+            chunk_mem = wrapper.reg(f"{prefix}_src_chunk_mem", width=self.data_width, depth=self.chunk_beats)
+            mask = self.chunk_beats - 1
+            wrapper.assign(tdata, chunk_mem[cnt & mask])
+
+            with wrapper.always(*sens):
+                with wrapper.if_(rst_cond):
+                    cnt <<= 0
+                with wrapper.else_():
+                    with wrapper.if_(tvalid & tready):
+                        cnt <<= cnt + 1
         else:
             # ROM mode: tdata comes from a registered case-statement ROM.
             # A chained mux expression for large n creates a deeply-nested ternary in
@@ -413,9 +480,10 @@ class AXIStreamSourceLowering:  # cm:2b9f4c
 
 @dataclass
 class AXIStreamSinkLowering:
-    """Lower an AXI-Stream sink to a per-beat capture array or PRNG checker.
+    """Lower an AXI-Stream sink to a per-beat capture array, PRNG checker, or
+    file-backed stream.
 
-    Two data modes are available:
+    Three data modes are available:
 
     **Capture mode** (default): every accepted beat is written into an individual
     ``<prefix>_cap_<i>`` output reg.  Suitable for small frame counts where the
@@ -434,11 +502,32 @@ class AXIStreamSinkLowering:
     For ``data_width > 32`` only the lower 32 bits are checked; the source also
     only uses 32 bits, so this is lossless for all common widths.
 
+    **File mode**: set ``file_path`` to a writable path.  Accepted beats are
+    written into a small on-chip ``chunk_beats``-deep window memory (must be
+    a power of 2) instead of per-beat capture regs, so the generated source
+    size is independent of ``n_beats`` — this is the only mode that scales to
+    millions of beats *and* preserves every real value (unlike PRNG check
+    mode, which only checks against a synthetic LFSR sequence). The window is
+    flushed to the file in ``chunk_beats``-sized chunks by
+    :meth:`LoweredDesign.batch_run_streaming` between C-level ``batch_run``
+    calls, as a flat binary stream of ``ceil(data_width/8)``-byte little-endian
+    words, no header/framing. Plain :meth:`LoweredDesign.run` / ``batch_run``
+    cannot drive this mode — they never flush the window, so captured data
+    would never reach the file. Use ``batch_run_streaming`` whenever any
+    interface uses file mode.
+
     Args:
-        n_beats: Maximum number of beats to capture / check.
+        n_beats: Maximum number of beats to capture / check / stream.
         data_width: Width (in bits) of ``tdata``.
         data_prng_seed: When not ``None``, enable PRNG check mode with this
-            seed.  Must match the source's ``data_prng_seed``.
+            seed.  Must match the source's ``data_prng_seed``.  Mutually
+            exclusive with ``file_path``.
+        file_path: Path to the file-mode output file.  Set to enable file
+            mode.  Mutually exclusive with ``data_prng_seed``.
+        chunk_beats: Depth of the file-mode on-chip window memory, in beats.
+            Must be a power of 2.  Also the unit `batch_run_streaming` uses to
+            decide how many cycles to run per C-level `batch_run` call between
+            flushes (see that method). Ignored outside file mode.
         prng_bits: Number of low-order LFSR bits used for the *pause* comparison.
             Set to ``0`` (default) to disable the pause generator entirely.
         pause_threshold: Pause is asserted when ``lfsr[prng_bits-1:0] < pause_threshold``.
@@ -459,6 +548,10 @@ class AXIStreamSinkLowering:
     In PRNG check mode the per-beat capture regs are replaced by
     ``<prefix>_snk_err_cnt`` and ``<prefix>_snk_err_flag``.
 
+    In file mode the per-beat capture regs are replaced by the
+    ``chunk_beats``-deep window memory described above; ``<prefix>_snk_done``
+    is still produced the same way.
+
     All output regs are exposed as **wrapper output ports**, so test code can
     read them after a batched run via
     :meth:`veriforge.sim.Simulator.signal`.
@@ -467,6 +560,8 @@ class AXIStreamSinkLowering:
     n_beats: int
     data_width: int = 8
     data_prng_seed: "int | None" = None
+    file_path: "str | Path | None" = None
+    chunk_beats: int = 65536
     protocol: str = "axi_stream"
     role: str = "master"  # DUT side; lowering is a *sink*
     prng_bits: int = 0
@@ -498,6 +593,16 @@ class AXIStreamSinkLowering:
             raise LoweringError(
                 f"AXIStreamSinkLowering[{binding.prefix}]: pause_threshold {self.pause_threshold} "
                 f"out of range 0..{1 << self.prng_bits} for prng_bits={self.prng_bits}"
+            )
+        file_mode = self.file_path is not None
+        if file_mode and self.data_prng_seed is not None:
+            raise LoweringError(
+                f"AXIStreamSinkLowering[{binding.prefix}]: set either 'file_path' (file mode) "
+                "or 'data_prng_seed' (PRNG check mode), not both"
+            )
+        if file_mode and (self.chunk_beats <= 0 or (self.chunk_beats & (self.chunk_beats - 1)) != 0):
+            raise LoweringError(
+                f"AXIStreamSinkLowering[{binding.prefix}]: chunk_beats must be a power of 2, got {self.chunk_beats}"
             )
         cnt_width = _bit_width_for(self.n_beats + 1)
         prng_check = self.data_prng_seed is not None
@@ -567,6 +672,27 @@ class AXIStreamSinkLowering:
                         with wrapper.if_(tdata_masked != exp_data_w):
                             err_cnt <<= err_cnt + 1
                             err_flag <<= 1
+                        cnt <<= cnt + 1
+                        with wrapper.if_(cnt == (self.n_beats - 1)):
+                            done <<= 1
+        elif file_mode:
+            # File mode: accepted beats land in a small on-chip
+            # chunk_beats-deep window memory, addressed by cnt's own
+            # low-order bits (chunk_beats is a power of 2, so `& mask`
+            # is exactly `% chunk_beats`). The window is flushed to the
+            # backing file by LoweredDesign.batch_run_streaming() between
+            # C-level batch_run calls -- this apply() call only wires the
+            # memory and the counter; it does no file I/O itself.
+            chunk_mem = wrapper.reg(f"{prefix}_snk_chunk_mem", width=self.data_width, depth=self.chunk_beats)
+            mask = self.chunk_beats - 1
+
+            with wrapper.always(*sens):
+                with wrapper.if_(rst_cond):
+                    cnt <<= 0
+                    done <<= 0
+                with wrapper.else_():
+                    with wrapper.if_(tvalid & tready & (cnt < self.n_beats)):
+                        chunk_mem[cnt & mask] <<= tdata
                         cnt <<= cnt + 1
                         with wrapper.if_(cnt == (self.n_beats - 1)):
                             done <<= 1
@@ -2319,6 +2445,88 @@ class MemBusResponderLowering:
             port_map[sigs["rvalid"]] = rvalid_reg
 
 
+# ---------------------------------------------------------------------------
+# File-streaming support (AXIStreamSourceLowering / AXIStreamSinkLowering
+# file mode) -- byte packing helpers + the binding record compile_native()
+# collects and LoweredDesign.batch_run_streaming() consumes.
+# ---------------------------------------------------------------------------
+
+_ARRAY_TYPECODE_BY_BYTES = {1: "B", 2: "H", 4: "I", 8: "Q"}
+
+
+def _byte_width_for_bits(data_width: int) -> int:
+    """Smallest whole number of bytes holding `data_width` bits."""
+    return (data_width + 7) // 8
+
+
+def _pack_words(words: Sequence[int], byte_width: int) -> bytes:
+    """Pack *words* into flat little-endian bytes, `byte_width` bytes each.
+
+    Uses `array.array` (a thin wrapper over a C buffer, no Python-level
+    per-element loop) for the common byte widths (1/2/4/8); falls back to a
+    plain per-element loop for odd widths (e.g. 3 bytes for 17..24-bit data)
+    -- still far cheaper than per-beat I/O since this runs once per chunk.
+    """
+    typecode = _ARRAY_TYPECODE_BY_BYTES.get(byte_width)
+    if typecode is not None:
+        arr = array.array(typecode, words)
+        if sys.byteorder != "little":
+            arr.byteswap()
+        return arr.tobytes()
+    out = bytearray(len(words) * byte_width)
+    for i, w in enumerate(words):
+        out[i * byte_width : (i + 1) * byte_width] = int(w).to_bytes(byte_width, "little")
+    return bytes(out)
+
+
+def _unpack_words(data: bytes, byte_width: int) -> list[int]:
+    """Inverse of `_pack_words`."""
+    typecode = _ARRAY_TYPECODE_BY_BYTES.get(byte_width)
+    if typecode is not None:
+        arr = array.array(typecode)
+        arr.frombytes(data)
+        if sys.byteorder != "little":
+            arr.byteswap()
+        return arr.tolist()
+    n = len(data) // byte_width
+    return [int.from_bytes(data[i * byte_width : (i + 1) * byte_width], "little") for i in range(n)]
+
+
+@dataclass(frozen=True)
+class FileStreamBinding:
+    """One interface's file-streaming configuration.
+
+    Collected by :func:`compile_native` from an :class:`AXIStreamSourceLowering`
+    or :class:`AXIStreamSinkLowering` using file mode (``n_file_beats > 0`` /
+    ``file_path`` set respectively) and exposed as
+    :attr:`LoweredDesign.file_streams`. Consumed by
+    :meth:`LoweredDesign.batch_run_streaming` — not meant to be constructed
+    directly.
+
+    Attributes:
+        prefix: Interface prefix (matches the key in the `lowerings` dict
+            passed to `compile_native`).
+        role: ``"source"`` or ``"sink"``.
+        mem_name: Name of the wrapper's chunk-window memory
+            (``<prefix>_src_chunk_mem`` / ``<prefix>_snk_chunk_mem``).
+        cnt_name: Name of the wrapper's beat counter register
+            (``<prefix>_src_cnt`` / ``<prefix>_snk_cnt``).
+        n_beats: Total beats this interface will transfer.
+        chunk_beats: Depth of the chunk-window memory (power of 2).
+        byte_width: Bytes per beat in the backing file (``ceil(data_width/8)``).
+        file_path: Backing file -- read from (source) or written to (sink).
+    """
+
+    prefix: str
+    role: str
+    mem_name: str
+    cnt_name: str
+    n_beats: int
+    chunk_beats: int
+    byte_width: int
+    file_path: Path
+
+
 @dataclass(frozen=True)
 class LoweredDesign:  # cm:3e3a4c
     """Result of a successful :func:`compile_native` call.
@@ -2338,6 +2546,13 @@ class LoweredDesign:  # cm:3e3a4c
         plan: The :class:`TestbenchPlan` used to build this lowered
             design. Consumed by :meth:`run` to schedule clocks and
             sequence reset automatically.
+        file_streams: Per-interface :class:`FileStreamBinding` for every
+            interface using file mode (`AXIStreamSourceLowering`'s
+            `n_file_beats`/`AXIStreamSinkLowering`'s `file_path`). Empty
+            when no interface uses file mode. Consumed by
+            :meth:`batch_run_streaming` — `run`/`batch_run` ignore it
+            entirely (and will NOT drive file-mode interfaces correctly;
+            see those lowerings' own docstrings).
     """
 
     wrapper: "ModelModule"
@@ -2345,6 +2560,7 @@ class LoweredDesign:  # cm:3e3a4c
     capture_signals: Mapping[str, list[str]]
     done_signals: Mapping[str, str]
     plan: TestbenchPlan
+    file_streams: Mapping[str, FileStreamBinding]
 
     def run(
         self,
@@ -2511,12 +2727,232 @@ class LoweredDesign:  # cm:3e3a4c
             done_name: int(sim.signal(done_name).value) for done_name in self.done_signals.values()
         }
 
+    def batch_run_streaming(
+        self,
+        cycles: int,
+        *,
+        clock_name: str | None = None,
+        clock_period: int | None = None,
+        reset_cycles: int = 4,
+        chunk_cycles: int | None = None,
+    ) -> dict[str, int]:
+        """Run a lowered design that has one or more file-streaming interfaces.
+
+        Like `batch_run`, this drives the whole simulation through repeated
+        C-level `Simulator.batch_run` calls on a single compiled `Simulator`
+        -- but between calls, it refills each file-mode
+        `AXIStreamSourceLowering`'s chunk window from its backing file, and
+        flushes each file-mode `AXIStreamSinkLowering`'s chunk window to its
+        own backing file, in `chunk_beats`-sized pieces (not per-beat, not
+        per-cycle). Use this instead of `batch_run` whenever any interface
+        was configured with file mode (`AXIStreamSourceLowering`'s
+        `n_file_beats` or `AXIStreamSinkLowering`'s `file_path`) -- plain
+        `batch_run`/`run` never refill or flush the chunk window at all, so
+        a source would silently replay chunk 0 forever and a sink would
+        never have its captured data reach a file.
+
+        Each round's own cycle budget is capped not just by `chunk_cycles`
+        but by how many beats remain in whichever currently-loaded chunk
+        (across every file-streamed interface) is closest to its own
+        boundary, checked from each interface's own beat counter *before*
+        the round runs. Beats advance at most once per cycle, so this
+        guarantees a round can never need data beyond the chunk that's
+        already loaded -- refilling strictly *between* rounds (never mid-round)
+        is therefore always correct, regardless of backpressure/pause stalls
+        on any interface.
+
+        Args:
+            cycles: Total clock cycles to run, same contract as `batch_run`.
+            clock_name: Clock signal to drive. Auto-detected like `batch_run`.
+            clock_period: Clock period. Auto-detected like `batch_run`.
+            reset_cycles: Cycles to hold reset before releasing, same as
+                `batch_run`.
+            chunk_cycles: Upper bound on cycles run per round (still further
+                clamped by the per-round boundary check above). Defaults to
+                the smallest `chunk_beats` across all file-streamed
+                interfaces. Must not exceed that value.
+
+        Returns:
+            Dict mapping capture-signal name to integer value, covering only
+            interfaces that are *not* file-streamed (file-streamed data lives
+            in the files themselves). Same layout as `batch_run` otherwise.
+
+        Raises:
+            ValueError: If there are no file-streaming interfaces (use
+                `batch_run` instead), if `chunk_cycles` exceeds the smallest
+                `chunk_beats` across file-streamed interfaces, or the same
+                clock/cycle validation `batch_run` itself performs.
+        """
+        from veriforge.sim.testbench import Simulator
+
+        _DEFAULT_PERIOD = 10
+
+        if not self.file_streams:
+            raise ValueError(
+                "batch_run_streaming: no file-streaming interfaces in this LoweredDesign; use batch_run() instead"
+            )
+        if reset_cycles < 0:
+            raise ValueError("reset_cycles must be non-negative")
+        if reset_cycles >= cycles:
+            raise ValueError(f"reset_cycles ({reset_cycles}) must be less than cycles ({cycles})")
+
+        min_chunk_beats = min(b.chunk_beats for b in self.file_streams.values())
+        if reset_cycles + 1 > min_chunk_beats:
+            raise ValueError(
+                f"batch_run_streaming: reset_cycles+1 ({reset_cycles + 1}) must not exceed the smallest "
+                f"chunk_beats across file-streamed interfaces ({min_chunk_beats}) -- the first round must "
+                "be able to run far enough to see the reset-release event, which Simulator.batch_run() "
+                "schedules at a cycle index relative to THAT call, not cumulative across calls"
+            )
+        if chunk_cycles is None:
+            chunk_cycles = min_chunk_beats
+        elif chunk_cycles > min_chunk_beats:
+            raise ValueError(
+                f"batch_run_streaming: chunk_cycles ({chunk_cycles}) must not exceed the smallest "
+                f"chunk_beats across file-streamed interfaces ({min_chunk_beats})"
+            )
+        if chunk_cycles <= 0:
+            raise ValueError(f"chunk_cycles must be positive, got {chunk_cycles}")
+
+        # Auto-detect clock_name / clock_period from the plan (identical to batch_run).
+        if clock_name is None:
+            if not self.plan.domains:
+                raise ValueError("batch_run_streaming: plan has no domains; provide clock_name explicitly")
+            if len(self.plan.domains) > 1:
+                names = [d.clock.name for d in self.plan.domains]
+                raise ValueError(
+                    f"batch_run_streaming: plan has {len(self.plan.domains)} domains ({names}); "
+                    "provide clock_name explicitly for multi-domain lowered designs"
+                )
+            primary_dom = self.plan.domains[0]
+            clock_name = primary_dom.clock.name
+            if clock_period is None:
+                clock_period = primary_dom.clock.period_hint or _DEFAULT_PERIOD
+        elif clock_period is None:
+            for dom in self.plan.domains:
+                if dom.clock.name == clock_name:
+                    clock_period = dom.clock.period_hint or _DEFAULT_PERIOD
+                    break
+            else:
+                clock_period = _DEFAULT_PERIOD
+
+        events: list[tuple[int, str, int]] = []
+        for dom in self.plan.domains:
+            if dom.reset is not None:
+                events.append((0, dom.reset.name, dom.reset.assert_level))
+                events.append((reset_cycles, dom.reset.name, dom.reset.release_level))
+        events.sort(key=lambda e: e[0])
+
+        sim = Simulator(self.wrapper, design=self.design, engine="compiled")
+
+        read_handles: dict[str, object] = {}
+        write_handles: dict[str, object] = {}
+        loaded_chunk: dict[str, int] = {}
+        flushed_chunks: dict[str, int] = {}
+        try:
+            for prefix, b in self.file_streams.items():
+                if b.role == "source":
+                    fh = open(b.file_path, "rb")  # noqa: SIM115 -- closed in finally below
+                    read_handles[prefix] = fh
+                    first = fh.read(b.chunk_beats * b.byte_width)
+                    sim.load_memory(b.mem_name, _unpack_words(first, b.byte_width))
+                    loaded_chunk[prefix] = 0
+                else:
+                    write_handles[prefix] = open(b.file_path, "wb")  # noqa: SIM115
+                    flushed_chunks[prefix] = 0
+
+            remaining = cycles
+            first_call = True
+            while remaining > 0:
+                # Clamp this round's budget so NO file-streamed interface's
+                # counter can cross into a chunk beyond what's currently
+                # loaded/not-yet-flushed -- see the method docstring's
+                # correctness argument. Skipped on the very first round:
+                # every counter register is still X (nothing has run yet,
+                # not even reset) and every stream starts fresh at chunk 0
+                # with that chunk already loaded, so no clamp is needed.
+                run_now = min(chunk_cycles, remaining)
+                if not first_call:
+                    for _prefix, b in self.file_streams.items():
+                        cnt_before = int(sim.signal(b.cnt_name).value)
+                        if cnt_before >= b.n_beats:
+                            continue  # this interface is already finished
+                        room = b.chunk_beats - (cnt_before & (b.chunk_beats - 1))
+                        run_now = min(run_now, room)
+                elif events:
+                    # The reset-release event is scheduled at cycle index
+                    # `reset_cycles`, relative to THIS call (Simulator.batch_run
+                    # restarts its own cycle index at 0 every call, it is not
+                    # cumulative across calls) -- the first call must run far
+                    # enough to include that index or reset never releases.
+                    # Safe regardless of chunk_cycles/room: reset holds every
+                    # counter at 0 the whole time, so no stream can advance
+                    # past its already-loaded chunk 0 before release fires.
+                    run_now = max(run_now, reset_cycles + 1)
+                run_now = max(run_now, 1)
+
+                completed = sim.batch_run(
+                    run_now, clock_name, clock_period, events=(events if first_call and events else None)
+                )
+                first_call = False
+                remaining -= completed
+
+                for prefix, b in self.file_streams.items():
+                    if b.role != "source":
+                        continue
+                    fh = read_handles[prefix]
+                    cnt = min(int(sim.signal(b.cnt_name).value), b.n_beats)
+                    needed_chunk = cnt // b.chunk_beats
+                    total_chunks = -(-b.n_beats // b.chunk_beats)
+                    if needed_chunk > loaded_chunk[prefix] and needed_chunk < total_chunks:
+                        fh.seek(needed_chunk * b.chunk_beats * b.byte_width)
+                        data = fh.read(b.chunk_beats * b.byte_width)
+                        sim.load_memory(b.mem_name, _unpack_words(data, b.byte_width))
+                        loaded_chunk[prefix] = needed_chunk
+
+                for prefix, b in self.file_streams.items():
+                    if b.role != "sink":
+                        continue
+                    wfh = write_handles[prefix]
+                    cnt = min(int(sim.signal(b.cnt_name).value), b.n_beats)
+                    chunk_of_cnt = cnt // b.chunk_beats
+                    while flushed_chunks[prefix] < chunk_of_cnt:
+                        words = sim.dump_memory(b.mem_name, b.chunk_beats)
+                        wfh.write(_pack_words(words, b.byte_width))
+                        flushed_chunks[prefix] += 1
+
+                if completed < run_now:
+                    break  # DUT hit $finish or an engine error; stop early like batch_run does.
+
+            # Final partial-chunk flush for sinks: whatever was written since
+            # the last full-chunk flush, which never crossed a boundary.
+            for prefix, b in self.file_streams.items():
+                if b.role != "sink":
+                    continue
+                cnt = min(int(sim.signal(b.cnt_name).value), b.n_beats)
+                local_count = cnt - flushed_chunks[prefix] * b.chunk_beats
+                if local_count > 0:
+                    words = sim.dump_memory(b.mem_name, local_count)
+                    write_handles[prefix].write(_pack_words(words, b.byte_width))
+        finally:
+            for fh in read_handles.values():
+                fh.close()
+            for fh in write_handles.values():
+                fh.close()
+
+        non_streamed_capture = {p: sigs for p, sigs in self.capture_signals.items() if p not in self.file_streams}
+        non_streamed_done = {p: name for p, name in self.done_signals.items() if p not in self.file_streams}
+        return {name: int(sim.signal(name).value) for sigs in non_streamed_capture.values() for name in sigs} | {
+            done_name: int(sim.signal(done_name).value) for done_name in non_streamed_done.values()
+        }
+
 
 def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
     bench: "Testbench",
     *,
     lowerings: Mapping[str, InterfaceLowering],
     name: str = "bench_native_top",
+    tie_values: Mapping[str, int] | None = None,
 ) -> LoweredDesign:
     """Synthesize a wrapper module that runs ``bench`` natively in the engine.
 
@@ -2530,6 +2966,15 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
             mode is intentionally rejected so failures are loud rather
             than silently mixed.
         name: Wrapper module name (also the top in the returned design).
+        tie_values: DUT input port name -> constant value, for DUT inputs
+            that are neither part of a lowered interface nor the plan's
+            clock/reset ports (e.g. a plain "always ready" control bit
+            with no tvalid/tready framing, so no :class:`InterfaceLowering`
+            applies to it at all). Every other such input is tied to ``0``
+            as before; this only overrides specific names. Raises
+            :class:`LoweringError` for any name that isn't actually an
+            unbound DUT input (a typo, or one already bound by a lowering
+            or a clock/reset connection).
 
     Returns:
         A :class:`LoweredDesign` ready to feed to ``Simulator(wrapper,
@@ -2538,7 +2983,8 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
 
     Raises:
         LoweringError: on any subset violation — unknown prefix, missing
-            lowering, role mismatch, or empty / out-of-range stimulus.
+            lowering, role mismatch, empty / out-of-range stimulus, or an
+            invalid ``tie_values`` key.
     """
     plan: TestbenchPlan = bench.plan
     dut = bench.module
@@ -2560,6 +3006,7 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
 
     capture_signals: dict[str, list[str]] = {}
     done_signals: dict[str, str] = {}
+    file_streams: dict[str, FileStreamBinding] = {}
 
     with DSLModule(name) as w:
         clk_signals: dict[str, object] = {}
@@ -2591,8 +3038,38 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
                 port_map=port_map,
             )
 
-            if isinstance(lowering, AXIStreamSinkLowering):
-                if lowering.data_prng_seed is not None:
+            if isinstance(lowering, AXIStreamSourceLowering) and lowering.n_file_beats > 0:
+                # File mode: nothing to capture (it's a source); the chunk
+                # window is refilled by batch_run_streaming(), not read back
+                # as a wrapper output port.
+                capture_signals[prefix] = []
+                file_streams[prefix] = FileStreamBinding(
+                    prefix=prefix,
+                    role="source",
+                    mem_name=f"{prefix}_src_chunk_mem",
+                    cnt_name=f"{prefix}_src_cnt",
+                    n_beats=lowering.n_file_beats,
+                    chunk_beats=lowering.chunk_beats,
+                    byte_width=_byte_width_for_bits(lowering.data_width),
+                    file_path=Path(lowering.file_path),  # type: ignore[arg-type]
+                )
+            elif isinstance(lowering, AXIStreamSinkLowering):
+                if lowering.file_path is not None:
+                    # File mode: no per-beat cap regs and no PRNG error
+                    # status; captured data is flushed to file_path by
+                    # batch_run_streaming() instead.
+                    capture_signals[prefix] = []
+                    file_streams[prefix] = FileStreamBinding(
+                        prefix=prefix,
+                        role="sink",
+                        mem_name=f"{prefix}_snk_chunk_mem",
+                        cnt_name=f"{prefix}_snk_cnt",
+                        n_beats=lowering.n_beats,
+                        chunk_beats=lowering.chunk_beats,
+                        byte_width=_byte_width_for_bits(lowering.data_width),
+                        file_path=Path(lowering.file_path),
+                    )
+                elif lowering.data_prng_seed is not None:
                     # PRNG check mode: no per-beat cap regs; expose error status instead.
                     capture_signals[prefix] = [
                         f"{prefix}_snk_err_cnt",
@@ -2633,11 +3110,22 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
                 port_map[dom.reset.name] = rst_signals[dom.name]
 
         # Tie off remaining DUT inputs to 0 (covers heartbeat anchors and any
-        # un-bound user inputs).
+        # un-bound user inputs), except for any name in tie_values, which
+        # gets that specific constant instead -- for a plain control input
+        # with no tvalid/tready framing (so no InterfaceLowering applies to
+        # it), 0 is not always the right "do nothing" value.
         bound = set(port_map.keys())
+        tie_values = tie_values or {}
+        dut_input_names = {p.name for p in dut.input_ports()}
+        unknown_ties = sorted((set(tie_values) - dut_input_names) | (set(tie_values) & bound))
+        if unknown_ties:
+            raise LoweringError(
+                f"compile_native: tie_values references name(s) {unknown_ties} that are not "
+                "unbound DUT inputs (already bound by a lowering/clock/reset, or not a DUT input at all)"
+            )
         for dut_port in dut.input_ports():
             if dut_port.name not in bound:
-                port_map[dut_port.name] = 0
+                port_map[dut_port.name] = tie_values.get(dut_port.name, 0)
                 bound.add(dut_port.name)
 
         # Drop any keys that aren't actually DUT ports (shouldn't normally
@@ -2648,11 +3136,22 @@ def compile_native(  # noqa: PLR0912, PLR0915  # cm:b7b6d5
         w.instance(dut.name, "u_dut", ports=clean_port_map)
 
     wrapper_module = w.build()
-    design = Design(modules=[wrapper_module, dut])
+    # Preserve the DUT's own full hierarchy when `bench` was built with a
+    # multi-module Design (e.g. a structural top instantiating real
+    # sub-modules) -- `bench.module` is only the top-level boundary module,
+    # so building `Design(modules=[wrapper_module, dut])` alone would
+    # silently drop every sub-module and fail to elaborate later, only
+    # once a Simulator is actually constructed from the result. Falls back
+    # to the single-module case for a `Testbench` built with no `design=`
+    # at all (every existing lowering test uses a standalone DUT, so this
+    # preserves their exact prior behavior).
+    other_modules = [m for m in (bench.design.modules if bench.design is not None else []) if m.name != dut.name]
+    design = Design(modules=[wrapper_module, dut, *other_modules])
     return LoweredDesign(
         wrapper=wrapper_module,
         design=design,
         capture_signals=capture_signals,
         done_signals=done_signals,
         plan=plan,
+        file_streams=file_streams,
     )

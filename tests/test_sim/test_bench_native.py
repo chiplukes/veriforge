@@ -1698,6 +1698,266 @@ def _run_loopback_with_pause(
     return [results[f"s_axis_cap_{i}"] for i in range(n_beats)]
 
 
+class TestTieValues:
+    """compile_native(..., tie_values=...) -- override for unbound DUT inputs
+    that aren't part of any lowered interface (e.g. a plain always-ready
+    control bit with no tvalid/tready framing)."""
+
+    # A second DUT input with no tvalid/tready framing at all -- not part
+    # of any interface the planner can detect, so compile_native's own
+    # default tie-off (0) is the only thing that would otherwise drive it.
+    EXTRA_INPUT_SRC = LOOPBACK_SRC.replace(
+        "input  wire        rst_n,",
+        "input  wire        rst_n,\n    input  wire        extra_enable,",
+    ).replace(
+        "assign m_axis_tready = s_axis_tready;",
+        "assign m_axis_tready = s_axis_tready & extra_enable;",
+    )
+
+    def test_tie_values_overrides_default_zero(self):
+        beats = [1, 2, 3]
+        bench = Testbench(_parse(self.EXTRA_INPUT_SRC))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(beats=beats, data_width=8),
+                "s_axis": AXIStreamSinkLowering(n_beats=len(beats), data_width=8),
+            },
+            tie_values={"extra_enable": 1},
+        )
+        # extra_enable=1 (tied) must behave identically to the plain
+        # loopback with no such gate -- all beats arrive.
+        results = lowered.run("reference", max_time=100)
+        assert [results[f"s_axis_cap_{i}"] for i in range(len(beats))] == beats
+        assert results["s_axis_snk_done"] == 1
+
+    def test_tie_values_unknown_name_raises(self):
+        bench = Testbench(_parse(self.EXTRA_INPUT_SRC))
+        with pytest.raises(LoweringError, match="tie_values"):
+            compile_native(
+                bench,
+                lowerings={
+                    "m_axis": AXIStreamSourceLowering(beats=[1], data_width=8),
+                    "s_axis": AXIStreamSinkLowering(n_beats=1, data_width=8),
+                },
+                tie_values={"not_a_real_port": 1},
+            )
+
+    def test_tie_values_already_bound_name_raises(self):
+        # clk is bound by the plan's own clock connection -- tying it too
+        # is a real conflict, not a silent override.
+        bench = Testbench(_parse(self.EXTRA_INPUT_SRC))
+        with pytest.raises(LoweringError, match="tie_values"):
+            compile_native(
+                bench,
+                lowerings={
+                    "m_axis": AXIStreamSourceLowering(beats=[1], data_width=8),
+                    "s_axis": AXIStreamSinkLowering(n_beats=1, data_width=8),
+                },
+                tie_values={"clk": 0, "extra_enable": 1},
+            )
+
+
+class TestFileStreaming:
+    """AXIStreamSourceLowering/AXIStreamSinkLowering file mode +
+    LoweredDesign.batch_run_streaming().
+
+    The DUT (LOOPBACK_SRC) is a plain combinational pass-through, so the
+    sink's output file should always equal the source's input file
+    byte-for-byte -- these tests exist to validate the chunked-refill/flush
+    *mechanism* itself (correct data at chunk boundaries, under
+    backpressure, with a non-divisor-of-chunk_beats final partial chunk),
+    not the DUT's own logic.
+    """
+
+    def _roundtrip(self, tmp_path, beats, *, chunk_beats, src_kwargs=None, snk_kwargs=None, cycles=None):
+        src_path = tmp_path / "src.bin"
+        dst_path = tmp_path / "dst.bin"
+        src_path.write_bytes(bytes(beats))
+
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(
+                    n_file_beats=len(beats),
+                    file_path=src_path,
+                    chunk_beats=chunk_beats,
+                    data_width=8,
+                    **(src_kwargs or {}),
+                ),
+                "s_axis": AXIStreamSinkLowering(
+                    n_beats=len(beats),
+                    file_path=dst_path,
+                    chunk_beats=chunk_beats,
+                    data_width=8,
+                    **(snk_kwargs or {}),
+                ),
+            },
+        )
+        assert lowered.capture_signals == {"m_axis": [], "s_axis": []}
+        assert set(lowered.file_streams) == {"m_axis", "s_axis"}
+        assert lowered.file_streams["m_axis"].role == "source"
+        assert lowered.file_streams["s_axis"].role == "sink"
+
+        # Generous cycle budget: reset + every beat + pause-stall margin.
+        total_cycles = cycles if cycles is not None else 4 + len(beats) * 6 + 64
+        lowered.batch_run_streaming(cycles=total_cycles)
+
+        return dst_path.read_bytes()
+
+    def test_exact_multiple_of_chunk_beats(self, tmp_path):
+        # 32 beats, chunk_beats=8 -> exactly 4 chunks, no partial tail.
+        beats = list(range(32))
+        out = self._roundtrip(tmp_path, beats, chunk_beats=8)
+        assert list(out) == beats
+
+    def test_non_divisor_chunk_beats_partial_tail(self, tmp_path):
+        # 50 beats, chunk_beats=8 -> 6 full chunks + a 2-beat partial tail;
+        # exercises the final-partial-chunk flush path specifically.
+        beats = [(i * 7 + 3) % 256 for i in range(50)]
+        out = self._roundtrip(tmp_path, beats, chunk_beats=8)
+        assert list(out) == beats
+
+    def test_single_chunk_no_crossing(self, tmp_path):
+        # chunk_beats bigger than n_beats -- never refills/flushes mid-run,
+        # only the initial load + final partial flush.
+        beats = [1, 2, 3, 4, 5]
+        out = self._roundtrip(tmp_path, beats, chunk_beats=64)
+        assert list(out) == beats
+
+    def test_backpressure_both_sides_across_many_chunks(self, tmp_path):
+        # The real correctness-sensitive case: small chunk_beats (frequent
+        # boundary crossings) PLUS random pause on both source and sink, so
+        # the per-round cycle-budget clamp (room-until-next-boundary) is
+        # genuinely exercised, not just the no-stall happy path. If the
+        # mid-round boundary-crossing bug this method's own docstring
+        # describes were reintroduced, this is the shape that would catch
+        # it: bursty stalls make it likely a naive fixed-size round would
+        # straddle a chunk boundary.
+        beats = [(i * 13 + 1) % 256 for i in range(97)]  # not a multiple of chunk_beats
+        out = self._roundtrip(
+            tmp_path,
+            beats,
+            chunk_beats=8,
+            src_kwargs={"prng_bits": 3, "pause_threshold": 5, "prng_seed": 0xBEEF},
+            snk_kwargs={"prng_bits": 3, "pause_threshold": 5, "prng_seed": 0xF00D},
+            cycles=4 + len(beats) * 20 + 128,
+        )
+        assert list(out) == beats
+
+    def test_small_chunk_cycles_override(self, tmp_path):
+        # Explicit chunk_cycles smaller than chunk_beats must still be correct.
+        beats = list(range(40))
+        src_path = tmp_path / "src.bin"
+        dst_path = tmp_path / "dst.bin"
+        src_path.write_bytes(bytes(beats))
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(
+                    n_file_beats=len(beats), file_path=src_path, chunk_beats=8, data_width=8
+                ),
+                "s_axis": AXIStreamSinkLowering(n_beats=len(beats), file_path=dst_path, chunk_beats=8, data_width=8),
+            },
+        )
+        lowered.batch_run_streaming(cycles=4 + len(beats) * 4 + 32, chunk_cycles=3)
+        assert list(dst_path.read_bytes()) == beats
+
+    def test_chunk_cycles_larger_than_chunk_beats_raises(self, tmp_path):
+        src_path = tmp_path / "src.bin"
+        dst_path = tmp_path / "dst.bin"
+        src_path.write_bytes(bytes(range(10)))
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(n_file_beats=10, file_path=src_path, chunk_beats=8, data_width=8),
+                "s_axis": AXIStreamSinkLowering(n_beats=10, file_path=dst_path, chunk_beats=8, data_width=8),
+            },
+        )
+        with pytest.raises(ValueError, match="chunk_cycles"):
+            lowered.batch_run_streaming(cycles=100, chunk_cycles=16)
+
+    def test_batch_run_streaming_without_file_streams_raises(self):
+        beats = [1, 2, 3]
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(beats=beats, data_width=8),
+                "s_axis": AXIStreamSinkLowering(n_beats=len(beats), data_width=8),
+            },
+        )
+        with pytest.raises(ValueError, match="no file-streaming interfaces"):
+            lowered.batch_run_streaming(cycles=40)
+
+    def test_non_power_of_two_chunk_beats_raises(self, tmp_path):
+        src_path = tmp_path / "src.bin"
+        src_path.write_bytes(bytes(range(10)))
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        with pytest.raises(LoweringError, match="power of 2"):
+            compile_native(
+                bench,
+                lowerings={
+                    "m_axis": AXIStreamSourceLowering(n_file_beats=10, file_path=src_path, chunk_beats=6, data_width=8),
+                    "s_axis": AXIStreamSinkLowering(n_beats=10, data_width=8),
+                },
+            )
+
+    def test_source_both_beats_and_file_raises(self, tmp_path):
+        src_path = tmp_path / "src.bin"
+        src_path.write_bytes(bytes(range(4)))
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        with pytest.raises(LoweringError, match="not more than one"):
+            compile_native(
+                bench,
+                lowerings={
+                    "m_axis": AXIStreamSourceLowering(beats=[1, 2], n_file_beats=4, file_path=src_path),
+                    "s_axis": AXIStreamSinkLowering(n_beats=2, data_width=8),
+                },
+            )
+
+    def test_sink_both_file_and_prng_raises(self, tmp_path):
+        dst_path = tmp_path / "dst.bin"
+        bench = Testbench(_parse(LOOPBACK_SRC))
+        with pytest.raises(LoweringError, match="not both"):
+            compile_native(
+                bench,
+                lowerings={
+                    "m_axis": AXIStreamSourceLowering(beats=[1, 2]),
+                    "s_axis": AXIStreamSinkLowering(n_beats=2, file_path=dst_path, data_prng_seed=0xACE1),
+                },
+            )
+
+    def test_16bit_data_width_two_byte_words(self, tmp_path):
+        # Non-1-byte data_width: confirms the byte-packing helpers (not just
+        # the 1-byte happy path above) round-trip correctly.
+        beats = [0x0000, 0x1234, 0xFFFF, 0x8001, 0x00FF] * 4  # 20 beats
+        src_path = tmp_path / "src16.bin"
+        dst_path = tmp_path / "dst16.bin"
+        import struct
+
+        src_path.write_bytes(b"".join(struct.pack("<H", v) for v in beats))
+
+        loopback16 = LOOPBACK_SRC.replace("[7:0]", "[15:0]")
+        bench = Testbench(_parse(loopback16))
+        lowered = compile_native(
+            bench,
+            lowerings={
+                "m_axis": AXIStreamSourceLowering(
+                    n_file_beats=len(beats), file_path=src_path, chunk_beats=8, data_width=16
+                ),
+                "s_axis": AXIStreamSinkLowering(n_beats=len(beats), file_path=dst_path, chunk_beats=8, data_width=16),
+            },
+        )
+        lowered.batch_run_streaming(cycles=4 + len(beats) * 6 + 64)
+
+        out = [v[0] for v in struct.iter_unpack("<H", dst_path.read_bytes())]
+        assert out == beats
+
+
 class TestPRNGPauseValidation:
     """Validation / error-path tests for PRNG pause params."""
 
