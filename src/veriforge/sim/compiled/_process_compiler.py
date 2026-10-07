@@ -115,27 +115,20 @@ class _ProcessCompilerMixin:
             return names
         return None
 
-    def _cont_assign_is_rerun_pure(self, assign: ContinuousAssign, sensitivity: set[int]) -> bool:
-        """Whether every process compiled from *assign* may skip a rerun when
-        none of its inputs changed since it last ran (the queue delta
-        engine's redundant-rerun elimination -- see
-        notes/plans/work_queue_delta_engine.md).
+    def _cont_assign_is_idempotent(self, assign: ContinuousAssign) -> bool:
+        """Whether running a process compiled from *assign* again on
+        unchanged inputs is a no-op (writes nothing, marks nothing dirty).
 
-        Requires that running it again on unchanged inputs is a no-op. A
-        conservative allowlist on the IR -- anything not positively
-        recognized is impure and keeps the exact scan-engine schedule:
+        A conservative allowlist on the IR -- anything not positively
+        recognized is treated as non-idempotent:
         - the LHS writes only plain signals (memory targets toggle their
           marker signal on every write, so a rerun isn't a no-op);
         - the RHS calls no user function (those write their own internal
-          signals) and no stateful/time system function;
-        - the sensitivity set is non-empty (an empty one means the process
-          runs every iteration by design).
+          signals) and no stateful/time system function.
         Signal writes in continuous-assign bodies are change-guarded (they
         only write, and only mark dirty, when the value differs), so with
         these conditions a rerun recomputes the same values and does nothing.
         """
-        if not sensitivity:
-            return False
         names = self._lhs_signal_names(assign.lhs)
         if not names:
             return False
@@ -143,6 +136,15 @@ class _ProcessCompilerMixin:
             if name in self._mem_map or self._signal_map.get(name) is None:
                 return False
         return not _has_impure_call(assign.rhs)
+
+    def _cont_assign_is_rerun_pure(self, assign: ContinuousAssign, sensitivity: set[int]) -> bool:
+        """Whether processes compiled from *assign* may skip a rerun when none
+        of their inputs changed since they last ran (the queue delta engine's
+        redundant-rerun elimination -- see
+        notes/plans/work_queue_delta_engine.md): idempotent, with a non-empty
+        sensitivity set (an empty one means the process runs every iteration
+        by design, so its schedule is kept exact)."""
+        return bool(sensitivity) and self._cont_assign_is_idempotent(assign)
 
     def _compile_continuous_assigns(self, module: Module) -> None:
         import sys
@@ -181,11 +183,17 @@ class _ProcessCompilerMixin:
 
         # (first process index, rerun-pure) per assign; every process an
         # assign compiles to is appended within its own loop iteration below.
-        purity_marks: list[tuple[int, bool]] = []
+        # (first process index, rerun-pure, constant driver) per assign; every
+        # process an assign compiles to is appended within its own loop
+        # iteration below.
+        purity_marks: list[tuple[int, bool, bool]] = []
         for _ca_idx, assign in enumerate(module.continuous_assigns):
             sensitivity: set[int] = set()
             self._walk_signals(assign.rhs, sensitivity)
-            purity_marks.append((len(self._processes), self._cont_assign_is_rerun_pure(assign, sensitivity)))
+            idempotent = self._cont_assign_is_idempotent(assign)
+            purity_marks.append(
+                (len(self._processes), idempotent and bool(sensitivity), idempotent and not sensitivity)
+            )
 
             if _profile and _ca_idx % _interval == 0:
                 _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)
@@ -625,10 +633,12 @@ class _ProcessCompilerMixin:
             ]
             self._processes.append((sensitivity, lines))
 
-        purity_marks.append((len(self._processes), False))  # end sentinel
-        for (start, pure), (end, _next_pure) in pairwise(purity_marks):
+        purity_marks.append((len(self._processes), False, False))  # end sentinel
+        for (start, pure, const), (end, _p, _c) in pairwise(purity_marks):
             if pure:
                 self._pure_conts.update(range(start, end))
+            if const:
+                self._const_conts.update(range(start, end))
 
         if _profile:
             _text_bytes = sum(sum(len(l) for l in lines) for _, lines in self._processes)

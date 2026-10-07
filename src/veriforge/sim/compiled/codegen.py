@@ -191,6 +191,7 @@ class CythonCodegen(
     __slots__ = (
         "_body_tainted_sids",
         "_combo_processes",
+        "_const_conts",
         "_delta_limit",
         "_dynamic_max_wide_words",
         "_et_count",
@@ -244,6 +245,9 @@ class CythonCodegen(
         # Indices into _processes whose rerun on unchanged inputs is a no-op
         # (see _cont_assign_is_rerun_pure).
         self._pure_conts: set[int] = set()
+        # Indices into _processes that are idempotent constant drivers (empty
+        # sensitivity, e.g. `assign x = 1'b0;`).
+        self._const_conts: set[int] = set()
         self._combo_processes: list[tuple[set[int], object]] = []
         self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
         self._module: Module | None = None

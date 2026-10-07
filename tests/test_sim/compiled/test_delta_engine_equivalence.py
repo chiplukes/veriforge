@@ -443,3 +443,137 @@ def test_engine_selection(env, n_lanes, expected, monkeypatch):
     if env is None:
         assert (n_procs > AUTO_QUEUE_MIN_PROCESSES) == (expected == "queue")
     assert ("DL_READER_OFF" in pyx) == (expected == "queue")
+
+
+# ── batch_run negedge skip with constant drivers ─────────────────────
+
+_TIE_POSEDGE = """
+module t(input clk, input [7:0] a, output reg [7:0] r, output [7:0] y, output z);
+  reg [7:0] m [0:3];
+  assign z = 1'b0;
+  wire [7:0] w = a + r;
+  always @(posedge clk) begin r <= w ^ {7'd0, z}; m[r[1:0]] <= w; end
+  assign y = m[a[1:0]];
+endmodule
+"""
+
+_TIE_NEGEDGE = """
+module t(input clk, input [7:0] a, output reg [7:0] r, output reg [7:0] rn, output z);
+  assign z = 1'b1;
+  always @(posedge clk) r <= a + {7'd0, z};
+  always @(negedge clk) rn <= r ^ a;
+endmodule
+"""
+
+_EMPTY_SENS_COMBO = """
+module t(input clk, input [7:0] a, output reg [7:0] r, output reg k);
+  always @(*) k = 1'b1;
+  always @(posedge clk) r <= a + {7'd0, k};
+endmodule
+"""
+
+
+@pytest.mark.parametrize("mode", ["scan", "queue"])
+@pytest.mark.parametrize(
+    "source", [_TIE_POSEDGE, _TIE_NEGEDGE, _EMPTY_SENS_COMBO], ids=["tie_posedge", "tie_negedge", "empty_combo"]
+)
+def test_batch_run_negedge_skip_matches_stepping(source, mode, monkeypatch):
+    """batch_run skips the falling-edge snapshot + delta_loop when nothing
+    can react to it; idempotent constant drivers (`assign z = 1'b0;`) must
+    not prevent that, and must not change the result. Compare against
+    explicit per-edge stepping, which always runs the falling-edge delta_loop."""
+    n_cycles = 12
+
+    def setup(sim):
+        sched = sim._sched
+        smap = sched._signal_map
+        sched._sim_drive_signal(smap["a"], 0x35, 0)
+        sched._sim_drive_signal(smap["clk"], 0, 0)
+        sched._sim.step()
+
+    batch = _build(source, mode, monkeypatch)
+    setup(batch)
+    batch.batch_run(n_cycles, "clk")
+
+    stepped = _build(source, mode, monkeypatch)
+    setup(stepped)
+    sched, csim = stepped._sched, stepped._sched._sim
+    clk = sched._signal_map["clk"]
+    for _ in range(n_cycles):
+        for level in (1, 0):
+            csim.snapshot()
+            sched._sim_drive_signal(clk, level, 0)
+            csim.step()
+
+    names = sorted(batch._sched._signal_map)
+    got = {n: batch._sched._sim.read_wide(batch._sched._signal_map[n]) for n in names}
+    want = {n: csim.read_wide(sched._signal_map[n]) for n in names}
+    assert got == want
+
+
+def test_negedge_skip_ignores_constant_drivers_only():
+    """Codegen check: a constant tie-off no longer forces the full negedge
+    path, but an empty-sensitivity combinational block still does."""
+    from veriforge.sim.compiled.codegen import CythonCodegen
+
+    def negedge_guarded(source):
+        cg = CythonCodegen()
+        pyx = cg.generate(td._parse_design(source).modules[0])
+        # Unguarded, the falling-edge snapshot sits at batch_run's loop-body
+        # indent (16 spaces); behind the skip guard it's one level deeper.
+        assert "# Snapshot before negedge" in pyx
+        return "\n                    # Snapshot before negedge" in pyx
+
+    assert negedge_guarded(_TIE_POSEDGE)
+    assert not negedge_guarded(_EMPTY_SENS_COMBO)
+
+
+# ── incremental memory snapshots ─────────────────────────────────────
+
+_ROM_DESIGN = """
+module t(input clk, input [3:0] a, output reg [63:0] q, output reg [7:0] r);
+  reg [63:0] rom [0:15];
+  reg [7:0] buf8 [0:3];
+  always @(posedge clk) begin
+    q <= rom[a];
+    buf8[a[1:0]] <= a;
+    r <= buf8[a[1:0]];
+  end
+endmodule
+"""
+
+
+@pytest.mark.parametrize("check", ["0", "1"])
+def test_memory_snapshot_is_incremental(check, monkeypatch):
+    """Each memory is copied into its pre-edge snapshot only if its marker
+    signal was marked since the last snapshot; VERIFORGE_CHECK_MEM_SNAPSHOT=1
+    adds a comparison for every skipped memory (so a check-mode test run
+    really does verify the invariant)."""
+    from veriforge.sim.compiled.codegen import CythonCodegen
+
+    monkeypatch.setenv("VERIFORGE_CHECK_MEM_SNAPSHOT", check)
+    cg = CythonCodegen()
+    pyx = cg.generate(td._parse_design(_ROM_DESIGN).modules[0])
+    for mid in range(cg._n_mems):
+        assert f"if self.ctx.sdirty[{cg._mem_marker_sigs[mid]}]:" in pyx
+    assert ("snap_stale_mid = " in pyx.replace("snap_stale_mid = -1", "")) == (check == "1")
+
+
+def test_memory_snapshot_after_load_and_writes(monkeypatch):
+    """A memory loaded from Python between batch_run calls, and one written by
+    the design every cycle, must both read correctly through the snapshot --
+    run in check mode so a stale skipped snapshot would raise."""
+    monkeypatch.setenv("VERIFORGE_CHECK_MEM_SNAPSHOT", "1")
+    sim = _build(_ROM_DESIGN, "scan", monkeypatch)
+    sched = sim._sched
+    smap = sched._signal_map
+    sim.load_memory("rom", [0x1111_0000 + i for i in range(16)])
+    sched._sim_drive_signal(smap["clk"], 0, 0)
+    for k in range(3):
+        sched._sim_drive_signal(smap["a"], 5 + k, 0)
+        sim.batch_run(2, "clk")
+        assert sim.read("q").val == 0x1111_0000 + 5 + k
+        sim.load_memory("rom", [0x2222_0000 + i for i in range(16)])
+        sim.batch_run(1, "clk")
+        assert sim.read("q").val == 0x2222_0000 + 5 + k
+        sim.load_memory("rom", [0x1111_0000 + i for i in range(16)])

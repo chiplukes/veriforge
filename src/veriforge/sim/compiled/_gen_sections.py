@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+from veriforge._env import get_env
 from veriforge.sim.compiled._codegen_utils import resolve_delta_engine
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
@@ -118,6 +119,10 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     it themselves, as they always have (memory NBAs set it without staging a
     scalar sid at all).
 
+    ``sdirty[sid]`` is set on every mark (never by the bit/list dedup) and
+    cleared only by a memory snapshot; it is what lets a snapshot skip
+    copying a memory nothing has written since the last snapshot.
+
     *write_log* (queue delta engine only): also record each distinct sid
     written since ``wepoch`` was last bumped into ``wlog`` -- the queue
     engine bumps it before every process call, so after the call ``wlog``
@@ -137,6 +142,9 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     )
     return [
         "cdef inline void mark_dirty(SimCtx *c, int sid) noexcept nogil:",
+        # Snapshot-dirty: memory snapshots copy a memory only if its marker
+        # sid was marked since the last snapshot (_mem_snap_memcpy_lines).
+        "    c.sdirty[sid] = 1",
         *log,
         "    if not c.dbit[sid]:",
         "        c.dbit[sid] = 1",
@@ -541,7 +549,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         edge of ``clk_sid`` (no negedge-triggered seq process on it, no
         cont/combo sensitive to it, no always-run cont/combo), the snapshot
         and delta_loop() are skipped -- only the clk value is updated; the
-        next posedge re-snapshots anyway."""
+        next posedge re-snapshots anyway.
+
+        Always-run processes that are idempotent constant drivers (e.g.
+        ``assign tie = 1'b0;``, see ``_cont_assign_is_idempotent``) don't
+        block the skip: re-running one changes nothing. Without this, a
+        single tie-off forced a full snapshot -- including every memory --
+        plus a delta_loop on every falling edge; on gfwx-fpga that doubled
+        ~6.9 MB of per-cycle snapshot copies."""
         body = [
             "                # Snapshot before negedge (delta_loop above converged)",
             f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
@@ -562,7 +577,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                    break",
         ]
         procs = [*self._processes, *self._combo_processes]
-        if any(not sens for sens, _b in procs):
+        n_cont = len(self._processes)
+        if any(not sens and not (i < n_cont and i in self._const_conts) for i, (sens, _b) in enumerate(procs)):
             return body
         sids = {sid for sens, _b in procs for sid in sens}
         sids |= {sid for edges, _s, _b in self._seq_processes for sid, et in edges.items() if et != "posedge"}
@@ -641,26 +657,41 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         clock edge, so a sequential process reading it needs the same
         frozen-at-the-edge value narrow/wide signals get from sv[]/sm[]/
         wide_snap_val/wide_snap_mask.
+
+        Incremental: a memory is copied only if its marker sid was marked
+        dirty since its last snapshot (``sdirty``, set by ``mark_dirty``).
+        Every write path marks the marker -- that is how the memory's readers
+        get re-triggered -- so an unmarked memory still equals its snapshot.
+        For a large, rarely written memory (e.g. a testbench stimulus buffer
+        refilled once per chunk round) this removes a full copy on every
+        snapshot; on gfwx-fpga that was ~6 MB, twice per cycle.
+        ``VERIFORGE_CHECK_MEM_SNAPSHOT=1`` verifies the invariant: skipped
+        memories are compared against their snapshot and any difference
+        raises.
         """
+        check = get_env("CHECK_MEM_SNAPSHOT", "0") in ("1", "true", "True")
         lines: list[str] = []
         for mid in range(self._n_mems):
             elem_w, depth = self._mem_info[mid]
+            marker = self._mem_marker_sigs[mid]
             if elem_w > _WORD_BITS:
-                words = self._mem_words(mid)
-                lines.append(
-                    f"{indent}memcpy(self.ctx.wide_mem_{mid}_snap_val, self.ctx.wide_mem_{mid}_val,"
-                    f" {depth * words} * sizeof(unsigned long long))"
-                )
-                lines.append(
-                    f"{indent}memcpy(self.ctx.wide_mem_{mid}_snap_mask, self.ctx.wide_mem_{mid}_mask,"
-                    f" {depth * words} * sizeof(unsigned long long))"
-                )
+                n, ctype, pre = depth * self._mem_words(mid), "unsigned long long", "wide_mem"
             else:
-                lines.append(
-                    f"{indent}memcpy(self.ctx.mem_{mid}_snap_val, self.ctx.mem_{mid}_val, {depth} * sizeof(long long))"
-                )
-                lines.append(
-                    f"{indent}memcpy(self.ctx.mem_{mid}_snap_mask, self.ctx.mem_{mid}_mask, {depth} * sizeof(long long))"
+                n, ctype, pre = depth, "long long", "mem"
+            copy = [
+                f"{indent}    memcpy(self.ctx.{pre}_{mid}_snap_val, self.ctx.{pre}_{mid}_val, {n} * sizeof({ctype}))",
+                f"{indent}    memcpy(self.ctx.{pre}_{mid}_snap_mask, self.ctx.{pre}_{mid}_mask, {n} * sizeof({ctype}))",
+                f"{indent}    self.ctx.sdirty[{marker}] = 0",
+            ]
+            lines.append(f"{indent}if self.ctx.sdirty[{marker}]:")
+            lines.extend(copy)
+            if check:
+                lines.extend(
+                    [
+                        f"{indent}elif (memcmp(self.ctx.{pre}_{mid}_snap_val, self.ctx.{pre}_{mid}_val, {n} * sizeof({ctype}))"
+                        f" or memcmp(self.ctx.{pre}_{mid}_snap_mask, self.ctx.{pre}_{mid}_mask, {n} * sizeof({ctype}))):",
+                        f"{indent}    self.ctx.snap_stale_mid = {mid}",
+                    ]
                 )
         return lines
 
@@ -700,7 +731,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "# cython: language_level=3, boundscheck=False, wraparound=False\n"
             "# cython: cdivision=True, initializedcheck=False, nonecheck=False\n"
             "\n"
-            "from libc.string cimport memcpy, memset\n"
+            "from libc.string cimport memcmp, memcpy, memset\n"
             "from libc.math cimport pow\n"
             "from libc.stdio cimport snprintf"
         )
@@ -860,6 +891,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    int       dbit[N_SIGS]",
             "    int       dlist[N_SIGS]",
             "    int       dcount",
+            # Per sid: marked since the last memory snapshot (see
+            # _mem_snap_memcpy_lines). Only memory-marker sids are consulted.
+            "    unsigned char sdirty[N_SIGS]",
+            # Sticky: a skipped memory snapshot was found stale (only set in
+            # VERIFORGE_CHECK_MEM_SNAPSHOT=1 builds).
+            "    int       snap_stale_mid",
             # Queue delta engine's per-process-call write log (see
             # _gen_dirty_helpers); unused by the scan engine.
             "    long long wmark[N_SIGS]",
@@ -2152,6 +2189,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "        self.ctx.dcount = 0",
             "        self.ctx.nba_count = 0",
             "        self.ctx.wcount = 0",
+            "        self.ctx.snap_stale_mid = -1",
             "        self.ctx.wepoch = 1",
             "        for i in range(N_SIGS):",
             "            self.ctx.val[i] = 0",
@@ -2160,6 +2198,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            self.ctx.wide_words[i] = 0",
             "            self.ctx.wide_offset[i] = 0",
             "            self.ctx.dbit[i] = 0",
+            "            self.ctx.sdirty[i] = 1",
             "            self.ctx.wmark[i] = 0",
             "            self.ctx.nba_val[i] = 0",
             "            self.ctx.nba_mask[i] = 0",
@@ -2461,6 +2500,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 f"            raise RuntimeError('Forever loop exceeded {_PROCESS_LOOP_LIMIT} iterations')",
                 "        if self.ctx.error_code == ERR_DELTA_LIMIT:",
                 f"            raise RuntimeError('Delta cycle limit ({self._delta_limit}) exceeded')",
+                "        if self.ctx.snap_stale_mid >= 0:",
+                "            raise RuntimeError(f'Memory {self.ctx.snap_stale_mid} changed without marking its marker"
+                " signal dirty: its incremental snapshot went stale (VERIFORGE_CHECK_MEM_SNAPSHOT)')",
                 "",
                 "    cpdef int step(self):",
                 "        cdef int deltas",

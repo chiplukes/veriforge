@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from veriforge._env import get_env
 from veriforge.model.expressions import Identifier
 from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator
 from veriforge.sim.event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
@@ -167,6 +168,7 @@ def _compute_elab_hash(module: Module, source_files: list[str]) -> str:
     from .codegen import delta_engine_mode  # noqa: PLC0415
 
     h.update(delta_engine_mode().encode("utf-8"))
+    h.update((get_env("CHECK_MEM_SNAPSHOT", "0") or "0").encode("utf-8"))
     for sf in sorted(source_files):
         try:
             h.update(Path(sf).read_bytes())

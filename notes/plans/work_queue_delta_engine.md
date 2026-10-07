@@ -14,10 +14,30 @@ on the tiny `benchmark.py` DUT (which `auto` keeps on scan).
 **`gfwx-fpga` result (2026-10-06):** scan ~444.9 us/cycle, queue ~431.0
 us/cycle (~1.03x), with faster compiles (290.5 s vs 371.1 s). So the
 delta-loop bookkeeping this plan targeted is *not* what dominates that
-design: removing nearly all of it saved ~14 us of ~445 us per cycle. The
-remaining ~430 us/cycle lies elsewhere (process bodies, sequential bodies,
-wide-signal operations, per-cycle snapshot copies) -- the next step is to
-profile where, before choosing an optimization.
+design. **Root cause found** by reading its generated module
+(`gfwx-fpga/.cycache/vtc_d1f6eb95_*`): every `batch_run` snapshot copied
+**6.93 MB of memory state** (every element of all 131 memories, value + mask),
+6.0 MB of it one 384-bit x 65536 memory -- the testbench's stimulus chunk
+buffer, written only by `load_memory` once per chunk round, never by the
+design. And a falling-edge snapshot ran **every cycle** too, because eight
+constant tie-offs (`assign x = 1'b0;`, empty sensitivity) defeated the
+negedge-skip logic. ~13.9 MB copied per cycle is ~400-450 us at memcpy
+bandwidth: essentially all of the observed time. Two fixes (2026-10-06):
+1. **Constant drivers no longer block the negedge skip**
+   (`_cont_assign_is_idempotent`; empty-sensitivity combinational blocks
+   still do). Synthetic tie-off + 1 MB memories: 72.5 -> 35.9 us/cycle.
+2. **Incremental memory snapshots**: a memory is copied only if its marker
+   signal was marked dirty since the last snapshot (`sdirty`, set by
+   `mark_dirty` -- every memory write marks its marker, since that's how
+   readers get re-triggered). `VERIFORGE_CHECK_MEM_SNAPSHOT=1` verifies the
+   invariant (compares every skipped memory to its snapshot; mismatch
+   raises), and the full test suite passes in that mode. gfwx-shaped
+   synthetic (1.5 MB stimulus memory read once per cycle, tie-off):
+   118 -> 0.02 us/cycle.
+Memories written every cycle (gfwx's ~0.9 MB of line buffers) are still
+copied in full when written; per-element tracking would be the next step if
+that becomes the bottleneck. Remaining per-snapshot full copies:
+`sv`/`sm` (~56 KB for gfwx) and wide-signal snapshot (~79 KB).
 
 ### Stage 2 results (2026-10-05)
 
