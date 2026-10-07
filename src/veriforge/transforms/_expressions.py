@@ -27,7 +27,7 @@ from ..model.expressions import (
     TernaryOp,
     UnaryOp,
 )
-from ._tree_utils import _SOURCE_TEXT_CACHE, _collect_real_number_text, _collect_text, _loc_from_tree
+from ._tree_utils import _collect_real_number_text, _collect_text, _loc_from_tree
 
 _BINARY_EXPR_CHILD_COUNT = 3
 _DEFAULT_PRECEDENCE = 6
@@ -1401,47 +1401,19 @@ def _build_wrapped_expression(
     return None
 
 
-def _extract_part_select_direction(range_tree: Tree, source_file: str | None) -> str:
-    # With keep_all_tokens=False (Lark default), anonymous terminal tokens like
-    # "+:" and "-:" are dropped from the tree.  If keep_all_tokens=True is ever
-    # enabled this fast path will work; otherwise fall through.
+def _extract_part_select_direction(range_tree: Tree, source_file: str | None) -> str:  # noqa: ARG001
+    """``"+:"`` or ``"-:"`` for an indexed part-select range node.
+
+    The grammar's named ``PART_SELECT_UP``/``PART_SELECT_DOWN`` terminals
+    keep the direction token in the tree. (It used to be anonymous, hence
+    dropped, and was recovered by re-reading *source_file* at the width
+    node's line/column -- a crash for a design parsed from a string, and a
+    silent ``"+:"`` whenever the parsed text differed from the file.)
+    """
     for child in range_tree.children:
         if isinstance(child, Token) and str(child) in ("+:", "-:"):
             return str(child)
-
-    # Recover direction from source text.
-    #
-    # Lark's start_pos/end_pos on range_expression nodes inside variable_lvalue
-    # (LHS of blocking assign) are unreliable — they point to the start of the
-    # containing statement rather than the range expression itself.  However,
-    # meta.line / meta.column on the width_constant_expression child ARE
-    # correct, so read the 2 characters immediately before it in the source
-    # line to recover the direction token.
-    if not source_file:
-        return "+:"
-
-    width_child = next(
-        (c for c in range_tree.children if isinstance(c, Tree) and str(c.data) == "width_constant_expression"),
-        None,
-    )
-    if width_child is None:
-        return "+:"
-    if not hasattr(width_child.meta, "line") or not hasattr(width_child.meta, "column"):
-        return "+:"
-
-    source_text = _SOURCE_TEXT_CACHE.get(source_file)
-    if source_text is None:
-        source_text = Path(source_file).read_text()
-        _SOURCE_TEXT_CACHE[source_file] = source_text
-
-    lines = source_text.splitlines()
-    line_idx = width_child.meta.line - 1
-    col_idx = width_child.meta.column - 1
-    if 0 <= line_idx < len(lines):
-        before = lines[line_idx][:col_idx].rstrip()
-        if before.endswith("-:") or before.endswith("+:"):
-            return before[-2:]
-    return "+:"
+    raise ValueError("indexed part-select range has no +: / -: token")
 
 
 def _build_function_call(tree: Tree, source_file: str | None, callbacks: _ExpressionCallbacks) -> Expression:

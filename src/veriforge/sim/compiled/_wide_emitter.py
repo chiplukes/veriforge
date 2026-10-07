@@ -61,11 +61,13 @@ class _WideEmitterMixin:
                 rhs_word = f"((({rhs_idx_expr}) * {words}) + {word_index})"
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {mid}",
-                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = {lhs_word}",
-                        f"{pad}c.nba_mem_val[c.nba_mem_count] = <long long>c.wide_mem_{rhs_mid}_val[{rhs_word}]",
-                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = <long long>c.wide_mem_{rhs_mid}_mask[{rhs_word}]",
-                        f"{pad}c.nba_mem_count += 1",
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = {lhs_word}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = 63",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>c.wide_mem_{rhs_mid}_val[{rhs_word}]",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>c.wide_mem_{rhs_mid}_mask[{rhs_word}]",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -140,11 +142,13 @@ class _WideEmitterMixin:
                 word_v, word_m = self._masked_flat_concat_word_exprs(flat_parts, base, elem_w)
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {mid}",
-                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = (({idx_expr}) * {words}) + {word_index}",
-                        f"{pad}c.nba_mem_val[c.nba_mem_count] = <long long>({word_v})",
-                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = <long long>({word_m})",
-                        f"{pad}c.nba_mem_count += 1",
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = (({idx_expr}) * {words}) + {word_index}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = 63",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>({word_v})",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>({word_m})",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -210,11 +214,13 @@ class _WideEmitterMixin:
             for word_index in range(words):
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {mid}",
-                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = (({idx_expr}) * {words}) + {word_index}",
-                        f"{pad}c.nba_mem_val[c.nba_mem_count] = 0",
-                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = 0",
-                        f"{pad}c.nba_mem_count += 1",
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = (({idx_expr}) * {words}) + {word_index}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = 63",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = 0",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -280,11 +286,13 @@ class _WideEmitterMixin:
         pad = "    " * indent
         if is_nba:
             return [
-                f"{pad}c.nba_mem_mid[c.nba_mem_count] = {mid}",
-                f"{pad}c.nba_mem_addr[c.nba_mem_count] = ({idx_expr})",
-                f"{pad}c.nba_mem_val[c.nba_mem_count] = ({rhs_val_expr}) & wmask({elem_w})",
-                f"{pad}c.nba_mem_mask[c.nba_mem_count] = ({rhs_mask_expr}) & wmask({elem_w})",
-                f"{pad}c.nba_mem_count += 1",
+                f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = ({idx_expr})",
+                f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = MEM_{mid}_WIDTH - 1",
+                f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val_expr}) & wmask({elem_w})",
+                f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask_expr}) & wmask({elem_w})",
+                f"{pad}_nba_mem_push(c)",
                 f"{pad}c.nba_pending = 1",
             ]
 
@@ -348,7 +356,7 @@ class _WideEmitterMixin:
                         f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
                         f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>rval",
                         f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>rmask",
-                        f"{pad}c.nba_mem_range_count += 1",
+                        f"{pad}_nba_mem_push(c)",
                         f"{pad}c.nba_pending = 1",
                     ]
                 )
@@ -384,7 +392,7 @@ class _WideEmitterMixin:
                 f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = ({bit_expr})",
                 f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val_expr}) & 1",
                 f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask_expr}) & 1",
-                f"{pad}c.nba_mem_range_count += 1",
+                f"{pad}_nba_mem_push(c)",
                 f"{pad}c.nba_pending = 1",
             ]
 
@@ -465,7 +473,7 @@ class _WideEmitterMixin:
                     f"{pad}    c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
                     f"{pad}    c.nba_mem_range_val[c.nba_mem_range_count] = <long long>chunk_val",
                     f"{pad}    c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>chunk_rmask",
-                    f"{pad}    c.nba_mem_range_count += 1",
+                    f"{pad}    _nba_mem_push(c)",
                     f"{pad}    word_index += 1",
                     f"{pad}c.nba_pending = 1",
                 ]
@@ -566,7 +574,7 @@ class _WideEmitterMixin:
                         f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
                         f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>(_sc{slot}_v[{i}] & _word_mask64({tail}))",
                         f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>(_sc{slot}_m[{i}] & _word_mask64({tail}))",
-                        f"{pad}c.nba_mem_range_count += 1",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -658,7 +666,7 @@ class _WideEmitterMixin:
                     f"{pad}        c.nba_mem_range_lsb[c.nba_mem_range_count] = _word_lsb",
                     f"{pad}        c.nba_mem_range_val[c.nba_mem_range_count] = <long long>_chunk_val",
                     f"{pad}        c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>_chunk_rmask",
-                    f"{pad}        c.nba_mem_range_count += 1",
+                    f"{pad}        _nba_mem_push(c)",
                     f"{pad}        _word_index += 1",
                     f"{pad}    c.nba_pending = 1",
                 ]
@@ -707,11 +715,13 @@ class _WideEmitterMixin:
                         word_addr = addr * words + word_index
                         lines.extend(
                             [
-                                f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
-                                f"{pad}c.nba_mem_addr[c.nba_mem_count] = {word_addr}",
-                                f"{pad}c.nba_mem_val[c.nba_mem_count] = <long long>c.wide_mem_{rhs_mid}_val[{word_addr}]",
-                                f"{pad}c.nba_mem_mask[c.nba_mem_count] = <long long>c.wide_mem_{rhs_mid}_mask[{word_addr}]",
-                                f"{pad}c.nba_mem_count += 1",
+                                f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {lhs_mid}",
+                                f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = {word_addr}",
+                                f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = 63",
+                                f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                                f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>c.wide_mem_{rhs_mid}_val[{word_addr}]",
+                                f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>c.wide_mem_{rhs_mid}_mask[{word_addr}]",
+                                f"{pad}_nba_mem_push(c)",
                             ]
                         )
                 lines.append(f"{pad}c.nba_pending = 1")
@@ -743,11 +753,13 @@ class _WideEmitterMixin:
             for addr in range(depth):
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
-                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = {addr}",
-                        f"{pad}c.nba_mem_val[c.nba_mem_count] = c.mem_{rhs_mid}_val[{addr}]",
-                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = c.mem_{rhs_mid}_mask[{addr}]",
-                        f"{pad}c.nba_mem_count += 1",
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {lhs_mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = {addr}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = MEM_{lhs_mid}_WIDTH - 1",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = c.mem_{rhs_mid}_val[{addr}]",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = c.mem_{rhs_mid}_mask[{addr}]",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -814,11 +826,13 @@ class _WideEmitterMixin:
                         word_addr = addr * words + word_index
                         lines.extend(
                             [
-                                f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
-                                f"{pad}c.nba_mem_addr[c.nba_mem_count] = {word_addr}",
-                                f"{pad}c.nba_mem_val[c.nba_mem_count] = <long long>(c.wide_mem_{true_mid}_val[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_val[{word_addr}])",
-                                f"{pad}c.nba_mem_mask[c.nba_mem_count] = <long long>(c.wide_mem_{true_mid}_mask[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_mask[{word_addr}])",
-                                f"{pad}c.nba_mem_count += 1",
+                                f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {lhs_mid}",
+                                f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = {word_addr}",
+                                f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = 63",
+                                f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                                f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>(c.wide_mem_{true_mid}_val[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_val[{word_addr}])",
+                                f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>(c.wide_mem_{true_mid}_mask[{word_addr}] if {cond_var} else c.wide_mem_{false_mid}_mask[{word_addr}])",
+                                f"{pad}_nba_mem_push(c)",
                             ]
                         )
                 lines.append(f"{pad}c.nba_pending = 1")
@@ -851,11 +865,13 @@ class _WideEmitterMixin:
             for addr in range(depth):
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_mid[c.nba_mem_count] = {lhs_mid}",
-                        f"{pad}c.nba_mem_addr[c.nba_mem_count] = {addr}",
-                        f"{pad}c.nba_mem_val[c.nba_mem_count] = c.mem_{true_mid}_val[{addr}] if {cond_var} else c.mem_{false_mid}_val[{addr}]",
-                        f"{pad}c.nba_mem_mask[c.nba_mem_count] = c.mem_{true_mid}_mask[{addr}] if {cond_var} else c.mem_{false_mid}_mask[{addr}]",
-                        f"{pad}c.nba_mem_count += 1",
+                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {lhs_mid}",
+                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = {addr}",
+                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = MEM_{lhs_mid}_WIDTH - 1",
+                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = 0",
+                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = c.mem_{true_mid}_val[{addr}] if {cond_var} else c.mem_{false_mid}_val[{addr}]",
+                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = c.mem_{true_mid}_mask[{addr}] if {cond_var} else c.mem_{false_mid}_mask[{addr}]",
+                        f"{pad}_nba_mem_push(c)",
                     ]
                 )
             lines.append(f"{pad}c.nba_pending = 1")
@@ -3873,6 +3889,10 @@ class _WideEmitterMixin:
             if words is None:
                 return None
             val_words, mask_words = words
+            if Value.is_unsized_xz_literal(expr.original_text):
+                # x-extends to the context width (see is_unsized_xz_literal).
+                fill = Value(0, width=32).xz_fill_to(dst_width).mask
+                mask_words = [m | ((fill >> (wi * 64)) & 0xFFFF_FFFF_FFFF_FFFF) for wi, m in enumerate(mask_words)]
             lines: list[str] = []
             for wi in range(n_words):
                 lines.append(f"{pad}_sc{slot}_v[{wi}] = {_cy_u64_hex(val_words[wi])}")
@@ -5094,24 +5114,29 @@ class _WideEmitterMixin:
 
         # ── RangeSelect ─────────────────────────────────────────────────────
         if et is RangeSelect:
-            if not isinstance(expr.target, Identifier):
+            # Bounds are in the target's declared coordinates: subtract its
+            # packed-range LSB (`reg [135:8] x;` -> 8), as the narrow emitter
+            # does. A whole memory element (`mem[i][119:0]`) loads through
+            # the BitSelect case above.
+            if not isinstance(expr.target, Identifier) and self._resolve_memory_element_access(expr.target) is None:
                 return None
+            sel_base = self._select_base(expr.target)
             if isinstance(expr.msb, Literal) and isinstance(expr.lsb, Literal):
-                lsb_expr: str = str(int(expr.lsb.value))
+                lsb_expr: str = str(int(expr.lsb.value) - sel_base)
                 slice_w_expr: str = str(int(expr.msb.value) - int(expr.lsb.value) + 1)
                 n_dst = (int(expr.msb.value) - int(expr.lsb.value) + 1 + 63) // 64
             else:
                 msb_v = _const_int(expr.msb, self._param_env)
                 lsb_v = _const_int(expr.lsb, self._param_env)
                 if msb_v is not None and lsb_v is not None:
-                    lsb_expr = str(lsb_v)
+                    lsb_expr = str(lsb_v - sel_base)
                     slice_w_expr = str(msb_v - lsb_v + 1)
                     n_dst = (msb_v - lsb_v + 1 + 63) // 64
                 else:
                     # Dynamic bounds: use runtime expressions; n_dst = n_words (conservative)
                     lsb_c = self._emit_expr(expr.lsb, 32)
                     msb_c = self._emit_expr(expr.msb, 32)
-                    lsb_expr = f"<int>({lsb_c})"
+                    lsb_expr = f"<int>(({lsb_c}) - {sel_base})" if sel_base else f"<int>({lsb_c})"
                     slice_w_expr = f"<int>(({msb_c}) - ({lsb_c}) + 1)"
                     n_dst = n_words  # conservative: wide_slice_extract zeros out-of-range words
             src_w = self._expr_width(expr.target)

@@ -72,13 +72,15 @@ class TestCodegen:
         assert cg._emit_mask_expr(literal, 8) == "0"
 
     def test_literal_mask_emission_for_x_literal(self):
-        """X literals still drive full-width masks through Python and Cython emitters."""
+        """X literals emit their own per-bit x mask (``4'b1x0x`` -> 0b0101),
+        zero-extended to the context -- not a full-width mask."""
         cg = CythonCodegen()
         literal = Literal("1x0x", width=4, base="b", is_x=True, original_text="4'b1x0x")
         assert cg._emit_expr(literal, 4) == "8"
         assert cg._emit_py_expr(literal, 4) == "8"
-        assert cg._emit_py_mask_expr(literal, 4) == cg._emit_py_width_mask(4)
-        assert cg._emit_mask_expr(literal, 4) == "wmask(4)"
+        assert cg._emit_py_mask_expr(literal, 4) == "5"
+        assert cg._emit_mask_expr(literal, 4) == "5"
+        assert cg._emit_mask_expr(literal, 12) == "5"
 
     def test_write_with_format_codegen(self):
         """Formatted $write lowers through the format-string emission path."""
@@ -160,9 +162,9 @@ class TestPhase3Codegen:
         """Memory NBA generates nba_mem queue fields."""
         cg = CythonCodegen()
         pyx = cg.generate(_make_mem_nba())
-        assert "nba_mem_count" in pyx
-        assert "nba_mem_mid" in pyx
-        assert "nba_mem_val" in pyx
+        assert "nba_mem_range_count" in pyx
+        assert "nba_mem_range_mid" in pyx
+        assert "nba_mem_range_val" in pyx
 
     def test_memory_copy_codegen_supports_whole_memory_rhs_and_marker_sensitivity(self):
         """Whole-memory copy should be emitted and depend on the RHS memory marker."""
@@ -952,15 +954,15 @@ class TestCharMemoryWriters:
         pyx = CythonCodegen().generate(_make_mem_read_write())
         assert "mem_read" in pyx or "mem_0_val" in pyx
 
-    def test_memory_nba_emits_nba_mem_count(self):
-        """Memory NBA path emits nba_mem_count to track pending element writes."""
+    def test_memory_nba_emits_nba_mem_range_count(self):
+        """Memory NBA path emits nba_mem_range_count to track pending writes."""
         pyx = CythonCodegen().generate(_make_mem_nba())
-        assert "nba_mem_count" in pyx
+        assert "nba_mem_range_count" in pyx
 
     def test_memory_nba_emits_nba_mem_val(self):
-        """Memory NBA path stages value through nba_mem_val."""
+        """Memory NBA path stages value through nba_mem_range_val."""
         pyx = CythonCodegen().generate(_make_mem_nba())
-        assert "nba_mem_val" in pyx
+        assert "nba_mem_range_val" in pyx
 
     def test_wide_memory_struct_has_wmem_array(self):
         """Wide memory element storage uses _wmem0 array name in struct."""

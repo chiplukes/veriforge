@@ -644,27 +644,17 @@ class _StmtEmittersMixin:
                 if sig_base != 0:
                     idx = f"(({idx}) - {sig_base})"
                 rhs_val = self._emit_expr(rhs, 1)
+                rhs_mask = self._emit_mask_expr(rhs, 1)
                 if lhs_w > _WORD_BITS:
                     helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
                     return [
-                        f"{pad}{helper}(c, {sid}, <int>({idx}), 1, <unsigned long long>(({rhs_val}) & 1), 0)",
+                        f"{pad}{helper}(c, {sid}, <int>({idx}), 1, <unsigned long long>(({rhs_val}) & 1),"
+                        f" <unsigned long long>(({rhs_mask}) & 1))",
                     ]
-                if is_nba:
-                    # Read from nba_val if already dirty, else from val
-                    return [
-                        f"{pad}_bbase = c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}]",
-                        f"{pad}c.nba_val[{sid}] = (_bbase & ~(1 << ({idx}))) | ((({rhs_val}) & 1) << ({idx}))",
-                        f"{pad}c.nba_mask[{sid}] = 0",
-                        f"{pad}mark_nba(c, {sid})",
-                        f"{pad}c.nba_pending = 1",
-                    ]
-                return [
-                    f"{pad}_cdv = (c.val[{sid}] & ~(1 << ({idx}))) | ((({rhs_val}) & 1) << ({idx}))",
-                    f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
-                    f"{pad}    c.val[{sid}] = _cdv",
-                    f"{pad}    c.mask[{sid}] = 0",
-                    f"{pad}    mark_dirty(c, {sid})",
-                ]
+                bit = f"(<long long>1 << ({idx}))"
+                return self._narrow_partial_write_lines(
+                    sid, bit, f"((({rhs_mask}) & 1) << ({idx}))", rhs_val, "1", f"({idx})", pad, is_nba
+                )
             raise NotImplementedError(
                 f"Compiled engine does not support bit-select write on "
                 f"{type(lhs.target).__name__!r} target. "
@@ -850,38 +840,31 @@ class _StmtEmittersMixin:
         if sig_base != 0:
             msb = f"(({msb}) - {sig_base})"
             lsb = f"(({lsb}) - {sig_base})"
+        if lhs_w > _WORD_BITS:
+            return [
+                f"{pad}_rmw_msb = ({msb})",
+                f"{pad}_rmw_lsb = ({lsb})",
+                *self._emit_wide_range_insert_lines(
+                    sid, "_rmw_lsb", "(_rmw_msb - _rmw_lsb + 1)", lhs_w, rhs, indent, is_nba=is_nba
+                ),
+            ]
         rhs_val = self._emit_expr(rhs, lhs_w)
-        lines = [
+        rhs_mask = self._emit_mask_expr(rhs, lhs_w)
+        return [
             f"{pad}_rmw_msb = ({msb})",
             f"{pad}_rmw_lsb = ({lsb})",
             f"{pad}_rmw_mask = wmask(_rmw_msb - _rmw_lsb + 1) << _rmw_lsb",
+            *self._narrow_partial_write_lines(
+                sid,
+                "_rmw_mask",
+                f"(({rhs_mask}) << _rmw_lsb) & _rmw_mask",
+                rhs_val,
+                "wmask(_rmw_msb - _rmw_lsb + 1)",
+                "_rmw_lsb",
+                pad,
+                is_nba,
+            ),
         ]
-        store_arr = "nba_val" if is_nba else "val"
-        if is_nba:
-            base_read = f"(c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}])"
-        else:
-            base_read = f"c.val[{sid}]"
-        new_val_expr = f"({base_read} & ~_rmw_mask) | ((({rhs_val}) << _rmw_lsb) & _rmw_mask)"
-        if is_nba:
-            lines.append(f"{pad}c.{store_arr}[{sid}] = {new_val_expr}")
-            lines.extend(
-                [
-                    f"{pad}c.nba_mask[{sid}] = 0",
-                    f"{pad}mark_nba(c, {sid})",
-                    f"{pad}c.nba_pending = 1",
-                ]
-            )
-        else:
-            lines.append(f"{pad}_cdv = {new_val_expr}")
-            lines.extend(
-                [
-                    f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
-                    f"{pad}    c.val[{sid}] = _cdv",
-                    f"{pad}    c.mask[{sid}] = 0",
-                    f"{pad}    mark_dirty(c, {sid})",
-                ]
-            )
-        return lines
 
     def _emit_range_write_const(  # noqa: PLR0913
         self,
@@ -979,32 +962,127 @@ class _StmtEmittersMixin:
                 val_expr = f"((<unsigned long long>c.mem_{rhs_mid}_val[({rhs_idx})]) >> ({rhs_lsb})) & {sel_mask}"
                 mask_expr = f"((<unsigned long long>c.mem_{rhs_mid}_mask[({rhs_idx})]) >> ({rhs_lsb})) & {sel_mask}"
                 return [f"{pad}{helper}(c, {sid}, {lsb_val}, {sel_w}, {val_expr}, {mask_expr})"]
+            return self._emit_wide_range_insert_lines(sid, str(lsb_val), str(sel_w), sel_w, rhs, indent, is_nba=is_nba)
         rhs_val = self._emit_expr(rhs, sel_w)
+        rhs_mask = self._emit_mask_expr(rhs, sel_w)
         range_mask = _cy_hex(((1 << sel_w) - 1) << lsb_val)
         sel_mask = _cy_hex((1 << sel_w) - 1)
-        store_arr = "nba_val" if is_nba else "val"
+        return self._narrow_partial_write_lines(
+            sid, range_mask, f"(({rhs_mask}) & {sel_mask}) << {lsb_val}", rhs_val, sel_mask, str(lsb_val), pad, is_nba
+        )
+
+    @staticmethod
+    def _narrow_partial_write_lines(  # noqa: PLR0913
+        sid: int,
+        range_mask: str,
+        part_mask: str,
+        rhs_val: str,
+        sel_mask: str,
+        lsb: str,
+        pad: str,
+        is_nba: bool,
+    ) -> list[str]:
+        """Bit/range write into a narrow signal: replace the *range_mask*
+        bits of both value and X/Z mask, keeping every other bit (and its
+        X/Z state) as it was. *part_mask* is the RHS's X/Z mask already
+        positioned at the range. Value bits under X/Z are zero, the same
+        convention as ``Value`` and the concat-LHS path.
+
+        These writes used to set the whole signal's mask to 0: an X written
+        into the range became 0, and so did every X bit outside it (e.g.
+        ``r[0] <= 1;`` on an all-X ``r`` gave ``8'b00000001``).
+        """
         if is_nba:
-            base_read = f"(c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}])"
+            base_v = f"(c.nba_val[{sid}] if c.nba_bit[{sid}] else c.val[{sid}])"
+            base_m = f"(c.nba_mask[{sid}] if c.nba_bit[{sid}] else c.mask[{sid}])"
         else:
-            base_read = f"c.val[{sid}]"
-        new_val_expr = f"({base_read} & ~{range_mask}) | ((({rhs_val}) & {sel_mask}) << {lsb_val})"
+            base_v = f"c.val[{sid}]"
+            base_m = f"c.mask[{sid}]"
+        new_m = f"({base_m} & ~{range_mask}) | _clhs"
+        new_v = f"(({base_v} & ~{range_mask}) | ((({rhs_val}) & {sel_mask}) << {lsb})) & ~_clhs"
+        lines = [f"{pad}_clhs = {part_mask}"]
         if is_nba:
-            lines = [f"{pad}c.{store_arr}[{sid}] = {new_val_expr}"]
-            lines.extend(
-                [
-                    f"{pad}c.nba_mask[{sid}] = 0",
-                    f"{pad}mark_nba(c, {sid})",
-                    f"{pad}c.nba_pending = 1",
-                ]
-            )
-        else:
-            lines = [
-                f"{pad}_cdv = {new_val_expr}",
-                f"{pad}if _cdv != c.val[{sid}] or c.mask[{sid}]:",
-                f"{pad}    c.val[{sid}] = _cdv",
-                f"{pad}    c.mask[{sid}] = 0",
-                f"{pad}    mark_dirty(c, {sid})",
+            return [
+                *lines,
+                f"{pad}_cdm = {new_m}",
+                f"{pad}c.nba_val[{sid}] = {new_v}",
+                f"{pad}c.nba_mask[{sid}] = _cdm",
+                f"{pad}mark_nba(c, {sid})",
+                f"{pad}c.nba_pending = 1",
             ]
+        return [
+            *lines,
+            f"{pad}_cdm = {new_m}",
+            f"{pad}_cdv = {new_v}",
+            f"{pad}if _cdv != c.val[{sid}] or _cdm != c.mask[{sid}]:",
+            f"{pad}    c.val[{sid}] = _cdv",
+            f"{pad}    c.mask[{sid}] = _cdm",
+            f"{pad}    mark_dirty(c, {sid})",
+        ]
+
+    def _emit_wide_range_insert_lines(  # noqa: PLR0913
+        self,
+        sid: int,
+        lsb_code: str,
+        width_code: str,
+        max_width: int,
+        rhs: Expression,
+        indent: int,
+        *,
+        is_nba: bool,
+    ) -> list[str]:
+        """Range write ``sig[lsb +: width] = rhs`` into a wide (>64-bit)
+        signal for an arbitrary RHS: evaluate the RHS into scratch, then
+        insert it in <=64-bit chunks with ``_whole_*_insert_word``.
+
+        *width_code* may be a runtime expression (dynamic bounds), bounded
+        by *max_width*. Before this, any RHS other than a plain signal or
+        memory slice fell through to the narrow scalar path, which writes
+        ``c.val``/``c.nba_val`` -- storage a wide signal never reads -- so
+        the write was silently lost.
+        """
+        pad = "    " * indent
+        n_words = max(
+            (max_width + _WORD_BITS - 1) // _WORD_BITS,
+            (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS,
+            self._module_max_wide_words(),
+        )
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+        # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
+        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
+        et_pending = self._et_pending
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._reset_scratch()
+        if scratch_lines is None:
+            raise NotImplementedError(
+                f"Compiled engine: range-select {'nonblocking' if is_nba else 'blocking'} assignment to "
+                f"'{self._signal_names[sid]}' ({self._signal_widths[sid]} bits) has an RHS shape not yet "
+                f"supported for a destination wider than {_WORD_BITS} bits. Use engine='vm' "
+                f"or engine='reference' for this design, or simplify the expression."
+            )
+        self._needs_wide_helpers = True
+        helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
+        lines = [f"{pad}{t}" for t in et_pending] + scratch_lines
+        static_width = int(width_code) if width_code.isdigit() else None
+        for k in range((max_width + _WORD_BITS - 1) // _WORD_BITS):
+            lo = k * _WORD_BITS
+            call_lsb = f"{lsb_code} + {lo}" if lo else lsb_code
+            if static_width is not None:
+                chunk_w = str(min(_WORD_BITS, static_width - lo))
+                lines.append(
+                    f"{pad}{helper}(c, {sid}, <int>({call_lsb}), {chunk_w}, _sc{slot}_v[{k}], _sc{slot}_m[{k}])"
+                )
+                continue
+            rem = f"({width_code}) - {lo}" if lo else f"({width_code})"
+            lines.append(f"{pad}if {rem} > 0:")
+            lines.append(
+                f"{pad}    {helper}(c, {sid}, <int>({call_lsb}), <int>({rem} if {rem} < {_WORD_BITS} else {_WORD_BITS}),"
+                f" _sc{slot}_v[{k}], _sc{slot}_m[{k}])"
+            )
         return lines
 
     def _emit_range_write_dynamic_part(
@@ -1037,26 +1115,52 @@ class _StmtEmittersMixin:
         indent: int,
         *,
         is_nba: bool,
+        part_extracts: list[tuple[str, str]] | None = None,
+        prelude: list[str] | None = None,
     ) -> list[str]:
-        """Emit concatenation LHS: {a, b, c} = rhs ΓåÆ extract slices to each part."""
+        """Emit concatenation LHS: {a, b, c} = rhs ΓåÆ extract slices to each part.
+
+        *part_extracts* (one ``(val, mask)`` expression per LHS part, in
+        ``lhs.parts`` order) and *prelude* (lines computing them) are only
+        passed by ``_emit_concat_lhs_scratch_rhs``, which has already
+        evaluated a wide RHS into scratch.
+        """
         pad = "    " * indent
-        direct_copy_lines = self._emit_matching_concat_copy(lhs, rhs, indent, is_nba=is_nba)
-        if direct_copy_lines is not None:
-            return direct_copy_lines
-        part_width_infos = [self._concat_part_width_info(p) for p in lhs.parts]
         wide_rhs_source = None
         wide_signal_rhs_source = None
-        source = self._resolve_signal_slice_source(rhs)
-        if source is not None:
-            sid, base_lsb = source
-            if self._signal_widths[sid] > _WORD_BITS:
-                wide_signal_rhs_source = (sid, base_lsb)
-            if self._signal_widths[sid] > _WORD_BITS and all(
-                self._concat_part_max_width(p) <= _WORD_BITS for p in lhs.parts
-            ):
-                wide_rhs_source = (sid, base_lsb)
+        if part_extracts is None:
+            direct_copy_lines = self._emit_matching_concat_copy(lhs, rhs, indent, is_nba=is_nba)
+            if direct_copy_lines is not None:
+                return direct_copy_lines
+            source = self._resolve_signal_slice_source(rhs)
+            if source is not None:
+                sid, base_lsb = source
+                if self._signal_widths[sid] > _WORD_BITS:
+                    wide_signal_rhs_source = (sid, base_lsb)
+                if self._signal_widths[sid] > _WORD_BITS and all(
+                    self._concat_part_max_width(p) <= _WORD_BITS for p in lhs.parts
+                ):
+                    wide_rhs_source = (sid, base_lsb)
+            if wide_signal_rhs_source is None:
+                # The narrow path below evaluates the RHS as one 64-bit
+                # value, so anything at or above bit 64 -- of the RHS or of
+                # the LHS -- would be lost or shifted out of range.
+                scratch_lines = self._emit_concat_lhs_scratch_rhs(lhs, rhs, indent, is_nba=is_nba)
+                if scratch_lines is not None:
+                    return scratch_lines
+        part_width_infos = [self._concat_part_width_info(p) for p in lhs.parts]
 
-        if wide_rhs_source is None:
+        if part_extracts is not None:
+            lines = [
+                f"{pad}cdef unsigned long long _cacc_val",
+                f"{pad}cdef unsigned long long _cacc_mask",
+                f"{pad}cdef unsigned long long _part_mask",
+                f"{pad}cdef unsigned long long _slice_mask",
+                *(prelude or []),
+            ]
+            concat_rhs_val = None
+            concat_rhs_mask = None
+        elif wide_rhs_source is None:
             rhs_width = self._expr_width(rhs)
             rhs_val = self._emit_expr(rhs, rhs_width)
             rhs_mask = self._emit_mask_expr(rhs, rhs_width)
@@ -1103,12 +1207,19 @@ class _StmtEmittersMixin:
             offset_infos.append(running_offset)
             running_offset = self._concat_width_sum([running_offset, width_info])
         offset_infos.reverse()
-        for part, (pw, width_expr), (_offset_width, offset_expr) in zip(
-            reversed(lhs.parts), reversed(part_width_infos), reversed(offset_infos), strict=True
+        extract_overrides = part_extracts if part_extracts is not None else [None] * len(lhs.parts)
+        for part, (pw, width_expr), (_offset_width, offset_expr), extract_override in zip(
+            reversed(lhs.parts),
+            reversed(part_width_infos),
+            reversed(offset_infos),
+            reversed(extract_overrides),
+            strict=True,
         ):
             part_rhs_source = self._concat_part_wide_rhs_source(part, offset_expr, wide_signal_rhs_source)
 
-            if part_rhs_source is not None:
+            if extract_override is not None:
+                extract, mask_extract = extract_override
+            elif part_rhs_source is not None:
                 extract = "0"
                 mask_extract = "0"
             elif wide_signal_rhs_source is not None and self._concat_part_max_width(part) <= _WORD_BITS:
@@ -1736,6 +1847,114 @@ class _StmtEmittersMixin:
         lines.extend(mem_part_lines)
         return lines
 
+    def _split_concat_lhs_part(self, part: Expression, width: int) -> list[Expression] | None:
+        """Split a constant-width concat LHS part into <=64-bit pieces, MSB
+        first, each an equivalent constant ``RangeSelect`` that
+        ``_emit_concat_lhs`` already handles. None if the part's shape has
+        no such form here (e.g. a dynamic part-select)."""
+        if width <= _WORD_BITS:
+            return [part]
+        if isinstance(part, RangeSelect):
+            if not (isinstance(part.msb, Literal) and isinstance(part.lsb, Literal)):
+                return None
+            target, base = part.target, int(part.lsb.value)
+        elif (access := self._resolve_memory_element_access(part)) is not None:
+            # Whole wide memory element: the RangeSelect path subtracts the
+            # memory's declared bit base, so add it here.
+            target, base = part, self._memory_bases.get(access[2], 0)
+        elif isinstance(part, Identifier) and self._signal_map.get(self._identifier_name(part)) is not None:
+            # The RangeSelect-of-signal path uses its bounds as raw storage
+            # bit positions.
+            target, base = part, 0
+        else:
+            return None
+        pieces: list[Expression] = []
+        for lo in reversed(range(0, width, _WORD_BITS)):
+            hi = min(width, lo + _WORD_BITS) - 1
+            pieces.append(RangeSelect(target, Literal(base + hi, width=32), Literal(base + lo, width=32)))
+        return pieces
+
+    def _emit_concat_lhs_scratch_rhs(
+        self,
+        lhs: Concatenation,
+        rhs: Expression,
+        indent: int,
+        *,
+        is_nba: bool,
+    ) -> list[str] | None:
+        """Concat LHS whose RHS or total width exceeds 64 bits: evaluate the
+        RHS once into a wide scratch slot, split every LHS part into
+        <=64-bit pieces, and hand each piece its slice of the scratch value.
+
+        ``_emit_concat_lhs``'s own path computes the RHS as a single 64-bit
+        expression and shifts it per part, which silently dropped every bit
+        from 64 up (e.g. ``{hi, lo} = a + b`` with 128-bit operands, or the
+        whole-element concat write ``w[i] <= {w[i][119:0], d}``).
+
+        Returns None (caller keeps its existing path) when nothing exceeds
+        64 bits, a part has a dynamic width, or the RHS shape isn't
+        supported by the scratch emitter.
+        """
+        widths = [self._concat_part_width_info(p)[0] for p in lhs.parts]
+        if any(w is None for w in widths):
+            return None
+        total = sum(w for w in widths if w is not None)
+        if total <= _WORD_BITS and self._expr_width(rhs) <= _WORD_BITS and not self._rhs_needs_wide_eval(rhs):
+            return None
+        pieces: list[Expression] = []
+        for part, width in zip(lhs.parts, widths, strict=True):
+            split = self._split_concat_lhs_part(part, width or 0)
+            if split is None:
+                return None
+            pieces.extend(split)
+        piece_widths = [self._concat_part_width_info(p)[0] or 0 for p in pieces]
+
+        n_words = max(
+            (total + _WORD_BITS - 1) // _WORD_BITS,
+            (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS,
+            self._module_max_wide_words(),
+        )
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+        # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
+        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, total, indent)
+        et_pending = self._et_pending
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        if scratch_lines is None:
+            self._reset_scratch()
+            return None
+        self._needs_wide_helpers = True
+        pad = "    " * indent
+
+        def word_slice(arr: str, offset: int, width: int) -> str:
+            word, shift = divmod(offset, _WORD_BITS)
+            if shift == 0:
+                raw = f"{arr}[{word}]"
+            elif shift + width <= _WORD_BITS:
+                raw = f"({arr}[{word}] >> {shift})"
+            else:
+                raw = f"(({arr}[{word}] >> {shift}) | ({arr}[{word + 1}] << {_WORD_BITS - shift}))"
+            return f"({raw} & _word_mask64({width}))"
+
+        extracts: list[tuple[str, str]] = []
+        offset = total
+        for width in piece_widths:
+            offset -= width
+            extracts.append((word_slice(f"_sc{slot}_v", offset, width), word_slice(f"_sc{slot}_m", offset, width)))
+        lines = self._emit_concat_lhs(
+            Concatenation(pieces),
+            rhs,
+            indent,
+            is_nba=is_nba,
+            part_extracts=extracts,
+            prelude=[f"{pad}{t}" for t in et_pending] + scratch_lines,
+        )
+        self._reset_scratch()
+        return lines
+
     def _emit_mem_write(
         self,
         lhs: BitSelect,
@@ -1912,7 +2131,7 @@ class _StmtEmittersMixin:
                             f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = {word_lsb}",
                             f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>({chunk_val})",
                             f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>({chunk_rmask})",
-                            f"{pad}c.nba_mem_range_count += 1",
+                            f"{pad}_nba_mem_push(c)",
                         ]
                     )
                 else:
@@ -1959,7 +2178,7 @@ class _StmtEmittersMixin:
                 f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = {lsb_v}",
                 f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val}) & {sel_mask}",
                 f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask}) & {sel_mask}",
-                f"{pad}c.nba_mem_range_count += 1",
+                f"{pad}_nba_mem_push(c)",
                 f"{pad}c.nba_pending = 1",
             ]
         return [
@@ -2021,7 +2240,7 @@ class _StmtEmittersMixin:
                 f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = ({lsb_expr})",
                 f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val})",
                 f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask})",
-                f"{pad}c.nba_mem_range_count += 1",
+                f"{pad}_nba_mem_push(c)",
                 f"{pad}c.nba_pending = 1",
             ]
         return [

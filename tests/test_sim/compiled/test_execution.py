@@ -1827,7 +1827,9 @@ class TestPhase3Execution:
         sim.step()
 
         v, m = sim.mem_read(mid_dst, 0)
-        expected_v = 0x123456789ABCDEF0
+        # Value bits under the x mask are stored as 0 (the `Value` val & ~mask
+        # convention), so bit 4 of 0x...F0 reads back clear.
+        expected_v = 0x123456789ABCDEE0
         expected_m = (1 << 64) | (1 << 4)
         assert (v, m) == (expected_v, expected_m), f"Expected ({expected_v}, {expected_m}), got ({v}, {m})"
 

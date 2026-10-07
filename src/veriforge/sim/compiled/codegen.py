@@ -2023,7 +2023,14 @@ class CythonCodegen(
             wmask = (1 << width) - 1
             if isinstance(expr, Literal):
                 if expr.is_x or expr.is_z:
-                    return (0, wmask)
+                    # Per-bit: `reg [11:0] r = 8'b1x;` is x only in bit 0.
+                    try:
+                        v = Value.from_verilog(expr.original_text or str(expr.value))
+                        if Value.is_unsized_xz_literal(expr.original_text):
+                            v = v.xz_fill_to(width)
+                        return (v.val & wmask, v.mask & wmask)
+                    except (ValueError, TypeError):
+                        return (0, ((1 << (expr.width or 32)) - 1) & wmask)
                 if isinstance(expr.value, (int, float)):
                     return (int(expr.value) & wmask, 0)
                 if isinstance(expr.value, str):

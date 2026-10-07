@@ -1316,7 +1316,7 @@ class _GenWideSectionsMixin:
                     "        c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
                     "        c.nba_mem_range_val[c.nba_mem_range_count] = <long long>chunk_val",
                     "        c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>chunk_rmask",
-                    "        c.nba_mem_range_count += 1",
+                    "        _nba_mem_push(c)",
                     "    c.nba_pending = 1",
                     "",
                     # Pre-edge-snapshot twin of the helper above -- identical
@@ -1357,7 +1357,7 @@ class _GenWideSectionsMixin:
                     "        c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
                     "        c.nba_mem_range_val[c.nba_mem_range_count] = <long long>chunk_val",
                     "        c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>chunk_rmask",
-                    "        c.nba_mem_range_count += 1",
+                    "        _nba_mem_push(c)",
                     "    c.nba_pending = 1",
                     "",
                     f"cdef inline void _wmem{mid}_assign_insert_signal_slice(SimCtx *c, int addr, int dst_lsb, int src_sid, int src_lsb, int src_width, int marker_sid) noexcept nogil:",

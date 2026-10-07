@@ -555,8 +555,60 @@ def test_memory_snapshot_is_incremental(check, monkeypatch):
     cg = CythonCodegen()
     pyx = cg.generate(td._parse_design(_ROM_DESIGN).modules[0])
     for mid in range(cg._n_mems):
-        assert f"if self.ctx.sdirty[{cg._mem_marker_sigs[mid]}]:" in pyx
+        assert f"if c.sdirty[{cg._mem_marker_sigs[mid]}]:" in pyx
+        assert f"for _mj in range(c.memj_{mid}_n):" in pyx
     assert ("snap_stale_mid = " in pyx.replace("snap_stale_mid = -1", "")) == (check == "1")
+
+
+_JOURNAL_DESIGN = """
+module t(input clk, input [3:0] a, input [7:0] d, output reg [7:0] q, output reg [127:0] wq);
+  reg [7:0] m [0:15];
+  reg [127:0] w [0:3];
+  integer i;
+  always @(posedge clk) begin
+    q <= m[a];
+    wq <= w[a[1:0]];
+    m[a] <= m[a] + d;
+    m[a ^ 4'd1][3:0] <= d[3:0];
+    w[a[1:0]] <= {w[a[1:0]][119:0], d};
+    if (d[7]) for (i = 0; i < 16; i = i + 1) m[i] <= m[i] ^ d;
+  end
+endmodule
+"""
+
+
+@pytest.mark.parametrize("mode", ["scan", "queue"])
+def test_memory_snapshot_journal(mode, monkeypatch):
+    """Per-slot snapshot journal: NBA element writes (narrow, wide, and
+    partial-select) are journaled and copied slot by slot; a cycle writing
+    more slots than the journal holds (the d[7] loop) falls back to a full
+    copy. Checked against a Python model, in check mode so a stale snapshot
+    raises."""
+    monkeypatch.setenv("VERIFORGE_CHECK_MEM_SNAPSHOT", "1")
+    sim = _build(_JOURNAL_DESIGN, mode, monkeypatch)
+    sched = sim._sched
+    smap = sched._signal_map
+    m = [(i * 37) & 0xFF for i in range(16)]
+    w = [(i + 1) * 0x0123_4567_89AB_CDEF for i in range(4)]
+    sim.load_memory("m", m)
+    sim.load_memory("w", w)
+    sched._sim_drive_signal(smap["clk"], 0, 0)
+    rng = random.Random(7)
+    for cycle in range(200):
+        a, d = rng.randrange(16), rng.randrange(256)
+        sched._sim_drive_signal(smap["a"], a, 0)
+        sched._sim_drive_signal(smap["d"], d, 0)
+        sim.batch_run(1, "clk")
+        q, wq = m[a], w[a & 3]
+        new_m = list(m)
+        new_m[a] = (m[a] + d) & 0xFF
+        new_m[a ^ 1] = (m[a ^ 1] & 0xF0) | (d & 0xF)
+        if d & 0x80:
+            new_m = [x ^ d for x in m]
+        m = new_m
+        w[a & 3] = ((w[a & 3] << 8) | d) & ((1 << 128) - 1)
+        assert sim.read("q").val == q, cycle
+        assert sim.read("wq").val == wq, cycle
 
 
 def test_memory_snapshot_after_load_and_writes(monkeypatch):

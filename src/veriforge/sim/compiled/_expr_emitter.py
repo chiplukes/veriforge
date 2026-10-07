@@ -862,6 +862,10 @@ class _ExprEmitterMixin:
             def _mask_needs_outer_width(branch: Expression) -> bool:
                 if isinstance(branch, BinaryOp) and branch.op in ("+", "-", "*", "/", "%"):
                     return True
+                # `cond ? 64'd1 : 'bx` -- an unsized x/z literal x-extends
+                # to the context width (Value.is_unsized_xz_literal).
+                if isinstance(branch, Literal) and Value.is_unsized_xz_literal(branch.original_text):
+                    return True
                 return bool(isinstance(branch, UnaryOp) and branch.op in ("~", "-"))
 
             true_mask_w = width if _mask_needs_outer_width(expr.true_expr) else tw
@@ -1243,8 +1247,17 @@ class _ExprEmitterMixin:
             return None
 
         if etype is Literal:
+            # Per-bit, like `_emit_mask_expr`'s Literal case.
+            if expr.original_text:
+                try:
+                    v = Value.from_verilog(expr.original_text)
+                    if Value.is_unsized_xz_literal(expr.original_text):
+                        v = v.xz_fill_to(width)
+                    return str(v.mask & ((1 << width) - 1))
+                except (ValueError, TypeError):
+                    pass
             if (hasattr(expr, "is_x") and expr.is_x) or (hasattr(expr, "is_z") and expr.is_z):
-                return self._emit_py_width_mask(width)
+                return str(((1 << (expr.width or 32)) - 1) & ((1 << width) - 1))
             return "0"
 
         if etype is FunctionCall:
@@ -3260,16 +3273,20 @@ class _ExprEmitterMixin:
             return "0"
 
         if etype is Literal:
-            if (hasattr(expr, "is_x") and expr.is_x) or (hasattr(expr, "is_z") and expr.is_z):
-                return f"wmask({width})"
-            # Check for x/z via Value.from_verilog for string literals
-            if isinstance(expr.value, str):
+            # The literal's own per-bit x/z mask, zero-extended to `width`:
+            # `8'b1x` is x only in bit 0. (An `is_x` literal used to make
+            # every bit of the whole context x -- e.g. `assign y12 =
+            # 8'b1x;` gave 12 x bits instead of `00000000001x`.)
+            if expr.original_text or isinstance(expr.value, str):
                 try:
                     v = Value.from_verilog(expr.original_text or expr.value)
-                    if v.mask:
-                        return _cy_lit(v.mask & ((1 << width) - 1))
+                    if Value.is_unsized_xz_literal(expr.original_text):
+                        v = v.xz_fill_to(width)
+                    return _cy_lit(v.mask & ((1 << width) - 1)) if v.mask else "0"
                 except (ValueError, TypeError):
                     pass
+            if (hasattr(expr, "is_x") and expr.is_x) or (hasattr(expr, "is_z") and expr.is_z):
+                return _cy_lit(((1 << (expr.width or 32)) - 1) & ((1 << width) - 1))
             return "0"
 
         if etype is BinaryOp:

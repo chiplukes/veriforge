@@ -192,11 +192,11 @@ class Value:  # cm:c8a1e6
         base_ch = base_ch.lower()
 
         if base_ch == "b":
-            return cls._parse_binary(digits, width)
+            return cls._xz_extend(cls._parse_binary(digits, width), digits, 1)
         elif base_ch == "o":
-            return cls._parse_octal(digits, width)
+            return cls._xz_extend(cls._parse_octal(digits, width), digits, 3)
         elif base_ch == "h":
-            return cls._parse_hex(digits, width)
+            return cls._xz_extend(cls._parse_hex(digits, width), digits, 4)
         elif base_ch == "d":
             # Decimal doesn't support x/z per digit in Verilog
             if any(c in digits.lower() for c in "xz?"):
@@ -204,6 +204,37 @@ class Value:  # cm:c8a1e6
             return cls(int(digits), width=width)
         else:
             raise ValueError(f"Unknown base: {base_ch!r}")
+
+    @staticmethod
+    def is_unsized_xz_literal(text: str | None) -> bool:
+        """True for an unsized based literal whose leftmost digit is x/z/?
+        (``'bx``, ``'hz0``). IEEE 1364-2005 3.5.1: such a literal x/z-extends
+        to the full width of its expression context, past its nominal 32
+        bits -- e.g. ``out64 = 'bx;`` is 64 x bits, not 32 zeros then 32 x.
+        Callers that know the context width apply that extension."""
+        if not text:
+            return False
+        m = re.match(r"\s*'[sS]?[bBoOdDhH]\s*([xXzZ?])", text)
+        return m is not None
+
+    def xz_fill_to(self, width: int) -> Value:
+        """This value widened to *width* with every new high bit x."""
+        if width <= self.width:
+            return self
+        fill = ((1 << width) - 1) ^ ((1 << self.width) - 1)
+        return Value(self.val, width=width, mask=self.mask | fill)
+
+    @classmethod
+    def _xz_extend(cls, value: Value, digits: str, bits_per_digit: int) -> Value:
+        """IEEE 1364-2005 3.5.1: when the leftmost digit is x/z/?, the value
+        is x/z-extended (not zero-extended) up to the literal's width, so
+        ``8'bx`` is all x and ``8'bx1`` is ``xxxxxxx1``. Without this only
+        the digit's own bits were x (``8'bx`` read as ``0000000x``)."""
+        n_bits = len(digits) * bits_per_digit
+        if digits[:1].lower() not in ("x", "z", "?") or value.width <= n_bits:
+            return value
+        fill = ((1 << value.width) - 1) ^ ((1 << n_bits) - 1)
+        return cls(value.val, width=value.width, mask=value.mask | fill)
 
     @classmethod
     def _parse_binary(cls, digits: str, width: int) -> Value:

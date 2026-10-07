@@ -290,6 +290,7 @@ cdef struct NBAMemEntry:
     int       addr
     long long val
     long long mask
+    long long wbits   # element bits this NBA writes (all of them for a whole-element NBA)
 
 # ── Result struct returned to Python ─────────────────────────────────
 
@@ -3862,6 +3863,7 @@ cdef int _execute_core(
                         nba_mem_buf[nba_mem_idx].addr = i
                         nba_mem_buf[nba_mem_idx].val = a.val & wmask & ~a.mask
                         nba_mem_buf[nba_mem_idx].mask = a.mask & wmask
+                        nba_mem_buf[nba_mem_idx].wbits = wmask
                         nba_mem_idx += 1
                     elif nba_mem_buf != NULL:
                         # NBA memory buffer overflow — signal data loss
@@ -3916,9 +3918,11 @@ cdef int _execute_core(
             # Non-blocking partial memory write.
             # arg1 = mem_id (low 16) | (marker_sid << 16)
             # stack: [val, idx, msb, lsb] — lsb on top
-            # The C delta loop lacks range-NBA infrastructure, so apply immediately
-            # (same as blocking) — valid for cases where NBA ordering within one
-            # active region does not matter, which is the common case.
+            # Queued into the same buffer as whole-element memory NBAs (with
+            # `wbits` = the range), so both apply at the NBA phase in program
+            # order. (This used to apply immediately, like a blocking write:
+            # `m[i][3:0] <= x; q <= m[i];` gave q the new bits, and other
+            # processes in the same delta saw them too.)
             sp -= 1; t = stack[sp]   # lsb
             sp -= 1; b = stack[sp]   # msb
             sp -= 1; a = stack[sp]   # idx
@@ -3935,14 +3939,32 @@ cdef int _execute_core(
                     new_val = new_val & wmask
                     result_val = (stack[sp].val << <int>t.val) & new_val & ~(stack[sp].mask << <int>t.val)
                     result_mask = (stack[sp].mask << <int>t.val) & new_val
-                    result_val = (mem_val[n] & ~new_val) | result_val
-                    result_mask = (mem_mask[n] & ~new_val) | result_mask
-                    if mem_val[n] != result_val or mem_mask[n] != result_mask:
-                        mem_val[n] = result_val
-                        mem_mask[n] = result_mask
-                        if dirty_idx < dirty_max:
-                            dirty_buf[dirty_idx] = marker_sid
-                            dirty_idx += 1
+                    if nba_mem_buf != NULL and nba_mem_idx < nba_mem_max:
+                        nba_mem_buf[nba_mem_idx].mem_id = arg1  # encode marker_sid in upper bits
+                        nba_mem_buf[nba_mem_idx].addr = i
+                        nba_mem_buf[nba_mem_idx].val = result_val
+                        nba_mem_buf[nba_mem_idx].mask = result_mask
+                        nba_mem_buf[nba_mem_idx].wbits = new_val
+                        nba_mem_idx += 1
+                    elif nba_mem_buf != NULL:
+                        # NBA memory buffer overflow — signal data loss
+                        nba_count[0] = nba_idx
+                        dirty_count[0] = dirty_idx
+                        if nba_mem_count != NULL:
+                            nba_mem_count[0] = nba_mem_idx
+                        if disp_pos != NULL:
+                            disp_pos[0] = disp_idx
+                        return 2
+                    else:
+                        # No NBA buffer: apply immediately (standalone wrapper path)
+                        result_val = (mem_val[n] & ~new_val) | result_val
+                        result_mask = (mem_mask[n] & ~new_val) | result_mask
+                        if mem_val[n] != result_val or mem_mask[n] != result_mask:
+                            mem_val[n] = result_val
+                            mem_mask[n] = result_mask
+                            if dirty_idx < dirty_max:
+                                dirty_buf[dirty_idx] = marker_sid
+                                dirty_idx += 1
             continue
 
     # Fell off end of program
@@ -4417,8 +4439,8 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 mid = dc.nba_mem_buf[i].mem_id & 0xFFFF
                 marker_sid = dc.nba_mem_buf[i].mem_id >> 16
                 n_flat = dc.mem_base[mid] + dc.nba_mem_buf[i].addr
-                dc.mem_val[n_flat] = dc.nba_mem_buf[i].val
-                dc.mem_mask[n_flat] = dc.nba_mem_buf[i].mask
+                dc.mem_val[n_flat] = (dc.mem_val[n_flat] & ~dc.nba_mem_buf[i].wbits) | dc.nba_mem_buf[i].val
+                dc.mem_mask[n_flat] = (dc.mem_mask[n_flat] & ~dc.nba_mem_buf[i].wbits) | dc.nba_mem_buf[i].mask
                 # Mark memory marker signal as changed for combo re-eval
                 if marker_sid < dc.sig_count and not dc.is_changed[marker_sid]:
                     dc.is_changed[marker_sid] = 1
@@ -5201,7 +5223,8 @@ cdef class CyContext:
         total_mem_elements = 0
         for i in range(n_mems):
             total_mem_elements += self.mem_depth[i]
-        needed_cap = total_mem_elements * 4
+        # x8: whole-element and partial (range) memory NBAs share this queue.
+        needed_cap = total_mem_elements * 8
         if needed_cap > self.nba_mem_cap:
             new_nba_mem_buf = <NBAMemEntry *>realloc(self.nba_mem_buf, needed_cap * sizeof(NBAMemEntry))
             if new_nba_mem_buf == NULL:

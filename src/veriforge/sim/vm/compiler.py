@@ -506,6 +506,8 @@ class Compiler:  # cm:8c1e4a
         try:
             if isinstance(expr, Literal):
                 v = self._compile_literal(expr)
+                if v.width < width and Value.is_unsized_xz_literal(expr.original_text):
+                    return v.xz_fill_to(width)
                 return v.resize(width) if v.width != width else v
             if isinstance(expr, UnaryOp):
                 inner = self._eval_initial_value(expr.operand, width)
@@ -924,6 +926,8 @@ class Compiler:  # cm:8c1e4a
             # the identical bug already fixed in `sim/evaluator.py` and
             # the compiled engine's wide emitter.
             val = self._compile_literal(expr)
+            if width and val.width < width and Value.is_unsized_xz_literal(expr.original_text):
+                val = val.xz_fill_to(width)
             cid = self._add_const(val)
             program.append(instr(Op.LOAD_CONST, cid))
             if width and val.width < width:

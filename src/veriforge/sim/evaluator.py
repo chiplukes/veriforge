@@ -419,6 +419,8 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # extended one, so different call sites requesting different
             # widths for the same literal AST node stay correct.
             if width and v.width < width:
+                if Value.is_unsized_xz_literal(expr.original_text):
+                    return v.xz_fill_to(width)
                 eff_signed = signed_override if signed_override is not None else expr.signed
                 return v.sign_extend(width) if eff_signed else v.resize(width)
             return v

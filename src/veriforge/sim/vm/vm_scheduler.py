@@ -1477,8 +1477,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         own (Python-path-only) callers — the fast path
         (`_cy_ctx.run_delta_loop(...)`) never calls `_apply_nbas()` at all,
         so any interpreter-queued NBA still pending at that point would
-        otherwise sit in `interp.nba_queue`/`nba_mem_queue`/
-        `nba_mem_range_queue` forever, invisible to `_cy_ctx`'s own delta
+        otherwise sit in `interp.nba_queue`/`nba_mem_queue`
+        forever, invisible to `_cy_ctx`'s own delta
         loop and never reapplied. Confirmed exactly: a DSL-built ROM's
         `initial`-block memory writes (`mem[i] <<= ...`, a non-blocking
         assign, queued into `nba_mem_queue` by `Op.NBA_MEM`) followed
@@ -1490,7 +1490,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         invisible there.
         """
         interp = self.interpreter
-        if not (interp.nba_queue or interp.nba_mem_queue or interp.nba_mem_range_queue):
+        if not (interp.nba_queue or interp.nba_mem_queue):
             return set()
 
         # Freshen the Python lists from `_cy_ctx` FIRST -- `compiler.sig_val`/
@@ -1545,21 +1545,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         mem_mask = self.compiler.mem_mask if self.compiler.mem_count > 0 else []
         mem_info = self.compiler.mem_info if self.compiler.mem_count > 0 else []
         mem_marker_sigs = self.compiler.mem_marker_sigs if self.compiler.mem_count > 0 else []
-        for mem_id, addr, val in interp.nba_mem_queue:
-            if mem_id < len(mem_info):
-                ew, depth, base = mem_info[mem_id]
-                if 0 <= addr < depth:
-                    flat = base + addr
-                    wmask = _mask_for_width(ew)
-                    mem_val[flat] = val.val & wmask & ~val.mask
-                    mem_mask[flat] = val.mask & wmask
-                    # Mark memory marker signal as changed so combo processes re-fire
-                    if mem_id < len(mem_marker_sigs):
-                        changed.add(mem_marker_sigs[mem_id])
-        interp.nba_mem_queue.clear()
-
-        # Apply memory range NBAs (partial byte-lane writes)
-        for mem_id, addr, msb, lsb, val in interp.nba_mem_range_queue:
+        # One queue, program order (see Interpreter.nba_mem_queue).
+        for mem_id, addr, msb, lsb, val in interp.nba_mem_queue:
             if mem_id < len(mem_info):
                 ew, depth, base = mem_info[mem_id]
                 if 0 <= addr < depth:
@@ -1569,9 +1556,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                     updated = current.set_range(msb, lsb, val)
                     mem_val[flat] = updated.val & wmask & ~updated.mask
                     mem_mask[flat] = updated.mask & wmask
+                    # Mark memory marker signal as changed so combo processes re-fire
                     if mem_id < len(mem_marker_sigs):
                         changed.add(mem_marker_sigs[mem_id])
-        interp.nba_mem_range_queue.clear()
+        interp.nba_mem_queue.clear()
 
         # `_cy_ctx`'s own delta loop (if this iteration takes the fast
         # path) reads/writes exclusively through its own C-level state --

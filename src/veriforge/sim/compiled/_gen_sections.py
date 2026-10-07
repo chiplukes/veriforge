@@ -25,7 +25,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _cy_u64_hex,
     _const_int,
 )
-from veriforge.model.expressions import Identifier
+from veriforge.model.expressions import BitSelect, Concatenation, Expression, Identifier, PartSelect, RangeSelect
 from veriforge.model.ports import PortDirection
 from veriforge.model.statements import BlockingAssign
 from veriforge.sim.compiled._gen_narrow_accessors import _gen_narrow_accessor_code
@@ -35,13 +35,46 @@ from veriforge.sim.compiled._gen_narrow_tail import _gen_narrow_tail_code
 from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
 
 
+# Upper bound on a memory's snapshot journal (see CodeGenerator._mem_journal_cap).
+_MEM_JOURNAL_MAX = 256
+
 _BLOCKING_WRITE_RE = re.compile(r"^\s*c\.val\[(\d+)\]\s*=(?!=)")
 _NARROW_LHS_RE = re.compile(r"^\s*_set_(?:val|mask)_word\s*\(\s*c\s*,\s*(\d+)\s*,")
+# Wide-signal blocking writes go through helpers whose first argument after
+# `c` is the destination sid. Without these, a read of a wide signal after a
+# blocking write to it in the same body (`rz = x; rz[100] = ~rz[100];`) was
+# redirected to the pre-edge snapshot.
+_WIDE_BLOCKING_WRITE_RE = re.compile(r"\b(?:_whole_assign_\w+|wide_store_signal)\(\s*c\s*,\s*(\d+)\s*,")
 
 # Memory-element counterparts of the two patterns above -- see
 # _seq_body_to_sv_reads's "Memories" docstring section for why memories need
 # their own (coarser, per-mid rather than per-address) taint tracking.
-_MEM_BLOCKING_WRITE_RE = re.compile(r"^\s*c\.(?:wide_)?mem_(\d+)_val\[[^\]]*\]\s*=(?!=)")
+_MEM_BLOCKING_WRITE_START_RE = re.compile(r"^\s*c\.(?:wide_)?mem_(\d+)_val\[")
+_ASSIGN_OP_RE = re.compile(r"\s*=(?!=)")
+
+
+def _mem_blocking_write_mid(line: str) -> int | None:
+    """The memory id a line blocking-writes (``c.mem_{mid}_val[...] = ...`` or
+    the ``wide_mem`` form), else None. The index is bracket-matched, since it
+    usually contains nested subscripts (``c.wide_mem_0_val[(c.val[2]) * 2] =``)
+    -- a regex with a bracket-free index pattern missed every such write, so
+    the memory's reads (and the writes themselves) were redirected to its
+    pre-edge snapshot."""
+    m = _MEM_BLOCKING_WRITE_START_RE.match(line)
+    if m is None:
+        return None
+    depth = 1
+    for i in range(m.end(), len(line)):
+        ch = line[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return int(m.group(1)) if _ASSIGN_OP_RE.match(line, i + 1) else None
+    return None
+
+
 _MEM_ASSIGN_HELPER_RE = re.compile(r"_wmem(\d+)_assign_insert")
 _MEM_VAL_RE = re.compile(r"c\.mem_(\d+)_val\[")
 _MEM_MASK_RE = re.compile(r"c\.mem_(\d+)_mask\[")
@@ -122,6 +155,11 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     ``sdirty[sid]`` is set on every mark (never by the bit/list dedup) and
     cleared only by a memory snapshot; it is what lets a snapshot skip
     copying a memory nothing has written since the last snapshot.
+    ``mark_dirty_nosnap`` is ``mark_dirty`` without that: only for a memory
+    write that records the slot it wrote in the memory's snapshot journal
+    instead (see ``_mem_journal_lines``), so the snapshot copies just that
+    slot. Every other memory write path uses ``mark_dirty`` and so gets a
+    full copy -- a path that is never converted stays correct.
 
     *write_log* (queue delta engine only): also record each distinct sid
     written since ``wepoch`` was last bumped into ``wlog`` -- the queue
@@ -141,6 +179,13 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
         else []
     )
     return [
+        "cdef inline void mark_dirty_nosnap(SimCtx *c, int sid) noexcept nogil:",
+        *log,
+        "    if not c.dbit[sid]:",
+        "        c.dbit[sid] = 1",
+        "        c.dlist[c.dcount] = sid",
+        "        c.dcount += 1",
+        "",
         "cdef inline void mark_dirty(SimCtx *c, int sid) noexcept nogil:",
         # Snapshot-dirty: memory snapshots copy a memory only if its marker
         # sid was marked since the last snapshot (_mem_snap_memcpy_lines).
@@ -348,9 +393,11 @@ def _seq_body_to_sv_reads(
         m = _NARROW_LHS_RE.match(line)
         if m:
             tainted.add(int(m.group(1)))
-        m = _MEM_BLOCKING_WRITE_RE.match(line)
-        if m:
-            tainted_mem.add(int(m.group(1)))
+        for m in _WIDE_BLOCKING_WRITE_RE.finditer(line):
+            tainted.add(int(m.group(1)))
+        mem_mid = _mem_blocking_write_mid(line)
+        if mem_mid is not None:
+            tainted_mem.add(mem_mid)
         for m in _MEM_ASSIGN_HELPER_RE.finditer(line):
             tainted_mem.add(int(m.group(1)))
 
@@ -665,12 +712,43 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         For a large, rarely written memory (e.g. a testbench stimulus buffer
         refilled once per chunk round) this removes a full copy on every
         snapshot; on gfwx-fpga that was ~6 MB, twice per cycle.
-        ``VERIFORGE_CHECK_MEM_SNAPSHOT=1`` verifies the invariant: skipped
-        memories are compared against their snapshot and any difference
-        raises.
+        Per-slot: a write that records its slot in the memory's journal
+        (``memj_{mid}``, see ``_mem_journal_lines``) marks the marker with
+        ``mark_dirty_nosnap`` instead, so the snapshot copies only the
+        journaled slots. A journal that would overflow sets ``sdirty``
+        instead (full copy). Journal entries are slot indices into the flat
+        val/mask arrays (a word index for a wide memory), so copying one is
+        always correct, even if stale or duplicated -- only a missing entry
+        could be wrong, and every unjournaled write path sets ``sdirty``.
+
+        ``VERIFORGE_CHECK_MEM_SNAPSHOT=1`` verifies the invariant: after any
+        non-full snapshot the memory is compared against its snapshot and
+        any difference raises.
         """
+        return [f"{indent}_mem_snapshot(&self.ctx)"] if self._n_mems else []
+
+    def _mem_snap_helper_lines(self) -> list[str]:
+        """The ``_mem_snapshot`` helper called by ``_mem_snap_memcpy_lines``,
+        and ``_nba_mem_push``, which every NBA memory-queue entry ends with."""
+        if not self._n_mems:
+            return []
+        push = [
+            # Commit the entry just written at `nba_mem_range_count` -- only
+            # while a free slot remains, so the next entry's writes stay in
+            # bounds; on overflow, flag the error (raised after the step).
+            "cdef inline void _nba_mem_push(SimCtx *c) noexcept nogil:",
+            "    if c.nba_mem_range_count < NBA_MEM_RANGE_MAX - 1:",
+            "        c.nba_mem_range_count += 1",
+            "    else:",
+            "        c.error_code = ERR_NBA_MEM_OVERFLOW",
+            "",
+        ]
         check = get_env("CHECK_MEM_SNAPSHOT", "0") in ("1", "true", "True")
-        lines: list[str] = []
+        lines: list[str] = [
+            *push,
+            "cdef void _mem_snapshot(SimCtx *c) noexcept nogil:",
+            "    cdef int _mj, _ms",
+        ]
         for mid in range(self._n_mems):
             elem_w, depth = self._mem_info[mid]
             marker = self._mem_marker_sigs[mid]
@@ -678,22 +756,55 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 n, ctype, pre = depth * self._mem_words(mid), "unsigned long long", "wide_mem"
             else:
                 n, ctype, pre = depth, "long long", "mem"
-            copy = [
-                f"{indent}    memcpy(self.ctx.{pre}_{mid}_snap_val, self.ctx.{pre}_{mid}_val, {n} * sizeof({ctype}))",
-                f"{indent}    memcpy(self.ctx.{pre}_{mid}_snap_mask, self.ctx.{pre}_{mid}_mask, {n} * sizeof({ctype}))",
-                f"{indent}    self.ctx.sdirty[{marker}] = 0",
-            ]
-            lines.append(f"{indent}if self.ctx.sdirty[{marker}]:")
-            lines.extend(copy)
+            lines.extend(
+                [
+                    f"    if c.sdirty[{marker}]:",
+                    f"        memcpy(c.{pre}_{mid}_snap_val, c.{pre}_{mid}_val, {n} * sizeof({ctype}))",
+                    f"        memcpy(c.{pre}_{mid}_snap_mask, c.{pre}_{mid}_mask, {n} * sizeof({ctype}))",
+                    f"        c.sdirty[{marker}] = 0",
+                    f"        c.memj_{mid}_n = 0",
+                    "    else:",
+                    f"        for _mj in range(c.memj_{mid}_n):",
+                    f"            _ms = c.memj_{mid}[_mj]",
+                    f"            c.{pre}_{mid}_snap_val[_ms] = c.{pre}_{mid}_val[_ms]",
+                    f"            c.{pre}_{mid}_snap_mask[_ms] = c.{pre}_{mid}_mask[_ms]",
+                    f"        c.memj_{mid}_n = 0",
+                ]
+            )
             if check:
                 lines.extend(
                     [
-                        f"{indent}elif (memcmp(self.ctx.{pre}_{mid}_snap_val, self.ctx.{pre}_{mid}_val, {n} * sizeof({ctype}))"
-                        f" or memcmp(self.ctx.{pre}_{mid}_snap_mask, self.ctx.{pre}_{mid}_mask, {n} * sizeof({ctype}))):",
-                        f"{indent}    self.ctx.snap_stale_mid = {mid}",
+                        f"        if (memcmp(c.{pre}_{mid}_snap_val, c.{pre}_{mid}_val, {n} * sizeof({ctype}))"
+                        f" or memcmp(c.{pre}_{mid}_snap_mask, c.{pre}_{mid}_mask, {n} * sizeof({ctype}))):",
+                        f"            c.snap_stale_mid = {mid}",
                     ]
                 )
+        lines.append("")
         return lines
+
+    def _mem_journal_cap(self, mid: int) -> int:
+        """Snapshot-journal capacity for memory *mid*, in slots. Past ~1/4 of
+        the memory a full memcpy is as cheap as per-slot copies, so a write
+        that would overflow just forces the full copy."""
+        elem_w, depth = self._mem_info[mid]
+        slots = depth * self._mem_words(mid) if elem_w > _WORD_BITS else depth
+        return max(1, min(_MEM_JOURNAL_MAX, slots // 4))
+
+    def _mem_journal_lines(self, mid: int, slot_expr: str, indent: str) -> list[str]:
+        """Mark memory *mid*'s marker after a write of the single flat slot
+        *slot_expr*, journaling the slot so the next snapshot copies only it
+        (see ``_mem_snap_memcpy_lines``). Replaces ``mark_dirty(c, marker)``
+        at a write site; *slot_expr* must be exactly the index written."""
+        marker = self._mem_marker_sigs[mid]
+        return [
+            f"{indent}if not c.sdirty[{marker}]:",
+            f"{indent}    if c.memj_{mid}_n < {self._mem_journal_cap(mid)}:",
+            f"{indent}        c.memj_{mid}[c.memj_{mid}_n] = {slot_expr}",
+            f"{indent}        c.memj_{mid}_n += 1",
+            f"{indent}    else:",
+            f"{indent}        c.sdirty[{marker}] = 1",
+            f"{indent}mark_dirty_nosnap(c, {marker})",
+        ]
 
     def _nba_mem_queue_bound(self) -> int:
         """Compute a safe capacity for the NBA memory queues (see the call
@@ -725,6 +836,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         """
         total_mem_elements = sum(depth for _elem_w, depth in self._mem_info)
         return total_mem_elements * 4
+
+    def _nba_mem_queue_capacity(self) -> int:
+        """Entries in the (single) NBA memory queue: the two former queues'
+        combined capacity. Overflow is checked at every push
+        (``_nba_mem_push``) and raises instead of writing past the array."""
+        return 2 * max(64, self._nba_mem_queue_bound())
 
     def _gen_header(self) -> str:
         return (
@@ -770,15 +887,16 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines.append("DEF ERR_WHILE_LOOP_LIMIT = 1")
         lines.append("DEF ERR_FOREVER_LOOP_LIMIT = 2")
         lines.append("DEF ERR_DELTA_LIMIT = 3")
+        lines.append("DEF ERR_NBA_MEM_OVERFLOW = 4")
         lines.append(f"DEF DELTA_LIMIT = {self._delta_limit}")
         # After this many delta iterations, start checking for value-level
         # stability (fixpoint) so designs whose dirty flags never quiet
         # (e.g. combo loops with intermediate writes) still terminate.
         lines.append(f"DEF DELTA_CONV_CHECK_START = {min(16, max(self._delta_limit - 2, 0))}")
         if self._n_mems > 0:
-            # These two queues buffer whole-element (NBA_MEM_MAX) and
-            # partial-bit-range (NBA_MEM_RANGE_MAX) non-blocking memory
-            # writes queued during ONE delta-loop iteration (every
+            # This queue buffers the non-blocking memory writes (whole
+            # element or partial bit range, in program order) queued
+            # during ONE delta-loop iteration (every
             # sequential process fires at most once per iteration, and the
             # queues are fully drained -- reset to 0 -- before the next
             # iteration begins, per the "if c.nba_pending: ... count = 0"
@@ -794,10 +912,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # `sv`/`sm` -- corrupting an unrelated COMBINATIONAL signal's
             # snapshotted value mid-iteration and causing a real design's
             # FIFO read pointer to advance one edge early). See
-            # `_nba_mem_queue_bound` for how the real capacity is derived.
-            nba_mem_bound = max(64, self._nba_mem_queue_bound())
-            lines.append(f"DEF NBA_MEM_MAX = {nba_mem_bound}")
-            lines.append(f"DEF NBA_MEM_RANGE_MAX = {nba_mem_bound}")
+            # `_nba_mem_queue_bound` for how the real capacity is derived;
+            # every push is now also bounds-checked (`_nba_mem_push`).
+            lines.append(f"DEF NBA_MEM_RANGE_MAX = {self._nba_mem_queue_capacity()}")
         for mid in range(self._n_mems):
             ew, _depth = self._mem_info[mid]
             lines.append(f"DEF MEM_{mid}_WIDTH = {ew}")
@@ -857,9 +974,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "OUT_BUF_MAX": 65536,
         }
         if self._n_mems > 0:
-            nba_mem_bound = max(64, self._nba_mem_queue_bound())
-            literals["NBA_MEM_MAX"] = nba_mem_bound
-            literals["NBA_MEM_RANGE_MAX"] = nba_mem_bound
+            literals["NBA_MEM_RANGE_MAX"] = self._nba_mem_queue_capacity()
         return literals
 
     def _struct_field_lines(self) -> list[str]:
@@ -931,15 +1046,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append(f"    long long mem_{mid}_mask[{depth}]")
                 lines.append(f"    long long mem_{mid}_snap_val[{depth}]")
                 lines.append(f"    long long mem_{mid}_snap_mask[{depth}]")
+            # Snapshot journal: flat slots written since the last snapshot
+            # (see _mem_snap_memcpy_lines).
+            lines.append(f"    int       memj_{mid}[{self._mem_journal_cap(mid)}]")
+            lines.append(f"    int       memj_{mid}_n")
         # NBA memory queue
         if self._n_mems > 0:
             lines.extend(
                 [
-                    "    int       nba_mem_count",
-                    "    int       nba_mem_mid[NBA_MEM_MAX]",
-                    "    int       nba_mem_addr[NBA_MEM_MAX]",
-                    "    long long nba_mem_val[NBA_MEM_MAX]",
-                    "    long long nba_mem_mask[NBA_MEM_MAX]",
                     "    int       nba_mem_range_count",
                     "    int       nba_mem_range_mid[NBA_MEM_RANGE_MAX]",
                     "    int       nba_mem_range_addr[NBA_MEM_RANGE_MAX]",
@@ -1004,6 +1118,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # Emitted first: every later helper (narrow templates, wide/memory
         # helpers) and every process body marks signals dirty through these.
         lines.extend(_gen_dirty_helpers(write_log=self._delta_engine() == "queue"))
+        lines.extend(self._mem_snap_helper_lines())
         lines.extend(_gen_narrow_accessor_code())
         lines.extend(_gen_narrow_stage_code())
         lines.extend(_gen_narrow_assign_code())
@@ -1224,14 +1339,24 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         snapshot gap") can make that decision at emission time instead of via
         `_seq_body_to_sv_reads`'s later text-level substitution, which can't
         safely parse these particular call sites' other (arbitrary-
-        expression) arguments. Mirrors `_BLOCKING_WRITE_RE`'s scope exactly:
-        only a plain (possibly hierarchical) identifier LHS resolves to a
-        whole signal id here -- bit/range-select and memory-element targets
-        don't taint a whole signal's value and are out of scope.
+        expression) arguments.
+
+        A bit/range/part-select LHS (``rz[127:12] = ...``) and every member
+        of a concatenation LHS taint their base signal too: a later read of
+        the whole signal in the same body must see the bits just written.
+        These were once excluded, so e.g. ``rz[127:12] = x; wq <= rz;`` (rz
+        wide) staged rz's pre-edge value. Memory-element targets are tracked
+        separately (`_seq_body_to_sv_reads`'s per-mid taint).
         """
         tainted: set[int] = set()
-        for assign in block_body.find(BlockingAssign):
-            target = assign.lhs
+
+        def add(target: Expression) -> None:
+            if isinstance(target, Concatenation):
+                for part in target.parts:
+                    add(part)
+                return
+            while isinstance(target, (BitSelect, RangeSelect, PartSelect)):
+                target = target.target
             if isinstance(target, Identifier):
                 name = target.name
                 if target.hierarchy:
@@ -1239,6 +1364,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 sid = self._signal_map.get(name)
                 if sid is not None:
                     tainted.add(sid)
+
+        for assign in block_body.find(BlockingAssign):
+            add(assign.lhs)
         return tainted
 
     def _compile_always_body(self, block_body, *, is_seq: bool = False, edge_sids: set[int] | None = None) -> list[str]:
@@ -1692,27 +1820,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            c.nba_count = 0",
         ]
         if self._n_mems > 0:
-            # Drain NBA memory queue
-            lines.append("            for i in range(c.nba_mem_count):")
-            for mid in range(self._n_mems):
-                marker_sid = self._mem_marker_sigs[mid]
-                elem_w, _depth = self._mem_info[mid]
-                cond_kw = "if" if mid == 0 else "elif"
-                lines.append(f"                {cond_kw} c.nba_mem_mid[i] == {mid}:")
-                if elem_w > _WORD_BITS:
-                    lines.append(
-                        f"                    c.wide_mem_{mid}_val[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_val[i]"
-                    )
-                    lines.append(
-                        f"                    c.wide_mem_{mid}_mask[c.nba_mem_addr[i]] = <unsigned long long>c.nba_mem_mask[i]"
-                    )
-                else:
-                    lines.append(f"                    c.mem_{mid}_val[c.nba_mem_addr[i]] = c.nba_mem_val[i]")
-                    lines.append(f"                    c.mem_{mid}_mask[c.nba_mem_addr[i]] = c.nba_mem_mask[i]")
-                lines.append(f"                    c.val[{marker_sid}] ^= 1")
-                lines.append(f"                    mark_dirty(c, {marker_sid})")
-            lines.append("            c.nba_mem_count = 0")
-            # Drain NBA memory range queue (partial byte-lane writes)
+            # Drain the NBA memory queue in program order. Whole-element and
+            # partial (bit-range) writes share this one queue -- a whole
+            # element is a range write covering it -- so for two NBAs to the
+            # same element in one edge the later one wins. (They were once
+            # two queues drained element-first, so `m[i][3:0] <= x;` then
+            # `m[i] <= y;` left m[i][3:0] = x.)
             lines.append("            for i in range(c.nba_mem_range_count):")
             lines.append("                _rmr_msb = c.nba_mem_range_msb[i]")
             lines.append("                _rmr_lsb = c.nba_mem_range_lsb[i]")
@@ -1745,7 +1858,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                         f" (c.mem_{mid}_mask[{addr_expr}] & ~_rmr_mask)"
                         f" | ((c.nba_mem_range_mask[i] << _rmr_lsb) & _rmr_mask)"
                     )
-                lines.append(f"                    mark_dirty(c, {marker_sid})")
+                lines.extend(self._mem_journal_lines(mid, addr_expr, "                    "))
             lines.append("            c.nba_mem_range_count = 0")
         lines.append("            c.nba_pending = 0")
         return lines
@@ -2255,8 +2368,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append(f"            self.ctx.mem_{mid}_mask[i] = wmask(MEM_{mid}_WIDTH)")
                 lines.append(f"            self.ctx.mem_{mid}_snap_val[i] = 0")
                 lines.append(f"            self.ctx.mem_{mid}_snap_mask[i] = 0")
+            lines.append(f"        self.ctx.memj_{mid}_n = 0")
         if self._n_mems > 0:
-            lines.append("        self.ctx.nba_mem_count = 0")
             lines.append("        self.ctx.nba_mem_range_count = 0")
 
         # Native initial block execution (no timing)
@@ -2500,9 +2613,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 f"            raise RuntimeError('Forever loop exceeded {_PROCESS_LOOP_LIMIT} iterations')",
                 "        if self.ctx.error_code == ERR_DELTA_LIMIT:",
                 f"            raise RuntimeError('Delta cycle limit ({self._delta_limit}) exceeded')",
+                "        if self.ctx.error_code == ERR_NBA_MEM_OVERFLOW:",
+                "            raise RuntimeError('Non-blocking memory write queue overflowed (more than "
+                f"{self._nba_mem_queue_capacity() if self._n_mems else 0} pending memory NBAs in one delta"
+                " iteration)')",
                 "        if self.ctx.snap_stale_mid >= 0:",
-                "            raise RuntimeError(f'Memory {self.ctx.snap_stale_mid} changed without marking its marker"
-                " signal dirty: its incremental snapshot went stale (VERIFORGE_CHECK_MEM_SNAPSHOT)')",
+                "            raise RuntimeError(f'Memory {self.ctx.snap_stale_mid} changed without updating its"
+                " incremental snapshot tracking (dirty flag or slot journal): snapshot went stale"
+                " (VERIFORGE_CHECK_MEM_SNAPSHOT)')",
                 "",
                 "    cpdef int step(self):",
                 "        cdef int deltas",

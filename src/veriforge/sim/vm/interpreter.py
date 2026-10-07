@@ -196,7 +196,6 @@ class Interpreter:  # cm:e3f1b4
         "mem_mask",
         "mem_val",
         "nba_mem_queue",
-        "nba_mem_range_queue",
         "nba_queue",
         "readmem_tasks",
         "sig_mask",
@@ -219,8 +218,12 @@ class Interpreter:  # cm:e3f1b4
         self.sig_width = sig_width
         self.const_pool = const_pool
         self.nba_queue: list[tuple[int, Value]] = []
-        self.nba_mem_queue: list[tuple[int, int, Value]] = []  # (mem_id, addr, val)
-        self.nba_mem_range_queue: list[tuple[int, int, int, int, Value]] = []  # (mem_id, addr, msb, lsb, val)
+        # (mem_id, addr, msb, lsb, val) -- whole-element NBAs (msb/lsb spanning
+        # the element) and partial ones share this one queue so they apply in
+        # program order: for two NBAs to one element in an edge, the later
+        # wins. (Two queues applied element-first got `m[i][3:0] <= x;` then
+        # `m[i] <= y;` wrong.)
+        self.nba_mem_queue: list[tuple[int, int, int, int, Value]] = []
         self.display_output: list[str] = []
         self.time: int = 0
         self.dirty: set[int] = set()
@@ -888,7 +891,7 @@ class Interpreter:  # cm:e3f1b4
                     if 0 <= addr < depth:
                         wmask = _mask_for_width(ew)
                         nba_val = Value(val.val & wmask, width=ew, mask=val.mask & wmask)
-                        self.nba_mem_queue.append((mid, addr, nba_val))
+                        self.nba_mem_queue.append((mid, addr, ew - 1, 0, nba_val))
                 continue
 
             if op == Op.STORE_MEM_RANGE:
@@ -932,7 +935,7 @@ class Interpreter:  # cm:e3f1b4
                     ew, depth, base = self.mem_info[mid]
                     addr = idx.val
                     if 0 <= addr < depth:
-                        self.nba_mem_range_queue.append((mid, addr, msb.val, lsb.val, val))
+                        self.nba_mem_queue.append((mid, addr, msb.val, lsb.val, val))
                 continue
 
             if op == Op.SYS_READMEM:

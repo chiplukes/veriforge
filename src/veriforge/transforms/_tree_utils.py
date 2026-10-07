@@ -6,8 +6,6 @@ from lark import Token, Tree
 
 from ..model.base import SourceLocation
 
-_SOURCE_TEXT_CACHE: dict[str, str] = {}
-
 
 def _loc_from_tree(tree: Tree, source_file: str | None = None) -> SourceLocation:
     """Extract SourceLocation from a Lark tree node's meta."""

@@ -34,10 +34,36 @@ bandwidth: essentially all of the observed time. Two fixes (2026-10-06):
    raises), and the full test suite passes in that mode. gfwx-shaped
    synthetic (1.5 MB stimulus memory read once per cycle, tie-off):
    118 -> 0.02 us/cycle.
-Memories written every cycle (gfwx's ~0.9 MB of line buffers) are still
-copied in full when written; per-element tracking would be the next step if
-that becomes the bottleneck. Remaining per-snapshot full copies:
-`sv`/`sm` (~56 KB for gfwx) and wide-signal snapshot (~79 KB).
+3. **Per-slot snapshot journals** (2026-10-06, after the gfwx result below):
+   memories written every cycle (gfwx's ~0.9 MB of line buffers) were still
+   copied whole on every snapshot. The NBA-queue drain -- where clocked
+   memory writes land -- now records each flat slot it writes in a
+   per-memory journal (`memj_{mid}`, capacity min(256, slots/4)) and marks
+   the marker with `mark_dirty_nosnap`; the snapshot (`_mem_snapshot()`)
+   copies only journaled slots. Every other write path still uses
+   `mark_dirty` (sets `sdirty`, full copy), and journal overflow falls back
+   to a full copy, so an unconverted path can't go stale -- only the drain
+   was converted. Check mode now compares every non-full snapshot.
+   Synthetic (two 128 KB line buffers + a 192 KB wide memory, each written
+   once per cycle): 18.19 -> 0.06 us/cycle.
+Remaining per-snapshot full copies: `sv`/`sm` (~56 KB for gfwx) and the
+wide-signal snapshot (~79 KB).
+
+Found while testing the journals (all fixed, regression tests in
+`tests/test_sim/test_wide_partial_writes_and_xz_literals.py`): compiled
+lost every bit >= 64 of a concat-LHS with a wide computed RHS and of a
+range write into a wide signal; ignored a wide signal's nonzero declared
+LSB in slices; read a wide signal's pre-edge snapshot after a blocking
+partial write to it in the same seq body (both taint scans missed those
+writes); cleared the whole X/Z mask on narrow bit/range writes. compiled,
+vm and vm-fast applied memory NBAs out of program order (separate
+whole-element / partial queues; vm-fast even applied partial memory NBAs
+immediately). Every engine mis-extended x/z literals (`8'bx` read as
+`0000000x`; compiled made any x literal x across the whole target). The
+parser recovered `+:`/`-:` by re-reading the source file (crash for
+string-parsed designs). The compiled NBA memory queue is now one queue with
+a bounds-checked push (`_nba_mem_push`, raises on overflow instead of
+writing past the array).
 
 **`gfwx-fpga` after both fixes (642e8d5, 2026-10-06, `batch_run` timing
 probe):** scan 16.7-16.8 us/cycle (~26.6x faster), queue 5.5-5.6 us/cycle

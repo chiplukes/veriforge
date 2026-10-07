@@ -781,7 +781,11 @@ uv run python setup_cython.py build_ext --inplace
 **Constants (DEF — compiled as C #defines):**
 - `STACK_MAX = 256` — operand stack depth
 - `NBA_MAX = 256` — NBA queue capacity
-- `NBA_MEM_MAX = 64` — memory NBA queue capacity
+- `NBA_MEM_MAX = 64` — initial memory NBA queue capacity (grown to 8x total memory
+  elements once memory shapes are known). Whole-element (`NBA_MEM`) and partial
+  (`NBA_MEM_RANGE`) memory NBAs share this one queue; each `NBAMemEntry` carries
+  `wbits` (the element bits it writes), so they apply in program order at the NBA
+  phase.
 - `DISP_BUF_CAP = 4096` — display output buffer slots
 
 **Python-visible class: `CyContext`**
