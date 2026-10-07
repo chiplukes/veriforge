@@ -39,6 +39,13 @@ copied in full when written; per-element tracking would be the next step if
 that becomes the bottleneck. Remaining per-snapshot full copies:
 `sv`/`sm` (~56 KB for gfwx) and wide-signal snapshot (~79 KB).
 
+**`gfwx-fpga` after both fixes (642e8d5, 2026-10-06, `batch_run` timing
+probe):** scan 16.7-16.8 us/cycle (~26.6x faster), queue 5.5-5.6 us/cycle
+(~77.7x faster). With the snapshot cost gone, queue is ~3x faster than scan
+on this real design (3112 processes, so `auto` already picks queue). Only
+timing was measured; output-vs-golden on gfwx's end-to-end flow was not
+re-checked as part of this measurement.
+
 ### Stage 2 results (2026-10-05)
 
 **Correctness.** New `tests/test_sim/compiled/test_delta_engine_equivalence.py`
