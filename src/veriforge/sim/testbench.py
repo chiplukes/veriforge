@@ -236,6 +236,13 @@ class Simulator:  # cm:a5c8f4
             sched._write_buffer = ""
         return sched.display_output
 
+    @property
+    def severity_events(self) -> list[tuple[int, str, str]]:
+        """``(time, severity, message)`` for every ``$info``/``$warning``/
+        ``$error``/``$fatal`` so far (see ``sim/severity.py``)."""
+        log = self.display_output  # drains pending engine output first
+        return list(getattr(log, "events", []))
+
     def engine_report(self) -> dict:
         """Report native vs. fallback process counts for the active engine.
 

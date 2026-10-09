@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from veriforge._env import get_env
 from veriforge.model.expressions import Identifier
 from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator
+from veriforge.sim.severity import DisplayLog
 from veriforge.sim.event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from veriforge.sim.executor import StatementExecutor, StopExecution
 from veriforge.sim.trace import flush_dump, start_dump
@@ -355,7 +356,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         self._event_queue: list[TimedEvent] = []
         self._event_seq: int = 0
         self.delta_limit: int = delta_limit
-        self.display_output: list[str] = []
+        self.display_output: DisplayLog = DisplayLog()  # severity events: sim/severity.py
         self._write_buffer: str = ""
 
         # Initial block support (Phase 4)
@@ -553,6 +554,11 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         """Copy signal values from compiled sim → reference EvalContext."""
         if self._ref_ctx is None:
             return
+        # $time in reference-executed code (initial blocks, timing
+        # coroutines) reads the context's time; it used to stay 0.
+        self._ref_ctx.time = self._time
+        if self._ref_executor is not None:
+            self._ref_executor.time = self._time
         ref_sigs = self._ref_ctx._signals
         if names is not None:
             for name in names:
@@ -1242,11 +1248,22 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             while True:
                 kwargs = self._batch_event_kwargs(sig_events, mem_events, done)
                 completed = self._sim.batch_run(cycles - done, clk_sid, **kwargs, t0=self._time, period=clock_period)
-                self._time += completed * clock_period
                 done += completed
+                if self._sim.is_finished():
+                    # Stopped mid-cycle by $finish: time stays at that edge.
+                    self._time = self._sim.get_time()
+                    if recording:
+                        self._drain_compiled_output()
+                        hub.dispatch_recorded(self._sim.trace_drain())
+                    break
+                self._time += completed * clock_period
                 if not recording:
                     break
                 stopped_full = self._sim.trace_record_full()  # trace_drain() clears it
+                # Display output first: a $error/$fatal in this chunk is then
+                # pending in capture sessions when the records stream in, and
+                # takes effect in time order (CaptureSession._on_severity).
+                self._drain_compiled_output()
                 hub.dispatch_recorded(self._sim.trace_drain())
                 if done >= cycles or not stopped_full:
                     break

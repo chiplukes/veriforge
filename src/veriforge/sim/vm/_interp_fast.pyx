@@ -4225,9 +4225,13 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
               run dirty continuous assigns → repeat until convergence.
 
     Returns  0 = converged,  1 = $finish,  -1 = delta limit exceeded.
+    A $finish stops only the process that ran it: the time step still
+    completes (other triggered processes, NBAs, settling), then 1 is
+    returned -- as in Icarus. (It used to return at once, dropping the rest
+    of the step.)
     The caller supplies (and owns) all buffers through *dc*.
     """
-    cdef int delta = 0
+    cdef int delta = 0, finished = 0
     cdef int changed_count = p_changed_count[0]
     cdef int triggered_count, total_nba_count, total_nba_mem_count
     cdef int i, j, c, sid, esid, pid, off, plen, status
@@ -4339,7 +4343,9 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
 
             # Keep execution status separate from dirty-buffer growth status:
             # a successful push must not erase $finish or an execution error.
-            if status != 0:
+            if status == 1:
+                finished = 1
+            elif status != 0:
                 p_changed_count[0] = 0
                 return status
 
@@ -4460,7 +4466,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
     for i in range(changed_count):
         dc.is_changed[dc.changed_buf[i]] = 0
     p_changed_count[0] = 0
-    return 0
+    return finished
 
 
 # ── Python-visible wrapper ───────────────────────────────────────────
@@ -4634,6 +4640,7 @@ def cy_execute_batch(
     cdef int sig_count = len(sig_val_list)
     cdef int const_count = len(const_val_list)
     cdef int n_progs = len(programs)
+    cdef int finished = 0
 
     # Allocate signal and const arrays once
     cdef long long *sig_val  = <long long *>malloc(sig_count * sizeof(long long))
@@ -4743,11 +4750,9 @@ def cy_execute_batch(
                 all_dirty.add(dirty_buf[i])
 
             if status == 1:
-                # Copy signal state back before raising
-                for i in range(sig_count):
-                    sig_val_list[i]  = sig_val[i]
-                    sig_mask_list[i] = sig_mask[i]
-                raise CyStopSimulation()
+                # $finish stops this program; the rest still run (the time
+                # step completes) and the caller is told via `finished`.
+                finished = 1
             if status == 2:
                 for i in range(sig_count):
                     sig_val_list[i]  = sig_val[i]
@@ -4762,7 +4767,7 @@ def cy_execute_batch(
             sig_val_list[i]  = sig_val[i]
             sig_mask_list[i] = sig_mask[i]
 
-        return (all_nba, all_dirty)
+        return (all_nba, all_dirty, finished)
 
     finally:
         free(prog_ops)
@@ -5388,10 +5393,11 @@ cdef class CyContext:
     def execute_procs(self, list proc_indices):
         """Execute programs identified by index.  Accumulates NBAs/dirty.
 
-        Returns (nba_list, dirty_set).
-        Raises CyStopSimulation on $finish.
+        Returns (nba_list, dirty_set, finished). A $finish stops only the
+        program that ran it; the remaining programs still run (the time step
+        completes), and *finished* reports it.
         """
-        cdef int j, idx, status
+        cdef int j, idx, status, finished = 0
         cdef int off, plen
         cdef int nba_room, dirty_room
 
@@ -5430,8 +5436,7 @@ cdef class CyContext:
             self.dirty_count += dirty_room
 
             if status == 1:
-                self._sync_out()
-                raise CyStopSimulation()
+                finished = 1
             if status == 2:
                 self._sync_out()
                 raise RuntimeError(
@@ -5440,7 +5445,8 @@ cdef class CyContext:
                 )
 
         self._sync_out()
-        return self._collect_results()
+        nba_list, dirty_set = self._collect_results()
+        return (nba_list, dirty_set, finished)
 
     cdef void _sync_out(self):
         """Write C signal arrays back to nothing — signals stay in C."""

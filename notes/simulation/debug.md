@@ -312,11 +312,12 @@ print(cap.files, cap.triggers)      # cap_000.vcd ... and (time, reason) each
 Triggers: a Verilog expression over signal names (`$rose`/`$fell`/
 `$changed` for edges; fires when it becomes true), a Python callable
 `f(time, values)` (signals it reads go in `watch=`), or `cap.trigger(reason)`
-from testbench code (e.g. a scoreboard). With `on_failure=True` (default),
-an exception from `run`/`run_step`/`batch_run`/`run_cycles`/`settle`, or
-one leaving the `with` block, writes the window up to the failure.
-`bench.run(capture={...})` takes the same arguments. HDL `$error`/`$fatal`
-don't trigger captures yet.
+from testbench code (e.g. a scoreboard), or an HDL `$error` (`on_error=True`,
+default). With `on_failure=True` (default), an HDL `$fatal`, an exception
+from `run`/`run_step`/`batch_run`/`run_cycles`/`settle`, or one leaving the
+`with` block writes the window up to the failure. `bench.run(capture={...})`
+takes the same arguments. `sim.severity_events` lists every
+`$info`/`$warning`/`$error`/`$fatal` as `(time, severity, message)`.
 
 ---
 

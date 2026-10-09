@@ -52,6 +52,7 @@ from .evaluator import (
     _resolve_struct_write_target,
     _write_whole_memory,
 )
+from .severity import severity_display
 from .value import Value
 
 log = logging.getLogger(__name__)
@@ -1230,6 +1231,14 @@ class StatementExecutor:  # cm:c2f9a1
 
     def _exec_system_task(self, task: SystemTaskCall, ctx: EvalContext) -> None:
         """Execute a system task ($display, $finish, etc.)."""
+        severity = severity_display(task)
+        if severity is not None:
+            # $info/$warning/$error/$fatal: see sim/severity.py.
+            display, fatal = severity
+            self._exec_system_task(display, ctx)
+            if fatal:
+                raise StopExecution()
+            return
         name = task.task_name.lower()
 
         if name == "$display":
@@ -1329,7 +1338,18 @@ class StatementExecutor:  # cm:c2f9a1
                     result.append("%")
                     continue
                 if spec == "t":
-                    result.append(str(getattr(self, "_sim_time", 0)))
+                    # %t: the next argument (normally $time) as a time --
+                    # right-justified in 20 columns unless a width is given
+                    # (%0t: none), as in Icarus/the default $timeformat. It
+                    # used to print 0 without consuming its argument, which
+                    # shifted every later argument.
+                    if arg_idx < len(args):
+                        tv = args[arg_idx]
+                        arg_idx += 1
+                        ts = str(tv.val) if tv.mask == 0 else "x"
+                    else:
+                        ts = str(self.time)
+                    result.append(ts.rjust(width if (width or zero_pad) else 20))
                     continue
                 if spec == "m":
                     result.append("<module>")

@@ -42,6 +42,7 @@ from ..semantics import const_int as _const_int
 from ..semantics import range_width as _range_width
 from ..semantics import var_width as _var_width
 from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed
+from .severity import DisplayLog
 from .executor import StatementExecutor, StopExecution, SuspendExecution
 from .trace import flush_dump, start_dump
 from .value import Value
@@ -211,6 +212,7 @@ class Scheduler:  # cm:9a7f2c
         "_edge_changed",
         "_edge_to_seq_procs",
         "_event_waiting",
+        "_finish_requested",
         "_initial_procs",
         "_last_run_signals",
         "_on_time_step",
@@ -240,7 +242,7 @@ class Scheduler:  # cm:9a7f2c
         self.executor = StatementExecutor(self.evaluator, loop_limit=100_000)
         self.event_queue = EventQueue()
         self.delta_limit = delta_limit
-        self.display_output: list[str] = []
+        self.display_output: DisplayLog = DisplayLog()  # severity events: sim/severity.py
 
         # Process tracking
         self._continuous_procs: list[ContinuousProcess] = []
@@ -287,6 +289,9 @@ class Scheduler:  # cm:9a7f2c
         # (all delta cycles resolved).  Signature: callback(scheduler)
         self._on_time_step: Callable[[Scheduler], None] | None = None
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
+        # $finish/$fatal ran this time step: complete the step, then stop
+        # (see _run_active_region).
+        self._finish_requested = False
 
     # ── Elaboration ──────────────────────────────────────────────
 
@@ -772,6 +777,9 @@ class Scheduler:  # cm:9a7f2c
         if self._pending_drives:
             self._settle_snapshot = self._snapshot_signals()
 
+        if self._finish_requested:
+            self.event_queue._queue.clear()
+            return False
         return True
 
     def _run_active_region(self, procs: list[Process]) -> set[str]:
@@ -786,11 +794,13 @@ class Scheduler:  # cm:9a7f2c
             try:
                 self._execute_process(proc)
             except StopExecution:
-                self.ctx._originals = None
-                self.display_output.extend(self.executor.display_output)
-                self.executor.display_output.clear()
-                self.event_queue._queue.clear()
-                return set()
+                # $finish/$fatal stops this process at once, but the time
+                # step completes -- other processes triggered at this time
+                # still run, NBAs are applied, combinational logic settles --
+                # and the simulation then ends (_run_single_step), as in
+                # Icarus. (This used to clear the queue and return here,
+                # skipping every later process of the step.)
+                self._finish_requested = True
             except SuspendExecution as e:
                 if isinstance(proc, AlwaysProcess):
                     proc.suspend_info = e

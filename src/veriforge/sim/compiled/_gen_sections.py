@@ -643,7 +643,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                if self._rec_on:",
             "                    self._trace_record(t0 + i * period + period // 2)",
             "                if self.ctx.finished:",
-            "                    cycles_run = i + 1",
+            "                    cycles_run = i",
             "                    break",
         ]
         if self._negedge_reacting_sids() is None:
@@ -1529,7 +1529,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 self._et_count = 0
                 self._et_node_masks = {}
                 self._et_node_vals = {}
-                body_lines = self._emit_stmt(body_copy, indent=1)
+                body_lines = self._emit_stmt(body_copy, indent=1, context="function")
                 hoisted_et_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                 joined = "\n".join(body_lines)
                 parts.extend(hoisted_et_cdefs)
@@ -2099,8 +2099,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             f"        for _q in range({n_seq}):",
             "            if _sfire[_q]:",
             "                DL_SEQ_FN[_q](c, sv, sm)",
-            "                if c.finished:",
-            "                    return it",
+            # No early return on c.finished: $finish stops only the calling
+            # process (it returns); the time step still completes -- other
+            # triggered processes, NBAs, settling -- as in Icarus. Callers
+            # stop after this delta_loop.
             "                if c.error_code != ERR_NONE:",
             "                    return it",
             "                _sfire[_q] = 0",
@@ -2273,14 +2275,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             if sens:
                 lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
                 lines.append(f"            {call}")
-                lines.append("            if c.finished:")
-                lines.append("                return it")
                 lines.append("            if c.error_code != ERR_NONE:")
                 lines.append("                return it")
             else:
                 lines.append(f"        {call}")
-                lines.append("        if c.finished:")
-                lines.append("            return it")
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
         # Early exit: if this iteration's dispatch left no dirty flag on any
@@ -2550,8 +2548,6 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             lines.append("            DL_RANK_FN[_r](c)")
             lines.extend(
                 [
-                    "            if c.finished:",
-                    "                return it",
                     "            if c.error_code != ERR_NONE:",
                     "                return it",
                     "            for _k in range(c.wcount):",
@@ -2970,6 +2966,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "",
                 "    cpdef void set_time(self, long long t):",
                 "        self.ctx.sim_time = t",
+                "",
+                "    cpdef long long get_time(self):",
+                "        return self.ctx.sim_time",
             ]
         )
 
@@ -3202,8 +3201,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    break",
                 "                if self._rec_on:",
                 "                    self._trace_record(t0 + i * period)",
+                # $finish: this cycle is partial -- not counted, and the
+                # scheduler takes the time from ctx.sim_time (this edge), as
+                # vm-fast's batch_run does.
                 "                if self.ctx.finished:",
-                "                    cycles_run = i + 1",
+                "                    cycles_run = i",
                 "                    break",
                 *self._negedge_block_lines(sn),
                 "        self._raise_runtime_error()",

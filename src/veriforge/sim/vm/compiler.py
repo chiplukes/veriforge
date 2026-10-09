@@ -56,6 +56,7 @@ from veriforge.model.statements import (
 )
 
 from ...semantics import const_int as _const_int
+from ..severity import severity_display
 from ...semantics import range_width as _range_width
 from ...semantics import var_width as _var_width
 from ..value import Value
@@ -2420,9 +2421,17 @@ class Compiler:  # cm:8c1e4a
 
     def _compile_system_task(self, task: SystemTaskCall, program: list[tuple[int, int, int]]) -> bool:  # noqa: PLR0912, PLR0915
         """Compile a system task call."""
+        severity = severity_display(task)
+        if severity is not None:
+            # $info/$warning/$error/$fatal: see sim/severity.py.
+            display, fatal = severity
+            self._compile_system_task(display, program)
+            if fatal:
+                program.append(instr(Op.SYS_FINISH))
+            return False
         name = task.task_name.lower()
 
-        if name in ("$display", "$write", "$monitor", "$error", "$warning", "$info"):
+        if name in ("$display", "$write", "$monitor"):
             # Check if first argument is a format string
             fmt_id = 0  # 0 = no format string
             value_args = list(task.arguments)

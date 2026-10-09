@@ -76,8 +76,16 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
                 result.append("%")
                 continue
             if spec == "t":
-                # %t doesn't consume an argument — uses sim_time
-                result.append(str(sim_time))
+                # %t: the next argument (normally $time) as a time, 20
+                # columns unless a width is given (see the reference
+                # executor's _format_display).
+                if arg_idx < len(args):
+                    tv = args[arg_idx]
+                    arg_idx += 1
+                    ts = str(tv.val) if tv.mask == 0 else "x"
+                else:
+                    ts = str(sim_time)
+                result.append(ts.rjust(width if (width or zero_pad) else 20))
                 continue
             if spec == "m":
                 # %m doesn't consume an argument — module path placeholder

@@ -20,6 +20,7 @@ from veriforge.model.expressions import FunctionCall, Identifier, Literal, Strin
 from veriforge.model.statements import Statement, SystemTaskCall, TaskEnable
 
 from ..evaluator import EvalContext, ExpressionEvaluator
+from ..severity import DisplayLog
 from ..event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from ..executor import StatementExecutor
 from ..trace import flush_dump, start_dump
@@ -115,6 +116,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "_event_queue",
         "_event_seq",
         "_event_started",
+        "_finish_requested",
         "_initial_coroutines",
         "_initial_procs",
         "_monitor_active",
@@ -148,7 +150,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         self.compiler = Compiler()
         self.interpreter: Interpreter | None = None
         self.delta_limit = delta_limit
-        self.display_output: list[str] = []
+        self.display_output: DisplayLog = DisplayLog()  # severity events: sim/severity.py
 
         # Process categories (populated during elaborate)
         self._continuous_procs: list[CompiledProcess] = []
@@ -175,6 +177,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # Optional callback fired after each time step completes
         self._on_time_step: Callable[[VMScheduler], None] | None = None
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
+        # A process ran $finish this time step (see _run_process_list).
+        self._finish_requested = False
 
         # $monitor state: (program, sensitivity_sigs) or None
         # The program is a mini-bytecoded program that produces one display line.
@@ -483,6 +487,11 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         """
         if self._ref_ctx is None:
             return
+        # $time in reference-executed code (initial blocks, timing
+        # coroutines) reads the context's time; it used to stay 0.
+        self._ref_ctx.time = self.time
+        if self._ref_executor is not None:
+            self._ref_executor.time = self.time
         sig_map = self.compiler.signal_map
         sig_width = self.compiler.sig_width
         ref_sigs = self._ref_ctx._signals
@@ -914,6 +923,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             # captures the final blocking-assignment state before $finish).
             self._fire_time_step_callback()
 
+            if self._finish_requested:
+                self._event_queue.clear()
+                stopped = True
             if stopped:
                 break
 
@@ -1010,6 +1022,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # captures the final blocking-assignment state before $finish).
         self._fire_time_step_callback()
 
+        if self._finish_requested:
+            self._event_queue.clear()
+            stopped = True
         return not stopped
 
     def _fire_time_step_callback(self) -> None:
@@ -1284,7 +1299,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if self._cy_ctx is not None:
             indices = [self._proc_idx[id(p)] for p in self._continuous_procs]
             try:
-                _nba, dirty_set = self._cy_ctx.execute_procs(indices)
+                _nba, dirty_set, _fin = self._cy_ctx.execute_procs(indices)
             except _CyStop:
                 self._drain_cy_display()
                 return
@@ -1293,7 +1308,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         elif self._use_cython:
             programs = [p.program for p in self._continuous_procs]
             try:
-                nba_list, dirty_set = cy_execute_batch(
+                nba_list, dirty_set, _fin = cy_execute_batch(
                     programs,
                     self.compiler.sig_val,
                     self.compiler.sig_mask,
@@ -1355,7 +1370,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if self._cy_ctx is not None:
             indices = [self._proc_idx[id(p)] for p in procs_to_run]
             try:
-                _nba, new_dirty = self._cy_ctx.execute_procs(indices)
+                _nba, new_dirty, _fin = self._cy_ctx.execute_procs(indices)
             except _CyStop:
                 self._drain_cy_display()
                 return
@@ -1364,7 +1379,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         elif self._use_cython:
             programs = [p.program for p in procs_to_run]
             try:
-                nba_list, new_dirty = cy_execute_batch(
+                nba_list, new_dirty, _fin = cy_execute_batch(
                     programs,
                     self.compiler.sig_val,
                     self.compiler.sig_mask,
@@ -1388,37 +1403,34 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                     pass
 
     def _run_process_list(self, procs: list[CompiledProcess]) -> None:
-        """Execute a list of compiled processes."""
+        """Execute a list of compiled processes. A ``$finish`` in one of them
+        sets ``_finish_requested``: the rest still run, the time step
+        completes, and the simulation then stops -- as in Icarus."""
         interp = self.interpreter
         interp.dirty.clear()
 
         if self._cy_ctx is not None:
             indices = [self._proc_idx[id(p)] for p in procs]
-            try:
-                _nba, dirty_set = self._cy_ctx.execute_procs(indices)
-            except _CyStop:
-                self._drain_cy_display()
-                self._event_queue.clear()
-                raise StopSimulation() from None
+            _nba, dirty_set, finished = self._cy_ctx.execute_procs(indices)
             self._drain_cy_display()
             interp.dirty.update(dirty_set)
+            if finished:
+                self._finish_requested = True
         elif self._use_cython:
             programs = [p.program for p in procs]
-            try:
-                nba_list, dirty_set = cy_execute_batch(
-                    programs,
-                    self.compiler.sig_val,
-                    self.compiler.sig_mask,
-                    self.compiler.sig_width,
-                    self._const_c_val,
-                    self._const_c_mask,
-                    self._const_c_width,
-                    self.time,
-                )
-            except _CyStop:
-                self._event_queue.clear()
-                raise StopSimulation() from None
+            nba_list, dirty_set, finished = cy_execute_batch(
+                programs,
+                self.compiler.sig_val,
+                self.compiler.sig_mask,
+                self.compiler.sig_width,
+                self._const_c_val,
+                self._const_c_mask,
+                self._const_c_width,
+                self.time,
+            )
             interp.dirty.update(dirty_set)
+            if finished:
+                self._finish_requested = True
             for sid, val, mask in nba_list:
                 interp.nba_queue.append((sid, Value(val, width=self.compiler.sig_width[sid], mask=mask)))
         else:
@@ -1426,10 +1438,9 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 try:
                     interp.execute(proc.program)
                 except StopSimulation:
-                    self.display_output.extend(interp.display_output)
-                    interp.display_output.clear()
-                    self._event_queue.clear()
-                    raise
+                    # $finish stops this process only; the time step completes
+                    # and the event loop then stops (see _finish_requested).
+                    self._finish_requested = True
 
             # Collect display output
             self.display_output.extend(interp.display_output)

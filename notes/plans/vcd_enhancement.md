@@ -245,13 +245,16 @@ control, captures).
   signals' activity. Triggers fire on a false -> true transition of the
   condition (x = false); expressions are parsed with the normal parser
   and evaluated by the reference `ExpressionEvaluator`.
-- **Not done**: HDL `$error`/`$fatal` as failure triggers. The engines
-  don't agree on these tasks today (reference executor ignores `$fatal`;
-  compiled treats it like `$finish`; vm prints `$error` like `$display`),
-  so this needs a uniform "simulation error" event first. Failure capture
-  covers Python exceptions from `run`/`run_step`/`batch_run`/
-  `run_cycles`/`settle` and exceptions leaving the session's `with`
-  block.
+- **HDL `$error`/`$fatal` (done 2026-10-08, follow-up)**: the engines now
+  agree on the severity tasks (`sim/severity.py`): each lowers `$info`/
+  `$warning`/`$error`/`$fatal` to a marked `$display` (plus `$finish` for
+  `$fatal`); the scheduler's `display_output` (`DisplayLog`) prints
+  `ERROR: file:line: message` (Icarus's first line) and records
+  `(time, severity, message)` events -- `Simulator.severity_events`.
+  Capture sessions queue `$error` (`on_error`: start a capture) and
+  `$fatal` (`on_failure`: window up to it) and act on them in time order
+  from the change stream, so the window is exact in `run()` and inside
+  `batch_run` alike.
 
 Found and fixed along the way:
 
@@ -261,6 +264,18 @@ Found and fixed along the way:
 - Compiled `$time`/`$realtime`/`$stime` in expressions evaluated to 0
   (unsupported functions silently become 0), and `batch_run` never
   updated `sim_time`, so `$time`/`%t` inside a batch was stale.
+- `$finish` semantics differed on every engine. Now as in Icarus: the
+  calling process stops at once, the rest of the time step completes
+  (other triggered processes, NBAs, settling), then the simulation ends.
+  Before: reference skipped the step's later processes; vm raised
+  `StopSimulation` out of `run()`; vm-fast dropped the step's NBAs and
+  later processes; compiled also kept running the finishing process.
+  Compiled `batch_run` now counts a `$finish`-interrupted cycle as not
+  completed and leaves time at that edge, like vm-fast.
+- `$time` in reference-executed code (timed initial blocks) was 0 on
+  vm/vm-fast/compiled; `%t` printed 0 (reference) or the current time
+  without consuming its argument on every engine (later arguments
+  shifted). Now `%t` formats its argument, 20 columns by default.
 - Known, not fixed: `$countones`, `$onehot`, `$onehot0`, `$isunknown`,
   `$size`, `$high`, `$low` are unimplemented on every engine (reference:
   x; compiled: silently 0).

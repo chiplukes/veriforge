@@ -43,6 +43,7 @@ from veriforge.model.statements import (
     WaitStatement,
     WhileLoop,
 )
+from veriforge.sim.severity import severity_display
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _PROCESS_LOOP_LIMIT,
@@ -117,7 +118,7 @@ class _StmtEmittersMixin:
             return self._emit_for(stmt, indent, context=context)
 
         if stype is SystemTaskCall:
-            return self._emit_system_task(stmt, indent)
+            return self._emit_system_task(stmt, indent, context=context)
 
         if stype is WhileLoop:
             return self._emit_while(stmt, indent, context=context)
@@ -3010,16 +3011,24 @@ class _StmtEmittersMixin:
 
     # ΓöÇΓöÇ System task codegen ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-    def _emit_system_task(self, stmt: SystemTaskCall, indent: int) -> list[str]:
-        """Emit code for $write, $display, $fflush, $finish, $stop."""
+    def _emit_system_task(self, stmt: SystemTaskCall, indent: int, *, context: str = "process") -> list[str]:
+        """Emit code for $write, $display, $fflush, $finish, $stop, and the
+        severity tasks ($info/$warning/$error/$fatal, see sim/severity.py)."""
         pad = "    " * indent
+        severity = severity_display(stmt)
+        if severity is not None:
+            display, fatal = severity
+            lines = self._emit_system_task(display, indent, context=context)
+            if fatal:
+                lines.extend(self._emit_finish_lines(pad, "$fatal", context))
+            return lines
         name = stmt.task_name.lower()
 
         if name == "$fflush":
             return [f"{pad}pass  # $fflush (no-op in compiled)"]
 
         if name in ("$finish", "$stop"):
-            return [f"{pad}c.finished = 1  # {name}"]
+            return self._emit_finish_lines(pad, name, context)
 
         if name in ("$display", "$write"):
             lines: list[str] = []
@@ -3046,6 +3055,16 @@ class _StmtEmittersMixin:
 
         # Unknown system tasks ΓÇö skip silently
         return [f"{pad}pass  # {stmt.task_name} skipped"]
+
+    @staticmethod
+    def _emit_finish_lines(pad: str, name: str, context: str) -> list[str]:
+        """``$finish``/``$stop``/``$fatal``: flag the end of the simulation and
+        stop the calling process here (the rest of the time step still runs,
+        see ``delta_loop``). Statements after it in the process used to run."""
+        lines = [f"{pad}c.finished = 1  # {name}"]
+        if context == "process":
+            lines.append(f"{pad}return")
+        return lines
 
     def _emit_format_string(self, fmt: str, args: list, indent: int) -> list[str]:
         """Parse a Verilog format string and emit _out_* calls."""
@@ -3126,8 +3145,20 @@ class _StmtEmittersMixin:
                     lines.extend(self._emit_string_output(args[arg_idx], indent))
                     arg_idx += 1
                 elif spec == "t":
-                    # %t ΓÇö simulation time
-                    lines.append(f"{pad}_out_int_dec(c, c.sim_time)")
+                    # %t: the next argument (normally $time) as a time, 20
+                    # columns unless a width is given (see the reference
+                    # executor's _format_display).
+                    if arg_idx < len(args):
+                        w = self._expr_width(args[arg_idx])
+                        time_code = self._emit_expr(args[arg_idx], w)
+                        arg_idx += 1
+                    else:
+                        time_code = "c.sim_time"
+                    t_width = width if (width or zero_pad) else 20
+                    if t_width:
+                        lines.append(f"{pad}_out_int_dec_w(c, {time_code}, {t_width}, 0)")
+                    else:
+                        lines.append(f"{pad}_out_int_dec(c, {time_code})")
                 else:
                     # Unknown spec ΓÇö output the '%' and the spec char
                     lines.append(f"{pad}_out_char(c, 37)  # '%'")

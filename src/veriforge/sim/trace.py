@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .elaborate import is_synthesized_local_name
+from .severity import DisplayLog
 from .value import Value
 from .vcd import VcdWriter, _VcdSignal
 
@@ -650,8 +651,9 @@ class CaptureSession(_TraceSink):
     Triggers: a condition (*trigger*: a ``TriggerExpr`` string, or a
     callable ``f(time, values) -> bool`` over a dict of the traced and
     *watch* signals' ``Value``s, called at each step where one of them
-    changed), ``trigger()`` from testbench code, and -- with *on_failure* --
-    an exception from ``run()``/``run_step()``/``batch_run()``/
+    changed), ``trigger()`` from testbench code, an HDL ``$error`` (with
+    *on_error*), and -- with *on_failure* -- an HDL ``$fatal`` or an
+    exception from ``run()``/``run_step()``/``batch_run()``/
     ``run_cycles()``/``settle()`` or leaving a ``with`` block. A failure
     writes the window up to the failure time and closes it (no post).
 
@@ -673,10 +675,12 @@ class CaptureSession(_TraceSink):
         watch: Iterable[str] = (),
         max_captures: int = 1,
         on_failure: bool = True,
+        on_error: bool = True,
         timescale: str = "1ns",
         root_scope: str = "top",
     ) -> None:
         self._sched = sched
+        self._on_error = on_error
         self._pattern = str(path)
         self._timescale = timescale
         self._root = root_scope
@@ -713,8 +717,12 @@ class CaptureSession(_TraceSink):
         self._cond = self._eval_at(sched.time, {}) if (self._expr or self._fn) else False
         self._closed = False
         self._failed: BaseException | None = None
+        self._pending: list[tuple[int, str, str]] = []  # queued $error/$fatal events
         self._hub = hub
         hub.subscribe(self, self._names)
+        log = getattr(sched, "display_output", None)
+        if isinstance(log, DisplayLog):
+            log.listeners.append(self._on_severity)
 
     # -- trigger evaluation ---------------------------------------------
 
@@ -724,6 +732,8 @@ class CaptureSession(_TraceSink):
     # -- change stream ----------------------------------------------------
 
     def on_changes(self, time: int, changes: list[tuple[int, int, int]]) -> None:
+        if self._pending:
+            self._take_pending(time, fatal_at_upto=False)
         if self._capture_end is not None and time > self._capture_end:
             self._finish_capture()
         cur = self._cur
@@ -739,6 +749,8 @@ class CaptureSession(_TraceSink):
             vcd_changes = [(sigs[k], v, m) for k, v, m in changes if k < self._n_vcd]
             if vcd_changes:
                 self._writer.write_changes(time, vcd_changes)
+        if self._pending:
+            self._take_pending(time)
         if self._expr is not None or self._fn is not None:
             cond = self._eval_at(time, old)
             fired = cond and not self._cond
@@ -771,8 +783,9 @@ class CaptureSession(_TraceSink):
 
     # -- captures -----------------------------------------------------------
 
-    def _start_capture(self, time: int, reason: str) -> None:
+    def _start_capture(self, time: int, reason: str, *, post: int | None = None) -> None:
         start = max(time - self._pre, self._attach_time)
+        end = time + (self._post if post is None else post)
         # Values at `start`: undo every buffered change after it.
         state = list(self._cur)
         for t, k, ov, om, _nv, _nm in reversed(self._ring):
@@ -794,6 +807,10 @@ class CaptureSession(_TraceSink):
         for t, k, _ov, _om, nv, nm in self._ring:
             if t <= start:
                 continue
+            if t > end:
+                # Already-delivered changes past the window (a severity
+                # event reported after batch_run's records, see _on_severity).
+                break
             if t != block_t and block:
                 writer.write_changes(block_t, block)
                 block = []
@@ -804,18 +821,21 @@ class CaptureSession(_TraceSink):
         self._writer = writer
         self.files.append(path)
         self.triggers.append((time, reason))
-        self._capture_end = time + self._post
+        self._capture_end = end
 
     def _finish_capture(self) -> None:
         if self._writer is not None:
             self._writer.finalize()
         self._writer = None
         self._capture_end = None
-        self._ring.clear()
+        # Keep the buffer (trimmed to `pre` as time advances): a re-armed
+        # trigger soon after still gets its pre-window.
 
     def _sync(self) -> int:
         now = self._sched.time
         self._hub.dispatch(now, self._hub._poll())
+        if self._pending:
+            self._take_pending(now)
         return now
 
     def trigger(self, reason: str = "manual trigger") -> None:
@@ -834,13 +854,44 @@ class CaptureSession(_TraceSink):
             now = self._sync()
         except Exception:  # noqa: BLE001 -- the simulation is already failing
             now = self._sched.time
+        self._fail_at(now, f"failure: {type(exc).__name__}: {exc}")
+
+    def _fail_at(self, time: int, reason: str) -> None:
         if self._writer is None:
             if len(self.files) >= self._max:
                 return
-            self._start_capture(now, f"failure: {type(exc).__name__}: {exc}")
+            self._start_capture(time, reason, post=0)
         else:
-            self._writer.write_comment(f"failure at {now}: {type(exc).__name__}: {exc}")
+            self._writer.write_comment(f"{reason} at {time}")
         self._finish_capture()
+
+    def _on_severity(self, time: int, severity: str, message: str) -> None:
+        """Queue a ``$error`` (with *on_error*: starts a capture) or
+        ``$fatal`` (with *on_failure*: writes the window up to it). Events
+        arrive while the engine drains display output, which can be before
+        or after the changes around them reach this session; they take
+        effect in time order from the change stream (``_take_pending``), so
+        the buffer holds exactly the history up to the event."""
+        if (severity == "FATAL" and self._on_failure) or (severity == "ERROR" and self._on_error):
+            self._pending.append((time, severity, message))
+
+    def _take_pending(self, upto: int, *, fatal_at_upto: bool = True) -> None:
+        """Act on queued severity events at or before *upto*. With
+        *fatal_at_upto* False (called before the changes at *upto* are
+        applied) a ``$fatal`` exactly at *upto* waits, so its window includes
+        the state at the failure; a ``$error`` there starts its capture
+        before them (they are then written live)."""
+        while self._pending:
+            t, severity, message = self._pending[0]
+            if t > upto or (t == upto and severity == "FATAL" and not fatal_at_upto):
+                break
+            self._pending.pop(0)
+            if self._capture_end is not None and t > self._capture_end:
+                self._finish_capture()
+            if severity == "FATAL":
+                self._fail_at(t, f"$fatal: {message}")
+            elif self._writer is None and len(self.files) < self._max:
+                self._start_capture(t, f"$error: {message}")
 
     def close(self) -> None:
         if self._closed:
@@ -848,6 +899,9 @@ class CaptureSession(_TraceSink):
         self._sync()
         self._finish_capture()
         self._hub.unsubscribe(self)
+        log = getattr(self._sched, "display_output", None)
+        if isinstance(log, DisplayLog) and self._on_severity in log.listeners:
+            log.listeners.remove(self._on_severity)
         self._closed = True
 
     def __enter__(self) -> CaptureSession:
@@ -869,6 +923,7 @@ def attach_capture(  # noqa: PLR0913
     watch: Iterable[str] = (),
     max_captures: int = 1,
     on_failure: bool = True,
+    on_error: bool = True,
     timescale: str = "1ns",
     signal_names: Iterable[str] | None = None,
     scopes: Iterable[str] | None = None,
@@ -895,6 +950,7 @@ def attach_capture(  # noqa: PLR0913
         watch=watch,
         max_captures=max_captures,
         on_failure=on_failure,
+        on_error=on_error,
         timescale=timescale,
         root_scope=getattr(sim._module, "name", "top"),
     )
