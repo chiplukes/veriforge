@@ -23,7 +23,7 @@ _vt*
 *.vcd
 src/veriforge/sim/vm/_interp_fast.c
 src/veriforge/sim/vm/_interp_fast.cpp
-.cycache/
+.cycache*/
 .pcache/
 .pcache*/
 examples/**/generated_*_compiled.pyx

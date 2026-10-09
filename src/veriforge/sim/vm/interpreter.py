@@ -13,6 +13,7 @@ Design for speed:
 
 from __future__ import annotations
 
+from ..display_format import SIGNED_FLAG, format_value
 from ..value import Value, _mask_for_width, _verilog_pow
 from .opcodes import Op
 
@@ -38,14 +39,9 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
         Formatted string.
     """
     if fmt_id == 0 or fmt_id > len(display_formats):
-        # No format string: just join values with spaces
-        parts: list[str] = []
-        for v in args:
-            if v.is_defined:
-                parts.append(str(int(v)))
-            else:
-                parts.append(str(v))
-        return " ".join(parts)
+        # No format string (not reached for a lowered call: see
+        # sim/display_format.py).
+        return "".join(format_value(v, "d", 0, False, False) for v in args)
 
     fmt = display_formats[fmt_id - 1]
     result: list[str] = []
@@ -57,6 +53,11 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
             i += 1
             if i >= len(fmt):
                 break
+            signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
+            if signed:
+                i += 1
+                if i >= len(fmt):
+                    break
             # Parse optional zero-pad flag and width
             zero_pad = False
             if fmt[i] == "0":
@@ -94,31 +95,8 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
             if arg_idx < len(args):
                 v = args[arg_idx]
                 arg_idx += 1
-                fill = "0" if zero_pad else " "
-                if spec == "d":
-                    if v.is_defined:
-                        s = str(int(v))
-                        result.append(s.rjust(width, fill) if width else s)
-                    else:
-                        result.append("x")
-                elif spec in ("h", "x"):
-                    if v.is_defined:
-                        s = format(int(v), "x")
-                        result.append(s.rjust(width, fill) if width else s)
-                    else:
-                        result.append("x")
-                elif spec == "b":
-                    if v.is_defined:
-                        s = format(int(v), "b")
-                        result.append(s.rjust(width, fill) if width else s)
-                    else:
-                        result.append("x")
-                elif spec == "o":
-                    if v.is_defined:
-                        s = format(int(v), "o")
-                        result.append(s.rjust(width, fill) if width else s)
-                    else:
-                        result.append("x")
+                if spec in "dhxob":
+                    result.append(format_value(v, spec, width, zero_pad, signed))
                 elif spec == "c":
                     if v.is_defined:
                         result.append(chr(int(v) & 0xFF))

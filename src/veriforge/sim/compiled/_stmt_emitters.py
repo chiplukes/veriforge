@@ -43,6 +43,7 @@ from veriforge.model.statements import (
     WaitStatement,
     WhileLoop,
 )
+from veriforge.sim.display_format import SIGNED_FLAG
 from veriforge.sim.severity import severity_display
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
@@ -3046,9 +3047,8 @@ class _StmtEmittersMixin:
                         ):
                             lines.extend(self._emit_string_output(arg, indent))
                         else:
-                            w = self._expr_width(arg)
-                            expr_code = self._emit_expr(arg, w)
-                            lines.append(f"{pad}_out_int_dec(c, {expr_code})")
+                            # (Not reached for a lowered call: see sim/display_format.py.)
+                            lines.extend(self._emit_format_arg(arg, "d", 0, False, False, indent))
             if name == "$display":
                 lines.append(f"{pad}_out_newline(c)")
             return lines
@@ -3092,6 +3092,9 @@ class _StmtEmittersMixin:
                     i += 2
             elif ch == "%" and i + 1 < len(fmt):
                 i += 1
+                signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
+                if signed:
+                    i += 1
                 # Parse optional '0' (zero-pad flag) and width
                 zero_pad = False
                 if i < len(fmt) and fmt[i] == "0":
@@ -3112,34 +3115,8 @@ class _StmtEmittersMixin:
                     expr_code = self._emit_expr(args[arg_idx], w)
                     lines.append(f"{pad}_out_char(c, <char>({expr_code} & 0xff))")
                     arg_idx += 1
-                elif spec == "d" and arg_idx < len(args):
-                    w = self._expr_width(args[arg_idx])
-                    expr_code = self._emit_expr(args[arg_idx], w)
-                    if width:
-                        lines.append(f"{pad}_out_int_dec_w(c, {expr_code}, {width}, {1 if zero_pad else 0})")
-                    else:
-                        lines.append(f"{pad}_out_int_dec(c, {expr_code})")
-                    arg_idx += 1
-                elif spec in ("h", "x") and arg_idx < len(args):
-                    w = self._expr_width(args[arg_idx])
-                    expr_code = self._emit_expr(args[arg_idx], w)
-                    if width:
-                        lines.append(f"{pad}_out_int_hex_w(c, {expr_code}, {width}, {1 if zero_pad else 0})")
-                    else:
-                        lines.append(f"{pad}_out_int_hex(c, {expr_code})")
-                    arg_idx += 1
-                elif spec == "o" and arg_idx < len(args):
-                    w = self._expr_width(args[arg_idx])
-                    expr_code = self._emit_expr(args[arg_idx], w)
-                    if width:
-                        lines.append(f"{pad}_out_int_oct_w(c, {expr_code}, {width}, {1 if zero_pad else 0})")
-                    else:
-                        lines.append(f"{pad}_out_int_oct(c, {expr_code})")
-                    arg_idx += 1
-                elif spec == "b" and arg_idx < len(args):
-                    w = self._expr_width(args[arg_idx])
-                    expr_code = self._emit_expr(args[arg_idx], w)
-                    lines.append(f"{pad}_out_int_bin(c, {expr_code}, {w})")
+                elif spec in "dhxob" and arg_idx < len(args):
+                    lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, signed, indent))
                     arg_idx += 1
                 elif spec == "s" and arg_idx < len(args):
                     lines.extend(self._emit_string_output(args[arg_idx], indent))
@@ -3168,6 +3145,48 @@ class _StmtEmittersMixin:
                 i += 1
 
         return lines
+
+    def _emit_format_arg(  # noqa: PLR0913
+        self,
+        arg: Expression,
+        spec: str,
+        width: int,
+        zero_pad: bool,
+        signed: bool,
+        indent: int,  # noqa: FBT001
+    ) -> list[str]:
+        """``%d``/``%h``/``%x``/``%o``/``%b`` of one argument via ``_out_fmt``
+        (value and x mask; a wide argument through scratch). Before this the
+        mask was ignored and a wide argument printed its low 64 bits."""
+        pad = "    " * indent
+        w = max(self._expr_width(arg), 1)
+        tail = f"{w}, {ord(spec if spec != 'x' else 'h')}, {width}, {1 if zero_pad else 0}, {1 if signed else 0})"
+        if w <= _WORD_BITS:
+            val = self._emit_expr(arg, w)
+            mask = self._emit_mask_expr(arg, w)
+            return [f"{pad}_out_fmt1(c, <unsigned long long>({val}), <unsigned long long>({mask}), {tail}"]
+        n_words = max((w + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words())
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+        # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
+        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        scratch_lines = self._emit_wide_expr_to_scratch(arg, slot, n_words, w, indent)
+        et_pending = self._et_pending
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._reset_scratch()
+        if scratch_lines is None:
+            raise NotImplementedError(
+                f"Compiled engine: a {w}-bit $display argument has an expression shape not yet supported "
+                f"wider than {_WORD_BITS} bits. Use engine='vm' or engine='reference' for this design."
+            )
+        self._needs_wide_helpers = True
+        return [
+            *(f"{pad}{t}" for t in et_pending),
+            *scratch_lines,
+            f"{pad}_out_fmt(c, <const unsigned long long *>_sc{slot}_v, <const unsigned long long *>_sc{slot}_m, {tail}",
+        ]
 
     def _emit_string_output(self, arg: Expression, indent: int) -> list[str]:
         """Emit code to output an expression as a string (%s).

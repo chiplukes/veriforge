@@ -52,6 +52,7 @@ from .evaluator import (
     _resolve_struct_write_target,
     _write_whole_memory,
 )
+from .display_format import SIGNED_FLAG, format_value
 from .severity import severity_display
 from .value import Value
 
@@ -1299,14 +1300,8 @@ class StatementExecutor:  # cm:c2f9a1
             return self._apply_format(fmt, data_args)
 
         # No format string: evaluate all arguments and join with spaces
-        parts: list[str] = []
-        for arg in task.arguments:
-            val = self.evaluator.eval(arg, ctx)
-            if val.is_defined:
-                parts.append(str(int(val)))
-            else:
-                parts.append(str(val))
-        return " ".join(parts)
+        # (Not reached for a lowered call: see sim/display_format.py.)
+        return "".join(format_value(self.evaluator.eval(a, ctx), "d", 0, False, False) for a in task.arguments)
 
     def _apply_format(self, fmt: str, args: list) -> str:  # noqa: PLR0912
         """Apply a Verilog format string to a list of Value arguments."""
@@ -1319,6 +1314,11 @@ class StatementExecutor:  # cm:c2f9a1
                 i += 1
                 if i >= len(fmt):
                     break
+                signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
+                if signed:
+                    i += 1
+                    if i >= len(fmt):
+                        break
                 # Parse optional zero-pad flag and width
                 zero_pad = False
                 if fmt[i] == "0":
@@ -1357,19 +1357,8 @@ class StatementExecutor:  # cm:c2f9a1
                 if arg_idx < len(args):
                     v = args[arg_idx]
                     arg_idx += 1
-                    fill = "0" if zero_pad else " "
-                    if spec == "d":
-                        s = str(int(v)) if v.is_defined else "x"
-                        result.append(s.rjust(width, fill) if width else s)
-                    elif spec in ("h", "x"):
-                        s = format(int(v), "x") if v.is_defined else "x"
-                        result.append(s.rjust(width, fill) if width else s)
-                    elif spec == "b":
-                        s = format(int(v), "b") if v.is_defined else "x"
-                        result.append(s.rjust(width, fill) if width else s)
-                    elif spec == "o":
-                        s = format(int(v), "o") if v.is_defined else "x"
-                        result.append(s.rjust(width, fill) if width else s)
+                    if spec in "dhxob":
+                        result.append(format_value(v, spec, width, zero_pad, signed))
                     elif spec == "c":
                         result.append(chr(int(v) & 0xFF) if v.is_defined else "?")
                     elif spec == "s":

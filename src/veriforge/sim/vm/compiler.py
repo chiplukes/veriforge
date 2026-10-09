@@ -56,6 +56,7 @@ from veriforge.model.statements import (
 )
 
 from ...semantics import const_int as _const_int
+from ..evaluator import evaluate_constant
 from ..severity import severity_display
 from ...semantics import range_width as _range_width
 from ...semantics import var_width as _var_width
@@ -530,7 +531,8 @@ class Compiler:  # cm:8c1e4a
                         return Value((left.val - right.val) & mask, width=width)
         except Exception:
             pass
-        return None
+        # Anything else (e.g. a concatenation): the reference evaluator.
+        return evaluate_constant(expr, width, self._param_env)
 
     def _apply_initial_value(self, sid: int, init_expr, width: int) -> None:
         """Apply an initial_value expression to a registered signal."""
@@ -563,6 +565,7 @@ class Compiler:  # cm:8c1e4a
         from veriforge.model.ports import PortDirection  # noqa: PLC0415
 
         param_env = _build_param_env(module)
+        self._param_env = param_env  # initializers may use parameters
 
         for net in module.nets:
             senv = _scoped_env(net.name, param_env)

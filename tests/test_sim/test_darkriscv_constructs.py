@@ -118,7 +118,8 @@ class TestDisplayFormatStrings:
 
     @pytest.mark.parametrize("engine", ENGINES)
     def test_display_format_decimal(self, engine):
-        """$display("val=%d", sig) with sig=42 -> 'val=42'."""
+        """$display("val=%d", sig) with 8-bit sig=42 -> 'val= 42' (padded to
+        3 columns, the widest 8-bit decimal, as Icarus does)."""
         mod = Module(
             "display_test",
             variables=[Variable("val", VariableKind.REG, width=_w(8), initial_value=Literal(42, width=8))],
@@ -131,7 +132,7 @@ class TestDisplayFormatStrings:
         sim = Simulator(mod, engine=engine)
         sim.run(max_time=0)
         assert len(sim.display_output) == 1
-        assert sim.display_output[0] == "val=42"
+        assert sim.display_output[0] == "val= 42"
 
     @pytest.mark.parametrize("engine", ENGINES)
     def test_display_format_hex(self, engine):
@@ -152,7 +153,8 @@ class TestDisplayFormatStrings:
 
     @pytest.mark.parametrize("engine", ENGINES)
     def test_display_format_binary(self, engine):
-        """$display("bits=%b", sig) with sig=5 -> 'bits=101'."""
+        """$display("bits=%b", sig) with 8-bit sig=5 -> 'bits=00000101'
+        (every digit of the width, as Icarus does)."""
         mod = Module(
             "display_test",
             variables=[Variable("bits", VariableKind.REG, width=_w(8), initial_value=Literal(5, width=8))],
@@ -165,7 +167,7 @@ class TestDisplayFormatStrings:
         sim = Simulator(mod, engine=engine)
         sim.run(max_time=0)
         assert len(sim.display_output) == 1
-        assert sim.display_output[0] == "bits=101"
+        assert sim.display_output[0] == "bits=00000101"
 
     @pytest.mark.parametrize("engine", ENGINES)
     def test_display_format_zero_pad(self, engine):
@@ -202,7 +204,7 @@ class TestDisplayFormatStrings:
         sim = Simulator(mod, engine=engine)
         sim.run(max_time=0)
         assert len(sim.display_output) == 1
-        assert sim.display_output[0] == "a=10 b=ff"
+        assert sim.display_output[0] == "a= 10 b=ff"
 
     @pytest.mark.parametrize("engine", ENGINES)
     def test_display_format_width_hex(self, engine):

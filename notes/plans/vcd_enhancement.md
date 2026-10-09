@@ -276,9 +276,23 @@ Found and fixed along the way:
   vm/vm-fast/compiled; `%t` printed 0 (reference) or the current time
   without consuming its argument on every engine (later arguments
   shifted). Now `%t` formats its argument, 20 columns by default.
-- Known, not fixed: `$countones`, `$onehot`, `$onehot0`, `$isunknown`,
-  `$size`, `$high`, `$low` are unimplemented on every engine (reference:
-  x; compiled: silently 0).
+- `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$size`, `$high`,
+  `$low`, `$left`, `$right` were unimplemented on every engine (reference:
+  x; compiled: silently 0). Now lowered before any engine
+  (`sim/sv_functions.py`): range queries fold from the declarations, the
+  bit functions become `x[i] === 1'b1` sums / `(^e) === 1'bx`. Found on
+  the way: compiled `===`/`!==` gave x (or a constant) for x operands;
+  vm/vm-fast/compiled dropped non-trivial declaration initializers
+  (`reg [99:0] w = {...}`; compiled also `-8'sd5`), and reference
+  evaluated them self-determined (`reg [7:0] r = -3'b001` -> 07) before
+  its parameters were registered.
+- `$display` formatting now follows Icarus on every engine
+  (`sim/display_format.py`): full-width `%h`/`%b`/`%o` with per-digit
+  x/X, `%d` padded to the width's widest decimal, signed `%d`, leftover
+  arguments as `%d`. Before: any x made the whole value `x`, nothing was
+  padded, signed printed unsigned, leftover arguments were dropped;
+  compiled ignored x and truncated wide values to 64 bits, vm-fast
+  printed wide values as 0. z still prints as x (one 4-state encoding).
 - Known engine difference: a value driven from Python *between* `run()`
   calls is reported by vm/compiled at the current time and by reference
   at its next time step (only the VCD timestamp differs).

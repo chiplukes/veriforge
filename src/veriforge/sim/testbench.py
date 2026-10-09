@@ -23,6 +23,8 @@ from .elaborate import (
     _resolve_typedef_widths,
 )
 from .scheduler import Scheduler
+from .display_format import lower_display_args
+from .sv_functions import lower_sv_functions
 from .value import Value
 
 if TYPE_CHECKING:
@@ -188,6 +190,8 @@ class Simulator:  # cm:a5c8f4
         _resolve_typedef_widths(module)
         materialize_process_locals(module)
         expand_array_concat_operands(module)
+        lower_sv_functions(module)
+        lower_display_args(module)
         check_signed_declarations(module)
         check_input_port_init(module, design)
 

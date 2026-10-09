@@ -53,6 +53,7 @@ from veriforge.model.statements import (
     WaitStatement,
     WhileLoop,
 )
+from veriforge.sim.evaluator import evaluate_constant
 from veriforge.sim.compiled._codegen_utils import delta_engine_mode  # noqa: F401 -- re-exported for compiled_scheduler
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
@@ -2047,8 +2048,9 @@ class CythonCodegen(
                 # them as 32-bit, so -1 → 0xFFFFFFFF, then truncated to the
                 # target width. We can evaluate that statically.
                 # For SIZED literals (width != None), the self-determined width
-                # differs from the context (e.g. -3'b001 = 3'b111 = 7, not
-                # 0xFF in an 8-bit context), so we defer to runtime.
+                # differs from the context, so those go to the reference
+                # evaluator below (deferring them to runtime used to leave
+                # e.g. `reg signed [7:0] s = -8'sd5;` x).
                 if (
                     expr.op in ("-", "~")
                     and isinstance(expr.operand, Literal)
@@ -2063,7 +2065,6 @@ class CythonCodegen(
                     else:
                         result = (~inner) & 0xFFFFFFFF
                     return (result & wmask, 0)
-                return None
             if isinstance(expr, BinaryOp):
                 left = self._eval_initial_value(expr.left, width)
                 right = self._eval_initial_value(expr.right, width)
@@ -2074,13 +2075,16 @@ class CythonCodegen(
                         return ((left[0] - right[0]) & wmask, 0)
         except Exception:
             pass
-        return None
+        # Anything else (e.g. a concatenation): the reference evaluator.
+        value = evaluate_constant(expr, width, self._param_env)
+        return (value.val, value.mask) if value is not None else None
 
     def _register_signals(self, module: Module) -> None:
         """Register all signals from the module (same order as VM compiler)."""
         from ..elaborate import _build_param_env  # noqa: PLC0415
 
         param_env = _build_param_env(module)
+        self._param_env = param_env  # initializers may use parameters
 
         for net in module.nets:
             senv = _scoped_env(net.name, param_env)

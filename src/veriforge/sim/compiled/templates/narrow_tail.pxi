@@ -168,6 +168,122 @@ cdef inline void _out_int_bin(SimCtx *c, long long v, int w) noexcept nogil:
         else:
             _out_char(c, 48)  # '0'
 
+# ``%d``/``%h``/``%x``/``%o``/``%b`` of a (val, mask) word array, with
+# Icarus's conventions -- the same rules as sim/display_format.py's
+# format_value (full-width digits, x/X digits, %d padded to the widest
+# decimal of the width, signed when *sgn*). Widths above 4096 bits print
+# their low 4096 bits.
+DEF _FMT_MAX_WORDS = 64
+
+cdef inline unsigned long long _fmt_bits(const unsigned long long *a, int shift, int n) noexcept nogil:
+    cdef int word = shift >> 6
+    cdef int off = shift & 63
+    cdef unsigned long long x = a[word] >> off
+    if off and off + n > 64:
+        x |= a[word + 1] << (64 - off)
+    if n < 64:
+        x &= (<unsigned long long>1 << n) - 1
+    return x
+
+cdef void _out_fmt(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
+                   int w, int spec, int fw, int zp, int sgn) noexcept nogil:
+    cdef char buf[4100]
+    cdef unsigned long long t[_FMT_MAX_WORDS]
+    cdef unsigned long long rem, cur, gm, gv, carry, full
+    cdef int n = 0, i, d, nw, bits, ndig, gw, natural, neg = 0, any_m = 0, all_m = 1
+    if w <= 0:
+        w = 1
+    if w > 64 * _FMT_MAX_WORDS:
+        w = 64 * _FMT_MAX_WORDS
+    nw = (w + 63) >> 6
+    for i in range(nw):
+        gw = w - i * 64
+        gm = m[i] if gw >= 64 else m[i] & ((<unsigned long long>1 << gw) - 1)
+        full = (<unsigned long long>0xFFFFFFFFFFFFFFFF) if gw >= 64 else ((<unsigned long long>1 << gw) - 1)
+        if gm:
+            any_m = 1
+        if gm != full:
+            all_m = 0
+    if spec == 100:  # 'd'
+        if any_m:
+            buf[0] = 120 if all_m else 88  # 'x' / 'X'
+            n = 1
+        else:
+            for i in range(nw):
+                t[i] = v[i]
+            if w & 63:
+                t[nw - 1] &= (<unsigned long long>1 << (w & 63)) - 1
+            if sgn and (t[(w - 1) >> 6] >> ((w - 1) & 63)) & 1:
+                neg = 1
+                carry = 1
+                for i in range(nw):
+                    cur = ~t[i]
+                    t[i] = cur + carry
+                    carry = 1 if (carry and t[i] == 0) else 0
+                if w & 63:
+                    t[nw - 1] &= (<unsigned long long>1 << (w & 63)) - 1
+            # Repeated division by 10, 32 bits at a time (digits come out reversed).
+            while True:
+                rem = 0
+                d = 0
+                for i in range(nw - 1, -1, -1):
+                    cur = (rem << 32) | (t[i] >> 32)
+                    gv = cur // 10
+                    rem = cur - gv * 10
+                    cur = (rem << 32) | (t[i] & <unsigned long long>0xFFFFFFFF)
+                    t[i] = (gv << 32) | (cur // 10)
+                    rem = cur - (cur // 10) * 10
+                    if t[i]:
+                        d = 1
+                buf[n] = <char>(48 + rem)
+                n += 1
+                if not d:
+                    break
+            if neg:
+                buf[n] = 45  # '-'
+                n += 1
+            # reverse in place
+            for i in range(n // 2):
+                buf[i], buf[n - 1 - i] = buf[n - 1 - i], buf[i]
+        if fw:
+            natural = fw
+        elif zp:
+            natural = 0
+        elif sgn:
+            natural = <int>((w - 1) * 0.30102999566398120) + 2
+        else:
+            natural = <int>(w * 0.30102999566398120) + 1
+        for i in range(natural - n):
+            _out_char(c, 48 if (zp and fw) else 32)
+        for i in range(n):
+            _out_char(c, buf[i])
+        return
+    bits = 1 if spec == 98 else (3 if spec == 111 else 4)  # 'b' / 'o' / hex
+    ndig = (w + bits - 1) // bits
+    for d in range(ndig - 1, -1, -1):
+        gw = w - d * bits
+        if gw > bits:
+            gw = bits
+        gm = _fmt_bits(m, d * bits, gw)
+        if gm:
+            buf[n] = 120 if gm == (<unsigned long long>1 << gw) - 1 else 88
+        else:
+            gv = _fmt_bits(v, d * bits, gw)
+            buf[n] = <char>(48 + gv if gv < 10 else 87 + gv)
+        n += 1
+    i = 0
+    if zp and not fw:
+        while i < n - 1 and buf[i] == 48:
+            i += 1
+    for d in range(fw - (n - i)):
+        _out_char(c, 48 if zp else 32)
+    for d in range(i, n):
+        _out_char(c, buf[d])
+
+cdef inline void _out_fmt1(SimCtx *c, unsigned long long v, unsigned long long m,
+                           int w, int spec, int fw, int zp, int sgn) noexcept nogil:
+    _out_fmt(c, &v, &m, w, spec, fw, zp, sgn)
+
 cdef inline void _out_int_dec_w(SimCtx *c, long long v, int w, int zp) noexcept nogil:
     cdef char buf[24]
     cdef int n, i, pad_len

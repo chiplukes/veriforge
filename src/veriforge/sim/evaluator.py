@@ -35,7 +35,7 @@ from .elaborate import match_assignment_pattern_layout
 from .value import Value, _verilog_pow, signed_literal_width
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Mapping
 
 
 class EvalContext:  # cm:1f4c6a
@@ -2045,3 +2045,17 @@ def _merge_xz(a: Value, b: Value) -> Value:
     new_mask = ~agree & wmask
     new_val = a.val & b.val & ~new_mask
     return Value(new_val, width=w, mask=new_mask)
+
+
+def evaluate_constant(expr: Expression, width: int, params: Mapping[str, object]) -> Value | None:
+    """Evaluate a declaration initializer (``reg [99:0] w = {4'ha, 96'h1};``)
+    at *width*, with integer parameters in scope; None if it can't be
+    evaluated. The vm/compiled engines' own initializer folding only knows a
+    few shapes (literals, unary/binary +/-) -- anything else, e.g. a
+    concatenation, used to be silently dropped, leaving the signal x."""
+    ctx = EvalContext({n: Value(v, width=32) for n, v in params.items() if isinstance(v, int)})
+    try:
+        value = ExpressionEvaluator().eval(expr, ctx, width=width)
+    except Exception:  # noqa: BLE001 -- not a constant expression
+        return None
+    return value if value.width == width else value.resize(width)

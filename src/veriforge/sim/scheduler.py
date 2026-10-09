@@ -306,6 +306,28 @@ class Scheduler:  # cm:9a7f2c
 
         param_env = _build_param_env(module)
 
+        # Register parameters as constant-valued signals -- first, since
+        # declaration initializers may use them (they used to read x).
+        for param in module.parameters:
+            if param.name not in self.ctx._signals and param.default_value is not None:
+                for p in module.parameters:
+                    val = param_env.get(p.name)
+                    if val is not None and p.name not in self.ctx._signals:
+                        if isinstance(val, str):
+                            # Byte-pack string parameters
+                            int_val = 0
+                            for ch in val:
+                                int_val = (int_val << 8) | ord(ch)
+                            width = parameter_signal_width(p, param_env, val)
+                            self.ctx.write_signal(p.name, Value(int_val, width=width))
+                        elif isinstance(val, int):
+                            width = parameter_signal_width(p, param_env, val)
+                            mask = (1 << width) - 1
+                            self.ctx.write_signal(p.name, Value(val & mask, width=width))
+                        if p.signed:
+                            self.ctx._signal_signed[p.name] = True
+                break
+
         # Initialize signal state
         for net in module.nets:
             senv = _scoped_env(net.name, param_env)
@@ -412,27 +434,6 @@ class Scheduler:  # cm:9a7f2c
             if port.signed:
                 self.ctx._signal_signed[port.name] = True
 
-        # Register parameters as constant-valued signals
-        for param in module.parameters:
-            if param.name not in self.ctx._signals and param.default_value is not None:
-                for p in module.parameters:
-                    val = param_env.get(p.name)
-                    if val is not None and p.name not in self.ctx._signals:
-                        if isinstance(val, str):
-                            # Byte-pack string parameters
-                            int_val = 0
-                            for ch in val:
-                                int_val = (int_val << 8) | ord(ch)
-                            width = parameter_signal_width(p, param_env, val)
-                            self.ctx.write_signal(p.name, Value(int_val, width=width))
-                        elif isinstance(val, int):
-                            width = parameter_signal_width(p, param_env, val)
-                            mask = (1 << width) - 1
-                            self.ctx.write_signal(p.name, Value(val & mask, width=width))
-                        if p.signed:
-                            self.ctx._signal_signed[p.name] = True
-                break
-
         # Register enum member constants from typedefs
         from .elaborate import _build_enum_env  # noqa: PLC0415
 
@@ -533,7 +534,11 @@ class Scheduler:  # cm:9a7f2c
         if init_expr is None:
             return Value.x(width)
         try:
-            v = self.evaluator.eval(init_expr, self.ctx)
+            # In the declaration's width context, like an assignment (it used
+            # to be self-determined: `reg [7:0] r = -3'b001;` gave 07, not ff).
+            v = self.evaluator.eval(init_expr, self.ctx, width=width)
+            if v.width < width and _expr_signed(init_expr, self.ctx):
+                v = v.sign_extend(width)
             return v.resize(width) if v.width != width else v
         except Exception:
             return Value.x(width)

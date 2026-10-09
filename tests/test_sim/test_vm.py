@@ -1871,10 +1871,10 @@ class TestDisplayFormatStrings:
     """Test $display with Verilog format strings."""
 
     def test_format_display_no_fmt(self, engine):
-        """No format string: values joined with spaces."""
+        """No format string: each value as %d (padded), not separated."""
         args = [Value(10, width=8), Value(20, width=8)]
         result = _format_display(args, 0, [], 0)
-        assert result == "10 20"
+        assert result == " 10 20"
 
     def test_format_display_hex(self, engine):
         """Format string with %h."""
@@ -1886,13 +1886,13 @@ class TestDisplayFormatStrings:
         """Format string with %d."""
         args = [Value(42, width=8)]
         result = _format_display(args, 1, ["%d"], 0)
-        assert result == "42"
+        assert result == " 42"  # padded to 3 columns, the widest 8-bit decimal
 
     def test_format_display_binary(self, engine):
         """Format string with %b."""
         args = [Value(5, width=4)]
         result = _format_display(args, 1, ["%b"], 0)
-        assert result == "101"
+        assert result == "0101"  # every digit of the width
 
     def test_format_display_time(self, engine):
         """Format string with %t."""
@@ -1913,7 +1913,7 @@ class TestDisplayFormatStrings:
         )
         sim = Simulator(m, engine=engine)
         sim.run(max_time=0)
-        assert any("val=42" in s for s in sim.display_output)
+        assert list(sim.display_output) == ["val= 42"]
 
     def test_display_multiple_args_no_format(self, engine):
         """$display with multiple args, no format string."""

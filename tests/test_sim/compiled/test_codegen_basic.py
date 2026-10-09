@@ -56,11 +56,16 @@ class TestCodegen:
         ],
     )
     def test_emit_binary_case_xz_literal_shortcuts(self, op, literal_on_left, use_z, expected):
-        """Case identity against x/z literals short-circuits in compiled codegen."""
+        """Case identity against an x/z literal compares masks and known bits
+        (it used to fold to a constant 0/1 -- wrong when the other operand
+        is itself x). Here the other operand is an unknown signal, emitted
+        as a known 0, so the result is still "not identical"."""
         cg = CythonCodegen()
         literal = Literal(0, width=8, is_x=not use_z, is_z=use_z)
         expr = BinaryOp(op, literal, Identifier("a")) if literal_on_left else BinaryOp(op, Identifier("a"), literal)
-        assert cg._emit_binary(expr, 1) == expected
+        code = cg._emit_binary(expr, 1)
+        assert code not in ("0", "1")
+        assert str(eval(code, {"wmask": lambda w: (1 << w) - 1})) == expected  # noqa: S307 -- our own generated expression
 
     def test_literal_emission_from_original_text(self):
         """Literal emission preserves Value.from_verilog parsing for numeric text."""
@@ -88,13 +93,13 @@ class TestCodegen:
         pyx = cg.generate(_make_write_with_format_always())
         assert "_out_char(c, 97)" in pyx
         assert "_out_char(c, 61)" in pyx
-        assert "_out_int_dec(c, c.val[0])" in pyx
+        assert "_out_fmt1(c, <unsigned long long>(c.val[0]), <unsigned long long>(c.mask[0]), 8, 100, 0, 0, 0)" in pyx
 
     def test_write_without_format_codegen(self):
         """Unformatted $write emits space-separated argument output directly."""
         cg = CythonCodegen()
         pyx = cg.generate(_make_write_without_format_always())
-        assert "_out_int_dec(c, c.val[0])" in pyx
+        assert "_out_fmt1(c, <unsigned long long>(c.val[0]), <unsigned long long>(c.mask[0]), 8, 100, 0, 0, 0)" in pyx
         assert "_out_char(c, 32)" in pyx
         assert "_out_char(c, 111)" in pyx
         assert "_out_char(c, 107)" in pyx

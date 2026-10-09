@@ -1174,6 +1174,18 @@ class _ExprEmitterMixin:
                     signed_value = f"(((({signed_left}) & {signed_mask}) ^ {sign_bit}) - {sign_bit})"
                     return f"((({signed_value}) >> ({shift_expr})) & {width_mask})"
                 return f"(({left}) >> ({shift_expr})) & {width_mask}"
+            if expr.op in ("===", "!=="):
+                # Case equality (see _emit_case_equality).
+                lm = self._emit_py_mask_expr(expr.left, op_width)
+                rm = self._emit_py_mask_expr(expr.right, op_width)
+                if lm is None or rm is None:
+                    return None
+                wm = self._emit_py_width_mask(op_width)
+                same = (
+                    f"(((({lm}) & {wm}) == (({rm}) & {wm}))"
+                    f" and (((({left}) & ~({lm})) & {wm}) == ((({right}) & ~({rm})) & {wm})))"
+                )
+                return f"(1 if {same} else 0)" if expr.op == "===" else f"(0 if {same} else 1)"
             if expr.op in _COMPARISON_OPS:
                 py_op = _BINARY_VALUE_OP[expr.op][0]
                 return f"(1 if (({left}) {py_op} ({right})) else 0)"
@@ -1360,6 +1372,9 @@ class _ExprEmitterMixin:
             operand_width = self._expr_width(expr.operand)
             return self._emit_py_mask_expr(expr.operand, operand_width)
 
+        if etype is BinaryOp and expr.op in ("===", "!=="):
+            return "0"  # case equality never yields x
+
         if etype is BinaryOp:
             if expr.op in _COMPARISON_OPS:
                 op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
@@ -1444,21 +1459,39 @@ class _ExprEmitterMixin:
 
         return None
 
+    def _emit_case_equality(self, expr: BinaryOp) -> str | None:
+        """``===``/``!==`` for operands up to 64 bits: equal iff masks and
+        known value bits all match, at the operands' combined width (signed
+        extension only when both are signed). Always 0/1 -- its mask is 0
+        (``_emit_mask_expr``). None for wider operands (wide emitter)."""
+        op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+        if op_width > _WORD_BITS:
+            return None
+        ov = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+        lv = self._emit_expr(expr.left, op_width, ov)
+        rv = self._emit_expr(expr.right, op_width, ov)
+        lm = self._emit_mask_expr(expr.left, op_width, ov)
+        rm = self._emit_mask_expr(expr.right, op_width, ov)
+        wm = f"wmask({op_width})"
+        same = (
+            f"(((({lm}) & {wm}) == (({rm}) & {wm})) and (((({lv}) & ~({lm})) & {wm}) == ((({rv}) & ~({rm})) & {wm})))"
+        )
+        return f"(1 if {same} else 0)" if expr.op == "===" else f"(0 if {same} else 1)"
+
     def _emit_binary(self, expr: BinaryOp, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911
         op_info = _BINARY_VALUE_OP.get(expr.op)
         if op_info is None:
             return "0"
         c_op, needs_mask = op_info
 
-        # In 2-state compiled mode x/z values don't exist, so identity
-        # comparisons with x/z literals have a known constant result:
-        #   anything === x  ΓåÆ  0  (never identical)
-        #   anything !== x  ΓåÆ  1  (always different)
+        # Case equality compares x/z bits exactly and never yields x
+        # (IEEE 1364-2005 5.1.8). This used to be a value-only `==` (x in
+        # either operand gave x) with `=== x` folded to 0 -- a leftover from
+        # when the compiled engine was 2-state.
         if expr.op in ("===", "!=="):
-            if (isinstance(expr.left, Literal) and (expr.left.is_x or expr.left.is_z)) or (
-                isinstance(expr.right, Literal) and (expr.right.is_x or expr.right.is_z)
-            ):
-                return "0" if expr.op == "===" else "1"
+            case_eq = self._emit_case_equality(expr)
+            if case_eq is not None:
+                return case_eq
 
         # Comparison and bitwise ops must see all bits of their operands.
         # Passing the surrounding context width (e.g. 1 for an if-condition)
@@ -3299,6 +3332,10 @@ class _ExprEmitterMixin:
             return "0"
 
         if etype is BinaryOp:
+            if expr.op in ("===", "!==") and (
+                max(self._expr_width(expr.left), self._expr_width(expr.right)) <= _WORD_BITS
+            ):
+                return "0"  # case equality never yields x (_emit_case_equality)
             if expr.op in _NATURAL_WIDTH_OPS:
                 # Must match `_emit_binary`'s IDENTICAL `op_width` gate
                 # (`_NATURAL_WIDTH_OPS`, not just `_COMPARISON_OPS`) --

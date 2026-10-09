@@ -3691,9 +3691,9 @@ class _WideEmitterMixin:
     # >  → wide_cmp_lt(b, a)  and  >= → wide_cmp_le(b, a)
     _WIDE_CMP_PRIMS: ClassVar[dict[str, tuple[str, bool]]] = {
         "==": ("wide_cmp_eq", False),
-        "===": ("wide_cmp_eq", False),
+        "===": ("wide_case_eq", False),
         "!=": ("wide_cmp_ne", False),
-        "!==": ("wide_cmp_ne", False),
+        "!==": ("wide_case_ne", False),
         "<": ("wide_cmp_lt", False),
         "<=": ("wide_cmp_le", False),
         ">": ("wide_cmp_lt", True),  # swap: a > b  ≡  b < a

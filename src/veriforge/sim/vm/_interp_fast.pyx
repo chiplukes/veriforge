@@ -656,6 +656,44 @@ cdef void _wm_mask_to_width(unsigned long long *wm_base, int w) noexcept nogil:
 
 # ── The core execution function ──────────────────────────────────────
 
+cdef inline int _disp_push(
+    long long *buf, int idx, int cap, int fmt_id, int n, int is_monitor,
+    SVal *stack, int base, int *wflag, unsigned long long *wv, unsigned long long *wm,
+) noexcept nogil:
+    """Append one display event for the *n* stack slots from *base*:
+    (fmt_id, n, is_monitor), then (val, mask, width) per argument -- or, for
+    a wide one, (0, 0, -width) followed by its WIDE_WORDS value words and
+    WIDE_WORDS mask words (wide arguments used to print their narrow
+    slot, 0). Returns the new index, or -1 if the event doesn't fit."""
+    cdef int need = 3
+    cdef int i, j, s, k
+    for i in range(n):
+        need += 3 + (2 * WIDE_WORDS if wflag[base + i] else 0)
+    if idx + need > cap:
+        return -1
+    buf[idx] = fmt_id
+    buf[idx + 1] = n
+    buf[idx + 2] = is_monitor
+    k = idx + 3
+    for i in range(n):
+        s = base + i
+        if wflag[s]:
+            buf[k] = 0
+            buf[k + 1] = 0
+            buf[k + 2] = -stack[s].width
+            k += 3
+            for j in range(WIDE_WORDS):
+                buf[k + j] = <long long>wv[s * WIDE_WORDS + j]
+                buf[k + WIDE_WORDS + j] = <long long>wm[s * WIDE_WORDS + j]
+            k += 2 * WIDE_WORDS
+        else:
+            buf[k] = stack[s].val
+            buf[k + 1] = stack[s].mask
+            buf[k + 2] = stack[s].width
+            k += 3
+    return k
+
+
 cdef int _execute_core(
     # Program
     const int *prog_ops,       # opcode array
@@ -3454,33 +3492,19 @@ cdef int _execute_core(
             # arg1 packs: n_args in low 16 bits, fmt_id in high 16 bits
             n = arg1 & 0xFFFF
             arg2 = arg1 >> 16
-            if disp_buf != NULL and disp_idx + 3 + 3 * n <= disp_cap:
-                disp_buf[disp_idx] = arg2   # fmt_id
-                disp_buf[disp_idx + 1] = n  # n_args
-                disp_buf[disp_idx + 2] = 0  # is_monitor=0
-                i = n - 1
-                while i >= 0:
-                    sp -= 1
-                    disp_buf[disp_idx + 3 + i * 3]     = stack[sp].val
-                    disp_buf[disp_idx + 3 + i * 3 + 1] = stack[sp].mask
-                    disp_buf[disp_idx + 3 + i * 3 + 2] = stack[sp].width
-                    i -= 1
-                disp_idx += 3 + 3 * n
-            elif disp_buf != NULL:
-                # Display buffer overflow
-                nba_count[0] = nba_idx
-                dirty_count[0] = dirty_idx
-                if nba_mem_count != NULL:
-                    nba_mem_count[0] = nba_mem_idx
-                if disp_pos != NULL:
-                    disp_pos[0] = disp_idx
-                return 2
-            else:
-                # No buffer (standalone wrapper) — just pop and discard
-                i = 0
-                while i < n:
-                    sp -= 1
-                    i += 1
+            if disp_buf != NULL:
+                i = _disp_push(disp_buf, disp_idx, disp_cap, arg2, n, 0, stack, sp - n, wflag, wv, wm)
+                if i < 0:
+                    # Display buffer overflow
+                    nba_count[0] = nba_idx
+                    dirty_count[0] = dirty_idx
+                    if nba_mem_count != NULL:
+                        nba_mem_count[0] = nba_mem_idx
+                    if disp_pos != NULL:
+                        disp_pos[0] = disp_idx
+                    return 2
+                disp_idx = i
+            sp -= n
             continue
 
         if op == OP_SYS_FINISH:
@@ -3769,32 +3793,19 @@ cdef int _execute_core(
         if op == OP_SYS_MONITOR:
             n = arg1 & 0xFFFF
             arg2 = arg1 >> 16
-            if disp_buf != NULL and disp_idx + 3 + 3 * n <= disp_cap:
-                disp_buf[disp_idx] = arg2   # fmt_id
-                disp_buf[disp_idx + 1] = n  # n_args
-                disp_buf[disp_idx + 2] = 1  # is_monitor=1
-                i = n - 1
-                while i >= 0:
-                    sp -= 1
-                    disp_buf[disp_idx + 3 + i * 3]     = stack[sp].val
-                    disp_buf[disp_idx + 3 + i * 3 + 1] = stack[sp].mask
-                    disp_buf[disp_idx + 3 + i * 3 + 2] = stack[sp].width
-                    i -= 1
-                disp_idx += 3 + 3 * n
-            elif disp_buf != NULL:
-                # Display buffer overflow
-                nba_count[0] = nba_idx
-                dirty_count[0] = dirty_idx
-                if nba_mem_count != NULL:
-                    nba_mem_count[0] = nba_mem_idx
-                if disp_pos != NULL:
-                    disp_pos[0] = disp_idx
-                return 2
-            else:
-                i = 0
-                while i < n:
-                    sp -= 1
-                    i += 1
+            if disp_buf != NULL:
+                i = _disp_push(disp_buf, disp_idx, disp_cap, arg2, n, 1, stack, sp - n, wflag, wv, wm)
+                if i < 0:
+                    # Display buffer overflow
+                    nba_count[0] = nba_idx
+                    dirty_count[0] = dirty_idx
+                    if nba_mem_count != NULL:
+                        nba_mem_count[0] = nba_mem_idx
+                    if disp_pos != NULL:
+                        disp_pos[0] = disp_idx
+                    return 2
+                disp_idx = i
+            sp -= n
             continue
 
         # ── Memory array operations ──────────────────────────────
@@ -6029,8 +6040,8 @@ cdef class CyContext:
         Resets the buffer position to 0 after draining.
         """
         cdef int pos = 0
-        cdef int fmt_id, n_args, is_monitor
-        cdef int k
+        cdef int fmt_id, n_args, is_monitor, width
+        cdef int k, j
         events = []
         while pos < self.disp_pos:
             fmt_id = <int>self.disp_buf[pos]
@@ -6039,8 +6050,20 @@ cdef class CyContext:
             pos += 3
             args = []
             for k in range(n_args):
-                args.append((self.disp_buf[pos], self.disp_buf[pos + 1], <int>self.disp_buf[pos + 2]))
+                width = <int>self.disp_buf[pos + 2]
+                if width >= 0:
+                    args.append((self.disp_buf[pos], self.disp_buf[pos + 1], width))
+                    pos += 3
+                    continue
+                # A wide argument: its words follow (see _disp_push).
                 pos += 3
+                val = 0
+                mask = 0
+                for j in range(WIDE_WORDS):
+                    val |= (<object>(<unsigned long long>self.disp_buf[pos + j])) << (64 * j)
+                    mask |= (<object>(<unsigned long long>self.disp_buf[pos + WIDE_WORDS + j])) << (64 * j)
+                pos += 2 * WIDE_WORDS
+                args.append((val, mask, -width))
             events.append((fmt_id, is_monitor, args))
         self.disp_pos = 0
         return events

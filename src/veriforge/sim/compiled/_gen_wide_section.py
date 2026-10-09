@@ -439,6 +439,32 @@ class _GenWideSectionsMixin:
             "",
         ]
 
+        # ── wide_case_eq / wide_case_ne (=== / !==) ────────────────────────────
+        # Case equality: x/z bits compare exactly; the result is never x.
+        L += [
+            "cdef inline void wide_case_eq(",
+            "    unsigned long long *dv, unsigned long long *dm,",
+            "    unsigned long long *av, unsigned long long *am,",
+            "    unsigned long long *bv, unsigned long long *bm,",
+            "    int n) noexcept nogil:",
+            "    cdef int i, equal = 1",
+            "    for i in range(n):",
+            "        if am[i] != bm[i] or (av[i] & ~am[i]) != (bv[i] & ~bm[i]):",
+            "            equal = 0",
+            "            break",
+            "    dv[0] = equal",
+            "    dm[0] = 0",
+            "",
+            "cdef inline void wide_case_ne(",
+            "    unsigned long long *dv, unsigned long long *dm,",
+            "    unsigned long long *av, unsigned long long *am,",
+            "    unsigned long long *bv, unsigned long long *bm,",
+            "    int n) noexcept nogil:",
+            "    wide_case_eq(dv, dm, av, am, bv, bm, n)",
+            "    dv[0] = 1 - dv[0]",
+            "",
+        ]
+
         # ── wide_cmp_ne ────────────────────────────────────────────────────────
         L += [
             "cdef inline void wide_cmp_ne(",

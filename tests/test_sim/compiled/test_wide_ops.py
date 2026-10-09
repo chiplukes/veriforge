@@ -803,9 +803,9 @@ class TestWideUnifiedPhase1Comparisons:
         "op,prim",
         [
             ("==", "wide_cmp_eq"),
-            ("===", "wide_cmp_eq"),
+            ("===", "wide_case_eq"),
             ("!=", "wide_cmp_ne"),
-            ("!==", "wide_cmp_ne"),
+            ("!==", "wide_case_ne"),
         ],
     )
     def test_equality_emits_correct_primitive(self, op, prim):
