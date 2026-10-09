@@ -108,7 +108,7 @@ class TestPhase2Codegen:
         cg = CythonCodegen()
         pyx = cg.generate(_make_counter())
         assert "seq_0" in pyx
-        assert "fire_seq_0" in pyx
+        assert "DL_SEQ_FN[0] = seq_0" in pyx
         assert "nba_pending" in pyx
         assert "delta_loop" in pyx
 
@@ -841,9 +841,12 @@ class TestCharProcessFunctions:
         assert "cdef inline void combo_0(SimCtx *c) noexcept nogil:" in pyx
 
     def test_seq_function_declares_fire_flag(self):
-        """Sequential process functions emit a fire_seq_N edge-detection flag."""
+        """Sequential processes get table-driven edge detection: an edge table
+        entry, a fire flag array in delta_loop, and a DL_SEQ_FN slot."""
         pyx = CythonCodegen().generate(_make_counter())
-        assert "fire_seq_0" in pyx
+        assert "DL_SEQ_EDGE_SID" in pyx
+        assert "cdef unsigned char _sfire[1]" in pyx
+        assert "DL_SEQ_FN[0] = seq_0" in pyx
 
     def test_delta_loop_present(self):
         """delta_loop is emitted for every module."""

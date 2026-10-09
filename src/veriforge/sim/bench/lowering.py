@@ -74,7 +74,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from veriforge.dsl import Module as DSLModule
 from veriforge.dsl import negedge, posedge
@@ -2570,6 +2570,7 @@ class LoweredDesign:  # cm:3e3a4c
         vcd: str | Path | None = None,
         vcd_timescale: str = "1ns",
         vcd_signals: Iterable[str] | None = None,
+        vcd_options: Mapping[str, Any] | None = None,
     ) -> dict[str, int]:
         """Run the lowered design end-to-end and return all capture signal values.
 
@@ -2586,6 +2587,8 @@ class LoweredDesign:  # cm:3e3a4c
             vcd: Optional path to write a VCD trace file.
             vcd_timescale: VCD ``$timescale`` directive (default ``"1ns"``).
             vcd_signals: Signal names to record. ``None`` records all signals.
+            vcd_options: Further ``attach_vcd`` keyword arguments (``scopes``,
+                ``signals``, ``start``/``stop``, ...).
 
         Returns:
             Dict mapping capture-signal name to integer value. The names match
@@ -2618,7 +2621,7 @@ class LoweredDesign:  # cm:3e3a4c
         # Optional VCD trace (attached after reset so reset transients are still visible)
         trace = None
         if vcd is not None:
-            trace = attach_vcd(sim, vcd, timescale=vcd_timescale, signal_names=vcd_signals)
+            trace = attach_vcd(sim, vcd, timescale=vcd_timescale, signal_names=vcd_signals, **dict(vcd_options or {}))
 
         try:
             sim.run(max_time=effective_max_time)

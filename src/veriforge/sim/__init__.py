@@ -15,7 +15,7 @@ from .testbench import (
     SignalHandle,
     Simulator,
 )
-from .trace import attach_vcd
+from .trace import attach_capture, attach_vcd
 from .value import Value
 from .vcd import VcdWriter
 
@@ -32,6 +32,7 @@ __all__ = [
     "StatementExecutor",
     "Value",
     "VcdWriter",
+    "attach_capture",
     "attach_vcd",
     "find_icarus",
     "record_vcd",

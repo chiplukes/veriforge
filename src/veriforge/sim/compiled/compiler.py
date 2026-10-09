@@ -534,13 +534,21 @@ class CythonCompiler:  # cm:3d7f4a
         """
         sources = [f"{module_name}.pyx", *(extra_sources or [])]
         sources_repr = ", ".join(f'"{s}"' for s in sources)
+        # No debug info (-g0, overriding Python's default -g): nobody steps
+        # through generated simulator C in a debugger, and for a large design
+        # it was ~30% of the C compile time (wide_bench 250 lanes: 14.0 s ->
+        # 9.8 s). Optimized code is unchanged. MSVC doesn't take -g0.
         return f"""\
+import sys
+
 from setuptools import Extension, setup
 from Cython.Build import cythonize
 
+_args = [] if sys.platform == "win32" else ["-g0"]
+
 setup(
     ext_modules=cythonize(
-        [Extension("{module_name}", [{sources_repr}])],
+        [Extension("{module_name}", [{sources_repr}], extra_compile_args=_args)],
         compiler_directives={{
             "language_level": "3",
             "boundscheck": False,
@@ -647,6 +655,12 @@ setup(
                 )
             if "gcc" in stderr and ("not found" in stderr or "No such file" in stderr):
                 raise RuntimeError("No C compiler (gcc) found. Install gcc or use engine='vm'.")
+            if "Killed signal terminated program" in stderr or "out of memory" in stderr.lower():
+                raise RuntimeError(
+                    "The C compiler ran out of memory building the compiled engine for this design "
+                    f"(killed while compiling {build_dir}). Try VERIFORGE_COMPILE_SPLIT=1 (splits the "
+                    "generated code across smaller files), or engine='vm-fast'."
+                )
             raise RuntimeError(
                 f"Cython compilation failed (exit code {proc.returncode}).\n"
                 f"stderr: {stderr[-2000:]}\nstdout: {stdout[-2000:]}"

@@ -8,6 +8,7 @@ Provides:
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 from veriforge.model.design import Design, Module
@@ -84,6 +85,24 @@ class SignalHandle:  # cm:2e7d3b
 # ── Clock ────────────────────────────────────────────────────────────
 
 
+def _reports_failures(method):
+    """Tell capture sessions (``trace.attach_capture``) when this method
+    raises, so they can write the window leading up to the failure."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as exc:
+            if getattr(self._sched, "_trace_hub", None) is not None:
+                from .trace import notify_failure  # noqa: PLC0415
+
+                notify_failure(self._sched, exc)
+            raise
+
+    return wrapper
+
+
 class Clock:  # cm:4d1b6e
     """Built-in clock generator utility.
 
@@ -126,7 +145,15 @@ class Simulator:  # cm:a5c8f4
                  ``"vm-fast"`` — bytecode VM, Cython interpreter (falls back to pure-Python if unavailable).
     """
 
-    __slots__ = ("_clocks", "_engine", "_module", "_run_cycles_clock_ready", "_sched", "_signal_cache")
+    __slots__ = (
+        "_clock_next_edge",
+        "_clocks",
+        "_engine",
+        "_module",
+        "_run_cycles_clock_ready",
+        "_sched",
+        "_signal_cache",
+    )
 
     def __init__(
         self,
@@ -139,6 +166,11 @@ class Simulator:  # cm:a5c8f4
         self._engine = engine
         self._signal_cache: dict[str, SignalHandle] = {}
         self._clocks: list[Clock] = []
+        # Per clock signal name: the time of the next rising edge not yet
+        # scheduled -- see _schedule_clock_events. (Keyed by name, not by
+        # the Clock object: callers pass temporaries, and a freed Clock's
+        # id() can be reused by the next one.)
+        self._clock_next_edge: dict[str, int] = {}
         self._run_cycles_clock_ready = False
 
         # Flatten hierarchy if instances or generate blocks are present
@@ -391,6 +423,7 @@ class Simulator:  # cm:a5c8f4
         """
         self._schedule_clock_events(clock, max_time)
 
+    @_reports_failures
     def run(
         self,
         test_fn: Callable[[Simulator], None] | None = None,
@@ -414,6 +447,7 @@ class Simulator:  # cm:a5c8f4
         # Run the event loop
         self._sched.run(max_time=max_time)
 
+    @_reports_failures
     def run_step(self, *, max_time: int = 1_000_000) -> bool:
         """Run one time step of the simulation.
 
@@ -440,6 +474,7 @@ class Simulator:  # cm:a5c8f4
         """Drive a signal by name (convenience method)."""
         self._sched.drive_signal(name, value)
 
+    @_reports_failures
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic.
 
@@ -493,6 +528,7 @@ class Simulator:  # cm:a5c8f4
         assert isinstance(sched, _CSched)  # noqa: S101
         return sched.dump_memory(name, count)
 
+    @_reports_failures
     def batch_run(
         self,
         cycles: int,
@@ -533,6 +569,7 @@ class Simulator:  # cm:a5c8f4
         assert isinstance(sched, _CSched)  # noqa: S101
         return sched.batch_run(cycles, clock_name, clock_period, events=events)
 
+    @_reports_failures
     def run_cycles(
         self,
         cycles: int,
@@ -626,15 +663,25 @@ class Simulator:  # cm:a5c8f4
         return sched.batch_run(cycles, clock_name, clock_period, events=events)
 
     def _schedule_clock_events(self, clock: Clock, max_time: int) -> None:
-        """Pre-schedule clock toggle events up to max_time."""
-        t = 0
+        """Schedule clock toggle events up to *max_time*, continuing from
+        where the previous call for this clock stopped.
+
+        Only the first call initializes the clock signal and starts at t=0.
+        (Every ``run()`` used to reschedule from t=0 and re-drive the clock
+        low: a second ``run()`` replayed the already-simulated edges with
+        time going backwards, so the design saw extra clock edges.)
+        """
+        t = self._clock_next_edge.get(clock.signal.name)
+        first = t is None
+        if t is None:
+            t = 0
         sig_name = clock.signal.name
         w = clock.signal.width
 
         if self._engine in ("vm", "vm-fast", "compiled"):
             sched = self._sched
-            # Initialize signal to 0
-            sched.drive_signal(sig_name, Value(0, width=w))
+            if first:
+                sched.drive_signal(sig_name, Value(0, width=w))
             while t <= max_time:
                 sched.schedule_at(t, ("clock_toggle", sig_name, Value(1, width=w)))
                 t += clock.high_time
@@ -642,16 +689,18 @@ class Simulator:  # cm:a5c8f4
                 t += clock.low_time
         else:
             # Reference engine: schedule via event_queue
-            self._sched.drive_signal(sig_name, Value(1, width=w))
-            self._sched.ctx.write_signal(sig_name, Value(0, width=w))
+            if first:
+                self._sched.drive_signal(sig_name, Value(1, width=w))
+                self._sched.ctx.write_signal(sig_name, Value(0, width=w))
             while t <= max_time:
                 self._sched.event_queue.schedule(t, _ClockToggle(sig_name, Value(1, width=w)))
                 t += clock.high_time
                 self._sched.event_queue.schedule(t, _ClockToggle(sig_name, Value(0, width=w)))
                 t += clock.low_time
-
-            # Reset initial drive
-            self._sched.ctx.write_signal(sig_name, Value(0, width=w))
+            if first:
+                # Reset initial drive
+                self._sched.ctx.write_signal(sig_name, Value(0, width=w))
+        self._clock_next_edge[clock.signal.name] = t
 
 
 class _ClockToggle:

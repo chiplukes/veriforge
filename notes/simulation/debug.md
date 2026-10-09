@@ -266,6 +266,58 @@ Tips:
   individual bit-slice signals.
 * Open with GTKWave, Surfer, or any standard viewer.
 
+### Tracing part of a big design, windows, and captures
+
+For a large design, trace only what you need — untraced signals cost
+nothing per step (on the compiled engine change detection runs in C over
+the traced set only), and traced ones cost in proportion to how often they
+change. `attach_vcd` (and `bench.run(vcd=..., vcd_options={...})`):
+
+```python
+from veriforge.sim import attach_vcd, attach_capture
+
+# One lane of a generate-loop datapath, plus anything matching a glob:
+attach_vcd(sim, "lane3.vcd", scopes=["u_dp.gen_lane[3]"], depth=0,
+           signals=None, exclude=["*_unused*"], memories=False)
+
+# Only t = 10_000 .. 12_000 (initial values written when the window opens):
+attach_vcd(sim, "win.vcd", scopes=["u_dp"], start=10_000, stop=12_000)
+```
+
+`depth` counts levels below each scope (0 = all, 1 = the scope's own
+signals); `signals`/`exclude` are fnmatch globs with `[`/`]` literal (so
+generate indices match as written); memory elements are included when
+nothing is selected, excluded once `scopes`/`signals` narrow the selection,
+unless `memories=True` or a list of memory-name globs. Sessions also have
+`pause()`/`resume()`/`dump_all()`. In HDL, `$dumpvars(level, scope...)`,
+`$dumpoff`, `$dumpon`, `$dumpall`, `$dumpflush` and `$dumplimit` are
+honored on every engine.
+
+Tracing also works inside `batch_run`/`run_cycles` (the compiled engine
+records changes at each edge in C), so a traced run no longer has to fall
+back to `run()`.
+
+**Capture around an event.** Keep the last `pre` time units in memory and
+write a file only when something happens:
+
+```python
+with attach_capture(sim, "cap.vcd", scopes=["u_dp.gen_lane[3]"],
+                    pre=2_000, post=500,
+                    trigger="u_dp.err || $rose(u_dp.gen_lane[3].u_core.overflow)",
+                    max_captures=3) as cap:
+    sim.run_cycles(1_000_000)
+print(cap.files, cap.triggers)      # cap_000.vcd ... and (time, reason) each
+```
+
+Triggers: a Verilog expression over signal names (`$rose`/`$fell`/
+`$changed` for edges; fires when it becomes true), a Python callable
+`f(time, values)` (signals it reads go in `watch=`), or `cap.trigger(reason)`
+from testbench code (e.g. a scoreboard). With `on_failure=True` (default),
+an exception from `run`/`run_step`/`batch_run`/`run_cycles`/`settle`, or
+one leaving the `with` block, writes the window up to the failure.
+`bench.run(capture={...})` takes the same arguments. HDL `$error`/`$fatal`
+don't trigger captures yet.
+
 ---
 
 ## 10. Parameter / elaboration bugs

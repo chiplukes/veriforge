@@ -144,10 +144,54 @@ class VcdWriter:
             self._time_written = True
             self._file.write("".join(parts))
 
-    def write_initial(self, signals: dict[str, Value]) -> None:
+    def write_changes(self, time: int, changes: list[tuple[_VcdSignal, int, int]]) -> None:
+        """Write one time step's changes, given as ``(signal, val, mask)``
+        with raw ints (the trace poll path: no ``Value`` objects, and the
+        caller already knows these signals changed)."""
+        parts = [f"#{time}\n"]
+        ap = parts.append
+        for sig, val, mask in changes:
+            if sig.width == 1:
+                ap(("x" if mask & 1 else "1" if val & 1 else "0") + sig.ident + "\n")
+            elif mask == 0:
+                ap("b" + format(val, sig.fmt) + sig.tail)
+            else:
+                ap("b" + _raw_to_vcd(val, mask, sig.width) + sig.tail)
+        self._file.write("".join(parts))
+
+    def signal_info(self, name: str) -> _VcdSignal:
+        """The registered signal *name* (for ``write_changes``)."""
+        return self._signals[name]
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def write_section(self, keyword: str, time: int, values: list[tuple[_VcdSignal, int, int]] | None) -> None:
+        """Write a ``#time`` + ``$keyword ... $end`` section (``$dumpvars``,
+        ``$dumpall``, ``$dumpon``) of ``(signal, val, mask)`` values; with
+        *values* None every signal is written as x (``$dumpoff``)."""
+        parts = [f"#{time}\n${keyword}\n"]
+        ap = parts.append
+        items = values if values is not None else [(sig, 0, (1 << sig.width) - 1) for sig in self._signals.values()]
+        for sig, val, mask in items:
+            if sig.width == 1:
+                ap(("x" if mask & 1 else "1" if val & 1 else "0") + sig.ident + "\n")
+            else:
+                ap("b" + _raw_to_vcd(val, mask, sig.width) + sig.tail)
+        ap("$end\n")
+        self._file.write("".join(parts))
+
+    def write_comment(self, text: str) -> None:
+        self._file.write(f"$comment {text} $end\n")
+
+    def bytes_written(self) -> int:
+        """Characters written so far (``$dumplimit``)."""
+        return self._file.tell()
+
+    def write_initial(self, signals: dict[str, Value], time: int = 0) -> None:
         """Write the $dumpvars section with initial signal values."""
         self._file.write("$dumpvars\n")
-        self._current_time = 0
+        self._current_time = time
         self._file.write(f"#{self._current_time}\n")
         for name, sig in self._signals.items():
             val = signals.get(name, Value.x(sig.width))
@@ -181,13 +225,15 @@ class VcdWriter:
 class _VcdSignal:
     """Internal signal metadata for VCD output."""
 
-    __slots__ = ("ident", "name", "scope", "width")
+    __slots__ = ("fmt", "ident", "name", "scope", "tail", "width")
 
     def __init__(self, name: str, width: int, ident: str, scope: str) -> None:
         self.name = name
         self.width = width
         self.ident = ident
         self.scope = scope
+        self.fmt = f"0{width}b"  # multi-bit value digits
+        self.tail = f" {ident}\n"
 
 
 def _make_id(n: int) -> str:
@@ -234,17 +280,21 @@ def _value_to_vcd(value: Value, width: int) -> str:
         if value.mask & 1:
             return "x"
         return "1" if (value.val & 1) else "0"
+    return _raw_to_vcd(value.val, value.mask, width)
 
-    # Multi-bit: fast path when no x/z bits
-    if value.mask == 0:
-        return format(value.val, f"0{width}b")
+
+def _raw_to_vcd(val: int, mask: int, width: int) -> str:
+    """Multi-bit VCD value string from raw ``(val, mask)`` ints."""
+    # Fast path when no x/z bits
+    if mask == 0:
+        return format(val, f"0{width}b")
 
     # Has x/z bits — per-bit conversion
     chars: list[str] = []
     for i in range(width - 1, -1, -1):
-        if value.mask & (1 << i):
+        if mask & (1 << i):
             chars.append("x")
-        elif value.val & (1 << i):
+        elif val & (1 << i):
             chars.append("1")
         else:
             chars.append("0")

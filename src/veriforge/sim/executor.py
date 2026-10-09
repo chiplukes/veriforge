@@ -161,10 +161,12 @@ class StatementExecutor:  # cm:c2f9a1
     """
 
     __slots__ = (
+        "_dump_ctl",
+        "_dump_request",
+        "_dump_session",
         "_function_map",
         "_task_map",
         "_vcd_filename",
-        "_vcd_writer",
         "_write_buffer",
         "display_output",
         "evaluator",
@@ -189,7 +191,13 @@ class StatementExecutor:  # cm:c2f9a1
         self._function_map: dict[str, object] = {}
         self._task_map: dict[str, object] = {}
         self._vcd_filename: str | None = None
-        self._vcd_writer: object | None = None  # VcdWriter, lazily imported
+        # $dumpvars: the request (trace.DumpRequest) until a scheduler starts
+        # it as a trace session (trace.start_dump), then that session.
+        self._dump_request: object | None = None
+        self._dump_session: object | None = None
+        # $dumpoff/$dumpon/$dumpall/$dumpflush/$dumplimit calls, as
+        # (task, arg), applied by the scheduler with the request.
+        self._dump_ctl: list[tuple[str, int]] = []
 
     def execute(self, stmt: Statement, ctx: EvalContext) -> None:  # noqa: PLR0911, PLR0912, PLR0915
         """Execute a statement tree, mutating ctx."""
@@ -1257,6 +1265,14 @@ class StatementExecutor:  # cm:c2f9a1
             self._exec_dumpvars(task, ctx)
             return
 
+        if name in ("$dumpoff", "$dumpon", "$dumpall", "$dumpflush", "$dumplimit"):
+            arg = 0
+            if name == "$dumplimit" and task.arguments:
+                limit = self.evaluator.eval(task.arguments[0], ctx)
+                arg = limit.val if limit.mask == 0 else 0
+            self._dump_ctl.append((name, arg))
+            return
+
         # Unknown system task — ignore silently
 
     def _format_display(self, task: SystemTaskCall, ctx: EvalContext) -> str:
@@ -1419,24 +1435,24 @@ class StatementExecutor:  # cm:c2f9a1
             self._vcd_filename = task.arguments[0].value
 
     def _exec_dumpvars(self, task: SystemTaskCall, ctx: EvalContext) -> None:
-        """Execute $dumpvars: create VcdWriter and dump initial values."""
-        from .vcd import VcdWriter  # noqa: PLC0415
+        """Execute ``$dumpvars [(level [, scope, ...])]``: record the request;
+        the scheduler turns it into a trace session (``trace.start_dump``)
+        once this initial block has run. *level* 0 dumps every level below
+        each scope, 1 just the scope's own signals; no scopes = whole design.
+        """
+        from veriforge.model.expressions import Identifier  # noqa: PLC0415
 
-        filename = self._vcd_filename or "dump.vcd"
-        writer = VcdWriter(filename)
-        # Register all scalar signals
-        for name, val in ctx._signals.items():
-            writer.add_signal(name, width=val.width)
-        writer.write_header()
-        writer.write_initial(ctx._signals)
-        self._vcd_writer = writer
+        from .trace import DumpRequest  # noqa: PLC0415
 
-    def vcd_time_step_callback(self, scheduler) -> None:
-        """Callback invoked after each time step to dump signal changes."""
-        writer = self._vcd_writer
-        if writer is None:
-            return
-        writer.dump_all(scheduler.time, scheduler.ctx._signals)
+        level = 0
+        scopes: list[str] = []
+        if task.arguments:
+            level_val = self.evaluator.eval(task.arguments[0], ctx)
+            level = level_val.val if level_val.mask == 0 else 0
+            for arg in task.arguments[1:]:
+                if isinstance(arg, Identifier):
+                    scopes.append(".".join([*arg.hierarchy, arg.name]) if arg.hierarchy else arg.name)
+        self._dump_request = DumpRequest(self._vcd_filename or "dump.vcd", level, tuple(scopes))
 
     def lookup_function(self, name: str):
         """Look up a user-defined function by name."""

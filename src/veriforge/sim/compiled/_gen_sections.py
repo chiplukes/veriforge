@@ -140,6 +140,25 @@ def _cont_dependency_order(processes: list) -> tuple[list[int], bool]:
     return order, acyclic
 
 
+def _c_const_array(ctype: str, name: str, values: list[int]) -> tuple[str, str, int]:
+    """A ``static const`` C array definition for a verbatim ``cdef extern
+    from *`` block: ``(text, name, length)``."""
+    vals = values or [0]  # C forbids zero-length arrays
+    rows = [", ".join(str(v) for v in vals[i : i + 24]) for i in range(0, len(vals), 24)]
+    body = ",\n        ".join(rows)
+    return f"    static const {ctype} {name}[{len(vals)}] = {{\n        {body}\n    }};", name, len(vals)
+
+
+def _c_const_array_block(arrays: list[tuple[str, str, int]], ctypes: dict[str, str]) -> list[str]:
+    """Wrap ``_c_const_array`` results in one ``cdef extern from *`` block
+    that defines them in C and declares them to Cython. *ctypes* gives each
+    array's Cython element type."""
+    lines = ["cdef extern from *:", '    """', *(text for text, _n, _l in arrays), '    """']
+    lines.extend(f"    {ctypes[name]} {name}[{length}]" for _t, name, length in arrays)
+    lines.append("")
+    return lines
+
+
 def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     """The only code allowed to write ``SimCtx.dbit``/``dlist``/``dcount``
     and ``nba_bit``/``nba_list``/``nba_count``.
@@ -574,7 +593,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             f"{indent}    memcpy(self.ctx.conv_mask, self.ctx.mask, {sn} * sizeof(long long))",
             f"{indent}    memcpy(self.ctx.conv_wide_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
             f"{indent}    memcpy(self.ctx.conv_wide_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
-            *(f"{indent}    cont_{i}(&self.ctx)" for i in range(n)),
+            f"{indent}    for _cont_settle_sid in range({n}):",
+            f"{indent}        DL_CONT_FN[_cont_settle_sid](&self.ctx)",
             f"{indent}    _cont_settle_stable = 1",
             f"{indent}    for _cont_settle_sid in range({sn}):",
             f"{indent}        if self.ctx.val[_cont_settle_sid] != self.ctx.conv_val[_cont_settle_sid]"
@@ -612,6 +632,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
             *self._mem_snap_memcpy_lines("                "),
             "                # Negedge: drive clk low",
+            "                self.ctx.sim_time = t0 + i * period + period // 2",
             "                self.ctx.val[clk_sid] = 0",
             "                self.ctx.mask[clk_sid] = 0",
             "                mark_dirty(&self.ctx, clk_sid)",
@@ -619,38 +640,262 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                if self.ctx.error_code != ERR_NONE:",
             "                    cycles_run = i + 1",
             "                    break",
+            "                if self._rec_on:",
+            "                    self._trace_record(t0 + i * period + period // 2)",
             "                if self.ctx.finished:",
             "                    cycles_run = i + 1",
             "                    break",
         ]
-        procs = [*self._processes, *self._combo_processes]
-        n_cont = len(self._processes)
-        if any(not sens and not (i < n_cont and i in self._const_conts) for i, (sens, _b) in enumerate(procs)):
+        if self._negedge_reacting_sids() is None:
             return body
-        sids = {sid for sens, _b in procs for sid in sens}
-        sids |= {sid for edges, _s, _b in self._seq_processes for sid, et in edges.items() if et != "posedge"}
-        if not sids:
-            check_lines = ["                if 0:"]
-        elif len(sids) <= _MAX_INLINE_SENS:
-            cond = " or ".join(f"clk_sid == {sid}" for sid in sorted(sids))
-            check_lines = [f"                if {cond}:"]
-        else:
-            terms = [f"clk_sid == {sid}" for sid in sorted(sids)]
-            # Line wrapping one large `or` still leaves a left-deep Cython
-            # expression tree. Keep each check bounded for large designs.
-            check_lines = ["                _negedge_reacts = 0"]
-            for i in range(0, len(terms), _MAX_INLINE_SENS):
-                cond = " or ".join(terms[i : i + _MAX_INLINE_SENS])
-                check_lines.append(f"                if not _negedge_reacts and ({cond}):")
-                check_lines.append("                    _negedge_reacts = 1")
-            check_lines.append("                if _negedge_reacts:")
+        check_lines = ["                if DL_NEG_REACT[clk_sid]:"]
         return [
             *check_lines,
             *("    " + ln for ln in body),
             "                else:",
             "                    self.ctx.val[clk_sid] = 0",
             "                    self.ctx.mask[clk_sid] = 0",
+            "                    if self._rec_on:",
+            "                        self._trace_record(t0 + i * period + period // 2)",
         ]
+
+    def _trace_method_lines(self) -> list[str]:
+        """``CompiledSim`` methods for VCD change detection (see
+        ``sim/trace.py``). ``trace_set(specs)`` installs the traced items --
+        ``(0, sid)`` for a signal, ``(1, mid, addr)`` for a memory element --
+        as (value pointer, mask pointer, word count) into the context arrays,
+        plus a copy of each one's current value. ``trace_poll()`` compares
+        every traced item against its copy in C, updates the copies, and
+        returns ``[(index, val, mask), ...]`` for the ones that changed, so
+        Python only touches changed signals. Untraced signals cost nothing.
+        """
+        lines = [
+            "",
+            "    def __dealloc__(self):",
+            "        self._trace_free()",
+            "        self.trace_record_end()",
+            "",
+            "    cdef void _trace_free(self):",
+            "        free(self._tr_vp)",
+            "        free(self._tr_mp)",
+            "        free(self._tr_nw)",
+            "        free(self._tr_off)",
+            "        free(self._tr_lv)",
+            "        free(self._tr_lm)",
+            "        free(self._tr_chg)",
+            "        self._tr_vp = NULL",
+            "        self._tr_mp = NULL",
+            "        self._tr_nw = NULL",
+            "        self._tr_off = NULL",
+            "        self._tr_lv = NULL",
+            "        self._tr_lm = NULL",
+            "        self._tr_chg = NULL",
+            "        self._tr_n = 0",
+            "",
+            "    cpdef void trace_set(self, list specs):",
+            "        cdef int i, w, n = len(specs), total = 0, sid, mid, addr",
+            "        self._trace_free()",
+            "        if n == 0:",
+            "            return",
+            "        self._tr_vp = <unsigned long long **>malloc(n * sizeof(unsigned long long *))",
+            "        self._tr_mp = <unsigned long long **>malloc(n * sizeof(unsigned long long *))",
+            "        self._tr_nw = <int *>malloc(n * sizeof(int))",
+            "        self._tr_off = <int *>malloc(n * sizeof(int))",
+            "        self._tr_chg = <int *>malloc(n * sizeof(int))",
+            "        for i in range(n):",
+            "            spec = specs[i]",
+            "            if spec[0] == 0:",
+            "                sid = spec[1]",
+            "                if self.ctx.wide_words[sid] > 0:",
+            "                    self._tr_vp[i] = &self.ctx.wide_val[self.ctx.wide_offset[sid]]",
+            "                    self._tr_mp[i] = &self.ctx.wide_mask[self.ctx.wide_offset[sid]]",
+            "                    self._tr_nw[i] = self.ctx.wide_words[sid]",
+            "                else:",
+            "                    self._tr_vp[i] = <unsigned long long *>&self.ctx.val[sid]",
+            "                    self._tr_mp[i] = <unsigned long long *>&self.ctx.mask[sid]",
+            "                    self._tr_nw[i] = 1",
+            "            else:",
+            "                mid = spec[1]",
+            "                addr = spec[2]",
+            "                self._tr_nw[i] = self._mem_slot_ptrs(mid, addr, &self._tr_vp[i], &self._tr_mp[i])",
+            "            self._tr_off[i] = total",
+            "            total += self._tr_nw[i]",
+            "        self._tr_words = total",
+            "        self._tr_lv = <unsigned long long *>malloc(total * sizeof(unsigned long long))",
+            "        self._tr_lm = <unsigned long long *>malloc(total * sizeof(unsigned long long))",
+            "        for i in range(n):",
+            "            for w in range(self._tr_nw[i]):",
+            "                self._tr_lv[self._tr_off[i] + w] = self._tr_vp[i][w]",
+            "                self._tr_lm[self._tr_off[i] + w] = self._tr_mp[i][w]",
+            "        self._tr_n = n",
+            "",
+            "    cpdef list trace_poll(self):",
+            "        cdef int i, w, k, off, nch = 0, changed",
+            "        cdef list out = []",
+            "        with nogil:",
+            "            for i in range(self._tr_n):",
+            "                off = self._tr_off[i]",
+            "                changed = 0",
+            "                for w in range(self._tr_nw[i]):",
+            "                    if self._tr_vp[i][w] != self._tr_lv[off + w] or self._tr_mp[i][w] != self._tr_lm[off + w]:",
+            "                        changed = 1",
+            "                        break",
+            "                if changed:",
+            "                    for w in range(self._tr_nw[i]):",
+            "                        self._tr_lv[off + w] = self._tr_vp[i][w]",
+            "                        self._tr_lm[off + w] = self._tr_mp[i][w]",
+            "                    self._tr_chg[nch] = i",
+            "                    nch += 1",
+            "        for k in range(nch):",
+            "            i = self._tr_chg[k]",
+            "            off = self._tr_off[i]",
+            "            if self._tr_nw[i] == 1:",
+            "                out.append((i, self._tr_lv[off], self._tr_lm[off]))",
+            "            else:",
+            "                v = 0",
+            "                m = 0",
+            "                for w in range(self._tr_nw[i] - 1, -1, -1):",
+            "                    v = (v << 64) | self._tr_lv[off + w]",
+            "                    m = (m << 64) | self._tr_lm[off + w]",
+            "                out.append((i, v, m))",
+            "        return out",
+            "",
+            # -- batch_run recording: after each edge, batch_run calls
+            # _trace_record(t), which does what trace_poll does but appends
+            # (time, slot, words) records to a buffer instead of returning a
+            # list. batch_run stops at a cycle boundary when the buffer can't
+            # hold two more full polls (_rec_full); the caller drains it
+            # (trace_drain) and resumes.
+            "    cpdef void trace_record_begin(self, int cap):",
+            "        cdef int maxnw = 1, i",
+            "        self.trace_record_end()",
+            "        for i in range(self._tr_n):",
+            "            if self._tr_nw[i] > maxnw:",
+            "                maxnw = self._tr_nw[i]",
+            "        if cap < 2 * self._tr_n:",
+            "            cap = 2 * self._tr_n",
+            "        if cap < 1:",
+            "            cap = 1",
+            "        self._rec_cap = cap",
+            "        self._rec_wcap = 2 * cap * maxnw",
+            "        self._rec_slot = <int *>malloc(cap * sizeof(int))",
+            "        self._rec_woff = <int *>malloc(cap * sizeof(int))",
+            "        self._rec_time = <long long *>malloc(cap * sizeof(long long))",
+            "        self._rec_w = <unsigned long long *>malloc(self._rec_wcap * sizeof(unsigned long long))",
+            "        self._rec_n = 0",
+            "        self._rec_wn = 0",
+            "        self._rec_full = 0",
+            "        self._rec_on = 1",
+            "",
+            "    cpdef void trace_record_end(self):",
+            "        free(self._rec_slot)",
+            "        free(self._rec_woff)",
+            "        free(self._rec_time)",
+            "        free(self._rec_w)",
+            "        self._rec_slot = NULL",
+            "        self._rec_woff = NULL",
+            "        self._rec_time = NULL",
+            "        self._rec_w = NULL",
+            "        self._rec_on = 0",
+            "        self._rec_n = 0",
+            "        self._rec_wn = 0",
+            "",
+            "    cpdef int trace_record_full(self):",
+            "        return self._rec_full",
+            "",
+            "    cdef inline int _trace_room(self) noexcept nogil:",
+            "        return (self._rec_n + 2 * self._tr_n <= self._rec_cap"
+            " and self._rec_wn + 4 * self._tr_words <= self._rec_wcap)",
+            "",
+            "    cdef void _trace_record(self, long long t) noexcept nogil:",
+            "        cdef int i, w, off, nw, changed",
+            "        for i in range(self._tr_n):",
+            "            off = self._tr_off[i]",
+            "            nw = self._tr_nw[i]",
+            "            changed = 0",
+            "            for w in range(nw):",
+            "                if self._tr_vp[i][w] != self._tr_lv[off + w] or self._tr_mp[i][w] != self._tr_lm[off + w]:",
+            "                    changed = 1",
+            "                    break",
+            "            if changed:",
+            "                self._rec_slot[self._rec_n] = i",
+            "                self._rec_time[self._rec_n] = t",
+            "                self._rec_woff[self._rec_n] = self._rec_wn",
+            "                self._rec_n += 1",
+            "                for w in range(nw):",
+            "                    self._tr_lv[off + w] = self._tr_vp[i][w]",
+            "                    self._tr_lm[off + w] = self._tr_mp[i][w]",
+            "                    self._rec_w[self._rec_wn + w] = self._tr_vp[i][w]",
+            "                    self._rec_w[self._rec_wn + nw + w] = self._tr_mp[i][w]",
+            "                self._rec_wn += 2 * nw",
+            "",
+            "    cpdef list trace_drain(self):",
+            "        cdef int k, i, w, nw, woff",
+            "        cdef list out = []",
+            "        for k in range(self._rec_n):",
+            "            i = self._rec_slot[k]",
+            "            nw = self._tr_nw[i]",
+            "            woff = self._rec_woff[k]",
+            "            if nw == 1:",
+            "                out.append((self._rec_time[k], i, self._rec_w[woff], self._rec_w[woff + 1]))",
+            "            else:",
+            "                v = 0",
+            "                m = 0",
+            "                for w in range(nw - 1, -1, -1):",
+            "                    v = (v << 64) | self._rec_w[woff + w]",
+            "                    m = (m << 64) | self._rec_w[woff + nw + w]",
+            "                out.append((self._rec_time[k], i, v, m))",
+            "        self._rec_n = 0",
+            "        self._rec_wn = 0",
+            "        self._rec_full = 0",
+            "        return out",
+            "",
+            "    cdef int _mem_slot_ptrs(self, int mid, int addr, unsigned long long **vp, unsigned long long **mp):",
+        ]
+        for mid in range(self._n_mems):
+            elem_w, _depth = self._mem_info[mid]
+            kw = "if" if mid == 0 else "elif"
+            lines.append(f"        {kw} mid == {mid}:")
+            if elem_w > _WORD_BITS:
+                words = self._mem_words(mid)
+                lines.extend(
+                    [
+                        f"            vp[0] = &self.ctx.wide_mem_{mid}_val[addr * {words}]",
+                        f"            mp[0] = &self.ctx.wide_mem_{mid}_mask[addr * {words}]",
+                        f"            return {words}",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"            vp[0] = <unsigned long long *>&self.ctx.mem_{mid}_val[addr]",
+                        f"            mp[0] = <unsigned long long *>&self.ctx.mem_{mid}_mask[addr]",
+                        "            return 1",
+                    ]
+                )
+        lines.extend(
+            [
+                # Unreachable (trace.py only passes known mids); any valid
+                # word keeps the poll in bounds.
+                "        vp[0] = <unsigned long long *>&self.ctx.val[0]",
+                "        mp[0] = <unsigned long long *>&self.ctx.mask[0]",
+                "        return 1",
+            ]
+        )
+        return lines
+
+    def _negedge_reacting_sids(self) -> set[int] | None:
+        """Sids whose falling edge something can react to: a cont/combo
+        sensitive to it, or a seq process with a non-posedge trigger on it.
+        None when some non-constant always-run process (empty sensitivity)
+        means *every* falling edge needs the full step."""
+        procs = [*self._processes, *self._combo_processes]
+        n_cont = len(self._processes)
+        if any(not sens and not (i < n_cont and i in self._const_conts) for i, (sens, _b) in enumerate(procs)):
+            return None
+        sids = {sid for sens, _b in procs for sid in sens}
+        sids |= {sid for edges, _s, _b in self._seq_processes for sid, et in edges.items() if et != "posedge"}
+        return sids
 
     def _settle_via_delta_loop_lines(self, sn: int, indent: str) -> list[str]:
         """Settle pending external perturbation by snapshotting the CURRENT
@@ -849,6 +1094,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "# cython: cdivision=True, initializedcheck=False, nonecheck=False\n"
             "\n"
             "from libc.string cimport memcmp, memcpy, memset\n"
+            "from libc.stdlib cimport free, malloc\n"
             "from libc.math cimport pow\n"
             "from libc.stdio cimport snprintf"
         )
@@ -1689,9 +1935,80 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         return resolve_delta_engine(len(self._processes) + len(self._combo_processes))
 
     def _gen_delta_loop(self) -> str:
+        tables = "\n".join(self._proc_table_lines())
         if self._delta_engine() == "scan":
-            return self._gen_delta_loop_scan()
-        return self._gen_delta_loop_queue()
+            return tables + "\n" + self._gen_delta_loop_scan()
+        return tables + "\n" + self._gen_delta_loop_queue()
+
+    def _proc_table_lines(self) -> list[str]:
+        """Tables that let generated code loop over processes instead of
+        unrolling one statement block per process:
+
+        - ``DL_CONT_FN`` (declaration order), ``DL_RANK_FN`` (dispatch rank
+          order, cont then combo -- ``_delta_ranked_processes``),
+          ``DL_SEQ_FN``: function pointers, filled once at module import.
+        - ``DL_SEQ_EDGE_OFF``/``_SID``/``_POS``: each seq process's edge
+          triggers, CSR (``POS`` 1 = posedge, 0 = negedge).
+        - ``DL_NEG_REACT[sid]``: whether a falling edge of ``sid`` can make
+          anything react (batch_run's negedge skip, ``_negedge_block_lines``).
+
+        Unrolled per-process code made the generated C grow with design
+        size inside a few functions (``delta_loop``, ``__init__``,
+        ``batch_run``, ``refresh_data_snapshot``), and gcc could inline every
+        process body into them -- a 2000-lane design's single ``cc1`` ran
+        out of memory on a 27 GB machine. Calls through these tables can't
+        be inlined into the loops, which keeps every generated function
+        small.
+        """
+        ranked = self._delta_ranked_processes()
+        n_cont, n_seq = len(self._processes), len(self._seq_processes)
+        lines = [
+            "ctypedef void (*_dl_proc_fn)(SimCtx *c) noexcept nogil",
+            "ctypedef void (*_dl_seq_fn)(SimCtx *c, long long *sv, long long *sm) noexcept nogil",
+            f"cdef _dl_proc_fn DL_CONT_FN[{max(n_cont, 1)}]",
+            f"cdef _dl_proc_fn DL_RANK_FN[{max(len(ranked), 1)}]",
+            f"cdef _dl_seq_fn DL_SEQ_FN[{max(n_seq, 1)}]",
+            "",
+            "cdef void _dl_init_fn_tables() noexcept nogil:",
+            "    pass",
+            *(f"    DL_CONT_FN[{i}] = cont_{i}" for i in range(n_cont)),
+            # `call` is "cont_N(c)" / "combo_N(c)".
+            *(f"    DL_RANK_FN[{r}] = {call.split('(')[0]}" for r, (call, _s, _p) in enumerate(ranked)),
+            *(f"    DL_SEQ_FN[{i}] = seq_{i}" for i in range(n_seq)),
+            "",
+            "_dl_init_fn_tables()",
+            "",
+        ]
+        off, sids, pos = [0], [], []
+        for edges, _sens, _body in self._seq_processes:
+            for sid, edge_type in edges.items():
+                sids.append(sid)
+                pos.append(1 if edge_type == "posedge" else 0)
+            off.append(len(sids))
+        n = max(self._n_sigs, 1)
+        neg_react = [0] * n
+        for sid in self._negedge_reacting_sids() or ():
+            neg_react[sid] = 1
+        wide_offsets, wide_words, _total = self._wide_layout()
+        arrays = [
+            _c_const_array("int", "DL_SIG_WIDTH", list(self._signal_widths[: self._n_sigs])),
+            _c_const_array("int", "DL_SIG_WIDE_WORDS", list(wide_words[: self._n_sigs])),
+            _c_const_array("int", "DL_SIG_WIDE_OFFSET", list(wide_offsets[: self._n_sigs])),
+            _c_const_array("int", "DL_SEQ_EDGE_OFF", off),
+            _c_const_array("int", "DL_SEQ_EDGE_SID", sids),
+            _c_const_array("unsigned char", "DL_SEQ_EDGE_POS", pos),
+            _c_const_array("unsigned char", "DL_NEG_REACT", neg_react),
+        ]
+        ctypes = {
+            "DL_SIG_WIDTH": "int",
+            "DL_SIG_WIDE_WORDS": "int",
+            "DL_SIG_WIDE_OFFSET": "int",
+            "DL_SEQ_EDGE_OFF": "int",
+            "DL_SEQ_EDGE_SID": "int",
+            "DL_SEQ_EDGE_POS": "unsigned char",
+            "DL_NEG_REACT": "unsigned char",
+        }
+        return lines + _c_const_array_block(arrays, ctypes)
 
     def _delta_ranked_processes(self) -> list[tuple[str, set[int], bool]]:
         """``(call, sens, pure)`` per rank, in dispatch order: continuous
@@ -1725,11 +2042,20 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         if self._n_mems > 0:
             lines.append("    cdef int _rmr_msb, _rmr_lsb")
             lines.append("    cdef long long _rmr_mask")
-        # Edge detection: fire_seq_N flags are computed inside the delta loop
-        # so that edges propagated through continuous assigns are detected.
-        for i in range(len(self._seq_processes)):
-            lines.append(f"    cdef int fire_seq_{i} = 0")
-            lines.append(f"    cdef int done_seq_{i} = 0")
+        # Edge detection: per-seq-process fire/done flags, computed inside the
+        # delta loop so that edges propagated through continuous assigns are
+        # detected (see _delta_seq_fire_lines).
+        n_seq = len(self._seq_processes)
+        if n_seq:
+            lines.extend(
+                [
+                    "    cdef int _q, _qe, _qs, _hit",
+                    f"    cdef unsigned char _sfire[{n_seq}]",
+                    f"    cdef unsigned char _sdone[{n_seq}]",
+                    f"    memset(_sfire, 0, {n_seq})",
+                    f"    memset(_sdone, 0, {n_seq})",
+                ]
+            )
         return lines
 
     def _delta_conv_snapshot_lines(self) -> list[str]:
@@ -1750,39 +2076,37 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _delta_seq_fire_lines(self) -> list[str]:
         """Edge detection, checked every iteration so edges propagated through
         continuous assigns are caught; each sequential process fires at most
-        once per delta_loop call, in index order."""
+        once per delta_loop call, in index order. Table-driven
+        (``DL_SEQ_EDGE_*``, ``DL_SEQ_FN``; see ``_proc_table_lines``)."""
         if not self._seq_processes:
             return []
-        lines = [""]
-        for i, (edges, _sens, _body) in enumerate(self._seq_processes):
-            edge_checks = []
-            for sid, edge_type in edges.items():
-                if edge_type == "posedge":
-                    edge_checks.append(f"((c.val[{sid}] & 1) == 1 and (sv[{sid}] & 1) == 0)")
-                else:  # negedge
-                    edge_checks.append(f"((c.val[{sid}] & 1) == 0 and (sv[{sid}] & 1) == 1)")
-            if edge_checks:
-                if len(edge_checks) <= _MAX_INLINE_SENS:
-                    cond = " or ".join(edge_checks)
-                    lines.append(f"        if not done_seq_{i} and ({cond}):")
-                    lines.append(f"            fire_seq_{i} = 1")
-                else:
-                    for j in range(0, len(edge_checks), _MAX_INLINE_SENS):
-                        cond = " or ".join(edge_checks[j : j + _MAX_INLINE_SENS])
-                        lines.append(f"        if not done_seq_{i} and not fire_seq_{i} and ({cond}):")
-                        lines.append(f"            fire_seq_{i} = 1")
-        lines.append("")
-        for i in range(len(self._seq_processes)):
-            lines.append(f"        if fire_seq_{i}:")
-            lines.append(f"            seq_{i}(c, sv, sm)")
-            lines.append("            if c.finished:")
-            lines.append("                return it")
-            lines.append("            if c.error_code != ERR_NONE:")
-            lines.append("                return it")
-            lines.append(f"            fire_seq_{i} = 0")
-            lines.append(f"            done_seq_{i} = 1")
-        lines.append("")
-        return lines
+        n_seq = len(self._seq_processes)
+        return [
+            "",
+            f"        for _q in range({n_seq}):",
+            "            if _sdone[_q] or _sfire[_q]:",
+            "                continue",
+            "            for _qe in range(DL_SEQ_EDGE_OFF[_q], DL_SEQ_EDGE_OFF[_q + 1]):",
+            "                _qs = DL_SEQ_EDGE_SID[_qe]",
+            "                if DL_SEQ_EDGE_POS[_qe]:",
+            "                    _hit = (c.val[_qs] & 1) == 1 and (sv[_qs] & 1) == 0",
+            "                else:",
+            "                    _hit = (c.val[_qs] & 1) == 0 and (sv[_qs] & 1) == 1",
+            "                if _hit:",
+            "                    _sfire[_q] = 1",
+            "                    break",
+            "",
+            f"        for _q in range({n_seq}):",
+            "            if _sfire[_q]:",
+            "                DL_SEQ_FN[_q](c, sv, sm)",
+            "                if c.finished:",
+            "                    return it",
+            "                if c.error_code != ERR_NONE:",
+            "                    return it",
+            "                _sfire[_q] = 0",
+            "                _sdone[_q] = 1",
+            "",
+        ]
 
     def _delta_nba_apply_lines(self) -> list[str]:
         """Commit staged NBAs. Iterates only the staged sids (``nba_list``),
@@ -2020,20 +2344,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         interesting = set(self._delta_interesting_sids())
         is_int = [1 if s in interesting else 0 for s in range(n)]
 
-        def c_array(ctype: str, name: str, values: list[int]) -> tuple[str, str, int]:
-            vals = values or [0]  # C forbids zero-length arrays
-            rows = [", ".join(str(v) for v in vals[i : i + 24]) for i in range(0, len(vals), 24)]
-            body = ",\n        ".join(rows)
-            return f"    static const {ctype} {name}[{len(vals)}] = {{\n        {body}\n    }};", name, len(vals)
-
         arrays = [
-            c_array("int", "DL_READER_OFF", off),
-            c_array("int", "DL_READER_RANK", flat),
-            c_array("int", "DL_IREADER_OFF", ioff),
-            c_array("int", "DL_IREADER_RANK", iflat),
-            c_array("int", "DL_ALWAYS_RANK", always),
-            c_array("unsigned char", "DL_IS_INTERESTING", is_int),
-            c_array("unsigned char", "DL_PURE", [1 if pure else 0 for _c, _s, pure in ranked]),
+            _c_const_array("int", "DL_READER_OFF", off),
+            _c_const_array("int", "DL_READER_RANK", flat),
+            _c_const_array("int", "DL_IREADER_OFF", ioff),
+            _c_const_array("int", "DL_IREADER_RANK", iflat),
+            _c_const_array("int", "DL_ALWAYS_RANK", always),
+            _c_const_array("unsigned char", "DL_IS_INTERESTING", is_int),
+            _c_const_array("unsigned char", "DL_PURE", [1 if pure else 0 for _c, _s, pure in ranked]),
         ]
         lines = [
             "cdef extern from *:",
@@ -2226,13 +2544,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "            c.wcount = 0",
                 ]
             )
-            # Rank -> process call. Cython lowers this if/elif chain on one C
-            # int into a C switch (O(1) dispatch); each body still has a single
-            # call site, so inlining is the same as the scan engine's.
-            for rank, (call, _sens, _pure) in enumerate(ranked):
-                kw = "if" if rank == 0 else "elif"
-                lines.append(f"            {kw} _r == {rank}:")
-                lines.append(f"                {call}")
+            # Rank -> process call through the function table (see
+            # _proc_table_lines: an unrolled per-rank switch with inlined
+            # bodies made delta_loop too large to compile for big designs).
+            lines.append("            DL_RANK_FN[_r](c)")
             lines.extend(
                 [
                     "            if c.finished:",
@@ -2289,15 +2604,30 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     def _gen_compiled_sim(self) -> str:
         sn = max(self._n_sigs, 1)
-        wide_offsets, wide_words, _total_wide_words = self._wide_layout()
         lines = [
             "cdef class CompiledSim:",
             "    cdef SimCtx ctx",
             f"    cdef long long _snap_v[{sn}]",
             f"    cdef long long _snap_m[{sn}]",
+            # Trace set (see _trace_method_lines); NULL until trace_set().
+            "    cdef int _tr_n",
+            "    cdef unsigned long long **_tr_vp",
+            "    cdef unsigned long long **_tr_mp",
+            "    cdef int *_tr_nw",
+            "    cdef int *_tr_off",
+            "    cdef unsigned long long *_tr_lv",
+            "    cdef unsigned long long *_tr_lm",
+            "    cdef int *_tr_chg",
+            "    cdef int _tr_words",
+            # batch_run change recording (see _trace_method_lines).
+            "    cdef int _rec_on, _rec_full, _rec_n, _rec_cap, _rec_wn, _rec_wcap",
+            "    cdef int *_rec_slot",
+            "    cdef int *_rec_woff",
+            "    cdef long long *_rec_time",
+            "    cdef unsigned long long *_rec_w",
             "",
             "    def __init__(self):",
-            "        cdef int i",
+            "        cdef int i, _iw",
             # Sparse-set counts first: init lines below may mark_dirty().
             "        self.ctx.dcount = 0",
             "        self.ctx.nba_count = 0",
@@ -2326,19 +2656,19 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            self.ctx.wide_snap_val[i] = 0",
             "            self.ctx.wide_snap_mask[i] = 0",
         ]
-        # Per-signal width and mask init (outside the loop, constant indices)
-        for sid in range(self._n_sigs):
-            cname = _safe_const_name(self._signal_names[sid])
-            lines.append(f"        self.ctx.width[{sid}] = W_{cname}")
-            lines.append(f"        self.ctx.wide_words[{sid}] = WIDE_WORDS_{cname}")
-            lines.append(f"        self.ctx.wide_offset[{sid}] = WIDE_OFFSET_{cname}")
-            lines.append(f"        self.ctx.mask[{sid}] = wmask(W_{cname})")
-            if wide_words[sid] > 0:
-                for word_index in range(wide_words[sid]):
-                    remaining_width = self._signal_widths[sid] - (word_index * 64)
-                    lines.append(
-                        f"        self.ctx.wide_mask[{wide_offsets[sid] + word_index}] = _word_mask64({remaining_width})"
-                    )
+        # Per-signal width/offset/mask init from the DL_SIG_* tables
+        # (_proc_table_lines) -- one loop, not several statements per signal.
+        lines.extend(
+            [
+                f"        for i in range({self._n_sigs}):",
+                "            self.ctx.width[i] = DL_SIG_WIDTH[i]",
+                "            self.ctx.wide_words[i] = DL_SIG_WIDE_WORDS[i]",
+                "            self.ctx.wide_offset[i] = DL_SIG_WIDE_OFFSET[i]",
+                "            self.ctx.mask[i] = wmask(DL_SIG_WIDTH[i])",
+                "            for _iw in range(DL_SIG_WIDE_WORDS[i]):",
+                "                self.ctx.wide_mask[DL_SIG_WIDE_OFFSET[i] + _iw] = _word_mask64(DL_SIG_WIDTH[i] - _iw * 64)",
+            ]
+        )
         lines.append("        self.ctx.nba_pending = 0")
         lines.append("        self.ctx.sim_time = 0")
         lines.append("        self.ctx.out_count = 0")
@@ -2632,6 +2962,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ]
         )
 
+        lines.extend(self._trace_method_lines())
+
         # set_time method
         lines.extend(
             [
@@ -2753,8 +3085,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                        int[::1] ev_sids=None, long long[::1] ev_vals=None,",
                 "                        int n_mem_events=0, int[::1] ev_mem_cycles=None,",
                 "                        int[::1] ev_mem_mids=None, int[::1] ev_mem_addrs=None,",
-                "                        long long[::1] ev_mem_vals=None):",
-                "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles, _negedge_reacts",
+                "                        long long[::1] ev_mem_vals=None, long long t0=0, long long period=0):",
+                "        cdef int i, ev_idx = 0, mem_ev_idx = 0, cycles_run = cycles",
                 *(
                     ["        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid"]
                     if self._processes
@@ -2786,7 +3118,15 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                delta_loop(&self.ctx, sv, sm)",
                 "                if self.ctx.error_code != ERR_NONE:",
                 "                    cycles_run = 0",
+                "                elif self._rec_on:",
+                "                    self._trace_record(t0)",
                 "            for i in range(cycles if self.ctx.error_code == ERR_NONE else 0):",
+                "                if self._rec_on and not self._trace_room():",
+                "                    # Trace buffer full: stop at this cycle boundary;",
+                "                    # the caller drains it and resumes.",
+                "                    self._rec_full = 1",
+                "                    cycles_run = i",
+                "                    break",
                 "                # Apply any scheduled events for this cycle",
                 "                ev_applied = 0",
                 "                while ev_idx < n_events and ev_cycles[ev_idx] == i:",
@@ -2848,6 +3188,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
                 "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
                 *self._mem_snap_memcpy_lines("                "),
+                # $time inside processes: posedge at t0 + i*period, negedge
+                # half a period later (matching the scheduler's own time
+                # arithmetic after the call).
+                "                self.ctx.sim_time = t0 + i * period",
                 "                # Posedge: drive clk high",
                 "                self.ctx.val[clk_sid] = 1",
                 "                self.ctx.mask[clk_sid] = 0",
@@ -2856,6 +3200,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                if self.ctx.error_code != ERR_NONE:",
                 "                    cycles_run = i + 1",
                 "                    break",
+                "                if self._rec_on:",
+                "                    self._trace_record(t0 + i * period)",
                 "                if self.ctx.finished:",
                 "                    cycles_run = i + 1",
                 "                    break",

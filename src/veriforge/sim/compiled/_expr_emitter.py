@@ -2903,6 +2903,13 @@ class _ExprEmitterMixin:
                 arg = self._emit_expr(call.arguments[0], 32)
                 return f"_clog2({arg})"
             return "0"
+        # Simulation time (integer time units, like the other engines;
+        # $realtime has no fractional part here either). These used to fall
+        # through to the unsupported-function `0` below.
+        if name in ("$time", "$realtime"):
+            return "c.sim_time"
+        if name == "$stime":
+            return "(c.sim_time & 0xFFFFFFFF)"
         if name == "$bits":
             if call.arguments:
                 arg0 = call.arguments[0]
@@ -3101,6 +3108,8 @@ class _ExprEmitterMixin:
             name = expr.name.lower()
             if name in {"$signed", "$unsigned"} and expr.arguments:
                 return self._expr_width(expr.arguments[0])
+            if name in {"$time", "$realtime"}:
+                return 64
             func = self._function_map.get(expr.name)
             if func is not None:
                 ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")

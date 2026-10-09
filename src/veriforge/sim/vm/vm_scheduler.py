@@ -22,6 +22,7 @@ from veriforge.model.statements import Statement, SystemTaskCall, TaskEnable
 from ..evaluator import EvalContext, ExpressionEvaluator
 from ..event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from ..executor import StatementExecutor
+from ..trace import flush_dump, start_dump
 from ..value import Value
 from .compiler import Compiler, CompiledProcess, ProcessType
 from .interpreter import Interpreter, StopSimulation, _format_display
@@ -131,6 +132,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "_sig_to_combo",
         "_sig_to_cont",
         "_sig_to_procs",
+        "_trace_hub",
         "_triggered_seq",
         "_use_cython",
         "compiler",
@@ -172,6 +174,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Optional callback fired after each time step completes
         self._on_time_step: Callable[[VMScheduler], None] | None = None
+        self._trace_hub = None  # trace.TraceHub, created by the first trace session
 
         # $monitor state: (program, sensitivity_sigs) or None
         # The program is a mini-bytecoded program that produces one display line.
@@ -700,12 +703,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # Run event loop
         self._run_event_loop(max_time)
 
-        # Finalize VCD writer if active
         if self._ref_executor is not None:
-            writer = getattr(self._ref_executor, "_vcd_writer", None)
-            if writer is not None:
-                writer.finalize()
-                self._ref_executor._vcd_writer = None
+            flush_dump(self._ref_executor)
 
     def batch_run(
         self,
@@ -816,15 +815,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self.interpreter.dirty.clear()
 
     def _wire_vcd_from_ref(self) -> None:
-        """If the reference executor created a VCD writer, wire it into _on_time_step."""
-        if self._on_time_step is not None:
-            return
-        if self._ref_executor is None:
-            return
-        writer = getattr(self._ref_executor, "_vcd_writer", None)
-        if writer is None:
-            return
-        self._on_time_step = self._ref_executor.vcd_time_step_callback
+        """Start the $dumpvars trace session, if an initial block requested
+        one (see ``trace.start_dump``)."""
+        if self._ref_executor is not None:
+            start_dump(self, self._ref_executor)
 
     def _run_event_loop(self, max_time: int) -> None:  # noqa: PLR0912
         """Process the event queue until empty or max_time exceeded."""
@@ -1232,12 +1226,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         return _CoroutineSignalNames(names, skip_memory_sync=not touches_memory)
 
     def _coro_needs_memory_sync(self, names: set[str] | None) -> bool:
-        # VCD callbacks use the reference context and may inspect its memory.
-        return (
-            not isinstance(names, _CoroutineSignalNames)
-            or not names.skip_memory_sync
-            or (self._ref_executor is not None and self._ref_executor._vcd_writer is not None)
-        )
+        return not isinstance(names, _CoroutineSignalNames) or not names.skip_memory_sync
 
     # -- CoroutineMixin hooks --------------------------------------------------
 

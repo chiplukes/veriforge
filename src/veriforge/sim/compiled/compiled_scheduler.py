@@ -26,6 +26,7 @@ from veriforge.model.expressions import Identifier
 from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator
 from veriforge.sim.event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from veriforge.sim.executor import StatementExecutor, StopExecution
+from veriforge.sim.trace import flush_dump, start_dump
 from veriforge.sim.value import Value
 
 from .codegen import CythonCodegen
@@ -38,6 +39,10 @@ from .compiler import (
     _platform_tag,
     _report_progress,
 )
+
+# Change records the C side of batch_run buffers before returning to Python
+# to drain them (see CompiledScheduler.batch_run).
+_TRACE_RECORD_CAP = 1 << 16
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -331,6 +336,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         "_sim",
         "_stopped",
         "_time",
+        "_trace_hub",
         "_write_buffer",
         "ctx",
         "delta_limit",
@@ -369,6 +375,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
 
         # Time-step callback (VCD recording)
         self._on_time_step: Callable[[CompiledScheduler], None] | None = None
+        self._trace_hub = None  # trace.TraceHub, created by the first trace session
 
         # Track whether a snapshot has been taken before external drives
         self._has_drive_snapshot: bool = False
@@ -872,72 +879,11 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         return False
 
     def _wire_vcd_from_ref(self) -> None:
-        """If the reference executor created a VCD writer and no external
-        callback is already registered, wire it into the compiled
-        scheduler's time-step callback.
-
-        Uses a compiled-specific fast path that reads raw (value, mask) pairs
-        directly from the compiled sim, skips unchanged signals via tuple
-        comparison, converts to VCD strings inline (no Value objects), and
-        batches all output into a single file write per timestep.
-        """
-        if self._on_time_step is not None:
-            return
-        if self._ref_executor is None:
-            return
-        writer = getattr(self._ref_executor, "_vcd_writer", None)
-        if writer is None:
-            return
-
-        # Build pre-computed info per VCD signal: (sid, width, ident, fmt)
-        # fmt is the binary format string for multi-bit signals (e.g. "032b")
-        vcd_info: list[tuple[int, int, str, str]] = []
-        for name, sig in writer._signals.items():
-            sid = self._signal_map.get(name)
-            if sid is not None:
-                fmt = f"0{sig.width}b" if sig.width > 1 else ""
-                vcd_info.append((sid, sig.width, sig.ident, fmt))
-
-        # Use a flat list for change detection (indexed by sid) instead of dict.
-        max_sid = max(sid for sid, _, _, _ in vcd_info) + 1 if vcd_info else 0
-        # Sentinel value that won't match any real (v, m) tuple.
-        _sentinel = (-1, -1)
-        last_v = [_sentinel] * max_sid
-        last_m = [_sentinel] * max_sid
-
-        sim_read = self._sim_read_signal
-        vcd_file = writer._file
-
-        def _fast_vcd_callback(scheduler) -> None:
-            parts: list[str] = []
-            ap = parts.append
-            for sid, width, ident, fmt in vcd_info:
-                v, m = sim_read(sid)
-                if v == last_v[sid] and m == last_m[sid]:
-                    continue
-                last_v[sid] = v
-                last_m[sid] = m
-                if width == 1:
-                    ap("x" + ident + "\n" if m & 1 else ("1" + ident + "\n" if v & 1 else "0" + ident + "\n"))
-                elif m == 0:
-                    ap("b" + format(v, fmt) + " " + ident + "\n")
-                else:
-                    # Has x/z bits — per-bit conversion
-                    chars: list[str] = []
-                    cap = chars.append
-                    for i in range(width - 1, -1, -1):
-                        if m & (1 << i):
-                            cap("x")
-                        elif v & (1 << i):
-                            cap("1")
-                        else:
-                            cap("0")
-                    ap("b" + "".join(chars) + " " + ident + "\n")
-            if parts:
-                parts.insert(0, "#" + str(scheduler.time) + "\n")
-                vcd_file.write("".join(parts))
-
-        self._on_time_step = _fast_vcd_callback
+        """Start the $dumpvars trace session, if an initial block requested
+        one (see ``trace.start_dump``; change detection runs in the compiled
+        module's ``trace_poll``)."""
+        if self._ref_executor is not None:
+            start_dump(self, self._ref_executor)
 
     def _has_timing_block(self, block) -> bool:
         """Check if an initial block body has timing controls."""
@@ -1075,6 +1021,14 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                     self._stopped = True
                     break
 
+            # The events' drive_signal() calls (e.g. the clock toggle) took
+            # this step's pre-edge snapshot; the delta loop below consumes
+            # it (as in run_step). Left set, a later drive() between run()
+            # calls reused this now-stale snapshot (clock still low in it),
+            # so the next run() re-detected the last posedge and fired
+            # every posedge process a second time.
+            self._has_drive_snapshot = False
+
             if self._stopped:
                 # $finish: run final delta loop and VCD snapshot
                 self._sim.step()
@@ -1096,10 +1050,8 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             if self._on_time_step is not None:
                 self._on_time_step(self)
 
-        # Finalize VCD writer if active
-        if self._ref_executor is not None and self._ref_executor._vcd_writer is not None:
-            self._ref_executor._vcd_writer.finalize()
-            self._ref_executor._vcd_writer = None
+        if self._ref_executor is not None:
+            flush_dump(self._ref_executor)
 
     def run_step(self) -> bool:
         """Advance one time step. Returns True if events remain."""
@@ -1242,9 +1194,9 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             self._drain_compiled_output()
             self._has_drive_snapshot = False
 
+        sig_events: list[tuple[int, int, int]] = []  # (cycle, sid, val)
+        mem_events: list[tuple[int, int, int, int]] = []  # (cycle, mid, addr, val)
         if events:
-            import array
-
             # Split into plain-signal events (the pre-existing case, a
             # direct `self._signal_map` hit) and memory-element events
             # (name has a "MEM[idx]" shape, e.g. a wide AXI-Stream `tdata`
@@ -1256,8 +1208,6 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             # without any per-event Python call). Only narrow (<=64-bit)
             # memory elements are supported here -- see
             # `_gen_compiled_sim`'s `batch_run` codegen for why.
-            sig_events = []
-            mem_events: list[tuple[int, int, int, int]] = []  # (cycle, mid, addr, val)
             for cycle, name, val in events:
                 sid = self._signal_map.get(name)
                 if sid is not None:
@@ -1278,24 +1228,57 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                     raise ValueError(f"batch_run: wide (>64-bit) memory element events aren't supported yet: {name!r}")
                 mem_events.append((cycle, mid, addr, val))
 
-            kwargs: dict[str, object] = {}
-            if sig_events:
-                kwargs["n_events"] = len(sig_events)
-                kwargs["ev_cycles"] = array.array("i", [e[0] for e in sig_events])
-                kwargs["ev_sids"] = array.array("i", [e[1] for e in sig_events])
-                kwargs["ev_vals"] = array.array("q", [e[2] for e in sig_events])
-            if mem_events:
-                kwargs["n_mem_events"] = len(mem_events)
-                kwargs["ev_mem_cycles"] = array.array("i", [e[0] for e in mem_events])
-                kwargs["ev_mem_mids"] = array.array("i", [e[1] for e in mem_events])
-                kwargs["ev_mem_addrs"] = array.array("i", [e[2] for e in mem_events])
-                kwargs["ev_mem_vals"] = array.array("q", [e[3] for e in mem_events])
-            completed = self._sim.batch_run(cycles, clk_sid, **kwargs)
-        else:
-            completed = self._sim.batch_run(cycles, clk_sid)
-        self._time += completed * clock_period
+        # Active trace sessions (sim/trace.py): record changes in C at each
+        # edge, drained to the sessions after each call. The C loop stops
+        # early (at a cycle boundary) when its buffer is full; resume from
+        # there, with event cycle numbers rebased.
+        hub = self._trace_hub
+        recording = hub is not None and hub.compiled_sim is self._sim
+        if recording:
+            hub.dispatch(self._time, hub._poll())
+            self._sim.trace_record_begin(_TRACE_RECORD_CAP)
+        done = 0
+        try:
+            while True:
+                kwargs = self._batch_event_kwargs(sig_events, mem_events, done)
+                completed = self._sim.batch_run(cycles - done, clk_sid, **kwargs, t0=self._time, period=clock_period)
+                self._time += completed * clock_period
+                done += completed
+                if not recording:
+                    break
+                stopped_full = self._sim.trace_record_full()  # trace_drain() clears it
+                hub.dispatch_recorded(self._sim.trace_drain())
+                if done >= cycles or not stopped_full:
+                    break
+        finally:
+            if recording:
+                self._sim.trace_record_end()
         self._sim.set_time(self._time)
-        return completed
+        return done
+
+    @staticmethod
+    def _batch_event_kwargs(
+        sig_events: list[tuple[int, int, int]], mem_events: list[tuple[int, int, int, int]], offset: int
+    ) -> dict[str, object]:
+        """``CompiledSim.batch_run`` event arguments for the events at or
+        after cycle *offset*, renumbered from 0."""
+        import array
+
+        kwargs: dict[str, object] = {}
+        sig = [(c - offset, sid, v) for c, sid, v in sig_events if c >= offset]
+        mem = [(c - offset, mid, a, v) for c, mid, a, v in mem_events if c >= offset]
+        if sig:
+            kwargs["n_events"] = len(sig)
+            kwargs["ev_cycles"] = array.array("i", [e[0] for e in sig])
+            kwargs["ev_sids"] = array.array("i", [e[1] for e in sig])
+            kwargs["ev_vals"] = array.array("q", [e[2] for e in sig])
+        if mem:
+            kwargs["n_mem_events"] = len(mem)
+            kwargs["ev_mem_cycles"] = array.array("i", [e[0] for e in mem])
+            kwargs["ev_mem_mids"] = array.array("i", [e[1] for e in mem])
+            kwargs["ev_mem_addrs"] = array.array("i", [e[2] for e in mem])
+            kwargs["ev_mem_vals"] = array.array("q", [e[3] for e in mem])
+        return kwargs
 
 
 # ── EvalContext wrapper ──────────────────────────────────────────────

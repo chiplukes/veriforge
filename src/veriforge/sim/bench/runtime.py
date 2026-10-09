@@ -29,13 +29,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping
 
 from veriforge.model.design import Module as ModelModule
 from veriforge.sim.endpoints import DomainCoordinator, MultiDomainRunner
 from veriforge.sim.step_harness import step_drive
 from veriforge.sim.testbench import Clock, Simulator
-from veriforge.sim.trace import attach_vcd
+from veriforge.sim.trace import attach_capture, attach_vcd
 
 from .interfaces import AXI4Proxy, AXILiteProxy, AXIStreamProxy, BenchTimeoutError, MemBusProxy, StreamProxy
 from .plan import ClockDomain, TestbenchPlan
@@ -434,6 +434,8 @@ class Testbench:  # cm:8a7c9d
         vcd: str | Path | None = None,
         vcd_timescale: str = "1ns",
         vcd_signals: Iterable[str] | None = None,
+        vcd_options: Mapping[str, Any] | None = None,
+        capture: Mapping[str, Any] | None = None,
     ) -> Iterator["Testbench"]:
         """Context manager around the test body.
 
@@ -445,18 +447,34 @@ class Testbench:  # cm:8a7c9d
                 (default ``"1ns"``).
             vcd_signals: Iterable of signal names to record. ``None``
                 records every top-level signal known to the simulator.
+            vcd_options: Further ``attach_vcd`` keyword arguments, e.g.
+                ``{"scopes": ["u_dp.gen_lane[3]"], "start": 1000}``.
+            capture: ``attach_capture`` keyword arguments (``path``,
+                ``pre``, ``post``, ``trigger``, ...) to capture VCD windows
+                around a trigger; an exception from the body writes the
+                window leading up to it.
         """
         trace_session = None
+        capture_session = None
         if vcd is not None:
             trace_session = attach_vcd(
                 self.sim,
                 vcd,
                 timescale=vcd_timescale,
                 signal_names=vcd_signals,
+                **dict(vcd_options or {}),
             )
+        if capture is not None:
+            capture_session = attach_capture(self.sim, **dict(capture))
         try:
             yield self
+        except Exception as exc:
+            if capture_session is not None:
+                capture_session.failure(exc)
+            raise
         finally:
+            if capture_session is not None:
+                capture_session.close()
             if trace_session is not None:
                 trace_session.close()
 

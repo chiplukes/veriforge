@@ -43,6 +43,7 @@ from ..semantics import range_width as _range_width
 from ..semantics import var_width as _var_width
 from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed
 from .executor import StatementExecutor, StopExecution, SuspendExecution
+from .trace import flush_dump, start_dump
 from .value import Value
 
 if TYPE_CHECKING:
@@ -221,6 +222,7 @@ class Scheduler:  # cm:9a7f2c
         "_sig_to_continuous",
         "_sig_to_procs",
         "_timing_procs",
+        "_trace_hub",
         "_triggered_seq_procs",
         "ctx",
         "delta_limit",
@@ -284,6 +286,7 @@ class Scheduler:  # cm:9a7f2c
         # Optional callback fired after each time step completes
         # (all delta cycles resolved).  Signature: callback(scheduler)
         self._on_time_step: Callable[[Scheduler], None] | None = None
+        self._trace_hub = None  # trace.TraceHub, created by the first trace session
 
     # ── Elaboration ──────────────────────────────────────────────
 
@@ -571,9 +574,8 @@ class Scheduler:  # cm:9a7f2c
         if self._combo_procs:
             self._run_active_region(list(self._combo_procs))
 
-        # Wire VCD callback if $dumpvars created a writer and no external callback is set
-        if self._on_time_step is None and self.executor._vcd_writer is not None:
-            self._on_time_step = self.executor.vcd_time_step_callback
+        # Start the $dumpvars trace session, if an initial block requested one.
+        start_dump(self, self.executor)
 
         # Run the event loop
         self._run_time_step(max_time)
@@ -690,10 +692,7 @@ class Scheduler:  # cm:9a7f2c
         self.display_output.extend(self.executor.display_output)
         self.executor.display_output.clear()
 
-        # Finalize VCD writer if active
-        if self.executor._vcd_writer is not None:
-            self.executor._vcd_writer.finalize()
-            self.executor._vcd_writer = None
+        flush_dump(self.executor)
 
     def _run_single_step(self, next_time: int) -> bool:
         """Process one time step at *next_time*. Returns True to continue."""
@@ -739,6 +738,10 @@ class Scheduler:  # cm:9a7f2c
         # Wake up event-waiting processes (@(posedge clk), etc.)
         if self._event_waiting:
             self._check_event_waiting()
+
+        # A $dumpvars/$dumpoff/... executed during this step (e.g. after a delay).
+        if self.executor._dump_request is not None or self.executor._dump_ctl:
+            start_dump(self, self.executor)
 
         # Fire time-step callback (all delta cycles resolved).
         # If the callback drives signals (e.g. an AXI responder), propagate
