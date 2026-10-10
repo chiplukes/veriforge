@@ -3762,6 +3762,20 @@ class _WideEmitterMixin:
         pad = "    " * indent
         et = type(expr)
 
+        # A guard condition (`r && f()`): its snapshot taken before the call
+        # (see `_cond_snapshot`); only its truthiness is used.
+        if id(expr) in self._guard_conds:
+            snap = self._cond_snapshot(expr)
+            if snap is not None:
+                lines = [
+                    f"{pad}_sc{slot}_v[0] = <unsigned long long>({snap[0]})",
+                    f"{pad}_sc{slot}_m[0] = <unsigned long long>({snap[1]})",
+                ]
+                for wi in range(1, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                return lines
+
         # ── Identifier ──────────────────────────────────────────────────────
         if et is Identifier:
             name = self._identifier_name(expr)
@@ -4482,9 +4496,16 @@ class _WideEmitterMixin:
                     if signed_override is not None
                     else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
                 )
+                # The base at max(destination, its own width), never
+                # narrower: built at a narrower destination width, a wide
+                # base like `{x, 73'h..}` was truncated (losing its x)
+                # before the power was taken.
+                pow_w = max(dst_width, self._expr_width(expr.left))
+                if (pow_w + _WORD_BITS - 1) // _WORD_BITS > n_words:
+                    return None
                 bslot = self._alloc_scratch()
                 blines = self._emit_wide_expr_to_scratch(
-                    expr.left, bslot, n_words, dst_width, indent, signed_override=both_signed
+                    expr.left, bslot, n_words, pow_w, indent, signed_override=both_signed
                 )
                 if blines is None:
                     self._free_scratch(bslot)
@@ -4498,8 +4519,18 @@ class _WideEmitterMixin:
                     *blines,
                     f"{pad}wide_pow(_sc{slot}_v, _sc{slot}_m, _sc{bslot}_v, _sc{bslot}_m,"
                     f" <long long>({exp_v}), 1 if (({exp_m}) & wmask({exp_w})) else 0,"
-                    f" {1 if both_signed else 0}, {n_words}, {dst_width})",
+                    f" {1 if both_signed else 0}, {n_words}, {pow_w})",
                 ]
+                if pow_w > dst_width:
+                    # Back down to the destination width.
+                    for wi in range(n_words):
+                        left = dst_width - wi * _WORD_BITS
+                        if left <= 0:
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                        elif left < _WORD_BITS:
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] &= _word_mask64({left})")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] &= _word_mask64({left})")
                 self._free_scratch(bslot)
                 return lines
 
@@ -4569,10 +4600,10 @@ class _WideEmitterMixin:
                 # independent of the `>>`), but the unconditional force
                 # made `a0` zero-extend to +1 instead, giving `a6 & 1`
                 # rather than `a6 & (-1) == a6`.
-                if op == ">>" and lw >= dst_width:
-                    l_signed_override = None
-                else:
-                    l_signed_override = False if op == ">>" else signed_override
+                # Extends with the expression's own signedness for `>>`
+                # too (the shift is logical; see `_expr_emitter`): it was
+                # forced unsigned, so `s8 >> 1` into 100 bits gave 7f.
+                l_signed_override = signed_override
                 llines = self._emit_wide_expr_to_scratch(
                     expr.left, lslot, n_src, l_dst_width, indent, signed_override=l_signed_override
                 )
@@ -5521,15 +5552,22 @@ class _WideEmitterMixin:
             # function call's contribution to the concat entirely.
             func = self._function_map.get(expr.name)
             if func is not None:
-                call_expr = self._emit_user_func_call_expr(func, expr)
                 ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
                 if ret_sid is None:
                     return None
+                # Hoisted (once, and only where its operand is evaluated --
+                # see `_scan_call_guards`) when a hoisting scope is open.
+                hoisted = self._hoist_user_func_call(func, expr)
+                if hoisted is not None:
+                    call_expr, mask_expr = hoisted
+                else:
+                    call_expr = self._emit_user_func_call_expr(func, expr)
+                    mask_expr = f"c.mask[{ret_sid}]"
                 ret_w = self._signal_widths[ret_sid]
                 src_signed = signed_override if signed_override is not None else self._expr_signed(expr)
                 lines = [
                     f"{pad}_sc{slot}_v[0] = ({call_expr}) & wmask({ret_w})",
-                    f"{pad}_sc{slot}_m[0] = (c.mask[{ret_sid}]) & wmask({ret_w})",
+                    f"{pad}_sc{slot}_m[0] = ({mask_expr}) & wmask({ret_w})",
                 ]
                 for wi in range(1, n_words):
                     lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")

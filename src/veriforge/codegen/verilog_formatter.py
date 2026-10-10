@@ -52,6 +52,7 @@ from ..model.statements import (
     WhileLoop,
 )
 from ..model.variables import Variable
+from ..model.variables import INTEGER_ATOM_WIDTHS
 from .format_style import FormatStyle
 from .verilog_emitter import emit_expression
 
@@ -616,6 +617,8 @@ class VerilogFormatter:
             parts.append("automatic")
         if fn.return_kind:
             parts.append(fn.return_kind)
+            if fn.return_kind in INTEGER_ATOM_WIDTHS and not fn.signed:
+                parts.append("unsigned")
         elif fn.return_range:
             parts.append(self._range(fn.return_range))
         parts.append(fn.name)
@@ -842,10 +845,15 @@ class VerilogFormatter:
             parts.append(port.net_type)
         if port.data_type:
             parts.append(port.data_type)
-        if port.signed:
-            parts.append("signed")
-        if port.width:
-            parts.append(f"[{emit_expression(port.width.msb)}:{emit_expression(port.width.lsb)}]")
+        if port.data_type in INTEGER_ATOM_WIDTHS:
+            # `byte`/`int`/...: fixed width, signed unless `unsigned`.
+            if not port.signed:
+                parts.append("unsigned")
+        else:
+            if port.signed:
+                parts.append("signed")
+            if port.width:
+                parts.append(f"[{emit_expression(port.width.msb)}:{emit_expression(port.width.lsb)}]")
         parts.append(port.name)
         if port.default_value:
             parts.append("=")

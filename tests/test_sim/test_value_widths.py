@@ -54,20 +54,21 @@ class TestArithmeticWidthPromotion:
         assert r == 2
         assert r.width == 16
 
-    def test_mul_result_width_is_sum(self):
-        """IEEE: multiply result width = sum of operand widths."""
+    def test_mul_result_width_is_max(self):
+        """IEEE Table 5-22: max(L(i), L(j)) -- the product wraps (callers
+        extend the operands to the context width first)."""
         a = Value(0xFF, width=8)
         b = Value(0xFF, width=8)
         r = a * b
-        assert r == 0xFF * 0xFF
-        assert r.width == 16
+        assert r == (0xFF * 0xFF) & 0xFF
+        assert r.width == 8
 
     def test_mul_mixed_widths(self):
         a = Value(3, width=4)
         b = Value(5, width=8)
         r = a * b
         assert r == 15
-        assert r.width == 12
+        assert r.width == 8
 
     def test_div_mixed_widths(self):
         a = Value(100, width=16)
@@ -409,7 +410,7 @@ class TestXPropagationMixedWidth:
     def test_mul_x_propagates(self):
         r = Value.x(4) * Value(3, width=8)
         assert r.is_x
-        assert r.width == 12
+        assert r.width == 8
 
 
 # ── Evaluator Width Promotion (Expression-Level) ─────────────────────

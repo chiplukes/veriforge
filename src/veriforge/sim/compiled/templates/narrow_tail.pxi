@@ -275,7 +275,7 @@ cdef void _out_fmt_body(SimCtx *c, const unsigned long long *v, const unsigned l
             natural = fw
         elif zp:
             natural = 0
-        elif sgn:
+        elif sgn and w > 1:  # (a 1-bit signed value pads to 1, as in Icarus)
             natural = <int>((w - 1) * 0.30102999566398120) + 2
         else:
             natural = <int>(w * 0.30102999566398120) + 1

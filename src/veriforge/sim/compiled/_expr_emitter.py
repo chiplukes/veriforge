@@ -264,6 +264,10 @@ class _ExprEmitterMixin:
         wrapped in `_sign_ext` afterward (those are not equivalent).
         """
         etype = type(expr)
+        if id(expr) in self._guard_conds:
+            snap = self._cond_snapshot(expr)
+            if snap is not None:
+                return snap[0]
 
         if etype is Identifier:
             name = expr.name
@@ -1741,10 +1745,13 @@ class _ExprEmitterMixin:
         # (matching Verilog's `a4 & a0`, independent of the `>>`), but the
         # unconditional force made `a0` zero-extend to +1 instead, giving
         # `a4 & 1` rather than `a4 & (-1) == a4`.
-        if expr.op == ">>" and self._expr_width(expr.left) >= op_width:
-            left_signed_override = None
-        else:
-            left_signed_override = False if expr.op == ">>" else combined_override
+        # 2026-10-10: no longer forced unsigned for `>>` -- the left operand
+        # is context-determined and extends with the expression's own
+        # signedness (IEEE 5.5.2; the shift itself is logical): `s8 >> 1`
+        # into 16 bits is 7fff in Icarus (it gave 007f). The force predates
+        # context-signedness propagation (`signed_override`), which now
+        # carries an unsigned context (`(s8 >> n) | u8`) down here instead.
+        left_signed_override = combined_override
         left = self._emit_expr(expr.left, bitwise_op_width, left_signed_override)
         # The shift COUNT is self-determined (IEEE 1364-2005 Table 5-22 /
         # SS5.6): it must be evaluated at its OWN natural width, not
@@ -2103,7 +2110,17 @@ class _ExprEmitterMixin:
         elif expr.op in ("/", "%") and not combined_override:
             # Unsigned division/modulus: cast both sides to avoid signed C behavior
             # on 64-bit values with MSB=1 stored as negative long long.
-            core = f"(<long long>(<unsigned long long>({left}) {c_op} <unsigned long long>({right})))"
+            # A zero divisor (x, see the mask side) used to divide natively
+            # -- SIGFPE, killing the process.
+            core = (
+                f"(0 if <unsigned long long>({right}) == 0 else"
+                f" <long long>(<unsigned long long>({left}) {c_op} <unsigned long long>({right})))"
+            )
+        elif expr.op in ("/", "%"):
+            # Signed: zero divisor as above; -1 without the C overflow trap
+            # (LLONG_MIN / -1).
+            neg = f"<long long>(-<unsigned long long>({left}))" if expr.op == "/" else "0"
+            core = f"(0 if ({right}) == 0 else ({neg} if ({right}) == -1 else (({left}) {c_op} ({right}))))"
         else:
             core = f"(({left}) {c_op} ({right}))"
         if expr.op == "^":
@@ -3074,12 +3091,75 @@ class _ExprEmitterMixin:
         ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
         if ret_sid is None:
             return None
+        guard = self._call_guard_expr(call)
+        call_expr = self._emit_user_func_call_expr(func, call)
         n = self._et_count
         self._et_count += 1
-        self._et_pending.append(f"cdef long long _et{n}_v = {self._emit_user_func_call_expr(func, call)}")
-        self._et_pending.append(f"cdef long long _et{n}_m = c.mask[{ret_sid}]")
+        if guard is None:
+            self._et_pending.append(f"cdef long long _et{n}_v = {call_expr}")
+            self._et_pending.append(f"cdef long long _et{n}_m = c.mask[{ret_sid}]")
+        else:
+            # In an operand that's only evaluated under *guard* (an untaken
+            # branch must not run the function's side effects).
+            self._et_pending.append(f"cdef long long _et{n}_v = 0")
+            self._et_pending.append(f"cdef long long _et{n}_m = 0")
+            self._et_pending.append(f"if {guard}:")
+            self._et_pending.append(f"    _et{n}_v = {call_expr}")
+            self._et_pending.append(f"    _et{n}_m = c.mask[{ret_sid}]")
         self._et_node_vals[id(call)] = f"_et{n}_v"
         self._et_node_masks[id(call)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
+
+    def _call_guard_expr(self, call: FunctionCall) -> str | None:
+        """The condition under which *call* is evaluated, as a Cython
+        expression over hoisted temporaries (None: always). Each guard
+        condition is reduced with `|`: value 1 = a known 1, mask 1 =
+        ambiguous (see `_scan_call_guards`)."""
+        guards = self._call_guards.get(id(call))
+        if not guards:
+            return None
+        terms = []
+        for cond, nonzero in guards:
+            snap = self._cond_snapshot(cond)
+            if snap is None:
+                return None
+            v, m = snap
+            terms.append(f"({v} | {m})" if nonzero else f"({v} & ~{m}) == 0")
+        return " and ".join(terms)
+
+    def _cond_snapshot(self, cond: Expression) -> tuple[str, str] | None:
+        """The guard condition *cond* (a `?:` condition, a `&&`/`||` left
+        operand -- see `_scan_call_guards`) reduced with `|` into hoisted
+        temporaries, once per statement: value 1 = a known 1, mask 1 =
+        ambiguous. Both the guards and the expression itself read it (only
+        its truthiness matters there), so the condition is evaluated before
+        any call it guards, as in the other engines: with the call hoisted
+        ahead of the statement, `r && f()` used to read `r` after `f()` had
+        changed it. None outside a hoisting scope."""
+        if self._et_pending is None or id(cond) in self._guard_snapping:
+            return None
+        key = ~id(cond)  # (negative: can't collide with a node's own entry)
+        cached_v = self._et_node_vals.get(key)
+        cached_m = self._et_node_masks.get(key)
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        red = self._guard_reductions.get(id(cond))
+        if red is None:
+            # Kept alive for the codegen's lifetime: the emitters' caches
+            # are keyed by id().
+            red = self._guard_reductions[id(cond)] = UnaryOp(op="|", operand=cond)
+        self._guard_snapping.add(id(cond))
+        try:
+            rv = self._emit_expr(red, 1)
+            rm = self._emit_mask_expr(red, 1)
+        finally:
+            self._guard_snapping.discard(id(cond))
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.append(f"cdef long long _et{n}_v = ({rv}) & 1")
+        self._et_pending.append(f"cdef long long _et{n}_m = ({rm}) & 1")
+        self._et_node_vals[key] = f"_et{n}_v"
+        self._et_node_masks[key] = f"_et{n}_m"
         return f"_et{n}_v", f"_et{n}_m"
 
     def _emit_user_func_call_expr(self, func, call: FunctionCall) -> str:
@@ -3361,6 +3441,10 @@ class _ExprEmitterMixin:
         for why this matters.
         """
         etype = type(expr)
+        if id(expr) in self._guard_conds:
+            snap = self._cond_snapshot(expr)
+            if snap is not None:
+                return snap[1]
 
         if etype is Identifier:
             name = expr.name
@@ -3709,6 +3793,13 @@ class _ExprEmitterMixin:
                 # divisor whose own x bit survives an `| 1` (used
                 # elsewhere to dodge zero-divisor UB) at a different bit
                 # position.
+                if expr.op in ("/", "%"):
+                    # A known-zero divisor is x too.
+                    rv = self._emit_expr(expr.right, bitwise_op_width)
+                    return (
+                        f"(wmask({width}) if (({lm}) | ({rm})) or"
+                        f" (<unsigned long long>({rv}) & <unsigned long long>wmask({bitwise_op_width})) == 0 else 0)"
+                    )
                 return f"(wmask({width}) if (({lm}) | ({rm})) else 0)"
             if (
                 expr.op == ">>>"
@@ -4248,6 +4339,15 @@ class _ExprEmitterMixin:
             fname = expr.name.lower()
             if fname == "$__2state":
                 return "0"  # 2-state: never x/z (see _emit_func_call)
+            if fname in ("$bits", "$time", "$realtime", "$stime"):
+                # Never x: `$bits(a)` of an x `a` used to fall to the
+                # argument-mask fallback below and print x.
+                return "0"
+            if fname == "$clog2" and expr.arguments:
+                # All x for an argument with any x bit (it used to copy the
+                # argument's own mask, so the 32-bit result was partly x).
+                arg = expr.arguments[0]
+                return f"(wmask(32) if ({self._emit_mask_expr(arg, self._expr_width(arg))}) else 0)"
             if fname in {"$signed", "$unsigned"} and expr.arguments:
                 # Mirrors `_emit_func_call`'s VALUE-side handling: `$signed`
                 # sign-extends its argument's raw value from the argument's

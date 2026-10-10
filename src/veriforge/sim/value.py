@@ -413,11 +413,13 @@ class Value:  # cm:c8a1e6
 
     def __mul__(self, other: Value | int) -> Value:
         other = _coerce(other, self.width)
-        # IEEE 1364-2005 §5.4.1: multiply result width = sum of operand widths
-        w = self.width + other.width
+        # IEEE 1364-2005 Table 5-22: max(L(i), L(j)), like `+` -- it used to
+        # be the sum, so a self-determined `a * b` of two 8-bit regs printed
+        # 16 bits and `(a * b) >> 4` kept the carry (2026-10-10).
+        w = max(self.width, other.width)
         if self.mask or other.mask:
             return Value.x(w)
-        return Value((self.val * other.val), width=w)
+        return Value((self.val * other.val) & ((1 << w) - 1), width=w)
 
     def __rmul__(self, other: int) -> Value:
         return self.__mul__(other)

@@ -1001,6 +1001,15 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         if not self._has_drive_snapshot:
             self._sim.snapshot()
         self._has_drive_snapshot = False
+        if not self._combo_bootstrapped:
+            # Every continuous assign / combinational block runs once at
+            # t=0 (as in reference/vm, and settle()'s own bootstrap): the
+            # delta loop only triggers everything when NOTHING is dirty, so
+            # with any initializer dirty, `wire [2:0] w4 = w2` stayed at its
+            # initial all-x when w2 itself stayed x (no change to propagate).
+            # Edges compare against the snapshot, so this fires none.
+            self._combo_bootstrapped = True
+            self._sim.mark_all_dirty()
         self._sim.step()
         self._drain_compiled_output()
         if self._sim.is_finished():

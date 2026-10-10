@@ -21,6 +21,7 @@ from ..model.expressions import (
     Range,
     StreamingConcatenation,
     StringLiteral,
+    TernaryOp,
 )
 from ..model.instances import Instance, PortConnection
 from ..model.statements import (
@@ -437,8 +438,9 @@ class ModuleGenerator:
         `int` counter. Added 2026-10-10: tasks and side effects were never
         generated (task locals were even dropped by the parser).
 
-        The impure call is only ever a top-level RHS operand, so its side
-        effect happens exactly once per clock in every simulator."""
+        The impure call is a top-level RHS operand, or (since short-circuit
+        evaluation was fixed, 2026-10-10) a `?:` branch or the right side of
+        `&&`/`||`, where it must run only when that operand is evaluated."""
         rng = self._rng
         ctx.add_clock()
         for _ in range(rng.randint(2, 4)):
@@ -471,7 +473,15 @@ class ModuleGenerator:
             rhs = expr_gen.expr(rng, depth=rng.randint(1, 3))
             if rng.random() < 0.5:
                 call = FunctionCall("fimp", [expr_gen.expr(rng, depth=1) for _ in spec.arg_widths])
-                rhs = BinaryOp(rng.choice(["+", "^", "-"]), call, rhs)
+                shape = rng.choice(["op", "op", "ternary", "logical"])
+                if shape == "ternary":
+                    cond = expr_gen.expr(rng, depth=rng.randint(0, 2))
+                    rhs = TernaryOp(cond, call, rhs) if rng.random() < 0.5 else TernaryOp(cond, rhs, call)
+                elif shape == "logical":
+                    cond = expr_gen.expr(rng, depth=rng.randint(0, 2))
+                    rhs = BinaryOp("^", BinaryOp(rng.choice(["&&", "||"]), cond, call), rhs)
+                else:
+                    rhs = BinaryOp(rng.choice(["+", "^", "-"]), call, rhs)
             stmts.append(NonblockingAssign(out.as_identifier(), rhs))
         stmts.extend(self._maybe_display(expr_gen))
         ab = AlwaysBlock(
@@ -722,6 +732,12 @@ class ModuleGenerator:
                     ctx.add_clock()
                 actual = Identifier("clk")
             else:
+                # Not reading clk: a port connection is a continuous assign,
+                # so a child's clocked block reading one that depends on clk
+                # races the clock edge (Icarus runs the block first, veriforge
+                # the assign) -- a legitimate IEEE ambiguity, not a bug.
+                clocks = [sig for sig in ctx._inputs if sig.name == "clk"]
+                ctx._inputs = [sig for sig in ctx._inputs if sig.name != "clk"]
                 depth = self._rng.randint(1, 3)
                 roll = self._rng.random()
                 if roll < 0.30:
@@ -730,6 +746,7 @@ class ModuleGenerator:
                     actual = expr_gen._streaming_concat(self._rng, depth, ())
                 else:
                     actual = expr_gen.expr(self._rng, depth)
+                ctx._inputs.extend(clocks)
             port_connections.append(PortConnection(port_name=port.name, expression=actual, is_named=True))
 
         inst = Instance(child.name, ctx._next_name("u"), port_connections=port_connections)

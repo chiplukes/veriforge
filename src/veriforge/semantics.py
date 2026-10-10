@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
+from .model.base import VerilogNode
 from .model.expressions import (
     BinaryOp,
     BitSelect,
@@ -379,10 +380,12 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
         if expr.op in _LEFT_WIDTH_BINARY:
             return expr_width(expr.left, width_of, env)
         left_w = expr_width(expr.left, width_of, env)
-        right_w = expr_width(expr.right, width_of, env)
-        if expr.op in ("*", "**"):
-            return left_w + right_w
-        return max(left_w, right_w)
+        if expr.op == "**":
+            return left_w  # Table 5-22: L(i)
+        # `*` too is max(L(i), L(j)) -- it used to be the sum, so `a * b` of
+        # two 8-bit regs printed 16 bits and `(a * b) >> 4` kept the carry
+        # (2026-10-10, Icarus-checked).
+        return max(left_w, expr_width(expr.right, width_of, env))
     if isinstance(expr, TernaryOp):
         return max(expr_width(expr.true_expr, width_of, env), expr_width(expr.false_expr, width_of, env))
     if isinstance(expr, Concatenation):
@@ -476,4 +479,48 @@ def expr_signed(
         return function_signed(expr.name) if function_signed is not None else False
     if isinstance(expr, WidthCast):
         return expr_signed(expr.operand, signed_of, function_signed)
+    return False
+
+
+# System functions with no side effects and no hidden state: a continuous
+# assign calling only these computes a pure function of its inputs.
+# ($random/$urandom carry state; $time/$realtime/$stime read time; anything
+# not listed -- including every user-defined function, which writes its own
+# internal port/local/return signals -- is treated as impure.)
+_PURE_SYSTEM_FUNCTIONS = frozenset(
+    {
+        "$signed",
+        "$unsigned",
+        "$__2state",
+        "$clog2",
+        "$bits",
+        "$size",
+        "$countones",
+        "$onehot",
+        "$onehot0",
+        "$isunknown",
+        "$high",
+        "$low",
+        "$left",
+        "$right",
+    }
+)
+
+
+def has_impure_call(node: object) -> bool:
+    """True if *node*'s expression tree contains any call outside
+    ``_PURE_SYSTEM_FUNCTIONS``. Walks every ``__slots__`` field generically,
+    so a new expression type can't silently hide a call from this check.
+    Used where evaluation order matters: compiled hoisting, and the
+    short-circuit `&&`/`||`/`?:` paths that skip an operand."""
+    if isinstance(node, FunctionCall) and node.name not in _PURE_SYSTEM_FUNCTIONS:
+        return True
+    if isinstance(node, VerilogNode):
+        for cls in type(node).__mro__:
+            for slot in getattr(cls, "__slots__", ()):
+                child = getattr(node, slot, None)
+                if isinstance(child, (VerilogNode, list, tuple)) and has_impure_call(child):
+                    return True
+    elif isinstance(node, (list, tuple)):
+        return any(has_impure_call(item) for item in node)
     return False

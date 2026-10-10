@@ -71,6 +71,85 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Short-circuit evaluation, integer atom types, fuzzer round 3 (RESOLVED 2026-10-10)
+
+Covered by `tests/test_sim/test_short_circuit.py`,
+`test_integer_atom_types.py` and new `test_fuzz_findings.py` cases.
+
+**Short-circuit evaluation (IEEE 1800 11.4.7).**
+
+- A function call in an untaken `?:` branch, or in a `&&`/`||` right
+  operand already decided by its left operand, ran its side effects.
+- **vm, vm-fast:** these evaluated every operand. They now emit jumps only
+  when the operand contains an impure call.
+- **reference:** did not short-circuit `&&`/`||`.
+- **compiled:** hoisted every call ahead of the statement.
+  - The calls now run under guards recorded by `_scan_call_guards`. Guards
+    are re-recorded for the copied function and task bodies.
+  - The condition is snapshotted before the call (`_cond_snapshot`), so
+    `r && f()` no longer reads `r` after `f` has changed it. This applies
+    on the narrow and wide paths.
+  - The wide function-call path now goes through the same hoist.
+- An ambiguous (x) condition still evaluates both branches and merges
+  them.
+
+**Integer atom types.**
+
+- **Grammar:** `byte`/`shortint`/`int`/`longint`/`integer` now take
+  `signed`/`unsigned` in every position. Tasks and non-ANSI functions take
+  several statements without `begin`/`end`.
+- **Ports (all engines):** `byte`/`int`/`shortint` function and task ports
+  were 1 bit wide.
+- **Returns:** `byte`/`shortint`/`longint` returns were 32 bits wide.
+- **`integer unsigned`:** now unsigned. Icarus prints it signed, a quirk
+  recorded in known_issues.md; Verilator follows IEEE.
+- **reference:** a task output bound to a caller signal with the same name
+  as one of the task's ports was lost.
+- **Emitters:** both now write `input byte unsigned x`, not
+  `input byte signed [7:0] x`.
+
+**Fuzzer round 3** (tasks/functions/mix campaigns; impure calls are now
+generated in lazy positions too).
+
+- **All engines except compiled:**
+  - `*` was `L(i) + L(j)` wide instead of `max`, in `Value.__mul__`,
+    `semantics.expr_width`, vm `static_result_w` and vm-fast `OP_MUL`.
+    `a * b` of two 8-bit values printed 16 bits, and on vm/vm-fast
+    `(a * b) >> 4` kept the carry.
+  - `**`'s width is now `L(i)` in `semantics.expr_width`.
+- **reference, vm, vm-fast:** `N'(e)` of a signed function or task port
+  was unsigned: the cast lowering looked names up at module scope.
+- **vm, vm-fast, compiled:** a `**` base wider than its destination was
+  truncated first, dropping its x bits.
+- **vm-fast:**
+  - The per-process dirty list (one entry per changing write) overflowed
+    in loops and silently dropped later entries, so a child's output never
+    reached its port connection. Entries are now de-duplicated with a
+    per-signal mark byte. A call in the push's overflow branch had cost
+    20% of interpreter speed.
+  - `LLONG_MIN / -1` crashed with SIGFPE.
+- **compiled:**
+  - `integer`s were stored unmasked at 64 bits.
+  - A continuous assign's x mask wasn't truncated to the wire width.
+  - A continuous assign whose inputs never changed at t=0 never ran.
+    Every combinational process now runs once at t=0, as in reference.
+  - `>>`'s left operand was forced unsigned, so `s8 >> 1` into 16 bits
+    gave `007f` instead of `7fff` (narrow and wide paths).
+  - Division and modulus by a known zero divided natively and crashed
+    with SIGFPE. They now give x, and `/ -1` no longer traps.
+  - `$bits` of an x signal printed x, and `$clog2` of an x value was only
+    partly x.
+  - Wide intermediates built from function locals didn't get their wide
+    helpers emitted, causing a build error.
+- **`%d` padding:** a 1-bit signed value pads to 1 column, like Icarus.
+- **`--repro`:** `info.json` now records the strategy and the engines, so
+  a seed from a restricted run regenerates the same design.
+- **Fuzzer generator and runner:**
+  - Port connections no longer read `clk`; they raced the child's clocked
+    blocks, an IEEE-allowed difference.
+  - The runner filters a self-reading combinational output whose
+    difference starts at vector 0, not only one confined to vector 0.
+
 ### Hardcoded capacity limits (RESOLVED 2026-10-10)
 
 An audit of fixed-size buffers in both native engines

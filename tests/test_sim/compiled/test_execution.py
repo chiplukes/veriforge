@@ -1963,10 +1963,13 @@ class TestPhase4Execution:
         assert sim.read("x") == Value(99, width=8)
 
     def test_integer_modulus_initial(self):
-        """Large INTEGER assignments do not get truncated to zero in compiled mode."""
+        """`modulus = 2**32` into a 32-bit `integer` is 0, so `7 % modulus` is
+        x (as in Icarus). This used to expect 7: compiled kept `integer`s
+        unmasked at 64 bits; fixed 2026-10-10, along with the native divide
+        by zero that then crashed the process."""
         sim = Simulator(_make_integer_modulus_initial(), engine="compiled")
         sim.run(max_time=0)
-        assert sim.read("count") == Value(7, width=32)
+        assert sim.read("count") == Value.x(32)
 
 
 class TestPhase5Execution:

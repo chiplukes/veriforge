@@ -182,6 +182,7 @@ class _StmtEmittersMixin:
             body_copy = copy.deepcopy(task.body)
             local_names = {port.name for port in task.ports}
             self._remap_local_identifiers(body_copy, local_names, prefix)
+            self._record_call_guards(body_copy)
             lines.extend(self._emit_stmt(body_copy, indent))
 
         # Copy outputs back
@@ -534,7 +535,7 @@ class _StmtEmittersMixin:
             lines = self._emit_wide_lnot_shift_lines(sid, rhs, indent=indent, is_nba=is_nba)
             if lines is not None:
                 return lines
-            assign_width = 64 if sid in self._unmasked_signal_ids else self._signal_widths[sid]
+            assign_width = self._signal_widths[sid]
             lines = self._emit_wide_py_bits_lines(sid, rhs, eval_width=assign_width, indent=indent, is_nba=is_nba)
             if lines is not None:
                 return lines
@@ -565,16 +566,8 @@ class _StmtEmittersMixin:
             rhs_mask = self._emit_mask_expr(rhs, assign_width)
             et_lines = [f"{pad}{t}" for t in self._et_pending]
             self._et_pending = old_et
-            assign_rhs = (
-                f"({rhs_val})"
-                if sid in self._unmasked_signal_ids
-                else f"({rhs_val}) & wmask({self._signal_widths[sid]})"
-            )
-            assign_mask = (
-                f"({rhs_mask})"
-                if sid in self._unmasked_signal_ids
-                else f"({rhs_mask}) & wmask({self._signal_widths[sid]})"
-            )
+            assign_rhs = f"({rhs_val}) & wmask({self._signal_widths[sid]})"
+            assign_mask = f"({rhs_mask}) & wmask({self._signal_widths[sid]})"
             if is_nba:
                 return [
                     *et_lines,

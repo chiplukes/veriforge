@@ -1532,6 +1532,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 local_names.update(local_var.name for local_var in func.locals)
                 local_names.add(func.name)
                 self._remap_local_identifiers(body_copy, local_names, prefix)
+                self._record_call_guards(body_copy)
                 self._et_count = 0
                 self._et_node_masks = {}
                 self._et_node_vals = {}

@@ -231,12 +231,14 @@ def test_expr_width_shift_uses_left_operand_only():
     assert expr_width(shifted, _width_of(widths)) == 8
 
 
-def test_expr_width_multiply_uses_sum_rule_not_max():
-    """Table 5-22: '*' self-determined width is the SUM of operand widths,
-    not max — unlike most other binary arithmetic operators."""
+def test_expr_width_multiply_uses_max_rule():
+    """Table 5-22: '*' is max(L(i), L(j)) wide, like '+' (this test used to
+    assert the sum; Icarus: `$bits(a8 * b8)` is 8). '**' is L(i)."""
     widths = {"a": 8, "b": 16}
     mul = BinaryOp("*", Identifier("a"), Identifier("b"))
-    assert expr_width(mul, _width_of(widths)) == 24
+    assert expr_width(mul, _width_of(widths)) == 16
+    power = BinaryOp("**", Identifier("a"), Identifier("b"))
+    assert expr_width(power, _width_of(widths)) == 8
     add = BinaryOp("+", Identifier("a"), Identifier("b"))
     assert expr_width(add, _width_of(widths)) == 16
 

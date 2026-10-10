@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from veriforge._env import get_env
 from veriforge.model.assignments import ContinuousAssign
 from veriforge.model.base import VerilogNode
+from veriforge.semantics import has_impure_call
 from veriforge.model.expressions import (
     AssignmentPattern,
     BinaryOp,
@@ -48,47 +49,6 @@ from veriforge.sim.compiled._codegen_utils import (
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
-
-
-# System functions with no side effects and no hidden state: a continuous
-# assign calling only these computes a pure function of its inputs.
-# ($random/$urandom carry state; $time/$realtime/$stime read time; anything
-# not listed -- including every user-defined function, which writes its own
-# internal port/local/return signals -- is treated as impure.)
-_PURE_SYSTEM_FUNCTIONS = frozenset(
-    {
-        "$signed",
-        "$unsigned",
-        "$__2state",
-        "$clog2",
-        "$bits",
-        "$size",
-        "$countones",
-        "$onehot",
-        "$onehot0",
-        "$isunknown",
-        "$high",
-        "$low",
-        "$left",
-        "$right",
-    }
-)
-
-
-def _has_impure_call(node: object) -> bool:
-    """True if *node*'s expression tree contains any call outside
-    ``_PURE_SYSTEM_FUNCTIONS``. Walks every ``__slots__`` field generically,
-    so a new expression type can't silently hide a call from this check."""
-    if isinstance(node, FunctionCall) and node.name not in _PURE_SYSTEM_FUNCTIONS:
-        return True
-    if isinstance(node, VerilogNode):
-        for slot in getattr(type(node), "__slots__", ()):
-            child = getattr(node, slot, None)
-            if isinstance(child, (VerilogNode, list, tuple)) and _has_impure_call(child):
-                return True
-    elif isinstance(node, (list, tuple)):
-        return any(_has_impure_call(item) for item in node)
-    return False
 
 
 class _ProcessCompilerMixin:
@@ -136,7 +96,7 @@ class _ProcessCompilerMixin:
         for name in names:
             if name in self._mem_map or self._signal_map.get(name) is None:
                 return False
-        return not _has_impure_call(assign.rhs)
+        return not has_impure_call(assign.rhs)
 
     def _cont_assign_is_rerun_pure(self, assign: ContinuousAssign, sensitivity: set[int]) -> bool:
         """Whether processes compiled from *assign* may skip a rerun when none
@@ -625,7 +585,9 @@ class _ProcessCompilerMixin:
             lines = [
                 *et_lines,
                 v_line,
-                f"    cdef long long m = {mask_expr}",
+                # (The mask used to be stored unmasked: `wire [0:0] w = r8`
+                # kept r8's upper x bits, visible wherever w was extended.)
+                f"    cdef long long m = ({mask_expr}) & wmask({lhs_w})",
                 "    v = v & ~m",
                 f"    if v != c.val[{lhs_sid}] or m != c.mask[{lhs_sid}]:",
                 f"        c.val[{lhs_sid}] = v",
@@ -1525,7 +1487,7 @@ class _ProcessCompilerMixin:
         lines = [
             f"    cdef long long idx = ({idx}) & 0x3f",
             f"    cdef long long rval = ({rhs_val}) & 1",
-            f"    cdef long long m = {mask_expr}",
+            f"    cdef long long m = ({mask_expr}) & 1",
             f"    cdef long long new_val = (c.val[{sid}] & ~(1LL << idx)) | (rval << idx)",
             f"    cdef long long new_mask = c.mask[{sid}] & ~(1LL << idx)",
             "    if m:",

@@ -17,7 +17,14 @@ from ._module_gen import Strategy
 from ._runner import FuzzRunner
 
 
-def _repro_seed(seed: int, *, icarus: bool = True, verilator: bool = False) -> None:
+def _repro_seed(
+    seed: int,
+    *,
+    icarus: bool = True,
+    verilator: bool = False,
+    strategy: Strategy | None = None,
+    engines: list[str] | None = None,
+) -> None:
     """Re-run a specific seed with detailed per-vector output comparison.
 
     *icarus*/*verilator* mirror the main run's own `--no-icarus`/
@@ -36,7 +43,7 @@ def _repro_seed(seed: int, *, icarus: bool = True, verilator: bool = False) -> N
     """
     rng = random.Random(seed)  # noqa: S311
     gen = ModuleGenerator(rng)
-    design = gen.generate_design()
+    design = gen.generate_design(strategy)
     top = design.get_module("t")
     assert top is not None, "generator always names the top module 't'"
     verilog = emit_design(design)
@@ -45,7 +52,7 @@ def _repro_seed(seed: int, *, icarus: bool = True, verilator: bool = False) -> N
     print(verilog)
     print()
 
-    runner = FuzzRunner(output_dir=".", seed=seed, icarus=icarus, verilator=verilator)
+    runner = FuzzRunner(output_dir=".", seed=seed, engines=engines, icarus=icarus, verilator=verilator)
     vectors = runner._gen_stimulus(top, rng)
 
     for engine in runner._engines:
@@ -131,17 +138,29 @@ def main() -> None:
 
     if args.repro:
         repro_path = Path(args.repro)
+        strategy_name = args.strategy
+        engines = args.engines
         if repro_path.is_dir():
             info_path = repro_path / "info.json"
             if info_path.exists():
                 info = json.loads(info_path.read_text())
                 seed = info["seed"]
+                # A run restricted to one strategy (or engine set) must be
+                # regenerated the same way, or it's a different design.
+                strategy_name = strategy_name or info.get("strategy") or None
+                engines = engines or info.get("engines_tested") or None
             else:
                 seed_str = repro_path.name.replace("mismatch_", "")
                 seed = int(seed_str)
         else:
             seed = int(args.repro)
-        _repro_seed(seed, icarus=not args.no_icarus, verilator=args.verilator)
+        _repro_seed(
+            seed,
+            icarus=not args.no_icarus,
+            verilator=args.verilator,
+            strategy=Strategy[strategy_name.upper()] if strategy_name else None,
+            engines=engines,
+        )
         return
 
     if args.max_modules is None and args.hours is None:

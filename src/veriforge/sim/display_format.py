@@ -67,8 +67,8 @@ _SCOPE_TASKS = {
 
 def decimal_width(width: int, signed: bool) -> int:  # noqa: FBT001
     """Columns ``%d`` pads a *width*-bit value to."""
-    if width <= 0:
-        return 1
+    if width <= 1:
+        return 1  # a 1-bit signed value too (Icarus: `[0]`, not `[ 0]`)
     return len(str(-(1 << (width - 1)))) if signed else len(str((1 << width) - 1))
 
 

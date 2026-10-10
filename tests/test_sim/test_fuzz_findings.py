@@ -192,6 +192,263 @@ endmodule
 """
 _TERNARY_CONTEXT_SIGN_EXPECTED = ["ffff25d6 ffff25d6 ffff25d6 ffff25d6"]
 
+# a loop rewriting a few signals filled vm-fast's per-process dirty list (one
+# entry per write) and dropped later entries: the child's output never
+# reached the port connection after the first evaluation
+_DIRTY_LOOP = """module t(input clk);
+  reg [79:0] i1 = 80'h9000000;
+  wire [30:0] o5;
+  c u4 (.i5(i1[27:24]), .o7(o5));
+  always @(posedge clk) begin
+    $display("%0d", o5);
+    i1 <= i1 + 80'h1000000;
+  end
+endmodule
+module c (input [3:0] i5, output reg [30:0] o7);
+  integer k;
+  reg w6;
+  always @(*) begin
+    for (k = 0; k < 8; k = k + 1) w6 = k[0];
+    o7 = i5;
+  end
+endmodule
+"""
+_DIRTY_LOOP_EXPECTED = ["9", "10", "11"]
+
+# a wide intermediate built from function locals: compiled didn't emit its
+# wide helpers (the pre-scan saw the locals before renaming) -- build error
+_FUNC_WIDE_LOCAL = """module t(input clk);
+  function automatic signed [32:0] f1 (input [0:0] a1, input [11:0] a2);
+    integer l1;
+    integer l2;
+    begin
+      l1 = 3'(a2[32'd11]);
+      l2 = a2 * a2[32'd6:32'd1];
+      f1 = {32'd3{l1, a2, l2}};
+    end
+  endfunction
+  task automatic tk(input [11:0] a, output [40:0] y); reg [7:0] q; begin q = a[7:0]; y = {5{q}} ^ {a, a, a, a}; end endtask
+  reg [40:0] y;
+  always @(posedge clk) begin
+    tk(12'h9a5, y);
+    $display("%h %h %h", f1(1, 12'habc), f1(0, 12'h0f3), y);
+  end
+endmodule
+"""
+_FUNC_WIDE_LOCAL_EXPECTED = ["000014208 10000361b 0fc003ffc00"]
+
+# `*` is max(L(i), L(j)) wide, not the sum: reference/vm/vm-fast printed
+# `a * b` of two 8-bit regs as 16 bits, and vm/vm-fast kept the carry in
+# `(a * b) >> 4`
+_MUL_WIDTH = """module t(input clk);
+  reg [7:0] a = 8'hff, b = 8'h02; reg [3:0] e = 4'd3; reg [3:0] n = 4'd9;
+  always @(posedge clk) begin
+    $display("%h %h %h", a * b, (a * b) >> 4, {a * b});
+    $display("%h %h %h", n ** e, (n ** e) >> 2, {n ** e});
+    $display("%0d %0d %0d", $bits(a * b), $bits(n ** e), $bits(a * e));
+    $display("%h %h", (a * e) >> 4, {a * 1'b1, 4'h0});
+  end
+endmodule
+"""
+_MUL_WIDTH_EXPECTED = ["fe 0f fe", "9 2 9", "8 4 8", "0f ff0"]
+
+# `` of an x signal is never x, `` of one is all x (compiled)
+_QUERY_X = """module t(input clk);
+  parameter W = 12;
+  localparam D = W * 3;
+  reg [W-1:0] a;
+  reg [D-1:0] b;
+  reg [W*3-1:0] c;
+  reg [7:0] m [0:3];
+  always @(posedge clk) begin
+    $display("%0d %0d %0d %0d %0d", $bits(a), $bits(b), $bits(c), $bits(m[1]), $bits({a, b}));
+    $display("%0d %0d %0d %0d %0d %0d", $size(a), $left(b), $right(c), $high(a), $low(a), $clog2(a));
+  end
+endmodule
+"""
+_QUERY_X_EXPECTED = ["12 36 36 8 48", "12 35 0 11 0 x"]
+
+# the base of `**` wider than the destination was truncated to the
+# destination width first, dropping its x bits (vm, vm-fast, compiled)
+_POW_WIDE_BASE = """module t(input clk);
+  reg [127:0] i2; reg c = 1; reg [3:0] n;
+  wire [14:0] o9 = {i2[9], c, 73'h2f9532a17c7a14276e} ** 2'd2;
+  wire [14:0] o10 = {1'bx, 73'h2f9532a17c7a14276e} ** 2'd2;
+  wire [14:0] o11 = {1'bx, 3'h5} ** 2'd2;
+  wire [14:0] o12 = 74'h3 ** n;
+  wire [70:0] o13 = {1'bx, 73'h2f9532a17c7a14276e} ** 2'd2;
+  always @(posedge clk) $display("%b %b %b %b %h", o9, o10, o11, o12, o13);
+endmodule
+"""
+_POW_WIDE_BASE_EXPECTED = ["xxxxxxxxxxxxxxx xxxxxxxxxxxxxxx xxxxxxxxxxxxxxx xxxxxxxxxxxxxxx xxxxxxxxxxxxxxxxxx"]
+
+# `%d` pads a 1-bit signed value to 1 column, like an unsigned one (Icarus)
+_DEC_PAD = """module t(input clk);
+  reg signed [0:0] s1 = 0; reg [0:0] u1 = 0;
+  reg signed [1:0] s2 = 0; reg [1:0] u2 = 0;
+  reg signed [2:0] s3 = 0; reg [2:0] u3 = 0;
+  reg signed [3:0] s4 = 0; reg [3:0] u4 = 0;
+  reg signed [4:0] s5 = 0; reg [4:0] u5 = 0;
+  reg signed [5:0] s6 = 0; reg [5:0] u6 = 0;
+  reg signed [6:0] s7 = 0; reg [6:0] u7 = 0;
+  reg signed [7:0] s8 = 0; reg [7:0] u8 = 0;
+  reg signed [8:0] s9 = 0; reg [8:0] u9 = 0;
+  reg signed [9:0] s10 = 0; reg [9:0] u10 = 0;
+  reg signed [10:0] s11 = 0; reg [10:0] u11 = 0;
+  reg signed [15:0] s16 = 0; reg [15:0] u16 = 0;
+  reg signed [16:0] s17 = 0; reg [16:0] u17 = 0;
+  reg signed [19:0] s20 = 0; reg [19:0] u20 = 0;
+  reg signed [30:0] s31 = 0; reg [30:0] u31 = 0;
+  reg signed [31:0] s32 = 0; reg [31:0] u32 = 0;
+  reg signed [32:0] s33 = 0; reg [32:0] u33 = 0;
+  reg signed [63:0] s64 = 0; reg [63:0] u64 = 0;
+  reg signed [64:0] s65 = 0; reg [64:0] u65 = 0;
+  reg signed [99:0] s100 = 0; reg [99:0] u100 = 0;
+  always @(posedge clk) begin $display("[%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]", s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s16, s17, s20, s31, s32, s33, s64, s65, s100); $display("[%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]", u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u16, u17, u20, u31, u32, u33, u64, u65, u100); end
+endmodule
+"""
+_DEC_PAD_EXPECTED = [
+    "[0] [ 0] [ 0] [ 0] [  0] [  0] [  0] [   0] [   0] [   0] [    0] [     0] [     0] [      0] [          0] [          0] [          0] [                   0] [                    0] [                              0]",
+    "[0] [0] [0] [ 0] [ 0] [ 0] [  0] [  0] [  0] [   0] [   0] [    0] [     0] [      0] [         0] [         0] [         0] [                   0] [                   0] [                              0]",
+]
+
+# `>>`'s left operand extends with the expression's signedness (the shift
+# itself is logical): compiled zero-extended it, so `s8 >> 1` into 16 bits
+# gave 007f, not 7fff (narrow and wide paths)
+_SHR_SIGNED = """module t(input clk);
+  reg signed [7:0] s8 = -8'sd2; reg [7:0] u8 = 8'hfe; reg signed [0:0] a0 = 1'b1; reg [3:0] a4 = 4'b1010;
+  integer m = -1; reg [2:0] n = 3'd1;
+  reg [15:0] q1, q2, q3, q4, q5, q6, q7, q8;
+  always @(posedge clk) begin
+    q1 = s8 >> 1;
+    q2 = (s8 >> n) | 16'h0;
+    q3 = (s8 >> n) | u8;
+    q4 = (~s8) >> 1;
+    q5 = (a4 & a0) >> n;
+    q6 = $signed(s8 >> n);
+    q7 = (s8 + 8'sd0) >> n;
+    q8 = {s8 >> 1};
+    $display("%h %h %h %h %h %h %h %h", q1, q2, q3, q4, q5, q6, q7, q8);
+  end
+endmodule
+"""
+_SHR_SIGNED_EXPECTED = ["7fff 007f 00ff 0000 0000 007f 7fff 007f"]
+_SHR_SIGNED_WIDE = """module t(input clk);
+  reg signed [7:0] s8 = -8'sd2; reg signed [69:0] s70 = -70'sd6; reg [7:0] u8 = 8'hfe; reg [2:0] n = 3'd1;
+  reg [99:0] q1, q2, q3, q4, q5;
+  always @(posedge clk) begin
+    q1 = s8 >> 1;
+    q2 = s70 >> n;
+    q3 = (~s70) >> 1;
+    q4 = (s70 >> n) | u8;
+    q5 = (~s8) >> n;
+    $display("%h %h %h %h %h", q1, q2, q3, q4, q5);
+  end
+endmodule
+"""
+_SHR_SIGNED_WIDE_EXPECTED = [
+    "7ffffffffffffffffffffffff 7fffffffffffffffffffffffd 0000000000000000000000002 00000001fffffffffffffffff 0000000000000000000000000"
+]
+
+# `7'(a)` of a signed function/task port is signed (reference/vm/vm-fast
+# looked the port up at module scope)
+_CAST_PORT_SCOPE = """module t(input clk);
+  reg signed [0:0] s = 1'b1; integer m = -1; reg [63:0] q1, q2, q3, q4;
+  task automatic tk(input signed [0:0] a2, output [63:0] q);
+    integer l1;
+    begin l1 = a2; q = (1'b0 ? 7'(a2) : ~l1) >> 8; end
+  endtask
+  function automatic [63:0] fn(input signed [0:0] a2);
+    integer l1;
+    begin l1 = a2; fn = (1'b0 ? 7'(a2) : ~l1) >> 8; end
+  endfunction
+  always @(posedge clk) begin
+    q1 = (1'b0 ? 7'(s) : ~m) >> 8;
+    tk(1'b1, q2);
+    q3 = fn(1'b1);
+    q4 = (1'b0 ? 7'(s) : ~m);
+    $display("%h %h %h %h", q1, q2, q3, q4);
+  end
+endmodule
+"""
+_CAST_PORT_SCOPE_EXPECTED = ["0000000000000000 0000000000000000 0000000000000000 0000000000000000"]
+
+# compiled stored `integer`s unmasked at 64 bits: `i = 33'h1_0000_0005`
+# kept bit 32, and an x mask leaked above bit 31 into a wider read
+_INTEGER_MASKED = """module t(input clk);
+  integer i, j, k; reg [63:0] q;
+  always @(posedge clk) begin
+    i = 33'h1_0000_0005;
+    j = 64'hffff_0000_0000_0003;
+    k = -7;
+    q = i + j;
+    $display("%0d %0d %0d %h %h %h", i, j, k, q, {i}, i + 64'd0);
+  end
+endmodule
+"""
+_INTEGER_MASKED_EXPECTED = ["5 3 -7 0000000000000008 00000005 0000000000000005"]
+_INTEGER_MASK_LEAK = """module t(input clk);
+  reg [15:0] a1;
+  reg [15:0] a2 = 16'h0;
+  integer l1, l3;
+  reg [62:0] q1, q3;
+  always @(posedge clk) begin
+    l1 = $signed(a1 ? a1[9:4] : a1) ? a1[8] : {2{a1}} + (a1[2:0] >> 65);
+    l3 = {2{a1}} + (a1[2:0] >> 65);
+    q1 = a2 ? a2[0] : l1;
+    q3 = a2 ? a2[0] : l3;
+    $display("%h %h", q1, q3);
+  end
+endmodule
+"""
+_INTEGER_MASK_LEAK_EXPECTED = ["00000000xxxxxxxx 00000000xxxxxxxx"]
+
+# compiled: a continuous assign's x mask wasn't truncated to the wire's
+# width, and an assign whose inputs never changed at t=0 never ran (left
+# all x) -- every continuous assign runs once at t=0
+_CONT_MASK = """module t(input clk);
+  reg signed [47:0] i5 = 48'bx0xx0x10xxx0xx1xxx00xx0x010x1xx1x010xxxx010xxx0x;
+  reg [7:0] r8 = 8'b0000x1x0;
+  wire [0:0] o6 = 8'(i5);
+  wire [2:0] o7 = o6;
+  wire [0:0] w1 = r8;
+  wire [2:0] w3 = w1;
+  wire [0:0] w2 = r8 + 8'd0;
+  wire [2:0] w4 = w2;
+  always @(posedge clk) $display("%b %b %b %b", o7, w3, w4, {o6, w1, w2});
+endmodule
+"""
+_CONT_MASK_EXPECTED = ["00x 000 00x x0x"]
+
+# division/modulus by a known zero is x, and the most negative value / -1
+# wraps: compiled divided natively (SIGFPE), vm-fast trapped on LLONG_MIN / -1
+_DIV_EDGES = """module t(input clk);
+  reg signed [63:0] mn = 64'sh8000_0000_0000_0000, m1 = -64'sd1, z = 0, a = -64'sd7, b = 64'sd2;
+  reg signed [7:0] s8 = -8'sd128, n8 = -8'sd1;
+  reg signed [63:0] q1, q2, q3, q4, q5, q6;
+  reg signed [7:0] q7, q8;
+  always @(posedge clk) begin
+    q1 = mn / m1; q2 = mn % m1; q3 = a / b; q4 = a % b; q5 = a / z; q6 = a % z;
+    q7 = s8 / n8; q8 = s8 % n8;
+    $display("%h %h %0d %0d %0d %0d %0d %0d", q1, q2, q3, q4, q5, q6, q7, q8);
+  end
+endmodule
+"""
+_DIV_EDGES_EXPECTED = ["8000000000000000 0000000000000000 -3 -1 x x -128 0"]
+_DIV_ZERO = """module t(input clk);
+  reg [31:0] count, c2, c3; integer modulus; integer z;
+  initial begin
+    modulus = 32'd2 ** 32'd32;
+    count = 32'd7 % modulus;
+    z = 0;
+    c2 = 32'd7 % z;
+    c3 = 32'd7 / z;
+  end
+  always @(posedge clk) $display("%0d %0d %0d %0d", modulus, count, c2, c3);
+endmodule
+"""
+_DIV_ZERO_EXPECTED = ["0 x x x"]
+
 _CASES = {
     "ternary_context_sign": (_TERNARY_CONTEXT_SIGN, _TERNARY_CONTEXT_SIGN_EXPECTED, 8),
     "unsized_literal_wide": (_UNSIZED_LITERAL_WIDE, _UNSIZED_LITERAL_WIDE_EXPECTED, 18),
@@ -207,6 +464,20 @@ _CASES = {
     "wide512": (_WIDE512, _WIDE512_EXPECTED, 8),
     "tc": (_TC, _TC_EXPECTED, 8),
     "fint": (_FINT, _FINT_EXPECTED, 8),
+    "dirty_loop": (_DIRTY_LOOP, _DIRTY_LOOP_EXPECTED, 8),
+    "func_wide_local": (_FUNC_WIDE_LOCAL, _FUNC_WIDE_LOCAL_EXPECTED, 8),
+    "mul_width": (_MUL_WIDTH, _MUL_WIDTH_EXPECTED, 8),
+    "query_x": (_QUERY_X, _QUERY_X_EXPECTED, 8),
+    "pow_wide_base": (_POW_WIDE_BASE, _POW_WIDE_BASE_EXPECTED, 8),
+    "dec_pad": (_DEC_PAD, _DEC_PAD_EXPECTED, 8),
+    "shr_signed": (_SHR_SIGNED, _SHR_SIGNED_EXPECTED, 8),
+    "shr_signed_wide": (_SHR_SIGNED_WIDE, _SHR_SIGNED_WIDE_EXPECTED, 8),
+    "cast_port_scope": (_CAST_PORT_SCOPE, _CAST_PORT_SCOPE_EXPECTED, 8),
+    "integer_masked": (_INTEGER_MASKED, _INTEGER_MASKED_EXPECTED, 8),
+    "integer_mask_leak": (_INTEGER_MASK_LEAK, _INTEGER_MASK_LEAK_EXPECTED, 8),
+    "cont_mask": (_CONT_MASK, _CONT_MASK_EXPECTED, 8),
+    "div_edges": (_DIV_EDGES, _DIV_EDGES_EXPECTED, 8),
+    "div_zero": (_DIV_ZERO, _DIV_ZERO_EXPECTED, 8),
 }
 
 

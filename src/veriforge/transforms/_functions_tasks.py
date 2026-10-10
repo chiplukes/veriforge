@@ -12,7 +12,7 @@ from ..model.expressions import Expression, Identifier, Literal, Range
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.ports import Port, PortDirection
 from ..model.statements import BlockingAssign, SeqBlock, Statement
-from ..model.variables import Variable, VariableKind
+from ..model.variables import INTEGER_ATOM_WIDTHS, Variable, VariableKind
 from ._tree_utils import _loc_from_tree
 
 BuildExpressionFn = Callable[[Tree, str | None], Expression]
@@ -40,6 +40,15 @@ _BLOCK_KIND_TOKENS = {
     "KW_BYTE": VariableKind.BYTE,
     "KW_SHORTINT": VariableKind.SHORTINT,
     "KW_LONGINT": VariableKind.LONGINT,
+}
+
+# Integer atom types: width, signed by default (IEEE 1800 6.11).
+_ATOM_TYPE_TOKENS = {
+    "KW_BYTE": "byte",
+    "KW_SHORTINT": "shortint",
+    "KW_INT": "int",
+    "KW_LONGINT": "longint",
+    "KW_INTEGER": "integer",
 }
 
 _TASK_PORT_TYPE_TOKENS = {
@@ -86,7 +95,7 @@ class _BlockVarContext:
 class _TfPortSpec:
     direction: PortDirection
     width: Range | None = None
-    signed: bool = False
+    signed: bool | None = None  # None: the type's default
     data_type: str | None = None
     names: list[str] = field(default_factory=list)
 
@@ -209,6 +218,8 @@ def _extract_function_range_or_type(
         if isinstance(child, Token):
             if child.type in _TASK_PORT_TYPE_TOKENS:
                 return_kind = _TASK_PORT_TYPE_TOKENS[child.type]
+            elif child.type in _ATOM_TYPE_TOKENS:
+                return_kind = _ATOM_TYPE_TOKENS[child.type]
             elif child.type == "KW_SIGNED":
                 signed = True
             elif child.type == "KW_UNSIGNED":
@@ -216,10 +227,15 @@ def _extract_function_range_or_type(
         elif isinstance(child, Tree) and child.data == "range":
             return_range = callbacks.build_range(child, source_file)
 
+    atom_width = INTEGER_ATOM_WIDTHS.get(return_kind or "")
     if signed is None:
         # `function integer f` returns a signed value (it used to be read
         # as unsigned, like every `integer`).
-        signed = return_kind in ("integer", "int", "shortint", "longint", "byte")
+        signed = atom_width is not None
+    if atom_width is not None and return_range is None:
+        # Engines size a return from its range (32 bits without one), so a
+        # `byte`/`shortint`/`longint` return used to be 32 bits wide.
+        return_range = Range(Literal(atom_width - 1, width=32), Literal(0, width=32))
     return return_range, return_kind, signed
 
 
@@ -403,6 +419,10 @@ def _extract_tf_direction_ports(
         if isinstance(child, Token):
             if child.type == "KW_SIGNED":
                 spec.signed = True
+            elif child.type == "KW_UNSIGNED":
+                spec.signed = False
+            elif child.type in _ATOM_TYPE_TOKENS:
+                spec.data_type = _ATOM_TYPE_TOKENS[child.type]
             elif child.type == "IDENTIFIER" and spec.data_type is None:
                 # A typedef'd port (`input idx_t x;`): the type used to be
                 # dropped, leaving a 1-bit port.
@@ -415,11 +435,6 @@ def _extract_tf_direction_ports(
             elif child.data == "task_port_type":
                 spec.data_type = _extract_task_port_type(child)
 
-    if spec.data_type == "integer" and spec.width is None:
-        # `input integer x`: 32-bit signed (engines size ports from their
-        # range, so it used to be a 1-bit unsigned port).
-        spec.width = Range(Literal(31, width=32), Literal(0, width=32))
-        spec.signed = True
     return _ports_from_spec(spec, loc)
 
 
@@ -435,6 +450,10 @@ def _extract_sv_function_ports(
         if isinstance(child, Token):
             if child.type == "KW_SIGNED":
                 spec.signed = True
+            elif child.type == "KW_UNSIGNED":
+                spec.signed = False
+            elif child.type in _ATOM_TYPE_TOKENS:
+                spec.data_type = _ATOM_TYPE_TOKENS[child.type]
             elif child.type in {"KW_LOGIC", "KW_BIT"}:
                 spec.data_type = str(child).lower().replace("kw_", "")
         elif isinstance(child, Tree):
@@ -450,13 +469,20 @@ def _extract_sv_function_ports(
 
 
 def _ports_from_spec(spec: _TfPortSpec, loc) -> list[Port]:
+    width = spec.width
+    atom_width = INTEGER_ATOM_WIDTHS.get(spec.data_type or "")
+    if atom_width is not None and width is None:
+        # `input byte x`, `input integer x`: engines size ports from their
+        # range, so these used to be 1-bit unsigned ports.
+        width = Range(Literal(atom_width - 1, width=32), Literal(0, width=32))
+    signed = spec.signed if spec.signed is not None else atom_width is not None
     return [
         Port(
             name=name,
             direction=spec.direction,
             data_type=spec.data_type,
-            width=spec.width,
-            signed=spec.signed,
+            width=width,
+            signed=signed,
             loc=loc,
         )
         for name in spec.names
@@ -482,7 +508,7 @@ def _extract_task_declaration(
     ports: list[Port] = []
     local_vars: list[Variable] = []
     init_statements: list[Statement] = []
-    body: Statement | None = None
+    statements: list[Statement] = []
     loc = _loc_from_tree(tree, source_file)
 
     for child in tree.children:
@@ -502,13 +528,14 @@ def _extract_task_declaration(
                 local_vars.extend(decl_vars)
                 init_statements.extend(inits)
             elif child.data == "statement_or_null":
-                body = callbacks.extract_statement(child, source_file)
+                stmt = callbacks.extract_statement(child, source_file)
+                if stmt is not None:
+                    statements.append(stmt)
 
     if not name:
         return None
 
-    if init_statements:
-        body = _combine_function_body([*init_statements, *([body] if body is not None else [])], loc)
+    body = _combine_function_body([*init_statements, *statements], loc)
     task = TaskDecl(name=name, is_automatic=is_automatic, ports=ports, local_vars=local_vars, body=body, loc=loc)
     for port in ports:
         port.parent = task

@@ -472,15 +472,13 @@ class FuzzRunner:
             if engine == "iverilog" and _is_icarus_first_activation_artifact(sig_mismatches):
                 self.icarus_artifacts_filtered += len(sig_mismatches)
                 continue
-            if (
-                engine == "iverilog"
-                and sig in getattr(self, "_self_reading_comb", ())
-                and all(vi == 0 for vi, _e, _g in sig_mismatches)
-            ):
+            if engine == "iverilog" and sig in getattr(self, "_self_reading_comb", ()) and sig_mismatches[0][0] == 0:
                 # First evaluation of a combinational block that reads a
                 # signal it writes later: whether it re-runs after its own
                 # write is simulator-dependent (known_issues.md, "self-
-                # referential combinational reads").
+                # referential combinational reads"). Later vectors too when
+                # the difference starts there: a variable the block only
+                # assigns on some paths keeps the first evaluation's value.
                 self.icarus_artifacts_filtered += len(sig_mismatches)
                 continue
             for vi, exp, got_val in sig_mismatches:
@@ -766,9 +764,13 @@ class FuzzRunner:
 
         info = {
             "seed": result.seed,
-            "strategy": result.strategy,
+            # The strategy the run was restricted to ("" = the weighted mix):
+            # `--repro` needs it to regenerate the same design.
+            "strategy": self.strategy.name.lower() if self.strategy is not None else "",
             "timestamp": datetime.datetime.now().isoformat(),
-            "engines_tested": list(result.engine_results.keys()),
+            # Every engine run, including ones that raised (which have no
+            # entry in `engine_results`).
+            "engines_tested": list(self._engines),
         }
         (case_dir / "info.json").write_text(json.dumps(info, indent=2))
 

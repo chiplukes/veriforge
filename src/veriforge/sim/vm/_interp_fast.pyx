@@ -6,7 +6,7 @@ Operates on flat C arrays — no Python objects in the hot loop.
 All 4-state logic is done inline with (val, mask, width) triples.
 """
 
-from libc.stdlib cimport malloc, free, realloc, qsort
+from libc.stdlib cimport calloc, malloc, free, realloc, qsort
 from libc.stdlib cimport rand as c_rand
 from libc.string cimport memcpy, memset
 
@@ -360,6 +360,7 @@ cdef struct DeltaCtx:
     int        nba_cap
     int       *dirty_buf
     int        dirty_cap
+    unsigned char *dirty_mark  # [sig_count]: sid already in dirty_buf (all 0 between calls)
     int        delta_limit
     long long  sim_time
     # Memory NBA buffer
@@ -386,6 +387,7 @@ cdef void _wide_mul_py(
     unsigned long long *dst_v, unsigned long long *dst_m,
     unsigned long long *a_v, int a_width, int a_is_wide, long long a_narrow,
     unsigned long long *b_v, int b_width, int b_is_wide, long long b_narrow,
+    int dst_width,
 ) noexcept:
     cdef object a_py, b_py, result_py
     cdef int wi
@@ -403,7 +405,7 @@ cdef void _wide_mul_py(
         b_py = b_py & (((<object>1) << b_width) - 1)
     else:
         b_py = (<object>(<unsigned long long>b_narrow)) & (((<object>1) << b_width) - 1)
-    result_py = a_py * b_py
+    result_py = (a_py * b_py) & (((<object>1) << dst_width) - 1)
     for wi in range(WIDE_WORDS):
         dst_v[wi] = <unsigned long long>((result_py >> (wi * 64)) & <object>0xFFFFFFFFFFFFFFFF)
         dst_m[wi] = 0
@@ -724,9 +726,14 @@ cdef int _execute_core(
     # NBA output buffer
     NBAEntry  *nba_buf,
     int       *nba_count,      # in: max, out: actual
-    # Dirty set output (signal IDs changed by blocking assigns)
+    # Dirty set output (signal IDs changed by blocking assigns), each listed
+    # once: *dirty_mark* (one byte per signal, all 0 on entry) flags the ones
+    # already listed; the caller clears those flags. A loop rewriting a few
+    # signals used to fill the list (one entry per write) and drop the rest,
+    # so a later write's dependents (a port connection, say) never ran.
     int       *dirty_buf,
     int       *dirty_count,
+    unsigned char *dirty_mark,
     # Simulation time
     long long  sim_time,
     # Memory arrays (optional, NULL if no memories)
@@ -885,9 +892,11 @@ cdef int _execute_core(
                             bit_off = 1
                         wctx.sig_val[wsp + wi]  = wtmp
                         wctx.sig_mask[wsp + wi] = wm[sp * WIDE_WORDS + wi]
-                    if bit_off and dirty_idx < dirty_max:
-                        dirty_buf[dirty_idx] = arg1
-                        dirty_idx += 1
+                    if bit_off:
+                        if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                            dirty_mark[arg1] = 1
+                            dirty_buf[dirty_idx] = arg1
+                            dirty_idx += 1
                 else:
                     # Narrow value promoted to wide pool (zero upper words)
                     wmask = mask_for_width(sig_width[arg1])
@@ -901,9 +910,11 @@ cdef int _execute_core(
                             bit_off = 1
                         wctx.sig_val[wsp + wi]  = 0
                         wctx.sig_mask[wsp + wi] = 0
-                    if bit_off and dirty_idx < dirty_max:
-                        dirty_buf[dirty_idx] = arg1
-                        dirty_idx += 1
+                    if bit_off:
+                        if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                            dirty_mark[arg1] = 1
+                            dirty_buf[dirty_idx] = arg1
+                            dirty_idx += 1
             else:
                 a = stack[sp]
                 if wflag[sp]:
@@ -918,7 +929,8 @@ cdef int _execute_core(
                 if sig_val[arg1] != new_val or sig_mask[arg1] != new_mask:
                     sig_val[arg1] = new_val
                     sig_mask[arg1] = new_mask
-                    if dirty_idx < dirty_max:
+                    if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                        dirty_mark[arg1] = 1
                         dirty_buf[dirty_idx] = arg1
                         dirty_idx += 1
             continue
@@ -1214,7 +1226,8 @@ cdef int _execute_core(
                             wctx.sig_val[wsp + wi]  = (wtmp & ~(1ULL << n_bits)) | ((<unsigned long long>(a.val & 1)) << n_bits)
                             wctx.sig_mask[wsp + wi] = <unsigned long long>result_mask & ~(1ULL << n_bits)
                             if wctx.sig_val[wsp + wi] != wtmp or wctx.sig_mask[wsp + wi] != <unsigned long long>result_mask:
-                                if dirty_idx < dirty_max:
+                                if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                                    dirty_mark[arg1] = 1
                                     dirty_buf[dirty_idx] = arg1
                                     dirty_idx += 1
                     else:
@@ -1229,7 +1242,8 @@ cdef int _execute_core(
                         if sig_val[arg1] != new_val or sig_mask[arg1] != new_mask:
                             sig_val[arg1] = new_val
                             sig_mask[arg1] = new_mask
-                            if dirty_idx < dirty_max:
+                            if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                                dirty_mark[arg1] = 1
                                 dirty_buf[dirty_idx] = arg1
                                 dirty_idx += 1
             continue
@@ -1339,9 +1353,11 @@ cdef int _execute_core(
                             )
                             if wctx.sig_mask[wsp + wi] != wtmp:
                                 bit_off = 1
-                        if bit_off != 0 and dirty_idx < dirty_max:
-                            dirty_buf[dirty_idx] = arg1
-                            dirty_idx += 1
+                        if bit_off != 0:
+                            if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                                dirty_mark[arg1] = 1
+                                dirty_buf[dirty_idx] = arg1
+                                dirty_idx += 1
                     else:
                         wmask = mask_for_width(n)
                         if a_wide:
@@ -1355,7 +1371,8 @@ cdef int _execute_core(
                         if sig_val[arg1] != new_val or sig_mask[arg1] != new_mask:
                             sig_val[arg1]  = new_val
                             sig_mask[arg1] = new_mask
-                            if dirty_idx < dirty_max:
+                            if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
+                                dirty_mark[arg1] = 1
                                 dirty_buf[dirty_idx] = arg1
                                 dirty_idx += 1
             continue
@@ -1584,7 +1601,8 @@ cdef int _execute_core(
             sp -= 1
             a = stack[sp]
             a_wide = wflag[sp]
-            w = a.width + b.width
+            # IEEE 1364 Table 5-22: max(L(i), L(j)) -- it used to be the sum
+            w = a.width if a.width > b.width else b.width
             wmask = mask_for_width(w)
             a_any_x = 1 if a.mask else 0
             b_any_x = 1 if b.mask else 0
@@ -1609,7 +1627,7 @@ cdef int _execute_core(
                     _wide_mul_py(
                         &wv[sp * WIDE_WORDS], &wm[sp * WIDE_WORDS],
                         &wv[sp * WIDE_WORDS], a.width, a_wide, a.val,
-                        &wv[(sp+1) * WIDE_WORDS], b.width, b_wide, b.val,
+                        &wv[(sp+1) * WIDE_WORDS], b.width, b_wide, b.val, w,
                     )
                 if w > 64:
                     wflag[sp] = 1
@@ -1786,7 +1804,14 @@ cdef int _execute_core(
                 new_mask = b.val
                 if b.width > 0 and b.width < 64 and (b.val >> (b.width - 1)) & 1:
                     new_mask = b.val - (<long long>1 << b.width)
-                if op == OP_SDIV:
+                if new_mask == -1:
+                    # Without the C overflow trap: LLONG_MIN / -1 raised
+                    # SIGFPE, killing the process.
+                    if op == OP_SDIV:
+                        stack[sp].val = <long long>(-<unsigned long long>new_val) & wmask
+                    else:
+                        stack[sp].val = 0
+                elif op == OP_SDIV:
                     stack[sp].val = <long long>(new_val / new_mask) & wmask
                 else:
                     stack[sp].val = (new_val - (<long long>(new_val / new_mask)) * new_mask) & wmask
@@ -3900,7 +3925,8 @@ cdef int _execute_core(
                         mem_val[n] = new_val
                         mem_mask[n] = new_mask
                         # Mark memory marker signal dirty for combo re-eval
-                        if dirty_idx < dirty_max:
+                        if dirty_mark[marker_sid] == 0 and dirty_idx < dirty_max:
+                            dirty_mark[marker_sid] = 1
                             dirty_buf[dirty_idx] = marker_sid
                             dirty_idx += 1
             continue
@@ -3969,7 +3995,8 @@ cdef int _execute_core(
                     if mem_val[n] != result_val or mem_mask[n] != result_mask:
                         mem_val[n] = result_val
                         mem_mask[n] = result_mask
-                        if dirty_idx < dirty_max:
+                        if dirty_mark[marker_sid] == 0 and dirty_idx < dirty_max:
+                            dirty_mark[marker_sid] = 1
                             dirty_buf[dirty_idx] = marker_sid
                             dirty_idx += 1
             continue
@@ -4022,7 +4049,8 @@ cdef int _execute_core(
                         if mem_val[n] != result_val or mem_mask[n] != result_mask:
                             mem_val[n] = result_val
                             mem_mask[n] = result_mask
-                            if dirty_idx < dirty_max:
+                            if dirty_mark[marker_sid] == 0 and dirty_idx < dirty_max:
+                                dirty_mark[marker_sid] = 1
                                 dirty_buf[dirty_idx] = marker_sid
                                 dirty_idx += 1
             continue
@@ -4159,12 +4187,14 @@ cdef int _propagate_cont_topo(DeltaCtx *dc, int *p_changed_count) noexcept nogil
             &dc.all_ops[off], &dc.all_a1[off], dc.prog_length[pid],
             dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
             dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
-            dc.nba_buf, &nba_room, dc.dirty_buf, &dirty_room, dc.sim_time,
+            dc.nba_buf, &nba_room, dc.dirty_buf, &dirty_room, dc.dirty_mark, dc.sim_time,
             dc.mem_val, dc.mem_mask, dc.mem_elem_width,
             dc.mem_depth, dc.mem_base, dc.mem_count, NULL, NULL,
             dc.disp_buf, dc.disp_pos, dc.disp_cap,
             &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
         )
+        for j in range(dirty_room):
+            dc.dirty_mark[dc.dirty_buf[j]] = 0
         if status != 0:
             break
         for j in range(dirty_room):
@@ -4241,7 +4271,7 @@ cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept no
                 dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
                 dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
                 dc.nba_buf, &nba_room,
-                dc.dirty_buf, &dirty_room,
+                dc.dirty_buf, &dirty_room, dc.dirty_mark,
                 dc.sim_time,
                 dc.mem_val, dc.mem_mask, dc.mem_elem_width,
                 dc.mem_depth, dc.mem_base, dc.mem_count,
@@ -4249,6 +4279,8 @@ cdef int _propagate_cont_assigns(DeltaCtx *dc, int *p_changed_count) noexcept no
                 dc.disp_buf, dc.disp_pos, dc.disp_cap,
                 &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
             )
+            for j in range(dirty_room):
+                dc.dirty_mark[dc.dirty_buf[j]] = 0
             if status != 0:
                 p_changed_count[0] = 0
                 return status
@@ -4389,7 +4421,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 dc.sig_val, dc.sig_mask, dc.sig_width, dc.sig_count,
                 dc.const_val, dc.const_mask, dc.const_width, dc.const_count,
                 &dc.nba_buf[total_nba_count], &nba_room,
-                dc.dirty_buf, &dirty_room,
+                dc.dirty_buf, &dirty_room, dc.dirty_mark,
                 dc.sim_time,
                 dc.mem_val, dc.mem_mask, dc.mem_elem_width,
                 dc.mem_depth, dc.mem_base, dc.mem_count,
@@ -4398,6 +4430,8 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 dc.disp_buf, dc.disp_pos, dc.disp_cap,
                 &dc.wctx if dc.wctx.sig_offset != NULL else NULL,
             )
+            for j in range(dirty_room):
+                dc.dirty_mark[dc.dirty_buf[j]] = 0
             total_nba_count += nba_room
             if dc.nba_mem_buf != NULL:
                 total_nba_mem_count += nba_mem_room
@@ -4583,6 +4617,7 @@ def cy_execute(
     cdef int       *c_w      = <int *>malloc(const_count * sizeof(int))
     cdef NBAEntry  *nba_buf  = <NBAEntry *>malloc(NBA_MAX * sizeof(NBAEntry))
     cdef int       *dirty_buf = <int *>malloc(sig_count * sizeof(int))
+    cdef unsigned char *dirty_mark = <unsigned char *>calloc(sig_count + 1, 1)
     cdef int        nba_count = NBA_MAX
     cdef int        dirty_count = sig_count
     cdef int        status
@@ -4590,11 +4625,11 @@ def cy_execute(
 
     if (prog_ops == NULL or prog_a1 == NULL or sig_val == NULL or
         sig_mask == NULL or sig_w == NULL or c_val == NULL or
-        c_mask == NULL or c_w == NULL or nba_buf == NULL or dirty_buf == NULL):
+        c_mask == NULL or c_w == NULL or nba_buf == NULL or dirty_buf == NULL or dirty_mark == NULL):
         # Free whatever we allocated
         free(prog_ops); free(prog_a1); free(sig_val); free(sig_mask)
         free(sig_w); free(c_val); free(c_mask); free(c_w)
-        free(nba_buf); free(dirty_buf)
+        free(nba_buf); free(dirty_buf); free(dirty_mark)
         raise MemoryError("Failed to allocate interpreter buffers")
 
     try:
@@ -4622,7 +4657,7 @@ def cy_execute(
             sig_val, sig_mask, sig_w, sig_count,
             c_val, c_mask, c_w, const_count,
             nba_buf, &nba_count,
-            dirty_buf, &dirty_count,
+            dirty_buf, &dirty_count, dirty_mark,
             sim_time,
             NULL, NULL, NULL, NULL, NULL, 0,
             NULL, NULL,
@@ -4675,6 +4710,7 @@ def cy_execute(
         free(c_w)
         free(nba_buf)
         free(dirty_buf)
+        free(dirty_mark)
 
 
 def cy_execute_batch(
@@ -4712,6 +4748,7 @@ def cy_execute_batch(
     cdef int       *c_w      = <int *>malloc(const_count * sizeof(int))
     cdef NBAEntry  *nba_buf  = <NBAEntry *>malloc(NBA_MAX * sizeof(NBAEntry))
     cdef int       *dirty_buf = <int *>malloc(sig_count * sizeof(int))
+    cdef unsigned char *dirty_mark = <unsigned char *>calloc(sig_count + 1, 1)
     cdef int       *prog_ops = NULL
     cdef int       *prog_a1  = NULL
     cdef int        nba_count, dirty_count, status
@@ -4720,10 +4757,10 @@ def cy_execute_batch(
 
     if (sig_val == NULL or sig_mask == NULL or sig_w == NULL or
         c_val == NULL or c_mask == NULL or c_w == NULL or
-        nba_buf == NULL or dirty_buf == NULL):
+        nba_buf == NULL or dirty_buf == NULL or dirty_mark == NULL):
         free(sig_val); free(sig_mask); free(sig_w)
         free(c_val); free(c_mask); free(c_w)
-        free(nba_buf); free(dirty_buf)
+        free(nba_buf); free(dirty_buf); free(dirty_mark)
         raise MemoryError("Failed to allocate interpreter buffers")
 
     all_nba = []
@@ -4771,7 +4808,7 @@ def cy_execute_batch(
                 sig_val, sig_mask, sig_w, sig_count,
                 c_val, c_mask, c_w, const_count,
                 nba_buf, &nba_count,
-                dirty_buf, &dirty_count,
+                dirty_buf, &dirty_count, dirty_mark,
                 sim_time,
                 NULL, NULL, NULL, NULL, NULL, 0,
                 NULL, NULL,
@@ -4809,6 +4846,7 @@ def cy_execute_batch(
             # Accumulate dirty
             for i in range(dirty_count):
                 all_dirty.add(dirty_buf[i])
+                dirty_mark[dirty_buf[i]] = 0
 
             if status == 1:
                 # $finish stops this program; the rest still run (the time
@@ -4841,6 +4879,7 @@ def cy_execute_batch(
         free(c_w)
         free(nba_buf)
         free(dirty_buf)
+        free(dirty_mark)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -4894,6 +4933,7 @@ cdef class CyContext:
     # Dirty output buffer (signal IDs changed by blocking assigns)
     cdef int       *dirty_buf
     cdef int        dirty_cap
+    cdef unsigned char *dirty_mark
     cdef int        dirty_count
 
     # Simulation time
@@ -4989,6 +5029,7 @@ cdef class CyContext:
         self.disp_buf = NULL
         self.disp_pos = 0
         self.dirty_buf = NULL
+        self.dirty_mark = NULL
         self.proc_is_combo = NULL
         self.proc_is_seq = NULL
         self.sens_offset = NULL
@@ -5086,6 +5127,7 @@ cdef class CyContext:
             free(self.nba_mem_buf)
             free(self.disp_buf)
             free(self.dirty_buf)
+            free(self.dirty_mark)
         # The pointers are NULL until allocated, so this also releases a
         # partially constructed process table if setup raises.
         free(self.proc_is_combo)
@@ -5225,6 +5267,8 @@ cdef class CyContext:
 
         self.dirty_cap = self.sig_count
         self.dirty_buf = <int *>malloc(self.dirty_cap * sizeof(int))
+        free(self.dirty_mark)
+        self.dirty_mark = <unsigned char *>calloc(self.sig_count + 1, 1)
         self.dirty_count = 0
 
         self._allocated = True
@@ -5491,7 +5535,7 @@ cdef class CyContext:
                 self.sig_val, self.sig_mask, self.sig_width, self.sig_count,
                 self.const_val, self.const_mask, self.const_width, self.const_count,
                 &self.nba_buf[self.nba_count], &nba_room,
-                &self.dirty_buf[self.dirty_count], &dirty_room,
+                &self.dirty_buf[self.dirty_count], &dirty_room, self.dirty_mark,
                 self.sim_time,
                 self.mem_val, self.mem_mask, self.mem_elem_width,
                 self.mem_depth, self.mem_base, self.mem_count,
@@ -5499,6 +5543,8 @@ cdef class CyContext:
                 &self.disp_buf, &self.disp_pos, &self.disp_cap,
                 &self.wctx_c if self._wide_allocated else NULL,
             )
+            for j in range(dirty_room):
+                self.dirty_mark[self.dirty_buf[self.dirty_count + j]] = 0
 
             self.nba_count += nba_room
             self.dirty_count += dirty_room
@@ -5891,6 +5937,7 @@ cdef class CyContext:
         dc.nba_cap = self.nba_cap
         dc.dirty_buf = self.dirty_buf
         dc.dirty_cap = self.dirty_cap
+        dc.dirty_mark = self.dirty_mark
         dc.nba_mem_buf = self.nba_mem_buf
         dc.nba_mem_cap = self.nba_mem_cap
         dc.disp_buf = &self.disp_buf

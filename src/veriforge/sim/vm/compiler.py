@@ -56,6 +56,7 @@ from veriforge.model.statements import (
 )
 
 from ...semantics import const_int as _const_int
+from ...semantics import has_impure_call
 from ..evaluator import evaluate_constant
 from ..sv_functions import is_two_state
 from ..severity import WRITE_MARK, severity_display
@@ -318,6 +319,62 @@ class Compiler:  # cm:8c1e4a
         return sid
 
     # ── Constant pool ────────────────────────────────────────────
+
+    def _compile_short_circuit(self, expr: BinaryOp, program: list[tuple[int, int, int]]) -> None:
+        """`&&`/`||` whose right operand calls a function, left operand
+        already compiled: the right one runs only when the left doesn't
+        decide the result (IEEE 1800 11.4.7) -- a known 1 for `||`, all
+        bits known 0 for `&&` (an x left still evaluates the right)."""
+        is_or = expr.op == "||"
+        op = Op.LOG_OR if is_or else Op.LOG_AND
+        program.append(instr(Op.DUP))
+        if not is_or:
+            zero = Value(0, width=max(self._expr_width(expr.left), 1))
+            program.append(instr(Op.LOAD_CONST, self._add_const(zero)))
+            program.append(instr(Op.CMP_CASE_EQ))
+        skip_idx = len(program)
+        program.append(instr(Op.JUMP_IF_NONZERO, 0))
+        self._compile_expr(expr.right, program)
+        program.append(instr(op))
+        end_idx = len(program)
+        program.append(instr(Op.JUMP, 0))
+        program[skip_idx] = instr(Op.JUMP_IF_NONZERO, len(program))
+        # The left operand alone decides it: `x || 0` / `x && 0`.
+        program.append(instr(Op.LOAD_CONST, self._add_const(Value(0, width=1))))
+        program.append(instr(op))
+        program[end_idx] = instr(Op.JUMP, len(program))
+
+    def _compile_lazy_ternary(
+        self, expr: TernaryOp, program: list[tuple[int, int, int]], width: int, signed: bool | None
+    ) -> None:
+        """`?:` with a function call in a branch, condition already compiled:
+        only the selected branch runs; an ambiguous (x, no known 1)
+        condition runs both and merges them, as Op.TERNARY does. The known
+        cases still finish through Op.TERNARY (with the branch duplicated)
+        so the result is exactly what the eager form gives."""
+        program.append(instr(Op.DUP))
+        true_idx = len(program)
+        program.append(instr(Op.JUMP_IF_NONZERO, 0))  # a known 1: true
+        program.append(instr(Op.DUP))
+        zero = Value(0, width=max(self._expr_width(expr.condition), 1))
+        program.append(instr(Op.LOAD_CONST, self._add_const(zero)))
+        program.append(instr(Op.CMP_CASE_EQ))
+        false_idx = len(program)
+        program.append(instr(Op.JUMP_IF_NONZERO, 0))  # all known 0: false
+        self._compile_expr(expr.true_expr, program, width, signed)
+        self._compile_expr(expr.false_expr, program, width, signed)
+        program.append(instr(Op.TERNARY))
+        end_jumps = [len(program)]
+        program.append(instr(Op.JUMP, 0))
+        for idx, branch in ((true_idx, expr.true_expr), (false_idx, expr.false_expr)):
+            program[idx] = instr(Op.JUMP_IF_NONZERO, len(program))
+            self._compile_expr(branch, program, width, signed)
+            program.append(instr(Op.DUP))
+            program.append(instr(Op.TERNARY))
+            end_jumps.append(len(program))
+            program.append(instr(Op.JUMP, 0))
+        for idx in end_jumps:
+            program[idx] = instr(Op.JUMP, len(program))
 
     def _add_const(self, value: Value) -> int:
         """Add a constant to the pool, deduplicating. Returns pool index."""
@@ -963,6 +1020,9 @@ class Compiler:  # cm:8c1e4a
             # below), so no width propagation is needed here.
             if expr.op in ("&&", "||"):
                 self._compile_expr(expr.left, program)
+                if has_impure_call(expr.right):
+                    self._compile_short_circuit(expr, program)
+                    return
                 self._compile_expr(expr.right, program)
             # Comparison/equality ops produce a 1-bit RESULT (self-
             # determined outward, not context-determined from the LHS),
@@ -1071,9 +1131,13 @@ class Compiler:  # cm:8c1e4a
             # correctly before `**` runs). Mirrors the identical fix in
             # `sim/evaluator.py`.
             elif expr.op == "**":
-                self._compile_expr(expr.left, program, width, signed_override)
+                # At `target`, never below the base's own width (as for the
+                # shifts above): compiled at a narrower `width`, a wide base
+                # like `{x, 73'h..}` was truncated -- losing its x -- before
+                # being widened back.
+                target = max(width, self._expr_width(expr.left))
+                self._compile_expr(expr.left, program, target if width else 0, signed_override)
                 if width:
-                    target = max(width, self._expr_width(expr.left))
                     eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
                     if eff_signed:
                         program.append(instr(Op.SIGN_EXT, target, 0))
@@ -1271,7 +1335,7 @@ class Compiler:  # cm:8c1e4a
                     both_signed = signed_override  # propagated from the context (IEEE 5.5.2)
                 self._compile_expr(expr.left, program, target, both_signed)
                 self._compile_expr(expr.right, program, target, both_signed)
-                static_result_w = target + target if expr.op == "*" else target
+                static_result_w = target  # `*` too (Table 5-22: max, not sum)
             # Detect signed comparison: both operands must be signed
             if expr.op in _SIGNED_CMP_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_CMP_MAP[expr.op]))
@@ -1498,6 +1562,9 @@ class Compiler:  # cm:8c1e4a
             # `sim/evaluator.py`; confirmed wrong against Icarus for
             # `(((-a4[17:9]) ? (~a0) : a3) && a4)`.
             own_width = max(width, self._expr_width(expr.true_expr), self._expr_width(expr.false_expr))
+            if has_impure_call(expr.true_expr) or has_impure_call(expr.false_expr):
+                self._compile_lazy_ternary(expr, program, own_width, own_signed)
+                return
             self._compile_expr(expr.true_expr, program, own_width, own_signed)
             self._compile_expr(expr.false_expr, program, own_width, own_signed)
             program.append(instr(Op.TERNARY))

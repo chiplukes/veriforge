@@ -153,6 +153,15 @@ operands it follows IEEE 1364-2005 Table 5-6 (1, -1, x). Every veriforge
 engine follows Table 5-6 at all widths; the fuzzer only generates small
 unsigned exponents. Not a veriforge bug -- do not replicate.
 
+### Icarus: `integer unsigned` prints as signed
+
+Icarus prints `integer unsigned iu = 32'hffff_ffff;` with `%0d` as `-1`
+yet evaluates `iu > 0` as 1, so it does treat the variable as unsigned
+everywhere except in display formatting. Verilator prints 4294967295, as
+IEEE 1800 requires; veriforge does the same (2026-10-10,
+`tests/test_sim/test_integer_atom_types.py`). Not a veriforge bug -- do
+not replicate.
+
 ### Icarus: real formats of signed expressions, leading x/X
 
 Two Icarus `$display` quirks the fuzzer works around (veriforge follows

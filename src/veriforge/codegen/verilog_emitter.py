@@ -73,7 +73,7 @@ from ..model.statements import (
     WaitStatement,
     WhileLoop,
 )
-from ..model.variables import SIGNED_KINDS, Variable
+from ..model.variables import INTEGER_ATOM_WIDTHS, SIGNED_KINDS, Variable
 
 
 def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True) -> str:
@@ -577,10 +577,15 @@ def _emit_port(port: Port) -> str:
         parts.append(port.net_type)
     if port.data_type:
         parts.append(port.data_type)
-    if port.signed:
-        parts.append("signed")
-    if port.width:
-        parts.append(_emit_range(port.width))
+    if port.data_type in INTEGER_ATOM_WIDTHS:
+        # `byte`/`int`/...: fixed width, signed unless `unsigned`.
+        if not port.signed:
+            parts.append("unsigned")
+    else:
+        if port.signed:
+            parts.append("signed")
+        if port.width:
+            parts.append(_emit_range(port.width))
     parts.append(port.name)
     if port.default_value:
         parts.append("=")
@@ -1155,6 +1160,8 @@ def _emit_function_decl(fn: FunctionDecl, indent: str, current_indent: str) -> s
         parts.append("automatic")
     if fn.return_kind:
         parts.append(fn.return_kind)
+        if fn.return_kind in INTEGER_ATOM_WIDTHS and not fn.signed:
+            parts.append("unsigned")
     elif fn.signed:
         parts.append("signed")  # used to be dropped: a signed function round-tripped unsigned
     if not fn.return_kind and fn.return_range:

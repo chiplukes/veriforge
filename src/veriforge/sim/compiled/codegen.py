@@ -12,10 +12,12 @@ Phase 3: LHS complexity (bit-select, range-select, concatenation) and
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING
 
 from veriforge._env import get_env
 
+from veriforge.model.base import VerilogNode
 from veriforge.model.expressions import (
     AssignmentPattern,
     BinaryOp,
@@ -192,6 +194,7 @@ class CythonCodegen(
 
     __slots__ = (
         "_body_tainted_sids",
+        "_call_guards",
         "_combo_processes",
         "_const_conts",
         "_delta_limit",
@@ -201,6 +204,9 @@ class CythonCodegen(
         "_et_node_vals",
         "_et_pending",
         "_function_map",
+        "_guard_conds",
+        "_guard_reductions",
+        "_guard_snapping",
         "_initial_lines",
         "_local_vars",
         "_mem_info",
@@ -232,7 +238,6 @@ class CythonCodegen(
         "_task_map",
         "_temp_var_counter",
         "_timing_diagnostics",
-        "_unmasked_signal_ids",
         "_var_init",
     )
 
@@ -243,7 +248,6 @@ class CythonCodegen(
         self._signal_widths: list[int] = []
         self._signal_signed: list[bool] = []
         self._n_sigs: int = 0
-        self._unmasked_signal_ids: set[int] = set()
         self._processes: list[tuple[set[int], list[str]]] = []
         # Indices into _processes whose rerun on unchanged inputs is a no-op
         # (see _cont_assign_is_rerun_pure).
@@ -284,6 +288,14 @@ class CythonCodegen(
         self._py_mask_cache: dict[int, str] = {}
         self._needs_wide_helpers: bool = False
         self._dynamic_max_wide_words: int = 0
+        # id(user function call) -> the conditions under which it's evaluated
+        # (see `_scan_call_guards`).
+        self._call_guards: dict[int, list[tuple[Expression, bool]]] = {}
+        self._guard_reductions: dict[int, UnaryOp] = {}
+        # ids of the guard conditions (see `_cond_snapshot`), and the ones
+        # being snapshotted right now (no recursion into themselves).
+        self._guard_conds: set[int] = set()
+        self._guard_snapping: set[int] = set()
 
     # ── Wide scratch allocator ────────────────────────────────────────────
     # Used by _emit_wide_expr_to_scratch (Phase 1) to manage temporary
@@ -1571,6 +1583,51 @@ class CythonCodegen(
                 self._note_wide_intermediate(arg)
             return
 
+    def _scan_call_guards(self, module: Module) -> None:
+        """Record, for each function call in a lazily evaluated operand -- a
+        `?:` branch, the right side of `&&`/`||` -- the conditions under
+        which it runs (IEEE 1800 11.4.7): ``(cond, True)`` for "*cond* isn't
+        all known 0" (a true branch, a `&&` right side), ``(cond, False)``
+        for "*cond* has no known 1" (a false branch, a `||` right side).
+        `_hoist_user_func_call` evaluates the call only under them, so an
+        impure function in an untaken branch has no side effects."""
+        self._call_guards = {}
+        self._guard_conds = set()
+        self._record_call_guards(module)
+
+    def _record_call_guards(self, root: object) -> None:
+        """`_scan_call_guards` for the tree under *root* (also used on the
+        copies of function bodies made for code generation)."""
+        seen: set[int] = set()
+
+        def visit(node: object, guards: list[tuple[Expression, bool]]) -> None:
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    visit(item, guards)
+                return
+            if not isinstance(node, VerilogNode) or (not guards and id(node) in seen):
+                return
+            seen.add(id(node))
+            if isinstance(node, TernaryOp):
+                visit(node.condition, guards)
+                visit(node.true_expr, [*guards, (node.condition, True)])
+                visit(node.false_expr, [*guards, (node.condition, False)])
+                return
+            if isinstance(node, BinaryOp) and node.op in ("&&", "||"):
+                visit(node.left, guards)
+                visit(node.right, [*guards, (node.left, node.op == "&&")])
+                return
+            if isinstance(node, FunctionCall) and guards:
+                self._call_guards[id(node)] = guards
+                if node.name in self._function_map:
+                    # (User functions: the ones hoisted under the guards.)
+                    self._guard_conds.update(id(cond) for cond, _nonzero in guards)
+            for cls in type(node).__mro__:
+                for slot in getattr(cls, "__slots__", ()):
+                    visit(getattr(node, slot, None), guards)
+
+        visit(root, [])
+
     def _scan_wide_intermediates(self, module: Module) -> None:
         """Pre-scan *module* so wide-intermediate expressions are known early.
 
@@ -1594,11 +1651,22 @@ class CythonCodegen(
         for block in module.initial_blocks:
             self._scan_wide_intermediates_stmt(block.body)
 
+        # On the bodies as they're emitted -- locals renamed to their
+        # `__func_f.x`/`__task_t.x` signals: an intermediate built from
+        # function locals (`f = {3{l1, a, l2}}`) otherwise looked narrow
+        # (unknown widths), so the wide helpers it needs weren't emitted.
         for func in module.functions:
-            self._scan_wide_intermediates_stmt(func.body)
+            if func.body is not None:
+                body = copy.deepcopy(func.body)
+                names = {port.name for port in func.ports} | {var.name for var in func.locals} | {func.name}
+                self._remap_local_identifiers(body, names, f"__func_{func.name}")
+                self._scan_wide_intermediates_stmt(body)
 
         for task in module.tasks:
-            self._scan_wide_intermediates_stmt(task.body)
+            if task.body is not None:
+                body = copy.deepcopy(task.body)
+                self._remap_local_identifiers(body, {port.name for port in task.ports}, f"__task_{task.name}")
+                self._scan_wide_intermediates_stmt(body)
 
     def generate(self, module: Module, *, delta_limit: int = 10_000) -> str:
         """Generate a complete .pyx source string for *module*."""
@@ -1623,6 +1691,7 @@ class CythonCodegen(
         self._task_map = {t.name: t for t in module.tasks}
         self._register_func_task_signals(module)
         self._validate_wide_transport_only(module)
+        self._scan_call_guards(module)
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
@@ -1677,6 +1746,7 @@ class CythonCodegen(
         self._task_map = {t.name: t for t in module.tasks}
         self._register_func_task_signals(module)
         self._validate_wide_transport_only(module)
+        self._scan_call_guards(module)
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
@@ -1804,6 +1874,7 @@ class CythonCodegen(
         self._task_map = {t.name: t for t in module.tasks}
         self._register_func_task_signals(module)
         self._validate_wide_transport_only(module)
+        self._scan_call_guards(module)
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
@@ -2130,10 +2201,9 @@ class CythonCodegen(
             else:
                 if lsb != 0:
                     self._signal_bases[var.name] = lsb
+                # (`integer`s used to be stored unmasked at 64 bits, so
+                # `i = 33'h1_0000_0005` kept bit 32 and `i + j` carried it.)
                 sid = self._register_signal(var.name, w, signed=var.signed)
-                kind_name = var.kind.name if hasattr(var.kind, "name") else str(var.kind)
-                if kind_name == "INTEGER":
-                    self._unmasked_signal_ids.add(sid)
                 if var.initial_value is not None:
                     iv = self._eval_initial_value(var.initial_value, w)
                     if iv is not None:

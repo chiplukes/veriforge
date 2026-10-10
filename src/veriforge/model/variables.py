@@ -31,6 +31,11 @@ SIGNED_KINDS = frozenset(
 )
 
 
+# Integer atom types by name (also used as port/function data types): their
+# fixed widths. All are signed unless declared `unsigned`.
+INTEGER_ATOM_WIDTHS = {"byte": 8, "shortint": 16, "int": 32, "longint": 64, "integer": 32}
+
+
 class Variable(VerilogNode):
     """A variable declaration (reg, integer, real, time, event)."""
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 from veriforge.model.base import VerilogNode
@@ -32,7 +32,7 @@ from veriforge.model.expressions import (
     UnaryOp,
     WidthCast,
 )
-from veriforge.model.functions import FunctionDecl
+from veriforge.model.functions import FunctionDecl, TaskDecl
 from veriforge.model.ports import Port, PortDirection
 from veriforge.model.statements import BlockingAssign
 from veriforge.semantics import const_int, expr_signed, expr_width
@@ -260,34 +260,41 @@ def lower_width_casts(module: Module) -> Module:
     made: dict[str, FunctionDecl] = {}
     func_signed = {f.name: bool(f.signed) for f in module.functions}
 
-    def lower(expr: Expression) -> Expression | None:
-        if not isinstance(expr, WidthCast):
-            return None
-        n = const_int(expr.width, env)
-        if n is None or n <= 0:
-            return None
-        # (A nested cast was already lowered to one of the generated functions
-        # -- they count too: `1'(12'(s))` of a signed `s` is signed.)
-        signed = expr_signed(
-            expr.operand,
-            lambda name: name in signed_names,
-            lambda f: bool(made[f].signed) if f in made else func_signed.get(f, False),
-        )
-        name = f"__vf_cast_{n}_{'s' if signed else 'u'}"
-        if name not in made:
-            made[name] = _cast_function(name, n, signed)
-        return FunctionCall(name=name, arguments=[expr.operand], loc=expr.loc)
+    def make_lower(scope_signed: set[str]) -> Callable[[Expression], Expression | None]:
+        def lower(expr: Expression) -> Expression | None:
+            if not isinstance(expr, WidthCast):
+                return None
+            n = const_int(expr.width, env)
+            if n is None or n <= 0:
+                return None
+            # (A nested cast was already lowered to one of the generated
+            # functions -- they count too: `1'(12'(s))` of a signed `s` is
+            # signed.)
+            signed = expr_signed(
+                expr.operand,
+                lambda name: name in scope_signed,
+                lambda f: bool(made[f].signed) if f in made else func_signed.get(f, False),
+            )
+            name = f"__vf_cast_{n}_{'s' if signed else 'u'}"
+            if name not in made:
+                made[name] = _cast_function(name, n, signed)
+            return FunctionCall(name=name, arguments=[expr.operand], loc=expr.loc)
 
+        return lower
+
+    lower = make_lower(signed_names)
     seen: set[int] = set()
-    for container in (
-        module.always_blocks,
-        module.initial_blocks,
-        module.continuous_assigns,
-        module.functions,
-        module.tasks,
-    ):
+    for container in (module.always_blocks, module.initial_blocks, module.continuous_assigns):
         for node in container:
             _rewrite(node, lower, seen)
+    # Inside a function or task, its own ports and locals are in scope (a
+    # signed port `a` made `7'(a)` signed; it used to read as unsigned).
+    tfs: list[FunctionDecl | TaskDecl] = [*module.functions, *module.tasks]
+    for tf in tfs:
+        local_decls = [*tf.ports, *getattr(tf, "locals", ()), *getattr(tf, "local_vars", ())]
+        local_names = {d.name for d in local_decls}
+        scope = (signed_names - local_names) | {d.name for d in local_decls if d.signed}
+        _rewrite(tf, make_lower(scope), seen)
     inits: list[Net | Variable] = [*module.nets, *module.variables]
     for decl in inits:
         init = decl.initial_value

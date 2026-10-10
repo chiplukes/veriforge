@@ -1533,10 +1533,11 @@ class StatementExecutor:  # cm:c2f9a1
         if task.body:
             self.execute(task.body, ctx)
 
-        # Copy output values back to caller
-        for port_name, lhs_expr in output_bindings:
-            out_val = ctx.read_signal(port_name)
-            self._write_target(lhs_expr, out_val, ctx, immediate=True)
+        # Read the outputs, then restore the caller's scope before writing
+        # them back: an output bound to a caller signal with the same name as
+        # one of the task's ports (`tk(x, b)` with a port `b`) used to be
+        # written to the port and then discarded by the restore.
+        out_vals = [(lhs_expr, ctx.read_signal(port_name)) for port_name, lhs_expr in output_bindings]
 
         # Restore shadowed signals
         for port_name, old_val in saved.items():
@@ -1549,6 +1550,9 @@ class StatementExecutor:  # cm:c2f9a1
                 ctx._signal_signed.pop(port_name, None)
             else:
                 ctx._signal_signed[port_name] = old_signed
+
+        for lhs_expr, out_val in out_vals:
+            self._write_target(lhs_expr, out_val, ctx, immediate=True)
 
     def _eval_port_width(self, port, ctx: EvalContext) -> int | None:
         """A task port's declared width, evaluated in *ctx* (parameterized

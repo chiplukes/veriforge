@@ -44,13 +44,14 @@ ExtractTypedVariableFn = Callable[[Tree, str | None, VariableKind], list[Variabl
 
 _ROOT_CONTAINERS = frozenset({"verilog", "source_text", "description"})
 _VAR_KINDS: dict[str, VariableKind] = {
-    "integer_declaration": VariableKind.INTEGER,
     "real_declaration": VariableKind.REAL,
     "realtime_declaration": VariableKind.REALTIME,
     "time_declaration": VariableKind.TIME,
     "event_declaration": VariableKind.EVENT,
 }
+# Declarations that may carry `signed`/`unsigned` (`integer unsigned x;`).
 _SV_REG_KINDS: dict[str, VariableKind] = {
+    "integer_declaration": VariableKind.INTEGER,
     "byte_declaration": VariableKind.BYTE,
     "shortint_declaration": VariableKind.SHORTINT,
     "int_declaration": VariableKind.INT,

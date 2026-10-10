@@ -37,6 +37,9 @@ from .value import Value, _verilog_pow, signed_literal_width
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# Stands in for a short-circuited `&&`/`||` right operand (never evaluated).
+_SHORT_CIRCUIT_RHS = Value(0, width=1)
+
 
 class EvalContext:  # cm:1f4c6a
     """Interface for reading signal values during expression evaluation.
@@ -434,7 +437,14 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # below), so no extension/propagation is needed here.
             if op in ("&&", "||"):
                 left = self.eval(expr.left, ctx)
-                right = self.eval(expr.right, ctx)
+                # Short-circuit (IEEE 1800 11.4.7): the right operand isn't
+                # evaluated (no function side effects) once the left one
+                # decides the result -- a known-0 left for `&&`, a left with
+                # a known 1 for `||`.
+                if (left.val & ~left.mask if op == "||" else left.val | left.mask) & ((1 << left.width) - 1):
+                    right = self.eval(expr.right, ctx) if op == "&&" else _SHORT_CIRCUIT_RHS
+                else:
+                    right = _SHORT_CIRCUIT_RHS if op == "&&" else self.eval(expr.right, ctx)
             # Comparison/equality ops produce a 1-bit RESULT (self-
             # determined outward), but their TWO OPERANDS are mutually
             # context-determined between each other (IEEE 1364-2005 §5.5.2:
