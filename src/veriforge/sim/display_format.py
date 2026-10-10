@@ -26,6 +26,7 @@ arguments; compiled ignored x bits entirely and truncated wide values to
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -119,7 +120,11 @@ def format_real(  # noqa: PLR0913
     if signed and val >> (width - 1):
         val -= 1 << width
     pad = "0" if zero_pad and field_width else ""
-    return format(float(val), f"{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
+    try:
+        real = float(val)
+    except OverflowError:  # beyond double range (> ~1024 bits): +/-inf
+        real = -math.inf if val < 0 else math.inf
+    return format(real, f"{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
 
 
 _SCOPE_ATTR = "__vf_scope"

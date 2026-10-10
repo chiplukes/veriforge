@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
+from veriforge._recursion import ensure_deep_recursion
 from veriforge.model.design import Design, Module
 
 from .elaborate import (
@@ -166,6 +167,7 @@ class Simulator:  # cm:a5c8f4
         design: Design | None = None,
         delta_limit: int = 10_000,
     ) -> None:
+        ensure_deep_recursion()
         self._engine = engine
         self._signal_cache: dict[str, SignalHandle] = {}
         self._clocks: list[Clock] = []

@@ -27,6 +27,7 @@ from ..trace import flush_dump, start_dump
 from ..value import Value
 from .compiler import Compiler, CompiledProcess, ProcessType
 from .interpreter import Interpreter, StopSimulation, _format_display
+from .opcodes import max_stack_depth
 from .propagation import plan_continuous_order
 
 # Try to import the Cython fast interpreter
@@ -62,6 +63,10 @@ from veriforge._env import get_env
 
 if get_env("DISABLE_CYTHON_VM") == "1":
     _HAS_CYTHON = False
+
+# vm-fast's evaluation stack (DEF STACK_MAX = 256 in _interp_fast.pyx), less
+# a few slots of headroom.
+_VM_FAST_STACK_SLOTS = 252
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -293,6 +298,13 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self._use_cython = False
         if self._use_cython and self.compiler.mem_count > 0:
             if any(info[0] > 64 for info in self.compiler.mem_info):  # noqa: PLR2004
+                self._use_cython = False
+        if self._use_cython:
+            # A program deeper than vm-fast's fixed evaluation stack (e.g. a
+            # 300-part concatenation) overran it: wrong values or a crash.
+            programs = [p.program for p in self.compiler.processes]
+            programs += [prog for prog, _sigs in self.compiler.monitor_programs]
+            if any(max_stack_depth(prog) > _VM_FAST_STACK_SLOTS for prog in programs):
                 self._use_cython = False
 
         # Pre-extract constant pool for Cython fast path

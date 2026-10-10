@@ -538,27 +538,53 @@ class CythonCompiler:  # cm:3d7f4a
         # through generated simulator C in a debugger, and for a large design
         # it was ~30% of the C compile time (wide_bench 250 lanes: 14.0 s ->
         # 9.8 s). Optimized code is unchanged. MSVC doesn't take -g0.
+        # Cython's parser recurses once per nesting level, so a long
+        # associative chain (a 200-input XOR becomes 200 nested parentheses)
+        # hit Python's recursion limit and the build failed. Run the build
+        # on a thread with a big stack and a high recursion limit.
         return f"""\
 import sys
+import threading
 
 from setuptools import Extension, setup
 from Cython.Build import cythonize
 
 _args = [] if sys.platform == "win32" else ["-g0"]
 
-setup(
-    ext_modules=cythonize(
-        [Extension("{module_name}", [{sources_repr}], extra_compile_args=_args)],
-        compiler_directives={{
-            "language_level": "3",
-            "boundscheck": False,
-            "wraparound": False,
-            "cdivision": True,
-            "initializedcheck": False,
-            "nonecheck": False,
-        }},
-    ),
-)
+
+def _build():
+    setup(
+        ext_modules=cythonize(
+            [Extension("{module_name}", [{sources_repr}], extra_compile_args=_args)],
+            compiler_directives={{
+                "language_level": "3",
+                "boundscheck": False,
+                "wraparound": False,
+                "cdivision": True,
+                "initializedcheck": False,
+                "nonecheck": False,
+            }},
+        ),
+    )
+
+
+_failure = []
+
+
+def _run():
+    try:
+        _build()
+    except BaseException as exc:  # noqa: BLE001 -- re-raised in the main thread
+        _failure.append(exc)
+
+
+sys.setrecursionlimit(200000)
+threading.stack_size(512 * 1024 * 1024)
+_thread = threading.Thread(target=_run)
+_thread.start()
+_thread.join()
+if _failure:
+    raise _failure[0]
 """
 
     def _run_build(self, build_dir: str, *, n_sources: int = 1) -> None:

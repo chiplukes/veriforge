@@ -71,6 +71,51 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Hardcoded capacity limits (RESOLVED 2026-10-10)
+
+An audit of fixed-size buffers in both native engines
+(`tests/test_sim/test_capacity_limits.py`). Each one silently gave wrong
+output, or failed outright, past its limit:
+
+- **vm-fast, wide NBA queues.** These held 64 entries per delta, and
+  entries past 64 were dropped. They are now sized from the wide-signal
+  count, and overflow returns an error instead of dropping.
+- **vm-fast, evaluation stack.** This has 256 slots with no bounds check,
+  so a 300-part concatenation gave wrong values and a deeply nested wide
+  expression segfaulted. `opcodes.max_stack_depth` now analyses every
+  program at setup, and a design that's too deep runs on the Python
+  interpreter instead. A growable stack was tried first, but it cost 22%
+  on the hot loop.
+- **vm-fast, display buffer.** This held 4096 slots, so 3000 `$display`s
+  from one process in one delta raised an overflow error. It now grows
+  with `realloc`.
+- **compiled, wide `*` `/` `%` `**`.** The temporaries were fixed at 16
+  words (64 for `**`), so results over 1024 bits were all x. They are now
+  sized by `DEF MAX_VALUE_WORDS`, the widest value in the module.
+- **compiled, display of wide values.** Values over 4096 bits printed only
+  their low 4096 bits. The scratch space now moves to the heap above that
+  width.
+- **compiled, output buffer.** The fixed 64 KB `out_buf` silently
+  truncated output in a multi-cycle `batch_run`, because it is drained
+  only when the batch returns. It is now a heap buffer that grows on
+  demand.
+- **compiled build, deep expressions.** These hit a Cython-parser
+  `RecursionError`. The generated `setup.py` now builds on a thread with a
+  512 MB stack and a high recursion limit.
+- **Front end and reference/vm, deep expressions.** Expressions nested
+  about 200 deep hit Python's recursion limit of 1000.
+  `veriforge._recursion.ensure_deep_recursion()` now raises the limit to
+  50 000; it is called from `tree_to_design` and `Simulator.__init__`.
+- **reference/vm, `%e/%f/%g` beyond double range.** These raised
+  `OverflowError`; they now print `inf`, as Icarus does.
+
+Checked and fine as designed:
+
+- compiled `_MEM_JOURNAL_MAX`: overflowing it falls back to a full copy.
+- vm-fast `MAX_PROCS` and `MAX_PROG_INSTRS`: both are unused.
+- vm-fast `NBA_MAX` and `NBA_MEM_MAX`: both are scaled from signal and
+  memory counts, and overflow raises loudly.
+
 ### Expanded fuzzer: second round (RESOLVED 2026-10-10)
 
 Tasks/impure functions/`$display` fuzzing (`tests/test_sim/test_fuzz_findings.py`):

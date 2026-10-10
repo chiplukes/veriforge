@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from lark import Token, Tree
 
+from .._recursion import ensure_deep_recursion
 from ..model.assignments import ContinuousAssign
 from ..model.base import Comment, SourceLocation
 from ..model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
@@ -317,6 +318,7 @@ def tree_to_design(  # noqa: PLR0912  # cm:6d5a2c
     Returns:
         Design containing the parsed modules.
     """
+    ensure_deep_recursion()
     design = _build_design_from_tree(tree, source_file, source_text, _design_builder_callbacks())
 
     # Attach comments to model nodes if provided

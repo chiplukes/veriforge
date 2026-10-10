@@ -156,3 +156,127 @@ class Op(IntEnum):  # cm:5b3d7f
 def instr(op: Op, arg1: int = 0, arg2: int = 0) -> tuple[int, int, int]:
     """Create an instruction tuple."""
     return (int(op), arg1, arg2)
+
+
+# ── Stack depth analysis ─────────────────────────────────────────────
+
+# (pops, pushes) of every opcode with a fixed stack effect.
+_STACK_EFFECT: dict[int, tuple[int, int]] = {
+    **dict.fromkeys(
+        (Op.LOAD_SIG, Op.LOAD_CONST, Op.DUP, Op.SYS_TIME, Op.FUNC_RANDOM, Op.SYS_FOPEN),
+        (0, 1),
+    ),
+    **dict.fromkeys(
+        (
+            Op.RESIZE,
+            Op.SIGN_EXT,
+            Op.STREAM_REVERSE,
+            Op.CLEAR_MASK,
+            Op.BIT_NOT,
+            Op.LOG_NOT,
+            Op.NEG,
+            Op.UPLUS,
+            Op.RED_AND,
+            Op.RED_OR,
+            Op.RED_XOR,
+            Op.RED_NAND,
+            Op.RED_NOR,
+            Op.RED_XNOR,
+            Op.FUNC_CLOG2,
+            Op.LOAD_MEM,
+            Op.SYS_FEOF,
+        ),
+        (1, 1),
+    ),
+    **dict.fromkeys(
+        (
+            Op.ADD,
+            Op.SUB,
+            Op.MUL,
+            Op.DIV,
+            Op.MOD,
+            Op.POW,
+            Op.SDIV,
+            Op.SMOD,
+            Op.SPOW,
+            Op.BIT_AND,
+            Op.BIT_OR,
+            Op.BIT_XOR,
+            Op.BIT_XNOR,
+            Op.SHL,
+            Op.SHR,
+            Op.ASHL,
+            Op.ASHR,
+            Op.CMP_EQ,
+            Op.CMP_NE,
+            Op.CMP_LT,
+            Op.CMP_LE,
+            Op.CMP_GT,
+            Op.CMP_GE,
+            Op.CMP_CASE_EQ,
+            Op.CMP_CASE_NE,
+            Op.CMP_CASEX,
+            Op.CMP_CASEZ,
+            Op.CMP_SLT,
+            Op.CMP_SLE,
+            Op.CMP_SGT,
+            Op.CMP_SGE,
+            Op.LOG_AND,
+            Op.LOG_OR,
+            Op.BIT_SELECT,
+            Op.REPLICATE,
+        ),
+        (2, 1),
+    ),
+    **dict.fromkeys((Op.RANGE_SELECT, Op.PART_SEL_UP, Op.PART_SEL_DOWN, Op.TERNARY), (3, 1)),
+    **dict.fromkeys(
+        (Op.STORE_SIG, Op.NBA_SIG, Op.JUMP_IF_ZERO, Op.JUMP_IF_NONZERO, Op.POP, Op.SYS_FCLOSE),
+        (1, 0),
+    ),
+    **dict.fromkeys((Op.STORE_BIT, Op.NBA_BIT, Op.STORE_MEM, Op.NBA_MEM), (2, 0)),
+    **dict.fromkeys((Op.STORE_RANGE, Op.NBA_RANGE), (3, 0)),
+    **dict.fromkeys((Op.STORE_MEM_RANGE, Op.NBA_MEM_RANGE), (4, 0)),
+    **dict.fromkeys((Op.JUMP, Op.NOP, Op.SYS_FINISH, Op.PROC_END, Op.SYS_READMEM), (0, 0)),
+}
+
+
+def _stack_effect(op: int, arg1: int) -> tuple[int, int]:
+    if op == Op.CONCAT:
+        return arg1, 1
+    if op in (Op.SYS_DISPLAY, Op.SYS_MONITOR):
+        return arg1 & 0xFFFF, 0
+    if op in (Op.SYS_FDISPLAY, Op.SYS_FWRITE):
+        return (arg1 & 0xFFFF) + 1, 0
+    # An unknown opcode: assume it pushes (no opcode pushes more than one).
+    return _STACK_EFFECT.get(op, (0, 1))
+
+
+def max_stack_depth(program: list[tuple[int, int, int]]) -> int:
+    """The most stack slots *program* can occupy at once, by following every
+    path through its jumps. vm-fast's interpreter has a fixed-size stack,
+    so a design with a deeper program (a 300-part concatenation, say) must
+    run on the Python interpreter. Returns ``len(program) + 1`` (an upper
+    bound) when the depth along some path keeps growing round a loop."""
+    n = len(program)
+    depth_at: list[int] = [-1] * (n + 1)
+    worst = 0
+    work = [(0, 0)]
+    while work:
+        pc, depth = work.pop()
+        while pc < n and depth > depth_at[pc]:
+            depth_at[pc] = depth
+            op, arg1, _arg2 = program[pc]
+            pops, pushes = _stack_effect(op, arg1)
+            depth = max(depth - pops, 0) + pushes
+            worst = max(worst, depth)
+            if worst > n:
+                return n + 1
+            if op in (Op.PROC_END, Op.SYS_FINISH):
+                break
+            if op == Op.JUMP:
+                pc = arg1
+            else:
+                if op in (Op.JUMP_IF_ZERO, Op.JUMP_IF_NONZERO):
+                    work.append((arg1, depth))
+                pc += 1
+    return worst

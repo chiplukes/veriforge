@@ -131,8 +131,20 @@ cdef inline int _clog2(long long v) noexcept nogil:
         r += 1
     return r
 
+cdef int _out_grow(SimCtx *c) noexcept nogil:
+    cdef int cap = c.out_cap * 2 if c.out_cap else OUT_BUF_MAX
+    cdef char *p
+    if c.out_cap >= (1 << 30):  # 1 GB in one burst: give up (output dropped)
+        return 0
+    p = <char *>realloc(c.out_buf, cap)
+    if p == NULL:
+        return 0
+    c.out_buf = p
+    c.out_cap = cap
+    return 1
+
 cdef inline void _out_char(SimCtx *c, char ch) noexcept nogil:
-    if c.out_count < OUT_BUF_MAX - 1:
+    if c.out_count < c.out_cap - 1 or _out_grow(c):
         c.out_buf[c.out_count] = ch
         c.out_count += 1
 
@@ -171,8 +183,8 @@ cdef inline void _out_int_bin(SimCtx *c, long long v, int w) noexcept nogil:
 # ``%d``/``%h``/``%x``/``%o``/``%b`` of a (val, mask) word array, with
 # Icarus's conventions -- the same rules as sim/display_format.py's
 # format_value (full-width digits, x/X digits, %d padded to the widest
-# decimal of the width, signed when *sgn*). Widths above 4096 bits print
-# their low 4096 bits.
+# decimal of the width, signed when *sgn*). Values up to _FMT_MAX_WORDS
+# words use stack scratch; wider ones use heap scratch.
 DEF _FMT_MAX_WORDS = 64
 
 cdef inline unsigned long long _fmt_bits(const unsigned long long *a, int shift, int n) noexcept nogil:
@@ -187,14 +199,28 @@ cdef inline unsigned long long _fmt_bits(const unsigned long long *a, int shift,
 
 cdef void _out_fmt(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
                    int w, int spec, int fw, int zp, int sgn) noexcept nogil:
-    cdef char buf[4100]
-    cdef unsigned long long t[_FMT_MAX_WORDS]
-    cdef unsigned long long rem, cur, gm, gv, carry, full
-    cdef int n = 0, i, d, nw, bits, ndig, gw, natural, neg = 0, any_m = 0, all_m = 1
+    cdef char sbuf[4100]
+    cdef unsigned long long st[_FMT_MAX_WORDS]
+    cdef char *buf = sbuf
+    cdef unsigned long long *t = st
+    cdef void *heap = NULL
     if w <= 0:
         w = 1
     if w > 64 * _FMT_MAX_WORDS:
-        w = 64 * _FMT_MAX_WORDS
+        heap = malloc(<size_t>((w + 63) >> 6) * 8 + <size_t>w + 16)
+        if heap == NULL:
+            return
+        t = <unsigned long long *>heap
+        buf = <char *>heap + ((w + 63) >> 6) * 8
+    _out_fmt_body(c, v, m, w, spec, fw, zp, sgn, buf, t)
+    if heap != NULL:
+        free(heap)
+
+cdef void _out_fmt_body(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
+                        int w, int spec, int fw, int zp, int sgn,
+                        char *buf, unsigned long long *t) noexcept nogil:
+    cdef unsigned long long rem, cur, gm, gv, carry, full
+    cdef int n = 0, i, d, nw, bits, ndig, gw, natural, neg = 0, any_m = 0, all_m = 1
     nw = (w + 63) >> 6
     for i in range(nw):
         gw = w - i * 64
@@ -284,16 +310,19 @@ cdef void _out_fmt(SimCtx *c, const unsigned long long *v, const unsigned long l
 # format_real): x/z bits read as 0, signed values print negative.
 cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
                     int w, int spec, int fw, int prec, int zp, int sgn) noexcept nogil:
-    cdef unsigned long long t[_FMT_MAX_WORDS]
+    cdef unsigned long long st[_FMT_MAX_WORDS]
+    cdef unsigned long long *t = st
     cdef unsigned long long cur, carry
     cdef int i, n, nw, neg = 0
     cdef double x = 0.0
     cdef char buf[400]
     if w <= 0:
         w = 1
-    if w > 64 * _FMT_MAX_WORDS:
-        w = 64 * _FMT_MAX_WORDS
     nw = (w + 63) >> 6
+    if nw > _FMT_MAX_WORDS:
+        t = <unsigned long long *>malloc(<size_t>nw * 8)
+        if t == NULL:
+            return
     for i in range(nw):
         t[i] = v[i] & ~m[i]  # x/z bits read as 0 (as in Icarus)
     if nw:
@@ -312,6 +341,8 @@ cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long 
             x = x * 18446744073709551616.0 + <double>t[i]
         if neg:
             x = -x
+    if t != st:
+        free(t)
     if prec < 0:
         prec = 6
     if spec == 101:  # 'e'

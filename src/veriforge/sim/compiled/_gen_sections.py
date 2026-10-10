@@ -672,6 +672,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines = [
             "",
             "    def __dealloc__(self):",
+            "        free(self.ctx.out_buf)",
             "        self._trace_free()",
             "        self.trace_record_end()",
             "",
@@ -1094,7 +1095,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "# cython: cdivision=True, initializedcheck=False, nonecheck=False\n"
             "\n"
             "from libc.string cimport memcmp, memcpy, memset\n"
-            "from libc.stdlib cimport free, malloc\n"
+            "from libc.stdlib cimport free, malloc, realloc\n"
             "from libc.math cimport pow\n"
             "from libc.stdio cimport snprintf"
         )
@@ -1127,6 +1128,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         _wide_offsets, _wide_words, total_wide_words = self._wide_layout()
         lines = [f"DEF N_SIGS = {max(self._n_sigs, 1)}"]
         lines.append(f"DEF N_WIDE_WORDS = {max(total_wide_words, self._dynamic_max_wide_words, 1)}")
+        # The widest single value (temporaries in the wide helpers).
+        lines.append(f"DEF MAX_VALUE_WORDS = {max(self._module_max_wide_words(), 16)}")
         lines.append("DEF OUT_BUF_MAX = 65536")
         lines.append(f"DEF PROCESS_LOOP_LIMIT = {_PROCESS_LOOP_LIMIT}")
         lines.append("DEF ERR_NONE = 0")
@@ -1309,8 +1312,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "    long long nba_mem_range_mask[NBA_MEM_RANGE_MAX]",
                 ]
             )
-        # Cold, large output buffer last so hot state stays packed together.
-        lines.append("    char      out_buf[OUT_BUF_MAX]")
+        # $display/$write output, heap-allocated (OUT_BUF_MAX initially) and
+        # grown on demand: a multi-cycle batch_run drains it only at the
+        # end, so a fixed array silently dropped output past 64 KB.
+        lines.append("    char      *out_buf")
+        lines.append("    int       out_cap")
         return lines
 
     def _gen_struct(self) -> str:
@@ -2701,6 +2707,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines.append("        self.ctx.nba_pending = 0")
         lines.append("        self.ctx.sim_time = 0")
         lines.append("        self.ctx.out_count = 0")
+        lines.append("        if self.ctx.out_buf == NULL:")
+        lines.append("            self.ctx.out_buf = <char *>malloc(OUT_BUF_MAX)")
+        lines.append("            self.ctx.out_cap = OUT_BUF_MAX if self.ctx.out_buf != NULL else 0")
         lines.append("        self.ctx.finished = 0")
         lines.append("        self.ctx.error_code = ERR_NONE")
         # Initialize parameter signals to their constant values

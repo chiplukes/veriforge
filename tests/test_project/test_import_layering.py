@@ -27,7 +27,7 @@ ENTRY_POINTS = {"__init__", "__main__"}
 
 # Small leaf utility modules with no dependents-of-concern; any package may
 # import them, and they aren't part of the DAG themselves.
-UTILITY_MODULES = {"_env", "_version"}
+UTILITY_MODULES = {"_env", "_recursion", "_version"}
 
 # Coarse top-level-subpackage DAG. Keys are source subpackages; values are
 # the set of subpackages they may import from at module level. A subpackage

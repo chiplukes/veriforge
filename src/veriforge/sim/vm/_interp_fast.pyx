@@ -365,10 +365,11 @@ cdef struct DeltaCtx:
     # Memory NBA buffer
     NBAMemEntry *nba_mem_buf
     int        nba_mem_cap
-    # Display output buffer (flat long long array)
-    long long *disp_buf
+    # Display output buffer (flat long long array, grown on demand: a
+    # process may print any number of lines within one delta)
+    long long **disp_buf
     int       *disp_pos       # pointer to current write position
-    int        disp_cap
+    int       *disp_cap
     # Memory arrays (flat storage)
     long long *mem_val
     long long *mem_mask
@@ -658,20 +659,30 @@ cdef void _wm_mask_to_width(unsigned long long *wm_base, int w) noexcept nogil:
 # ── The core execution function ──────────────────────────────────────
 
 cdef inline int _disp_push(
-    long long *buf, int idx, int cap, int fmt_id, int n, int is_monitor,
+    long long **bufp, int idx, int *capp, int fmt_id, int n, int is_monitor,
     SVal *stack, int base, int *wflag, unsigned long long *wv, unsigned long long *wm,
 ) noexcept nogil:
     """Append one display event for the *n* stack slots from *base*:
     (fmt_id, n, is_monitor), then (val, mask, width) per argument -- or, for
     a wide one, (0, 0, -width) followed by its WIDE_WORDS value words and
     WIDE_WORDS mask words (wide arguments used to print their narrow
-    slot, 0). Returns the new index, or -1 if the event doesn't fit."""
+    slot, 0). The buffer grows as needed. Returns the new index, or -1
+    when out of memory."""
     cdef int need = 3
-    cdef int i, j, s, k
+    cdef int i, j, s, k, cap
+    cdef long long *buf
     for i in range(n):
         need += 3 + (2 * WIDE_WORDS if wflag[base + i] else 0)
-    if idx + need > cap:
-        return -1
+    if idx + need > capp[0]:
+        cap = capp[0] * 2 if capp[0] > 0 else DISP_BUF_CAP
+        if cap < idx + need:
+            cap = idx + need
+        buf = <long long *>realloc(bufp[0], <size_t>cap * sizeof(long long))
+        if buf == NULL:
+            return -1
+        bufp[0] = buf
+        capp[0] = cap
+    buf = bufp[0]
     buf[idx] = fmt_id
     buf[idx + 1] = n
     buf[idx + 2] = is_monitor
@@ -730,13 +741,15 @@ cdef int _execute_core(
     int       *nba_mem_count,     # in: max, out: actual (NULL if nba_mem_buf is NULL)
     # Display output buffer (optional, NULL to discard)
     # Layout per event: [fmt_id, n_args, is_monitor, v0, m0, w0, v1, m1, w1, ...]
-    long long *disp_buf,
+    long long **disp_buf,         # in/out: display buffer (may be grown)
     int       *disp_pos,          # in/out: current write position
-    int        disp_cap,          # capacity of disp_buf
+    int       *disp_cap,          # in/out: capacity of *disp_buf
     # Wide signal context (NULL-safe: pass NULL if design has no wide signals)
     WideCtx   *wctx,
 ) noexcept nogil:
-    """Execute bytecode. Returns 0=ok, 1=finish, 2=error."""
+    """Execute bytecode. Returns 0=ok, 1=finish, 2=error. The program
+    must not need more than STACK_MAX stack slots (the VM scheduler
+    checks, see compiler.max_stack_depth)."""
 
     cdef SVal stack[STACK_MAX]
     cdef int sp = 0                     # stack pointer (next free slot)
@@ -929,7 +942,14 @@ cdef int _execute_core(
                             wctx.nba_mask[wide_nba_idx * WIDE_WORDS + wi] = 0
                     wide_nba_idx += 1
                     wctx.nba_count[0] = wide_nba_idx
-                # If overflow, silently drop (same policy as narrow NBA overflow avoidance)
+                else:
+                    nba_count[0] = nba_idx
+                    dirty_count[0] = dirty_idx
+                    if nba_mem_count != NULL:
+                        nba_mem_count[0] = nba_mem_idx
+                    if disp_pos != NULL:
+                        disp_pos[0] = disp_idx
+                    return 2  # wide NBA buffer overflow (used to be dropped silently)
             else:
                 a = stack[sp]
                 if wflag[sp]:
@@ -1239,6 +1259,14 @@ cdef int _execute_core(
                             wctx.nba_part_mask[wsp * WIDE_WORDS + wi] = (<unsigned long long>(a.mask & 1)) << n_bits
                             wide_part_nba_idx += 1
                             wctx.nba_part_count[0] = wide_part_nba_idx
+                        elif wctx.nba_part_count != NULL:
+                            nba_count[0] = nba_idx
+                            dirty_count[0] = dirty_idx
+                            if nba_mem_count != NULL:
+                                nba_mem_count[0] = nba_mem_idx
+                            if disp_pos != NULL:
+                                disp_pos[0] = disp_idx
+                            return 2  # wide NBA buffer overflow (used to be dropped silently)
                     else:
                         new_val  = (a.val & 1) << i     # partial: bit i only
                         new_mask = (a.mask & 1) << i
@@ -1377,6 +1405,14 @@ cdef int _execute_core(
                                 wctx.nba_part_mask[wsp * WIDE_WORDS + wi] = (<unsigned long long>new_mask & <unsigned long long>wmask) << bit_in_word
                             wide_part_nba_idx += 1
                             wctx.nba_part_count[0] = wide_part_nba_idx
+                        elif wctx.nba_part_count != NULL:
+                            nba_count[0] = nba_idx
+                            dirty_count[0] = dirty_idx
+                            if nba_mem_count != NULL:
+                                nba_mem_count[0] = nba_mem_idx
+                            if disp_pos != NULL:
+                                disp_pos[0] = disp_idx
+                            return 2  # wide NBA buffer overflow (used to be dropped silently)
                     else:
                         wmask = mask_for_width(n)
                         if a_wide:
@@ -3508,7 +3544,7 @@ cdef int _execute_core(
             if disp_buf != NULL:
                 i = _disp_push(disp_buf, disp_idx, disp_cap, arg2, n, 0, stack, sp - n, wflag, wv, wm)
                 if i < 0:
-                    # Display buffer overflow
+                    # Out of memory growing the display buffer
                     nba_count[0] = nba_idx
                     dirty_count[0] = dirty_idx
                     if nba_mem_count != NULL:
@@ -3809,7 +3845,7 @@ cdef int _execute_core(
             if disp_buf != NULL:
                 i = _disp_push(disp_buf, disp_idx, disp_cap, arg2, n, 1, stack, sp - n, wflag, wv, wm)
                 if i < 0:
-                    # Display buffer overflow
+                    # Out of memory growing the display buffer
                     nba_count[0] = nba_idx
                     dirty_count[0] = dirty_idx
                     if nba_mem_count != NULL:
@@ -4590,7 +4626,7 @@ def cy_execute(
             sim_time,
             NULL, NULL, NULL, NULL, NULL, 0,
             NULL, NULL,
-            NULL, NULL, 0,
+            NULL, NULL, NULL,
             NULL,
         )
 
@@ -4739,7 +4775,7 @@ def cy_execute_batch(
                 sim_time,
                 NULL, NULL, NULL, NULL, NULL, 0,
                 NULL, NULL,
-                NULL, NULL, 0,
+                NULL, NULL, NULL,
                 NULL,
             )
 
@@ -5332,19 +5368,26 @@ cdef class CyContext:
                 self.wide_const_val[i]  = <unsigned long long>const_val_words[i]
                 self.wide_const_mask[i] = <unsigned long long>const_mask_words[i]
 
-        # Wide NBA buffer (full-signal replace)
-        self.wide_nba_cap = WIDE_NBA_MAX
-        self.wide_nba_sids = <int *>malloc(WIDE_NBA_MAX * sizeof(int))
-        self.wide_nba_val  = <unsigned long long *>malloc(WIDE_NBA_MAX * WIDE_WORDS * sizeof(unsigned long long))
-        self.wide_nba_mask = <unsigned long long *>malloc(WIDE_NBA_MAX * WIDE_WORDS * sizeof(unsigned long long))
+        # Wide NBA buffers, sized from the design's wide-signal count (a fixed
+        # 64 entries silently dropped the rest when more wide signals were
+        # NBA-written in one delta -- e.g. 100 wide regs on one clock).
+        cdef int n_wide_sigs = 0
+        for i in range(self.sig_count):
+            if self.wide_sig_offset[i] >= 0:
+                n_wide_sigs += 1
+        cdef int part_cap = max(WIDE_PART_NBA_MAX, n_wide_sigs * 8)
+        self.wide_nba_cap = max(WIDE_NBA_MAX, n_wide_sigs * 8)
+        self.wide_nba_sids = <int *>malloc(self.wide_nba_cap * sizeof(int))
+        self.wide_nba_val  = <unsigned long long *>malloc(self.wide_nba_cap * WIDE_WORDS * sizeof(unsigned long long))
+        self.wide_nba_mask = <unsigned long long *>malloc(self.wide_nba_cap * WIDE_WORDS * sizeof(unsigned long long))
         self.wide_nba_count = 0
 
         # Wide partial NBA buffer (read-modify-write for NBA_BIT / NBA_RANGE)
-        self.wide_part_nba_sids = <int *>malloc(WIDE_PART_NBA_MAX * sizeof(int))
-        self.wide_part_nba_lsb  = <int *>malloc(WIDE_PART_NBA_MAX * sizeof(int))
-        self.wide_part_nba_n    = <int *>malloc(WIDE_PART_NBA_MAX * sizeof(int))
-        self.wide_part_nba_val  = <unsigned long long *>malloc(WIDE_PART_NBA_MAX * WIDE_WORDS * sizeof(unsigned long long))
-        self.wide_part_nba_mask = <unsigned long long *>malloc(WIDE_PART_NBA_MAX * WIDE_WORDS * sizeof(unsigned long long))
+        self.wide_part_nba_sids = <int *>malloc(part_cap * sizeof(int))
+        self.wide_part_nba_lsb  = <int *>malloc(part_cap * sizeof(int))
+        self.wide_part_nba_n    = <int *>malloc(part_cap * sizeof(int))
+        self.wide_part_nba_val  = <unsigned long long *>malloc(part_cap * WIDE_WORDS * sizeof(unsigned long long))
+        self.wide_part_nba_mask = <unsigned long long *>malloc(part_cap * WIDE_WORDS * sizeof(unsigned long long))
         self.wide_part_nba_count = 0
 
         # Build the WideCtx struct
@@ -5365,7 +5408,7 @@ cdef class CyContext:
         self.wctx_c.nba_part_val   = self.wide_part_nba_val
         self.wctx_c.nba_part_mask  = self.wide_part_nba_mask
         self.wctx_c.nba_part_count = &self.wide_part_nba_count
-        self.wctx_c.nba_part_cap   = WIDE_PART_NBA_MAX
+        self.wctx_c.nba_part_cap   = part_cap
 
         self._wide_allocated = True
 
@@ -5453,7 +5496,7 @@ cdef class CyContext:
                 self.mem_val, self.mem_mask, self.mem_elem_width,
                 self.mem_depth, self.mem_base, self.mem_count,
                 NULL, NULL,
-                self.disp_buf, &self.disp_pos, self.disp_cap,
+                &self.disp_buf, &self.disp_pos, &self.disp_cap,
                 &self.wctx_c if self._wide_allocated else NULL,
             )
 
@@ -5850,9 +5893,9 @@ cdef class CyContext:
         dc.dirty_cap = self.dirty_cap
         dc.nba_mem_buf = self.nba_mem_buf
         dc.nba_mem_cap = self.nba_mem_cap
-        dc.disp_buf = self.disp_buf
+        dc.disp_buf = &self.disp_buf
         dc.disp_pos = &self.disp_pos
-        dc.disp_cap = self.disp_cap
+        dc.disp_cap = &self.disp_cap
         dc.delta_limit = delta_limit
         dc.sim_time = self.sim_time
         dc.mem_val = self.mem_val

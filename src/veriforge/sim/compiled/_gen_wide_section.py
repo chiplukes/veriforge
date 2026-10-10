@@ -714,7 +714,7 @@ class _GenWideSectionsMixin:
             "    unsigned long long *av, unsigned long long *am,",
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
-            "    cdef unsigned long long tmp[16]",
+            "    cdef unsigned long long tmp[MAX_VALUE_WORDS + 2]",
             "    cdef int i, j, k, k2, remaining_w, has_x = 0, eff_n",
             "    cdef unsigned long long lo, hi, old, tail_mask",
             "    for i in range(n):",
@@ -756,7 +756,7 @@ class _GenWideSectionsMixin:
             "    eff_n = (dst_width + 63) // 64",
             "    if eff_n > n:",
             "        eff_n = n",
-            "    if eff_n > 16:",
+            "    if eff_n > MAX_VALUE_WORDS:",  # (sized for the design's widest value; was 16 words, so >1024-bit * / % read x)
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
@@ -802,16 +802,16 @@ class _GenWideSectionsMixin:
         # (mirrors sim/value.py's _verilog_pow; `**` wider than 64 bits used
         # to be unsupported). `ev` is the exponent's value (sign-extended
         # when the operation is signed), `e_x` its x flag, `sgn` whether the
-        # operation is signed. Operands up to 64 words.
+        # operation is signed.
         L += [
             "cdef inline void wide_pow(",
             "    unsigned long long *dv, unsigned long long *dm,",
             "    unsigned long long *av, unsigned long long *am,",
             "    long long ev, int e_x, int sgn, int n, int dst_width) noexcept nogil:",
-            "    cdef unsigned long long r[64]",
-            "    cdef unsigned long long b[64]",
-            "    cdef unsigned long long t[64]",
-            "    cdef unsigned long long z[64]",
+            "    cdef unsigned long long r[MAX_VALUE_WORDS + 2]",
+            "    cdef unsigned long long b[MAX_VALUE_WORDS + 2]",
+            "    cdef unsigned long long t[MAX_VALUE_WORDS + 2]",
+            "    cdef unsigned long long z[MAX_VALUE_WORDS + 2]",
             "    cdef unsigned long long e, top",
             "    cdef int i, nw, has_x = e_x, is_zero = 1, is_one = 1, is_m1 = 1",
             "    nw = (dst_width + 63) // 64",
@@ -823,7 +823,7 @@ class _GenWideSectionsMixin:
             "    for i in range(nw):",
             "        if am[i] & _word_mask64(dst_width - i * 64):",
             "            has_x = 1",
-            "    if has_x or nw > 64:",
+            "    if has_x or nw > MAX_VALUE_WORDS:",
             "        for i in range(nw):",
             "            dm[i] = _word_mask64(dst_width - i * 64)",
             "        return",
@@ -880,7 +880,7 @@ class _GenWideSectionsMixin:
             "    unsigned long long *av, unsigned long long *am,",
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
-            "    cdef unsigned long long Rv[16]",
+            "    cdef unsigned long long Rv[MAX_VALUE_WORDS + 2]",
             "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1, eff_n",
             "    cdef unsigned long long borrow, old, tail_mask",
             "    for i in range(n):",
@@ -913,7 +913,7 @@ class _GenWideSectionsMixin:
             "    eff_n = (dst_width + 63) // 64",
             "    if eff_n > n:",
             "        eff_n = n",
-            "    if eff_n > 16:",
+            "    if eff_n > MAX_VALUE_WORDS:",  # (sized for the design's widest value; was 16 words, so >1024-bit * / % read x)
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
@@ -959,7 +959,7 @@ class _GenWideSectionsMixin:
             "    unsigned long long *av, unsigned long long *am,",
             "    unsigned long long *bv, unsigned long long *bm,",
             "    int n, int dst_width) noexcept nogil:",
-            "    cdef unsigned long long Rv[16]",
+            "    cdef unsigned long long Rv[MAX_VALUE_WORDS + 2]",
             "    cdef int i, bit, wi, bs, ge, remaining_w, has_x = 0, b_zero = 1, eff_n",
             "    cdef unsigned long long borrow, old, tail_mask",
             "    for i in range(n):",
@@ -979,7 +979,7 @@ class _GenWideSectionsMixin:
             "    eff_n = (dst_width + 63) // 64",
             "    if eff_n > n:",
             "        eff_n = n",
-            "    if eff_n > 16:",
+            "    if eff_n > MAX_VALUE_WORDS:",  # (sized for the design's widest value; was 16 words, so >1024-bit * / % read x)
             "        for i in range(n):",
             "            remaining_w = dst_width - i * 64",
             "            tail_mask = _word_mask64(remaining_w)",
