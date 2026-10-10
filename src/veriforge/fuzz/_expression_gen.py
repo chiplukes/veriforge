@@ -153,10 +153,10 @@ class ExpressionGenerator:
             val = rng.choice((0, 1, 2, 3, 7, 15, 16, 255, 256, 65535, 2**31 - 1, 2**31, 2**32 - 1, rng.getrandbits(31)))
             return Literal(val, base="d", signed=True, original_text=str(val))
         w = rng.choice((1, 2, 4, 8, 12, 33))
-        bits = "".join(rng.choice("01xz") if rng.random() < 0.4 else rng.choice("01") for _ in range(w))
-        return Literal(
-            bits, width=w, base="b", signed=False, is_x="x" in bits, is_z="z" in bits, original_text=f"{w}'b{bits}"
-        )
+        # x but never z: z shares x's encoding in veriforge (known_issues.md),
+        # so a z literal only ever produced that known difference.
+        bits = "".join(rng.choice("01x") if rng.random() < 0.4 else rng.choice("01") for _ in range(w))
+        return Literal(bits, width=w, base="b", signed=False, is_x="x" in bits, original_text=f"{w}'b{bits}")
 
     def literal(self, rng: random.Random, *, width: int | None = None) -> Literal:
         """Generate a random literal with optional width constraint."""

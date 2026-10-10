@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..codegen.verilog_emitter import emit_design
 from ._module_gen import ModuleGenerator
+from ._module_gen import Strategy
 from ._runner import FuzzRunner
 
 
@@ -114,6 +115,12 @@ def main() -> None:
         help="Engines to test (default: all available: reference vm vm-fast)",
     )
     parser.add_argument(
+        "--strategy",
+        type=str,
+        default=None,
+        help="Generate only this strategy (e.g. with_tasks, with_functions); default: weighted mix",
+    )
+    parser.add_argument(
         "--repro",
         type=str,
         default=None,
@@ -147,6 +154,7 @@ def main() -> None:
         engines=args.engines,
         icarus=not args.no_icarus,
         verilator=args.verilator,
+        strategy=Strategy[args.strategy.upper()] if args.strategy else None,
     )
 
     try:

@@ -1,7 +1,6 @@
 # Fuzzer coverage expansion (queued 2026-10-09)
 
-**Status**: first round done 2026-10-10 (see "Done" below); tasks, impure
-functions and `$display` observation still open.
+**Status**: done 2026-10-10 (see "Done" and "Second round" below).
 
 ## Why
 
@@ -73,8 +72,30 @@ signedness propagation" and "Functions, tasks, integers and $display gaps"):
 - Remaining known: `casez`/`casex` with an x selector (x and z share one
   encoding, known_issues.md).
 
+## Second round (2026-10-10)
+
+- New `WITH_TASKS` strategy: automatic tasks with input/output ports and
+  integer/signed locals called from a clocked block, plus an impure
+  function bumping an `int` counter (only ever a top-level RHS operand).
+- `$display("#D ...")` observation in clocked strategies (random `%d %0d
+  %h %0h %b %0b %o %x %5d %08h %3h %m`), compared line-for-line across
+  engines and against Icarus (z->x mapped, x/X case ignored, `tb.dut` ->
+  module name). No real formats: Icarus's partly-x signed -> double rule.
+- Hierarchical children get the parent's real `clk` (a constant/data clock
+  made a t=0 or same-step race); x/z literals use x only; comb blocks
+  must read a live signal; the harness no longer drives `clk` from the
+  random vectors (the Icarus testbench never did).
+- `--strategy NAME` CLI option to target one strategy.
+- Bugs found and fixed: 2-state memories started at x; compiled dropped x
+  on task inputs; vm didn't sign-extend signed task arguments; compiled
+  and reference sized unsized literals >= 2**31 as 32 bits (wide signed
+  targets got -1); real formats of partly-x values (x bits read as 0, as
+  Icarus); nested casts lost signedness; `**` result signedness is the
+  base's (all engines' analysis); a ternary's branches take the context's
+  signedness (all engines; reversed an old "confirmed" comment/test that
+  Icarus contradicts); compiled t=0 edge handling kept to the old rule.
+
 ## Still open
 
-- Tasks (with output ports) and impure functions in generated designs.
-- `$display` observation with random format specifiers.
-- 2-state memories (`int m [0:3]`) still start at x.
+- Nothing from the original list. Known remaining mismatch classes are
+  Icarus quirks or the x/z single-encoding limitation (known_issues.md).

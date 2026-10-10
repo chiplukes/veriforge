@@ -550,8 +550,14 @@ endmodule
     )
 
 
-def test_compiled_ternary_own_signed_ignores_inherited_override() -> None:
-    """Regression test for a confirmed compiled-engine bug:
+def test_ternary_signedness_follows_context() -> None:
+    """2026-10-10 CORRECTION: the context's signedness wins for a ternary's
+    branches after all (IEEE 1364-2005 5.5.2) -- this test's `y1` was
+    re-checked directly against Icarus with these exact values and Icarus
+    gives 41, not the 43 asserted below before; every engine now gives 41.
+    The history below is kept for context.
+
+    Original docstring -- regression test for a compiled-engine bug:
     `_emit_ternary_value_mask_exprs`'s `own_signed` (the ternary's own
     combined signedness, threaded into its branches as `t_signed_
     override`/`f_signed_override`) let an inherited `signed_override`
@@ -618,7 +624,7 @@ endmodule
         sim.settle()
         y0, y1 = sim.read("y0"), sim.read("y1")
         assert y0 == td.Value(1, width=64), f"engine={engine} y0={y0!r}"
-        assert y1 == td.Value(43, width=64), f"engine={engine} y1={y1!r}"
+        assert y1 == td.Value(41, width=64), f"engine={engine} y1={y1!r}"  # Icarus: 41
 
 
 def test_compiled_wide_concat_in_narrow_context_not_truncated() -> None:

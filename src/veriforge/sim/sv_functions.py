@@ -266,7 +266,13 @@ def lower_width_casts(module: Module) -> Module:
         n = const_int(expr.width, env)
         if n is None or n <= 0:
             return None
-        signed = expr_signed(expr.operand, lambda name: name in signed_names, lambda f: func_signed.get(f, False))
+        # (A nested cast was already lowered to one of the generated functions
+        # -- they count too: `1'(12'(s))` of a signed `s` is signed.)
+        signed = expr_signed(
+            expr.operand,
+            lambda name: name in signed_names,
+            lambda f: bool(made[f].signed) if f in made else func_signed.get(f, False),
+        )
         name = f"__vf_cast_{n}_{'s' if signed else 'u'}"
         if name not in made:
             made[name] = _cast_function(name, n, signed)
@@ -358,6 +364,12 @@ _TWO_STATE_KINDS = frozenset({"bit", "byte", "shortint", "int", "longint"})
 TWO_STATE_CALL = "$__2state"
 
 
+def is_two_state(decl: object) -> bool:
+    """Whether a variable/port declaration has a 2-state type."""
+    kind = getattr(getattr(decl, "kind", None), "value", None)
+    return kind in _TWO_STATE_KINDS or getattr(decl, "data_type", None) in _TWO_STATE_KINDS
+
+
 def lower_two_state(module: Module) -> Module:
     """2-state variables, in place: give each one without an initializer a
     0 initializer, and wrap the RHS of every assignment to one in the
@@ -365,16 +377,11 @@ def lower_two_state(module: Module) -> Module:
     clears x/z bits (every engine implements it next to ``$signed``).
 
     Before 2026-10-09 no engine modeled 2-state types: `int i;` read x and
-    `i = 'x` stored x (Icarus: 0). Memories of 2-state type still start at
-    x (not handled here).
+    `i = 'x` stored x (Icarus: 0). A 2-state memory's elements start at 0 in
+    each engine's own memory setup (`is_two_state`).
     """
     from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
     from veriforge.model.statements import NonblockingAssign  # noqa: PLC0415
-
-    def is_two_state(decl) -> bool:
-        kind = getattr(getattr(decl, "kind", None), "value", None)
-        data_type = getattr(decl, "data_type", None)
-        return kind in _TWO_STATE_KINDS or data_type in _TWO_STATE_KINDS
 
     two_state_decls: list[Port | Variable] = [*module.ports, *module.variables]
     module_two_state = {d.name for d in two_state_decls if is_two_state(d)}

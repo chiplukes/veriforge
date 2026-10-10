@@ -54,6 +54,7 @@ from veriforge.model.statements import (
     WhileLoop,
 )
 from veriforge.sim.evaluator import evaluate_constant
+from veriforge.sim.sv_functions import is_two_state
 from veriforge.sim.compiled._codegen_utils import delta_engine_mode  # noqa: F401 -- re-exported for compiled_scheduler
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
@@ -206,6 +207,7 @@ class CythonCodegen(
         "_mem_layouts",
         "_mem_map",
         "_mem_marker_sigs",
+        "_mem_two_state",
         "_memory_bases",
         "_module",
         "_n_mems",
@@ -262,6 +264,7 @@ class CythonCodegen(
         self._task_map: dict[str, object] = {}
         self._param_init: dict[int, int] = {}
         self._param_env: dict[str, int] = {}
+        self._mem_two_state: set[int] = set()
         self._var_init: dict[int, tuple[int, int]] = {}
         self._struct_signal_types: dict[str, object] = {}
         self._struct_type_map: dict[str, object] = {}
@@ -2121,7 +2124,9 @@ class CythonCodegen(
                 if lsb != 0:
                     self._memory_bases[var.name] = lsb
                 elem_width, depth, dims = _memory_shape_layout(var.dimensions, w, senv, var.packed_dim_count)
-                self._register_memory(var.name, elem_width, depth, dims)
+                mid = self._register_memory(var.name, elem_width, depth, dims)
+                if is_two_state(var):
+                    self._mem_two_state.add(mid)  # starts at 0, see _gen_sections
             else:
                 if lsb != 0:
                     self._signal_bases[var.name] = lsb

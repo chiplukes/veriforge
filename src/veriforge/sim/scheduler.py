@@ -42,6 +42,7 @@ from ..semantics import const_int as _const_int
 from ..semantics import range_width as _range_width
 from ..semantics import var_width as _var_width
 from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed
+from .sv_functions import is_two_state
 from .severity import DisplayLog
 from .executor import StatementExecutor, StopExecution, SuspendExecution
 from .trace import flush_dump, start_dump
@@ -372,7 +373,9 @@ class Scheduler:  # cm:9a7f2c
                     depth, elem_width = shape
                     if lsb != 0:
                         self.ctx._memory_bases[var.name] = lsb
-                    mem_data = [Value.x(elem_width) for _ in range(depth)]
+                    # A 2-state memory (`byte m [0:3]`) starts at 0.
+                    init = Value(0, width=elem_width) if is_two_state(var) else Value.x(elem_width)
+                    mem_data = [init for _ in range(depth)]
                     self.ctx._memories[var.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(var.name)
                     continue

@@ -2112,11 +2112,13 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # = 1->0, x->0, 1->x (masks used to be ignored: 0->x and x->0
             # never fired).
             "                _qnx = c.mask[_qs] & 1",
-            # A transition out of x at t=0 is the clock's initialization
-            # (e.g. a forked Python Clock's first drive), which no engine
-            # treats as an edge (see compiled_scheduler's bootstrap
-            # snapshot); afterwards x->0/x->1 are real edges.
-            "                _qox = (sm[_qs] & 1) if c.sim_time > 0 else 0",
+            # At t=0 the old value-only rule (a clock's initialization: a
+            # forked Python Clock's first rise is a posedge, its first fall
+            # from x is not -- as on reference/vm); afterwards x counts.
+            "                _qox = sm[_qs] & 1",
+            "                if c.sim_time == 0:",
+            "                    _qnx = 0",
+            "                    _qox = 0",
             "                if DL_SEQ_EDGE_POS[_qe]:",
             "                    _hit = (not _qnx and (c.val[_qs] & 1) == 1 and (_qox or (sv[_qs] & 1) == 0))"
             " or (_qnx and not _qox and (sv[_qs] & 1) == 0)",
@@ -2714,15 +2716,19 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 words = self._mem_words(mid)
                 lines.append(f"        for i in range({depth * words}):")
                 lines.append(f"            self.ctx.wide_mem_{mid}_val[i] = 0")
-                lines.append(
-                    f"            self.ctx.wide_mem_{mid}_mask[i] = _word_mask64(MEM_{mid}_WIDTH - ((i % MEM_{mid}_WORDS) * 64))"
-                )
+                if mid in self._mem_two_state:
+                    lines.append(f"            self.ctx.wide_mem_{mid}_mask[i] = 0")  # 2-state
+                else:
+                    lines.append(
+                        f"            self.ctx.wide_mem_{mid}_mask[i] = _word_mask64(MEM_{mid}_WIDTH - ((i % MEM_{mid}_WORDS) * 64))"
+                    )
                 lines.append(f"            self.ctx.wide_mem_{mid}_snap_val[i] = 0")
                 lines.append(f"            self.ctx.wide_mem_{mid}_snap_mask[i] = 0")
             else:
                 lines.append(f"        for i in range({depth}):")
                 lines.append(f"            self.ctx.mem_{mid}_val[i] = 0")
-                lines.append(f"            self.ctx.mem_{mid}_mask[i] = wmask(MEM_{mid}_WIDTH)")
+                mem_mask = "0" if mid in self._mem_two_state else f"wmask(MEM_{mid}_WIDTH)"  # 2-state: 0
+                lines.append(f"            self.ctx.mem_{mid}_mask[i] = {mem_mask}")
                 lines.append(f"            self.ctx.mem_{mid}_snap_val[i] = 0")
                 lines.append(f"            self.ctx.mem_{mid}_snap_mask[i] = 0")
             lines.append(f"        self.ctx.memj_{mid}_n = 0")

@@ -125,6 +125,7 @@ class SignalContext:
         self.continuous_assigns: list = []
         self.instances: list = []
         self.functions: list = []
+        self.tasks: list = []
 
     # ------------------------------------------------------------------
     # Signal creation

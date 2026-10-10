@@ -281,7 +281,7 @@ cdef void _out_fmt(SimCtx *c, const unsigned long long *v, const unsigned long l
         _out_char(c, buf[d])
 
 # ``%e``/``%f``/``%g`` of a (val, mask) word array (sim/display_format.py's
-# format_real): x reads as 0, signed values print negative.
+# format_real): x/z bits read as 0, signed values print negative.
 cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
                     int w, int spec, int fw, int prec, int zp, int sgn) noexcept nogil:
     cdef unsigned long long t[_FMT_MAX_WORDS]
@@ -295,10 +295,7 @@ cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long 
         w = 64 * _FMT_MAX_WORDS
     nw = (w + 63) >> 6
     for i in range(nw):
-        if (m[i] if (w - i * 64) >= 64 else m[i] & ((<unsigned long long>1 << (w - i * 64)) - 1)):
-            nw = 0  # any x/z bit: the value reads as 0
-            break
-        t[i] = v[i]
+        t[i] = v[i] & ~m[i]  # x/z bits read as 0 (as in Icarus)
     if nw:
         if w & 63:
             t[nw - 1] &= (<unsigned long long>1 << (w & 63)) - 1

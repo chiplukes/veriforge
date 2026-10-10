@@ -5104,7 +5104,9 @@ class _WideEmitterMixin:
                 )
             tslot = self._alloc_scratch()
             fslot = self._alloc_scratch()
-            own_signed = self._expr_signed(expr)
+            # 2026-10-10: the context's signedness wins after all (IEEE 5.5.2, as
+            # Icarus does it): `-(c ? s : t) | u33` zero-extends the signed branches.
+            own_signed = signed_override if signed_override is not None else self._expr_signed(expr)
             # `own_signed` (the ternary's OWN combined branch signedness)
             # is meant to govern WIDENING a branch's independently-computed
             # value up to `dst_width` -- not to override how a

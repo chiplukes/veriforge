@@ -33,3 +33,20 @@ def test_with_functions_strategy_simulates():
         assert top.functions
         sim = Simulator(top, engine="reference", design=design)
         sim.run(max_time=0)
+
+
+def test_tasks_impure_functions_and_displays_appear():
+    tasks = "\n".join(_sources(20, Strategy.WITH_TASKS))
+    assert "task automatic" in tasks
+    assert "output" in tasks.split("task automatic", 1)[1]  # an output port
+    assert "fimp(" in tasks  # the impure function is called
+    clocked = "\n".join(_sources(30, Strategy.CLOCKED_SEQUENTIAL))
+    assert '$display("#D' in clocked
+
+
+def test_with_tasks_strategy_simulates():
+    for src in _sources(6, Strategy.WITH_TASKS):
+        design = tree_to_design(verilog_parser(start="source_text").build_tree(src))
+        top = next(m for m in design.modules if m.name == "t")
+        assert top.tasks
+        Simulator(top, engine="reference", design=design).run(max_time=0)

@@ -10,14 +10,26 @@ from typing import Callable
 
 from ..model.behavioral import AlwaysBlock, SensitivityType
 from ..model.design import Design, Module
-from ..model.functions import FunctionDecl
-from ..model.expressions import BinaryOp, Concatenation, Expression, Identifier, Literal, Range, StreamingConcatenation
+from ..model.functions import FunctionDecl, TaskDecl
+from ..model.expressions import (
+    BinaryOp,
+    Concatenation,
+    Expression,
+    FunctionCall,
+    Identifier,
+    Literal,
+    Range,
+    StreamingConcatenation,
+    StringLiteral,
+)
 from ..model.instances import Instance, PortConnection
 from ..model.statements import (
     BlockingAssign,
     NonblockingAssign,
     SensitivityEdge,
     SeqBlock,
+    SystemTaskCall,
+    TaskEnable,
     Statement,
 )
 from ..model.assignments import ContinuousAssign
@@ -26,6 +38,7 @@ from ..model.ports import Port, PortDirection
 from ..model.variables import Variable, VariableKind
 
 from ._expression_gen import ExpressionGenerator
+from ._runner_marks import DISPLAY_MARK
 from ._signal_context import Signal, SignalContext
 from ._statement_gen import StatementGenerator
 
@@ -39,6 +52,7 @@ class Strategy(Enum):
     NESTED_BLOCKS = auto()  # begin/end with local vars
     MIXED = auto()  # random mix
     HIERARCHICAL = auto()  # child module instance + port connections
+    WITH_TASKS = auto()  # tasks with output ports + an impure function, clocked
 
     def __str__(self) -> str:
         return self.name.lower()
@@ -50,10 +64,21 @@ _STRATEGY_WEIGHTS: dict[Strategy, float] = {
     Strategy.MULTI_ALWAYS: 1.5,
     Strategy.CLOCKED_SEQUENTIAL: 1.5,
     Strategy.WITH_FUNCTIONS: 1.5,
+    Strategy.WITH_TASKS: 1.0,
     Strategy.NESTED_BLOCKS: 1.0,
     Strategy.MIXED: 1.0,
     Strategy.HIERARCHICAL: 1.0,
 }
+
+# `$display` observation (see `ModuleGenerator._maybe_display`).
+_DISPLAY_PROBABILITY = 0.4
+# No %e/%f/%g: Icarus converts a partly-x signed value to a double by its
+# own rule (bits below the lowest x, then sign-fill), which IEEE leaves
+# undefined; those formats have dedicated Icarus-checked tests instead
+# (tests/test_sim/test_display_format.py, test_fuzz_findings.py).
+_DISPLAY_SPECS = (
+    "%d", "%0d", "%h", "%0h", "%b", "%0b", "%o", "%x", "%5d", "%08h", "%3h", "%m",
+)  # fmt: skip
 
 # Function port/return widths: <= 64 bits, the compiled engine's limit for
 # user-function ports/returns (known_issues.md).
@@ -113,6 +138,7 @@ class ModuleGenerator:
             Strategy.MIXED: self._gen_mixed,
             Strategy.HIERARCHICAL: self._gen_hierarchical,
             Strategy.WITH_FUNCTIONS: self._gen_with_functions,
+            Strategy.WITH_TASKS: self._gen_with_tasks,
         }
 
         expr_gen = ExpressionGenerator(ctx)
@@ -124,7 +150,7 @@ class ModuleGenerator:
 
         # Assemble the Module
         mod = Module(name)
-        for port in ctx.emit_ports(has_clock=strategy in (Strategy.CLOCKED_SEQUENTIAL, Strategy.REGISTERED)):
+        for port in ctx.emit_ports(has_clock=any(sig.name == "clk" for sig in ctx.inputs)):
             mod.ports.append(port)
         for net in ctx.emit_nets():
             mod.nets.append(net)
@@ -141,6 +167,7 @@ class ModuleGenerator:
         for ca in ctx.continuous_assigns:
             mod.continuous_assigns.append(ca)
         mod.functions.extend(ctx.functions)
+        mod.tasks.extend(ctx.tasks)
 
         # Post-process output port types: if an output is driven ONLY by
         # continuous assigns (not always blocks), drop the "reg" data_type
@@ -356,6 +383,7 @@ class ModuleGenerator:
             stmts.append(NonblockingAssign(out.as_identifier(), rhs))
 
         self._rng.shuffle(stmts)
+        stmts.extend(self._maybe_display(expr_gen))
         ab = AlwaysBlock(
             stmt_gen._seq_block_from_stmts(self._rng, stmts),
             sensitivity_list=[SensitivityEdge("posedge", Identifier("clk"))],
@@ -396,6 +424,124 @@ class ModuleGenerator:
             )
             for out in ctx.outputs
         ]
+
+    def _gen_with_tasks(
+        self,
+        ctx: SignalContext,
+        expr_gen: ExpressionGenerator,
+        stmt_gen: StatementGenerator,
+    ) -> None:
+        """``always @(posedge clk)`` calling 1-2 automatic tasks (input and
+        output ports, `integer`/signed locals), whose outputs land in
+        dedicated regs, plus an impure function that bumps a module-level
+        `int` counter. Added 2026-10-10: tasks and side effects were never
+        generated (task locals were even dropped by the parser).
+
+        The impure call is only ever a top-level RHS operand, so its side
+        effect happens exactly once per clock in every simulator."""
+        rng = self._rng
+        ctx.add_clock()
+        for _ in range(rng.randint(2, 4)):
+            ctx.add_input(rng)
+        for _ in range(rng.randint(1, 3)):
+            ctx.add_output(rng, width=rng.choice(_FUNC_WIDTHS))
+
+        stmts: list[Statement] = []
+        for k in range(rng.randint(1, 2)):
+            task, in_widths, out_width = self._gen_task(f"tk{k + 1}")
+            ctx.tasks.append(task)
+            target = ctx.add_reg(rng, width=out_width, signed=rng.choice([True, False]))
+            args = [expr_gen.expr(rng, depth=rng.randint(1, 3)) for _ in in_widths]
+            stmts.append(TaskEnable(task.name, [*args, target.as_identifier()]))
+
+        # Impure function: `cnt = cnt + a1; f = <expr>` with an `int` counter
+        # (2-state, so it starts at 0 and its value is meaningful).
+        counter = Signal(ctx._next_name("r"), 32, True, "reg", var_kind="int")
+        ctx._regs.append(counter)
+        func, spec = self._gen_function("fimp", [])
+        side_effect = BlockingAssign(
+            counter.as_identifier(),
+            BinaryOp("+", counter.as_identifier(), Identifier(func.ports[0].name)),
+        )
+        assert isinstance(func.body, SeqBlock)
+        func.body.statements.insert(0, side_effect)
+        ctx.functions.append(func)
+
+        for out in ctx.outputs:
+            rhs = expr_gen.expr(rng, depth=rng.randint(1, 3))
+            if rng.random() < 0.5:
+                call = FunctionCall("fimp", [expr_gen.expr(rng, depth=1) for _ in spec.arg_widths])
+                rhs = BinaryOp(rng.choice(["+", "^", "-"]), call, rhs)
+            stmts.append(NonblockingAssign(out.as_identifier(), rhs))
+        stmts.extend(self._maybe_display(expr_gen))
+        ab = AlwaysBlock(
+            stmt_gen._seq_block_from_stmts(rng, stmts),
+            sensitivity_list=[SensitivityEdge("posedge", Identifier("clk"))],
+            sensitivity_type=SensitivityType.SEQUENTIAL,
+        )
+        ctx.always_blocks = [ab]
+
+    def _maybe_display(self, expr_gen: ExpressionGenerator) -> list[Statement]:
+        """Sometimes a `$display("#D ...")` of random expressions with random
+        format specifiers, compared line-for-line by the runner (display
+        formatting was never fuzzed before 2026-10-10)."""
+        rng = self._rng
+        if rng.random() >= _DISPLAY_PROBABILITY:
+            return []
+        pieces = [DISPLAY_MARK.strip()]
+        args: list[Expression] = []
+        for _ in range(rng.randint(1, 3)):
+            spec = rng.choice(_DISPLAY_SPECS)
+            pieces.append(spec)
+            if spec in ("%e", "%g", "%0.2f"):
+                # A plain signal of <= 53 bits: Icarus formats a signed
+                # *expression* as unsigned under the real formats (but a
+                # signed signal as signed), and rounds a wider value to a
+                # double differently (off by one ulp) -- Icarus quirks, not
+                # worth fuzzing.
+                narrow = [sig for sig in expr_gen._ctx.all_readable() if sig.width <= 53]
+                if not narrow:
+                    pieces[-1] = "%d"
+                    args.append(expr_gen.expr(rng, depth=rng.randint(0, 2)))
+                    continue
+                args.append(rng.choice(narrow).as_identifier())
+            elif spec != "%m":
+                args.append(expr_gen.expr(rng, depth=rng.randint(0, 2)))
+        return [SystemTaskCall("$display", [StringLiteral(" ".join(pieces)), *args])]
+
+    def _gen_task(self, name: str) -> tuple[TaskDecl, list[int], int]:
+        rng = self._rng
+        tctx = SignalContext()
+        ports: list[Port] = []
+        for k in range(rng.randint(1, 3)):
+            sig = Signal(f"a{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "input")
+            tctx._inputs.append(sig)
+            ports.append(sig.as_port(PortDirection.INPUT))
+        out_width = rng.choice(_FUNC_WIDTHS)
+        out_sig = Signal("q", out_width, rng.choice([True, False]), "output")
+        out_port = out_sig.as_port(PortDirection.OUTPUT)
+        out_port.data_type = None  # `output [w] q`, not `output reg`
+        ports.append(out_port)
+        local_sigs: list[Signal] = []
+        for k in range(rng.randint(0, 2)):
+            if rng.random() < 0.5:
+                local_sigs.append(Signal(f"l{k + 1}", 32, True, "reg", var_kind="integer"))
+            else:
+                local_sigs.append(Signal(f"l{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "reg"))
+        texpr = ExpressionGenerator(tctx)
+        body: list[Statement] = []
+        for sig in local_sigs:
+            body.append(BlockingAssign(sig.as_identifier(), texpr.expr(rng, depth=rng.randint(1, 3))))
+            tctx._regs.append(sig)
+        body.append(BlockingAssign(out_sig.as_identifier(), texpr.expr(rng, depth=rng.randint(1, 3))))
+        task = TaskDecl(
+            name,
+            is_automatic=True,
+            ports=ports,
+            local_vars=[sig.as_variable() for sig in local_sigs],
+            body=SeqBlock(body),
+        )
+        return task, [sig.width for sig in tctx._inputs], out_width
 
     def _gen_function(self, name: str, earlier: list[_FuncSpec]) -> tuple[FunctionDecl, _FuncSpec]:
         rng = self._rng
@@ -567,6 +713,14 @@ class ModuleGenerator:
                 w = ctx.add_wire(self._rng, width=width, signed=signed)
                 inst_output_wires.append(w)
                 actual: Expression = w.as_identifier()
+            elif port.name == "clk":
+                # The child's clock comes from a real parent clock the runner
+                # toggles. An arbitrary (often constant) expression made a
+                # t=0 x->1 "edge" whose firing is a race (Icarus itself
+                # fires it in some designs and not others).
+                if not any(sig.name == "clk" for sig in ctx.inputs):
+                    ctx.add_clock()
+                actual = Identifier("clk")
             else:
                 depth = self._rng.randint(1, 3)
                 roll = self._rng.random()
@@ -708,21 +862,31 @@ def _collect_assigned_signals(stmt: Statement) -> set[str]:
 
 def _ensure_comb_blocks_read_a_signal(ctx: SignalContext) -> None:
     """Make every ``always @(*)`` block read at least one signal it doesn't
-    itself write. One that reads only constants (common since literal
-    operands were added) never executes in Icarus -- IEEE 1364's `@*` with
+    itself write and that can ever change. One that reads only constants or
+    undriven regs (common since literal operands were added) never executes
+    in Icarus -- IEEE 1364's `@*` with
     an empty implicit list waits forever -- while veriforge runs it once at
     time 0 like `always_comb`, an intentional difference not worth fuzzing.
     The patch `rhs | (input & 1'b0)` leaves the value unchanged."""
-    params = {p.name for p in ctx.parameters}
     inputs = [s for s in ctx.inputs if s.name != "clk"]
     if not inputs:
         return
+    # Signals that can ever change: inputs, and anything some block or
+    # continuous assign drives (reading only an undriven reg or a parameter
+    # never re-triggers the block in Icarus either, so its t=0 run is the
+    # only one -- which Icarus doesn't do).
+    live = {s.name for s in inputs}
+    for ab in ctx.always_blocks:
+        live |= _collect_assigned_signals(ab.body)
+    for ca in ctx.continuous_assigns:
+        if isinstance(ca.lhs, Identifier):
+            live.add(ca.lhs.name)
     for ab in ctx.always_blocks:
         if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
             continue
         written = _collect_assigned_signals(ab.body)
-        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier)} - written - params
-        if read:
+        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier)} - written
+        if read & live:
             continue
         for node in ab.body.walk():
             if isinstance(node, BlockingAssign):

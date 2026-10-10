@@ -153,6 +153,20 @@ operands it follows IEEE 1364-2005 Table 5-6 (1, -1, x). Every veriforge
 engine follows Table 5-6 at all widths; the fuzzer only generates small
 unsigned exponents. Not a veriforge bug -- do not replicate.
 
+### Icarus: real formats of signed expressions, leading x/X
+
+Two Icarus `$display` quirks the fuzzer works around (veriforge follows
+IEEE): `%e`/`%f`/`%g` format a signed *signal* as signed but a signed
+*expression* (`~s`, `-s`, `s - k`) as unsigned (`%d` is signed for both);
+a value wider than 53 bits converts to a double one ulp off
+(apparently truncated rather than rounded); and an x-condition ternary
+(`c ? r : r`, all x) -- and any x from a logical/relational operator
+(`a || b`) -- prints `X`
+instead of `x` under `%o`/`%h`; and a partly-x *signed* value under
+`%e`/`%f`/`%g` keeps the bits below the lowest x and fills above with the
+sign bit if known-1 (`8'sb1000_00x1` -> -1.00; veriforge reads x bits as
+0, -127.00). Not veriforge bugs -- do not replicate.
+
 ### Icarus first-activation x-extension artifact (investigated, not a bug — do not replicate)
 
 **Status**: Investigated and closed — not a simulator bug.

@@ -40,6 +40,34 @@ _KNOWN_LIMITATIONS = (
 )
 
 
+from ._runner_marks import DISPLAY_MARK  # noqa: E402
+
+
+def _x_case_only(a: str, b: str) -> bool:
+    """Lines equal up to x/X case. Icarus prints some fully-unknown digits
+    as `X`: an x-condition ternary's merge (`c ? r : r`) and an x produced
+    by a logical/relational operator (`a || b`), unlike the same x stored
+    in a reg. Per-digit x/X correctness has dedicated Icarus-checked tests
+    (test_display_format.py) instead."""
+    return a.replace("X", "x") == b.replace("X", "x")
+
+
+def _compare_displays(expected: list[str], got: list[str], engine: str) -> list[str]:
+    """Mismatch descriptions for a design's own display lines."""
+    if engine == "iverilog" and len(expected) == len(got):
+        got = [e if _x_case_only(e, g) else g for e, g in zip(expected, got, strict=True)]
+    if expected == got:
+        return []
+    diffs = []
+    if len(expected) != len(got):
+        diffs.append(f"[{engine}] display line count expected={len(expected)} got={len(got)}")
+    for i, (e, g) in enumerate(zip(expected, got)):
+        if e != g:
+            diffs.append(f"[{engine}] display {i}: expected={e!r} got={g!r}")
+            break
+    return diffs
+
+
 class _IcarusIncomparable(Exception):
     """A module Icarus legitimately simulates differently (see the raise)."""
 
@@ -100,7 +128,9 @@ class FuzzRunner:
         engines: Sequence[str] | None = None,
         icarus: bool = True,
         verilator: bool = False,
+        strategy: Strategy | None = None,
     ) -> None:
+        self.strategy = strategy  # None: weighted mix
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.seed = seed
@@ -126,6 +156,7 @@ class FuzzRunner:
         self.icarus_artifacts_filtered = 0
         self.known_limitations_skipped = 0
         self.icarus_skipped = 0
+        self._displays: dict[str, list[str]] = {}
         self._start_time = time.time()
 
     # ------------------------------------------------------------------
@@ -183,12 +214,13 @@ class FuzzRunner:
         rng = random.Random(self.seed)  # noqa: S311
         gen = ModuleGenerator(rng)
 
-        design = gen.generate_design()
+        design = gen.generate_design(self.strategy)
         top = design.get_module("t")
         assert top is not None, "generator always names the top module 't'"
         verilog = emit_design(design)
 
         self.total_modules += 1
+        self._displays = {}
 
         vectors = self._gen_stimulus(top, rng)
 
@@ -223,6 +255,13 @@ class FuzzRunner:
             self._log_mismatch(result)
             return
 
+        # The design's own `$display` lines (DISPLAY_MARK) across engines.
+        for engine in self._engines:
+            if engine != "reference" and engine in result.engine_results:
+                result.mismatches.extend(
+                    _compare_displays(self._displays.get("reference", []), self._displays.get(engine, []), engine)
+                )
+
         # Compare non-reference engines to reference
         for engine in self._engines:
             if engine == "reference":
@@ -254,6 +293,9 @@ class FuzzRunner:
                 icarus_res = self._simulate_icarus(verilog, vectors, top)
                 self._self_reading_comb = _self_reading_comb_outputs(top)
                 diffs = self._compare(oracle, icarus_res, "iverilog", vectors)
+                diffs += _compare_displays(
+                    self._displays.get("reference", []), self._displays.get("iverilog", []), "iverilog"
+                )
                 if diffs:
                     result.mismatches.extend(diffs)
                     self.mismatches_by_engine["iverilog"] = self.mismatches_by_engine.get("iverilog", 0) + 1
@@ -373,6 +415,8 @@ class FuzzRunner:
 
         for vec in vectors:
             for name, value in vec.items():
+                if has_clock and name == "clk":
+                    continue  # the harness drives the clock (the Icarus testbench skips it too)
                 sim.drive(name, value)
 
             if has_clock:
@@ -385,6 +429,7 @@ class FuzzRunner:
             outputs = {p.name: sim.read(p.name) for p in top.output_ports()}
             results.append(outputs)
 
+        self._displays[engine] = [line for line in sim.display_output if line.startswith(DISPLAY_MARK)]
         return results
 
     # ------------------------------------------------------------------
@@ -496,6 +541,13 @@ class FuzzRunner:
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"vvp: {exc.stderr.strip()}") from exc
 
+            # z prints as x/X in veriforge (one x/z encoding; known_issues.md).
+            self._displays["iverilog"] = [
+                # (%m: the testbench instantiates the design as tb.dut)
+                line.strip().replace("z", "x").replace("Z", "X").replace("tb.dut", mod.name)
+                for line in result.stdout.splitlines()
+                if line.strip().startswith(DISPLAY_MARK)
+            ]
             return self._parse_display_output(result.stdout, mod)
 
     def _build_testbench(self, mod: Module, vectors: list[dict[str, Value]]) -> str:
@@ -679,8 +731,8 @@ class FuzzRunner:
 
         for line in stdout.strip().splitlines():
             line = line.strip()
-            if not line:
-                continue
+            if not line or line.startswith(DISPLAY_MARK):
+                continue  # a design's own $display (compared separately)
             parts = line.split()
             if len(parts) != len(output_names):
                 continue

@@ -159,22 +159,16 @@ class _StmtEmittersMixin:
             if sid is None:
                 continue
             w = self._signal_widths[sid]
-            if port.direction == PortDirection.INPUT:
-                if i < len(args):
-                    val_expr = self._emit_expr(args[i], w)
-                else:
-                    val_expr = "0"
-                lines.append(f"{pad}c.val[{sid}] = ({val_expr}) & wmask({w})")
-                lines.append(f"{pad}c.mask[{sid}] = 0")
-            elif port.direction == PortDirection.INOUT:
-                if i < len(args):
-                    val_expr = self._emit_expr(args[i], w)
-                    lines.append(f"{pad}c.val[{sid}] = ({val_expr}) & wmask({w})")
-                    lines.append(f"{pad}c.mask[{sid}] = 0")
+            if port.direction in (PortDirection.INPUT, PortDirection.INOUT) and i < len(args):
+                # Bound like an assignment to the port (x/z bits, width,
+                # signedness and wide ports included) -- it used to write
+                # only the narrow value with mask 0, so an x argument read 0.
+                lines.extend(self._emit_lhs_write(Identifier(local_name), args[i], indent, is_nba=False))
+                if port.direction == PortDirection.INOUT:
                     output_bindings.append((local_name, args[i]))
-                else:
-                    lines.append(f"{pad}c.val[{sid}] = 0")
-                    lines.append(f"{pad}c.mask[{sid}] = 0")
+            elif port.direction in (PortDirection.INPUT, PortDirection.INOUT):
+                lines.append(f"{pad}c.val[{sid}] = 0")  # no argument
+                lines.append(f"{pad}c.mask[{sid}] = 0")
             elif port.direction == PortDirection.OUTPUT:
                 lines.append(f"{pad}c.val[{sid}] = 0")
                 lines.append(f"{pad}c.mask[{sid}] = 0")

@@ -57,10 +57,11 @@ from veriforge.model.statements import (
 
 from ...semantics import const_int as _const_int
 from ..evaluator import evaluate_constant
+from ..sv_functions import is_two_state
 from ..severity import WRITE_MARK, severity_display
 from ...semantics import range_width as _range_width
 from ...semantics import var_width as _var_width
-from ..value import Value
+from ..value import Value, signed_literal_width
 from .opcodes import Op, instr
 
 if TYPE_CHECKING:
@@ -346,7 +347,7 @@ class Compiler:  # cm:8c1e4a
         self._compile_always_blocks(module)
         self._compile_initial_blocks(module)
 
-    def _register_memory(self, name: str, elem_width: int, depth: int) -> int:
+    def _register_memory(self, name: str, elem_width: int, depth: int, *, two_state: bool = False) -> int:
         """Register a memory array and return its mem_id."""
         if name in self.mem_map:
             return self.mem_map[name]
@@ -367,7 +368,7 @@ class Compiler:  # cm:8c1e4a
         wmask = (1 << elem_width) - 1
         for _ in range(depth):
             self.mem_val.append(0)
-            self.mem_mask.append(wmask)
+            self.mem_mask.append(0 if two_state else wmask)  # a 2-state memory starts at 0
         return mid
 
     def _is_memory(self, name: str) -> bool:
@@ -604,7 +605,7 @@ class Compiler:  # cm:8c1e4a
                 if lsb != 0:
                     self._memory_bases[var.name] = lsb
                 depth, elem_width = _memory_shape(var.dimensions, width, senv, var.packed_dim_count)
-                self._register_memory(var.name, elem_width, depth)
+                self._register_memory(var.name, elem_width, depth, two_state=is_two_state(var))
             else:
                 if lsb != 0:
                     self._signal_bases[var.name] = lsb
@@ -1469,7 +1470,9 @@ class Compiler:  # cm:8c1e4a
             # wholesale (using that operand's own width/value), and when the
             # condition is x/z it merges bit-by-bit, zero-padding the
             # narrower operand.
-            own_signed = self._expr_signed(expr)
+            # 2026-10-10: the context's signedness wins after all (IEEE 5.5.2, as
+            # Icarus does it): `-(c ? s : t) | u33` zero-extends the signed branches.
+            own_signed = signed_override if signed_override is not None else self._expr_signed(expr)
             # The condition is self-determined (IEEE 1364-2005 Table
             # 5-22): its OWN natural width is the context that resizes any
             # nested context-determined operator within it -- compiling
@@ -2073,6 +2076,13 @@ class Compiler:  # cm:8c1e4a
             if node.hierarchy and node.hierarchy[0] in local_names:
                 node.hierarchy[0] = f"{prefix}.{node.hierarchy[0]}"
 
+    def _compile_task_argument(self, arg: Expression, port_width: int, program: list[tuple[int, int, int]]) -> None:
+        """Bind a task argument like an assignment to its port: evaluated at
+        the port's width and extended by the argument's signedness (it used
+        to be self-determined and zero-extended: a signed `-3` read 7d)."""
+        self._compile_expr(arg, program, port_width)
+        program.append(instr(Op.SIGN_EXT if self._expr_signed(arg) else Op.RESIZE, port_width, 0))
+
     def _compile_task_enable(self, stmt: TaskEnable, program: list[tuple[int, int, int]]) -> bool:
         """Inline a user-defined task call at the call site."""
         import copy
@@ -2103,14 +2113,14 @@ class Compiler:  # cm:8c1e4a
             w = _range_width(port.width, self._param_env)
             if port.direction == PortDirection.INPUT:
                 if i < len(stmt.arguments):
-                    self._compile_expr(stmt.arguments[i], program)
+                    self._compile_task_argument(stmt.arguments[i], w, program)
                 else:
                     x_cid = self._add_const(Value.x(w))
                     program.append(instr(Op.LOAD_CONST, x_cid))
                 program.append(instr(Op.STORE_SIG, port_sids[i], w))
             elif port.direction == PortDirection.INOUT:
                 if i < len(stmt.arguments):
-                    self._compile_expr(stmt.arguments[i], program)
+                    self._compile_task_argument(stmt.arguments[i], w, program)
                     program.append(instr(Op.STORE_SIG, port_sids[i], w))
                     output_bindings.append((port_sids[i], stmt.arguments[i]))
                 else:
@@ -2606,6 +2616,11 @@ class Compiler:  # cm:8c1e4a
             return self.sig_width[sid]
 
         if etype is Literal:
+            if expr.width is None and expr.signed and isinstance(expr.value, int):
+                # An unsized decimal >= 2**31 needs a sign-guard bit (see
+                # `signed_literal_width`); as 32 bits, `4294967295` read as
+                # -1 and sign-extended into a wide signed target.
+                return signed_literal_width(int(expr.value))
             return expr.width or 32
 
         if etype is BitSelect:
@@ -2766,7 +2781,7 @@ class Compiler:  # cm:8c1e4a
             # Comparisons and logical ops always produce an unsigned 1-bit
             # result regardless of operand signedness (IEEE 1364-2005
             # §5.5.1, Table 5-22).
-            if expr.op in ("<<", ">>", "<<<", ">>>"):
+            if expr.op in ("<<", ">>", "<<<", ">>>", "**"):  # `**`: the base's signedness (as Icarus)
                 result = self._expr_signed(expr.left, cache)
             elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
                 result = False

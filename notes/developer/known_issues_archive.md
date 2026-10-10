@@ -71,6 +71,23 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Expanded fuzzer: second round (RESOLVED 2026-10-10)
+
+Tasks/impure functions/`$display` fuzzing (`tests/test_sim/test_fuzz_findings.py`):
+2-state memories started at x; compiled bound an x task input as 0; vm
+zero-extended a signed task argument; compiled and reference sized an
+unsized literal >= 2**31 as 32 bits (so `r <= 4294967295` into a wide
+signed reg became all ones on compiled, and a ternary with it printed one
+hex digit short on reference); `%e/%f/%g` of a partly-x value printed 0
+(x bits now read as 0, as in Icarus); a nested cast `1'(12'(s))` lost the
+inner cast's signedness; `**`'s result signedness is its base's in every
+engine's own analysis (`3'(s ** 2'd1)`, `(s ** 1) >>> 1`, `(s ** 1) < 0`);
+a ternary's branches now take the signedness propagated from the context
+(`-(c ? s : t) | u33` zero-extends `s`) -- this reverses
+`test_compiled_ternary_own_signed_ignores_inherited_override`'s assertion
+(43 -> 41, re-checked against Icarus) and the compiled emitter comment
+defending the old rule.
+
 ### Expanded fuzzer: first findings (RESOLVED 2026-10-10)
 
 From `notes/plans/fuzzer_coverage_2026-10.md` (regressions in

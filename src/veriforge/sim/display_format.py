@@ -110,11 +110,12 @@ def format_real(  # noqa: PLR0913
     zero_pad: bool,
     signed: bool,  # noqa: FBT001
 ) -> str:
-    """``%e``/``%f``/``%g`` of an integer argument, as C/Icarus print it (an x
-    value reads as 0). There is no ``real`` type in this simulator yet, so
+    """``%e``/``%f``/``%g`` of an integer argument, as C/Icarus print it (x/z
+    bits read as 0). There is no ``real`` type in this simulator yet, so
     the argument is always the integer value."""
     width = max(v.width, 1)
-    val = 0 if v.mask else v.val & ((1 << width) - 1)
+    # x/z bits read as 0 (as in Icarus: `8'bx0000001` prints 1.0)
+    val = v.val & ~v.mask & ((1 << width) - 1)
     if signed and val >> (width - 1):
         val -= 1 << width
     pad = "0" if zero_pad and field_width else ""

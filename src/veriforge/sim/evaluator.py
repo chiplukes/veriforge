@@ -986,7 +986,10 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # selected -- not that branch's own individual signedness. This
             # establishes a *fresh* override for both branches, replacing
             # whatever override (if any) was active from further out.
-            own_signed = _expr_signed(expr, ctx)
+            # Signedness propagated from the context wins (IEEE 5.5.2): in
+            # `-(c ? s : t) | u33` the unsigned `|` makes the branches
+            # zero-extend; they used to sign-extend by their own type.
+            own_signed = signed_override if signed_override is not None else _expr_signed(expr, ctx)
             # The condition is reduced to a boolean the same way `!`/`&&`/
             # `||`/reduction-OR are (Value.reduce_or): a known-1 bit ANYWHERE
             # makes the condition definitely true regardless of unrelated x/z
@@ -1653,6 +1656,8 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
             return elem_width * len(_mem_data)
         return 32
     if etype is Literal:
+        if expr.width is None and expr.signed and isinstance(expr.value, int):
+            return signed_literal_width(int(expr.value))  # >= 2**31: 33+ bits
         return expr.width or 32
     if etype is BitSelect:
         # BitSelect also represents unpacked-array ELEMENT access (e.g.
@@ -1826,7 +1831,7 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[Expression, boo
     # operand signedness (IEEE 1364-2005 SS5.5.1, Table 5-22); otherwise
     # both operands must be signed ------------------------------------
     if etype is BinaryOp:
-        if expr.op in ("<<", ">>", "<<<", ">>>"):
+        if expr.op in ("<<", ">>", "<<<", ">>>", "**"):  # `**`: the base's signedness (as Icarus)
             result = _expr_signed(expr.left, ctx, cache)
         elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
             result = False

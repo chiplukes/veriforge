@@ -357,6 +357,10 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
     when narrowing a multiply feeding a shift).
     """
     if isinstance(expr, Literal):
+        if expr.width is None and expr.signed and isinstance(expr.value, int) and expr.value > 0:
+            # An unsized decimal >= 2**31 needs a sign-guard bit (see
+            # sim/value.py:signed_literal_width).
+            return max(32, int(expr.value).bit_length() + 1)
         return expr.width if expr.width is not None else 32
     if isinstance(expr, StringLiteral):
         return 8 * len(expr.value)
@@ -447,7 +451,10 @@ def expr_signed(
             return False
         return expr_signed(expr.operand, signed_of, function_signed)
     if isinstance(expr, BinaryOp):
-        if expr.op in _LEFT_WIDTH_BINARY:
+        if expr.op in _LEFT_WIDTH_BINARY or expr.op == "**":
+            # `**` too: its result takes the base's signedness, as Icarus
+            # and every engine's own evaluation do (`3'(s ** 2'd1)` of a
+            # signed `s` sign-extends).
             return expr_signed(expr.left, signed_of, function_signed)
         if expr.op in _ONE_BIT_BINARY:
             return False

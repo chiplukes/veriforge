@@ -42,7 +42,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _UNARY_PREFIX,
     _REDUCTION_OPS,
 )
-from veriforge.sim.value import Value
+from veriforge.sim.value import Value, signed_literal_width
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
@@ -745,7 +745,9 @@ class _ExprEmitterMixin:
         # specifically, which always re-establishes itself fresh, exactly
         # like every OTHER node type that has its own combined-signedness
         # concept, e.g. `_emit_binary`'s comparisons/`&&`/`||`).
-        own_signed = self._expr_signed(expr)
+        # 2026-10-10: the context's signedness wins after all (IEEE 5.5.2, as
+        # Icarus does it): `-(c ? s : t) | u33` zero-extends the signed branches.
+        own_signed = signed_override if signed_override is not None else self._expr_signed(expr)
         tw = self._expr_width(expr.true_expr)
         fw = self._expr_width(expr.false_expr)
         if py:
@@ -3145,6 +3147,11 @@ class _ExprEmitterMixin:
                 return elem_w * depth
             return 1
         if etype is Literal:
+            if expr.width is None and expr.signed and isinstance(expr.value, int):
+                # An unsized decimal >= 2**31 needs a sign-guard bit (see
+                # `signed_literal_width`); as 32 bits, `4294967295` read as
+                # -1 and sign-extended into a wide signed target.
+                return signed_literal_width(int(expr.value))
             return expr.width or 32
         if etype is BitSelect:
             mem_access = self._resolve_memory_element_expr(expr)
@@ -3287,7 +3294,7 @@ class _ExprEmitterMixin:
             # Comparisons and logical ops always produce an unsigned 1-bit
             # result regardless of operand signedness (IEEE 1364-2005
             # §5.5.1, Table 5-22).
-            if expr.op in ("<<", ">>", "<<<", ">>>"):
+            if expr.op in ("<<", ">>", "<<<", ">>>", "**"):  # `**`: the base's signedness (as Icarus)
                 result = self._expr_signed(expr.left, cache)
             elif expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
                 result = False
