@@ -247,18 +247,22 @@ def test_power_operator(engine: str, case: PowCase) -> None:
         ),
     ],
 )
-def test_wide_power_destination_raises_on_compiled(source: str) -> None:
-    """`**` over a >64-bit destination must fail loudly, not silently no-op.
+def test_wide_power_destination_on_compiled(source: str) -> None:
+    """`**` over a >64-bit destination on compiled matches reference.
 
-    Before this fix, `_compile_continuous_assigns`/`_emit_lhs_write`'s
-    last-resort narrow-scalar fallback (reached because neither wide
-    emitter has ever supported `**`) would emit code writing only
-    `c.val[lhs_sid]`/`c.mask[lhs_sid]`, never the wide destination's real
-    `c.wide_val`/`c.wide_offset` storage -- so `y` would silently stay at
-    its reset value of 0 forever, with no warning. Confirmed via direct
-    tracing that both wide emitters correctly return `None` for this RHS
-    before reaching that fallback. Now raises `NotImplementedError` at
-    compile time instead.
-    """
-    with pytest.raises(NotImplementedError, match=r"wider than \d+ bits"):
-        _sim_for(source, "compiled")
+    It used to fail loudly (`NotImplementedError` -- neither wide emitter
+    supported `**`, and before that it silently never wrote the wide
+    destination); since 2026-10-10 the wide emitter implements it
+    (`wide_pow`, IEEE 1364-2005 Table 5-6)."""
+    wa = Value(0xF_FFFF_0000_1234_5678_9ABC, width=80)
+    results = {}
+    for engine in ("reference", "compiled"):
+        sim = _sim_for(source, engine)
+        sim.drive("clk", Value(0, width=1))
+        sim.drive("wa", wa)
+        sim.settle()
+        sim.drive("clk", Value(1, width=1))
+        sim.settle()
+        results[engine] = sim.read("y")
+    assert results["compiled"] == results["reference"]
+    assert results["reference"].val == (wa.val**2) & ((1 << 96) - 1)

@@ -2163,10 +2163,18 @@ class TestBitwiseOps:
 
     def test_ashr(self, engine):
         m = self._make_binop_module("ashr", ">>>")
+        m.continuous_assigns[0].rhs.left = FunctionCall("$signed", [Identifier("a")], is_system=True)
         sim = Simulator(m, engine=engine)
         sim.run(lambda s: (s.drive("a", Value(0xC0, width=8)), s.drive("b", Value(2, width=8))), max_time=0)
-        # 0xC0 = 11000000, arithmetic shift right 2 → 11110000 = 0xF0
+        # 0xC0 = 11000000, arithmetic shift right 2 → 11110000 = 0xF0 (only
+        # a SIGNED operand sign-fills; `a >>> 2` of unsigned `a` is 0x30).
         assert int(sim.read("y")) == 0xF0
+
+    def test_ashr_unsigned_is_logical(self, engine):
+        m = self._make_binop_module("ashr_u", ">>>")
+        sim = Simulator(m, engine=engine)
+        sim.run(lambda s: (s.drive("a", Value(0xC0, width=8)), s.drive("b", Value(2, width=8))), max_time=0)
+        assert int(sim.read("y")) == 0x30
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2846,7 +2854,7 @@ class TestXZPropagation:
     def test_ashr_unknown_sign_bit_fills_vacated_bits_with_x(self, engine):
         """Unknown sign bit -> every bit the shift derives from it becomes x."""
         m = self._make_xz_module(
-            BinaryOp(">>>", Identifier("a"), Literal(3, width=8)),
+            BinaryOp(">>>", FunctionCall("$signed", [Identifier("a")], is_system=True), Literal(3, width=8)),
         )
         sim = Simulator(m, engine=engine)
         sim.drive("a", Value(0b0101_0110, width=8, mask=1 << 7))  # sign bit(7) unknown

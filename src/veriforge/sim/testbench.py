@@ -24,7 +24,7 @@ from .elaborate import (
 )
 from .scheduler import Scheduler
 from .display_format import lower_display_args
-from .sv_functions import lower_sv_functions, lower_width_casts, materialize_task_locals
+from .sv_functions import lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
 from .value import Value
 
 if TYPE_CHECKING:
@@ -196,6 +196,7 @@ class Simulator:  # cm:a5c8f4
         lower_sv_functions(module)
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
         lower_width_casts(module)
+        lower_two_state(module)
         check_signed_declarations(module)
         check_input_port_init(module, design)
 

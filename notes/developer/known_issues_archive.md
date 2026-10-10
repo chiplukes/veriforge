@@ -71,6 +71,33 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Expanded fuzzer: first findings (RESOLVED 2026-10-10)
+
+From `notes/plans/fuzzer_coverage_2026-10.md` (regressions in
+`tests/test_sim/test_fuzz_findings.py`, all against Icarus):
+
+- No 2-state types on any engine: `int`/`byte`/`bit`/... started at x and
+  kept x/z. Lowered before the engines (`lower_two_state`): 0 initializer,
+  assignments wrapped in an internal context-transparent `$__2state(e)`
+  (reference evaluator, vm `CLEAR_MASK` opcode, compiled narrow/wide).
+- `>>>` of an unsigned operand sign-filled on every engine (it is a
+  logical shift); compiled's narrow `>>>` mask wasn't shifted at all.
+- Clock edges with x: 0->x (posedge) and x->0 / 1->x (negedge) -- reference
+  ignored transitions to x, compiled ignored masks entirely.
+- vm-fast silently computed values wider than its 512-bit wide slots wrong
+  (e.g. `~^{2{{3{i126}}}}`); such designs now run on the Python
+  interpreter (`VMCompiler.exceeds_fast_width`), and the old
+  streaming-concat error is gone.
+- compiled: `<<<` was missing from the wide shift table; `**` wider than 64
+  bits was unimplemented (`wide_pow`); wide XNOR computed XOR; wide `>>>`
+  of an unsigned operand sign-filled; `reg [99:0] r = -1` set 32 bits.
+- reference: a user-function result wasn't widened to its context (a call
+  in a ternary branch inside a concatenation).
+- Size casts of a signed parameter were treated as unsigned; `integer`
+  function returns were unsigned and `input integer` ports 1 bit; the
+  emitter dropped `signed` on function returns; `$display` treated user
+  calls as unsigned.
+
 ### Functions, tasks, integers and $display gaps (RESOLVED 2026-10-09)
 
 Found while closing the `$display` gaps (`tests/test_sim/test_functions_tasks.py`,

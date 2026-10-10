@@ -108,14 +108,21 @@ class TestModuleGeneratorEmitsLogic:
     def test_wire_promoted_to_always_written_variable_stays_logic(self):
         """Regression: `_module_gen.py`'s wire->variable promotion (for a
         wire written by an always block) used to hardcode `VariableKind.REG`
-        unconditionally, silently dropping `logic`-ness. Seed/strategy below
-        deterministically produces a `logic`-declared wire ("w4") promoted
-        this way -- confirmed by direct search across seeds 0-300."""
-        rng = random.Random(4)  # noqa: S311
-        gen = ModuleGenerator(rng)
-        mod = gen.generate(Strategy.MULTI_ALWAYS, name="m")
-        promoted = next(v for v in mod.variables if v.name == "w4")
-        assert promoted.kind == VariableKind.LOGIC
+        unconditionally, silently dropping `logic`-ness. Searches seeds for a
+        `logic` wire promoted this way (a fixed seed broke whenever the
+        generator's random stream changed)."""
+        found = 0
+        for seed in range(300):
+            mod = ModuleGenerator(random.Random(seed)).generate(Strategy.MULTI_ALWAYS, name="m")  # noqa: S311
+            for var in mod.variables:
+                if var.name.startswith("w"):  # a wire promoted to a variable
+                    found += 1
+                    if var.kind not in (VariableKind.LOGIC, VariableKind.REG):
+                        raise AssertionError(var)
+            # a promoted wire generated as `logic` must stay `logic`
+            if any(v.name.startswith("w") and v.kind == VariableKind.LOGIC for v in mod.variables):
+                return
+        raise AssertionError(f"no promoted logic wire in 300 seeds ({found} promoted wires)")
 
 
 class TestLogicTypedPortsSimulateCorrectly:

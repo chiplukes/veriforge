@@ -59,6 +59,7 @@ _PURE_SYSTEM_FUNCTIONS = frozenset(
     {
         "$signed",
         "$unsigned",
+        "$__2state",
         "$clog2",
         "$bits",
         "$size",

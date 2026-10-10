@@ -1023,6 +1023,12 @@ class _ExprEmitterMixin:
 
         if etype is FunctionCall:
             name = expr.name.lower()
+            if name == "$__2state" and len(expr.arguments) == 1:
+                inner_v = self._emit_py_expr(expr.arguments[0], width)
+                inner_m = self._emit_py_mask_expr(expr.arguments[0], width)
+                if inner_v is None or inner_m is None:
+                    return None
+                return f"(({inner_v}) & ~({inner_m}))"
             if name in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
                 return self._emit_py_expr(expr.arguments[0], self._expr_width(expr.arguments[0]))
             return None
@@ -1280,6 +1286,8 @@ class _ExprEmitterMixin:
 
         if etype is FunctionCall:
             name = expr.name.lower()
+            if name == "$__2state" and len(expr.arguments) == 1:
+                return "0"
             if name in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
                 return self._emit_py_mask_expr(expr.arguments[0], self._expr_width(expr.arguments[0]))
             return None
@@ -1898,6 +1906,14 @@ class _ExprEmitterMixin:
         # >= 64 must saturate to the sign bit replicated across all bits
         # (0 if non-negative, -1/all-ones if negative) rather than wrap —
         # same native-shift-instruction footgun as the `>>`/`<<` guard above.
+        if c_op == ">>_ARITH" and not (
+            signed_override if signed_override is not None else self._expr_signed(expr.left)
+        ):
+            # `>>>` of an unsigned operand is a logical shift (it used to
+            # sign-fill from the context width's top bit: `u8 >>> 1` with
+            # u8 = 8'h80 gave c0).
+            lv = f"(<unsigned long long>({left}) & <unsigned long long>wmask({width}))"
+            return f"(0 if ({right}) >= 64 else <long long>({lv} >> ({right}))) & wmask({width})"
         if c_op == ">>_ARITH":
             signed_width = self._expr_width(expr.left) if self._expr_signed(expr.left) else width
             sx = f"_sign_ext({left}, {signed_width})"
@@ -2917,6 +2933,13 @@ class _ExprEmitterMixin:
 
     def _emit_func_call(self, call: FunctionCall, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911
         name = call.name.lower()
+        if name == "$__2state" and call.arguments:
+            # Assignment to a 2-state variable (sv_functions.lower_two_state):
+            # transparent, then x/z bits -> 0 (the mask side emits 0).
+            arg = call.arguments[0]
+            val = self._emit_expr(arg, width, signed_override)
+            mask = self._emit_mask_expr(arg, width, signed_override)
+            return f"(({val}) & ~({mask}))"
         if name in ("$signed", "$unsigned"):
             if call.arguments:
                 arg_w = self._expr_width(call.arguments[0])
@@ -3209,7 +3232,7 @@ class _ExprEmitterMixin:
             return len(expr.value) * 8
         if etype is FunctionCall:
             name = expr.name.lower()
-            if name in {"$signed", "$unsigned"} and expr.arguments:
+            if name in {"$signed", "$unsigned", "$__2state"} and expr.arguments:
                 return self._expr_width(expr.arguments[0])
             if name in {"$time", "$realtime"}:
                 return 64
@@ -3283,6 +3306,8 @@ class _ExprEmitterMixin:
                 result = True
             elif name == "$unsigned":
                 result = False
+            elif name == "$__2state" and expr.arguments:
+                result = self._expr_signed(expr.arguments[0])
             else:
                 # A user function call's own signedness is its declared
                 # return type's signedness, NOT unconditionally False --
@@ -3736,7 +3761,22 @@ class _ExprEmitterMixin:
                             f" (<long long>(<unsigned long long>({lm}) >> <unsigned long long>({rv}))))"
                         )
                     return f"(wmask({width}) if ({rm}) else (({lm_shifted}) & wmask({width})))"
-                return f"(wmask({width}) if ({rm}) else ({lm}))"
+                # `>>>`: the mask shifts too (it used to stay put) -- logical
+                # for an unsigned operand, sign-filling (an x sign bit fills
+                # the vacated bits with x) for a signed one.
+                rv = self._emit_expr(expr.right, self._shift_amount_width(expr.right))
+                if signed_override if signed_override is not None else self._expr_signed(expr.left):
+                    sx = f"_sign_ext({lm}, {width})"
+                    lm_shifted = (
+                        f"((0 if ({sx}) >= 0 else -1) if (<unsigned long long>({rv})) >= 64 else (({sx}) >> ({rv})))"
+                    )
+                else:
+                    lm_shifted = (
+                        f"(0 if (<unsigned long long>({rv})) >= 64 else"
+                        f" (<long long>((<unsigned long long>({lm}) & <unsigned long long>wmask({width}))"
+                        f" >> <unsigned long long>({rv}))))"
+                    )
+                return f"(wmask({width}) if ({rm}) else (({lm_shifted}) & wmask({width})))"
             if expr.op == "**":
                 # `base == 0 and exponent < 0` (IEEE 1364-2005 Table 5-6)
                 # is genuinely undefined ('bx) even when BOTH operands are
@@ -4199,6 +4239,8 @@ class _ExprEmitterMixin:
 
         if etype is FunctionCall:
             fname = expr.name.lower()
+            if fname == "$__2state":
+                return "0"  # 2-state: never x/z (see _emit_func_call)
             if fname in {"$signed", "$unsigned"} and expr.arguments:
                 # Mirrors `_emit_func_call`'s VALUE-side handling: `$signed`
                 # sign-extends its argument's raw value from the argument's

@@ -146,6 +146,9 @@ class Op(IntEnum):  # cm:5b3d7f
     # ── Streaming concatenation (`{<<slice_size{...}}`) ─────────────────
     STREAM_REVERSE = auto()  # Chunk-reverse TOS: (STREAM_REVERSE, slice_size, 0)
 
+    # ── 2-state conversion (assignment to `int`/`bit`/...) ───────────────
+    CLEAR_MASK = auto()  # TOS x/z bits -> 0: (CLEAR_MASK, 0, 0)
+
 
 # ── Instruction constructor helpers ──────────────────────────────────
 

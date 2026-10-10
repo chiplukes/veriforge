@@ -1,6 +1,7 @@
 # Fuzzer coverage expansion (queued 2026-10-09)
 
-**Status**: queued, not started.
+**Status**: first round done 2026-10-10 (see "Done" below); tasks, impure
+functions and `$display` observation still open.
 
 ## Why
 
@@ -48,3 +49,32 @@ signedness propagation" and "Functions, tasks, integers and $display gaps"):
 3. Run a few thousand seeds per feature against all four engines; triage
    with the existing minimizer; add each confirmed bug's minimized repro to
    the matching regression file.
+
+## Done (2026-10-10)
+
+- Operators `>>>`, `<<<`, `**` (small constant exponent), `>`, `>=`,
+  `===`, `!==`, binary `~^`; literal operands (sized/unsized/signed/
+  negative/x-z; no unsized inside concatenations); literal shift amounts;
+  `N'(e)` casts; `integer`/`int`/`byte`/`shortint`/`longint` regs (incl.
+  `int unsigned`); the `WITH_FUNCTIONS` strategy (signed ports, integer/
+  signed locals, signed returns, nested calls).
+- Runner: documented engine limitations that raise are counted, not
+  logged; modules where Icarus reports an `always @*` with no
+  sensitivities are skipped for the Icarus comparison; vector-0-only
+  Icarus mismatches on outputs of a combinational block that reads a
+  signal it writes are filtered (simulator-dependent).
+- ~1150 modules run (3 campaigns, one with compiled). Bugs found and fixed
+  (`tests/test_sim/test_fuzz_findings.py`): no 2-state types on any
+  engine; unsigned `>>>` sign-filled on every engine; 0->x / x->0 clock
+  edges (reference, compiled); vm-fast values > 512 bits; compiled >64-bit
+  `<<<`/`**`/XNOR, `>>>` mask, `-1` wide initializer; reference user-
+  function results not widened to context; signed-parameter casts;
+  `integer` function returns/ports; emitted function `signed` dropped.
+- Remaining known: `casez`/`casex` with an x selector (x and z share one
+  encoding, known_issues.md).
+
+## Still open
+
+- Tasks (with output ports) and impure functions in generated designs.
+- `$display` observation with random format specifiers.
+- 2-state memories (`int m [0:3]`) still start at x.

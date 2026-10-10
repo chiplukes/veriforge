@@ -488,13 +488,22 @@ class TestWideUnifiedPhase1Emitter:
 
     def test_ashr_emits_wide_ashr_with_src_width(self):
         cg = self._cg_wide(128)
-        expr = BinaryOp(">>>", Identifier("a"), Literal(3, width=8))
+        expr = BinaryOp(">>>", FunctionCall("$signed", [Identifier("a")], is_system=True), Literal(3, width=8))
         lines = self._scratch(cg, expr)
         assert lines is not None
         joined = "\n".join(lines)
         assert "wide_ashr" in joined
         # ashr must pass src_width before dst_width
         assert "128, 128" in joined  # src_width=128, dst_width=128
+
+    def test_ashr_of_unsigned_operand_is_logical(self):
+        """`>>>` only sign-fills a signed operand (it used to always)."""
+        cg = self._cg_wide(128)
+        lines = self._scratch(cg, BinaryOp(">>>", Identifier("a"), Literal(3, width=8)))
+        assert lines is not None
+        joined = "\n".join(lines)
+        assert "wide_shr" in joined
+        assert "wide_ashr" not in joined
 
     # ── TernaryOp ────────────────────────────────────────────────────────
 

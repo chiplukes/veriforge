@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from lark import Token, Tree
 
-from ..model.expressions import Expression, Identifier, Range
+from ..model.expressions import Expression, Identifier, Literal, Range
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.ports import Port, PortDirection
 from ..model.statements import BlockingAssign, SeqBlock, Statement
@@ -203,7 +203,7 @@ def _extract_function_range_or_type(
     """
     return_range: Range | None = None
     return_kind: str | None = None
-    signed = False
+    signed: bool | None = None
 
     for child in tree.children:
         if isinstance(child, Token):
@@ -211,9 +211,15 @@ def _extract_function_range_or_type(
                 return_kind = _TASK_PORT_TYPE_TOKENS[child.type]
             elif child.type == "KW_SIGNED":
                 signed = True
+            elif child.type == "KW_UNSIGNED":
+                signed = False
         elif isinstance(child, Tree) and child.data == "range":
             return_range = callbacks.build_range(child, source_file)
 
+    if signed is None:
+        # `function integer f` returns a signed value (it used to be read
+        # as unsigned, like every `integer`).
+        signed = return_kind in ("integer", "int", "shortint", "longint", "byte")
     return return_range, return_kind, signed
 
 
@@ -409,6 +415,11 @@ def _extract_tf_direction_ports(
             elif child.data == "task_port_type":
                 spec.data_type = _extract_task_port_type(child)
 
+    if spec.data_type == "integer" and spec.width is None:
+        # `input integer x`: 32-bit signed (engines size ports from their
+        # range, so it used to be a 1-bit unsigned port).
+        spec.width = Range(Literal(31, width=32), Literal(0, width=32))
+        spec.signed = True
     return _ports_from_spec(spec, loc)
 
 

@@ -839,6 +839,10 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # meant to be read as negative.
             elif op == "**" and _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx):
                 result = _eval_signed_pow(left, right)
+            elif op == ">>>" and not (signed_override if signed_override is not None else _expr_signed(expr.left, ctx)):
+                # `>>>` of an unsigned operand is a logical shift (IEEE
+                # 1364-2005 5.1.12); it used to sign-fill on every engine.
+                result = _eval_binary_op(">>", left, right)
             else:
                 result = _eval_binary_op(op, left, right)
             # The RESULT must end up at exactly the caller's requested
@@ -1255,6 +1259,11 @@ class ExpressionEvaluator:  # cm:7e8b5d
         # -- FunctionCall ------------------------------------------
         if etype is FunctionCall:
             fname = expr.name.lower()
+            if fname == "$__2state" and expr.arguments:
+                # Assignment to a 2-state variable (sim/sv_functions.py:
+                # lower_two_state): transparent, except that x/z bits read 0.
+                v = self.eval(expr.arguments[0], ctx, width, signed_override)
+                return Value(v.val, width=v.width) if v.mask else v
             if fname in ("$signed", "$unsigned") and expr.arguments:
                 # $signed/$unsigned are transparent to VALUE -- they only
                 # mark the expression's signedness for the ENCLOSING
@@ -1336,7 +1345,17 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     eff_signed = signed_override if signed_override is not None else (fname == "$signed")
                     return result.sign_extend(width) if eff_signed else result.resize(width)
                 return result
-            return self._eval_function_call(expr, ctx)
+            result = self._eval_function_call(expr, ctx)
+            # A user function's result is its declared width; extend it to a
+            # wider context like any operand (it used to stay narrow, so a
+            # call in a ternary branch inside a concatenation, e.g. a
+            # lowered `2'(x)` vs a 31-bit other branch, had the wrong width).
+            if width and result.width < width and not expr.name.startswith("$"):
+                func = ctx._functions.get(expr.name)
+                if func is not None:
+                    eff_signed = signed_override if signed_override is not None else bool(func.signed)
+                    result = result.sign_extend(width) if eff_signed else result.resize(width)
+            return result
 
         # -- StringLiteral -----------------------------------------
         if etype is StringLiteral:
@@ -1545,7 +1564,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # Declared width and signedness (a local used to take the width
             # of whatever was first assigned to it, unsigned).
             kind = getattr(local_var.kind, "value", "")
-            local_ctx._signal_signed[local_var.name] = bool(local_var.signed) or kind in _SIGNED_KIND_WIDTHS
+            local_ctx._signal_signed[local_var.name] = bool(local_var.signed)  # defaults by kind
             if local_var.name not in local_signals and not local_var.dimensions:
                 local_width = _SIGNED_KIND_WIDTHS.get(kind, 64 if kind == "time" else 1)
                 if local_var.width is not None:
@@ -1714,7 +1733,7 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         return 32
     if etype is FunctionCall:
         name = expr.name.lower()
-        if name in ("$signed", "$unsigned") and expr.arguments:
+        if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
             return _expr_self_width(expr.arguments[0], ctx)
         # A user-defined function call's self-determined width is its
         # OWN declared return width, not a hardcoded fallback -- the
@@ -1839,6 +1858,8 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[Expression, boo
             result = True
         elif name == "$unsigned":
             result = False
+        elif name == "$__2state" and expr.arguments:
+            result = _expr_signed(expr.arguments[0], ctx, cache)
         else:
             func = ctx._functions.get(expr.name)
             # A user function call's own signedness is its declared return

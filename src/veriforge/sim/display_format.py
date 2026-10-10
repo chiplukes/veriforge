@@ -41,6 +41,7 @@ from .sv_functions import iter_nodes
 if TYPE_CHECKING:
     from veriforge.model.design import Module
     from veriforge.model.nets import Net
+    from veriforge.model.parameters import Parameter
     from veriforge.model.ports import Port
 
     from .value import Value
@@ -61,7 +62,6 @@ _SCOPE_TASKS = {
     "$display", "$write", "$strobe", "$monitor", "$fdisplay", "$fwrite",
     "$info", "$warning", "$error", "$fatal",
 }  # fmt: skip
-_SIGNED_KINDS = {"integer", "int", "shortint", "longint", "byte"}
 
 
 def decimal_width(width: int, signed: bool) -> int:  # noqa: FBT001
@@ -193,6 +193,7 @@ def lower_display_args(module: Module) -> Module:
     the module docstring)."""
     substitute_scope_names(module)
     module_signed = _signed_names(module)
+    func_signed = {f.name: bool(f.signed) for f in module.functions}
     done: set[int] = set()
     # Function/task bodies first, so their own ports and locals count too.
     subs: list[FunctionDecl | TaskDecl] = [*module.functions, *module.tasks]
@@ -201,14 +202,14 @@ def lower_display_args(module: Module) -> Module:
         for node in iter_nodes(sub, set()):
             if isinstance(node, SystemTaskCall) and id(node) not in done:
                 done.add(id(node))
-                _lower_task(node, local_signed)
+                _lower_task(node, local_signed, func_signed)
     for node in iter_nodes(module, set()):
         if isinstance(node, SystemTaskCall) and id(node) not in done:
-            _lower_task(node, module_signed)
+            _lower_task(node, module_signed, func_signed)
     return module
 
 
-def _lower_task(task: SystemTaskCall, signed_names: set[str]) -> None:
+def _lower_task(task: SystemTaskCall, signed_names: set[str], func_signed: dict[str, bool]) -> None:
     name = task.task_name.lower()
     default_spec = "d"
     if name in _RADIX_TASKS:
@@ -227,7 +228,9 @@ def _lower_task(task: SystemTaskCall, signed_names: set[str]) -> None:
         return
     if len(args) <= keep:
         return
-    fmt, data = _canonical(args[keep:], lambda n: n in signed_names, default_spec)
+    fmt, data = _canonical(
+        args[keep:], (lambda n: n in signed_names, lambda f: func_signed.get(f, False)), default_spec
+    )
     task.arguments = [*args[:keep], fmt, *data]
 
 
@@ -236,13 +239,14 @@ def _signed_names(scope: Module | FunctionDecl | TaskDecl) -> set[str]:
     if isinstance(scope, (FunctionDecl, TaskDecl)):
         # Ports, plus every variable declared anywhere inside (function
         # locals, and a task's block-level declarations).
-        all_decls: list[Port | Net | Variable] = list(scope.ports)
+        all_decls: list[Port | Net | Variable | Parameter] = list(scope.ports)
         all_decls += [n for n in iter_nodes(scope, set()) if isinstance(n, Variable)]
     else:
-        all_decls = [*scope.ports, *scope.nets, *scope.variables]
+        all_decls = [*scope.ports, *scope.nets, *scope.variables, *scope.parameters]
     for decl in all_decls:
-        kind = getattr(decl, "kind", None)
-        if getattr(decl, "signed", False) or getattr(kind, "value", None) in _SIGNED_KINDS:
+        # `Variable.signed` already defaults by kind (`integer` signed,
+        # `int unsigned` not).
+        if getattr(decl, "signed", False):
             names.add(decl.name)
     return names
 
@@ -293,7 +297,8 @@ def _canonical(args: list[Expression], signed_of, default_spec: str = "d") -> tu
 
 
 def _signed(expr: Expression, signed_of) -> bool:
+    """*signed_of*: (signal signedness, function return signedness)."""
     try:
-        return expr_signed(expr, signed_of)
+        return expr_signed(expr, *signed_of)
     except Exception:  # noqa: BLE001 -- unusual expression: treat as unsigned
         return False

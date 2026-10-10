@@ -1155,7 +1155,9 @@ def _emit_function_decl(fn: FunctionDecl, indent: str, current_indent: str) -> s
         parts.append("automatic")
     if fn.return_kind:
         parts.append(fn.return_kind)
-    elif fn.return_range:
+    elif fn.signed:
+        parts.append("signed")  # used to be dropped: a signed function round-tripped unsigned
+    if not fn.return_kind and fn.return_range:
         parts.append(_emit_range(fn.return_range))
     parts.append(fn.name)
     lines: list[str] = []

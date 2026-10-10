@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable
 
 from ..model.behavioral import AlwaysBlock, SensitivityType
 from ..model.design import Design, Module
-from ..model.expressions import Concatenation, Expression, Identifier, Literal, StreamingConcatenation
+from ..model.functions import FunctionDecl
+from ..model.expressions import BinaryOp, Concatenation, Expression, Identifier, Literal, Range, StreamingConcatenation
 from ..model.instances import Instance, PortConnection
 from ..model.statements import (
     BlockingAssign,
     NonblockingAssign,
     SensitivityEdge,
+    SeqBlock,
     Statement,
 )
 from ..model.assignments import ContinuousAssign
@@ -32,7 +35,7 @@ class Strategy(Enum):
     REGISTERED = auto()  # inputs → regs → combinational → outputs
     MULTI_ALWAYS = auto()  # several always @* blocks
     CLOCKED_SEQUENTIAL = auto()  # clock + always @(posedge clk)
-    WITH_FUNCTIONS = auto()  # functions called from expressions (future)
+    WITH_FUNCTIONS = auto()  # user functions called from expressions
     NESTED_BLOCKS = auto()  # begin/end with local vars
     MIXED = auto()  # random mix
     HIERARCHICAL = auto()  # child module instance + port connections
@@ -46,10 +49,23 @@ _STRATEGY_WEIGHTS: dict[Strategy, float] = {
     Strategy.REGISTERED: 2.0,
     Strategy.MULTI_ALWAYS: 1.5,
     Strategy.CLOCKED_SEQUENTIAL: 1.5,
+    Strategy.WITH_FUNCTIONS: 1.5,
     Strategy.NESTED_BLOCKS: 1.0,
     Strategy.MIXED: 1.0,
     Strategy.HIERARCHICAL: 1.0,
 }
+
+# Function port/return widths: <= 64 bits, the compiled engine's limit for
+# user-function ports/returns (known_issues.md).
+_FUNC_WIDTHS = (1, 2, 3, 4, 7, 8, 12, 16, 21, 31, 32, 33, 48, 63, 64)
+
+
+@dataclass
+class _FuncSpec:
+    """A generated function, as `ExpressionGenerator._call` needs it."""
+
+    name: str
+    arg_widths: list[int]
 
 
 class ModuleGenerator:
@@ -96,6 +112,7 @@ class ModuleGenerator:
             Strategy.NESTED_BLOCKS: self._gen_nested_blocks,
             Strategy.MIXED: self._gen_mixed,
             Strategy.HIERARCHICAL: self._gen_hierarchical,
+            Strategy.WITH_FUNCTIONS: self._gen_with_functions,
         }
 
         expr_gen = ExpressionGenerator(ctx)
@@ -103,6 +120,7 @@ class ModuleGenerator:
 
         # Strategy fills the context with signals and body items
         methods[strategy](ctx, expr_gen, stmt_gen)
+        _ensure_comb_blocks_read_a_signal(ctx)
 
         # Assemble the Module
         mod = Module(name)
@@ -122,6 +140,7 @@ class ModuleGenerator:
             mod.always_blocks.append(ab)
         for ca in ctx.continuous_assigns:
             mod.continuous_assigns.append(ca)
+        mod.functions.extend(ctx.functions)
 
         # Post-process output port types: if an output is driven ONLY by
         # continuous assigns (not always blocks), drop the "reg" data_type
@@ -348,6 +367,71 @@ class ModuleGenerator:
     # Strategy: NESTED_BLOCKS
     # ------------------------------------------------------------------
 
+    def _gen_with_functions(
+        self,
+        ctx: SignalContext,
+        expr_gen: ExpressionGenerator,
+        stmt_gen: StatementGenerator,
+    ) -> None:
+        """1-3 automatic functions (signed/unsigned ports, `integer`/signed
+        locals, signed or unsigned returns; later ones may call earlier
+        ones), called from the outputs' expressions. Added 2026-10-09: no
+        function was ever generated, and signed ports/locals, `integer`
+        locals and wider-context use of a call were all broken somewhere."""
+        rng = self._rng
+        specs: list[_FuncSpec] = []
+        for k in range(rng.randint(1, 3)):
+            func, spec = self._gen_function(f"f{k + 1}", specs)
+            ctx.functions.append(func)
+            specs.append(spec)
+
+        for _ in range(rng.randint(2, 5)):
+            ctx.add_input(rng)
+        for _ in range(rng.randint(1, 3)):
+            ctx.add_output(rng, width=rng.choice(_FUNC_WIDTHS))
+        ctx.continuous_assigns = [
+            ContinuousAssign(
+                out.as_identifier(),
+                expr_gen.expr(rng, depth=rng.randint(2, 4), callables=specs, exclude=out.name),
+            )
+            for out in ctx.outputs
+        ]
+
+    def _gen_function(self, name: str, earlier: list[_FuncSpec]) -> tuple[FunctionDecl, _FuncSpec]:
+        rng = self._rng
+        fctx = SignalContext()
+        ports: list[Port] = []
+        for k in range(rng.randint(1, 3)):
+            sig = Signal(f"a{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "input")
+            fctx._inputs.append(sig)
+            ports.append(sig.as_port(PortDirection.INPUT))
+        local_sigs: list[Signal] = []
+        for k in range(rng.randint(0, 2)):
+            if rng.random() < 0.5:
+                sig = Signal(f"l{k + 1}", 32, True, "reg", var_kind="integer")
+            else:
+                sig = Signal(f"l{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "reg")
+            local_sigs.append(sig)
+        fexpr = ExpressionGenerator(fctx)
+        body: list[Statement] = []
+        for sig in local_sigs:
+            body.append(
+                BlockingAssign(sig.as_identifier(), fexpr.expr(rng, depth=rng.randint(1, 3), callables=earlier))
+            )
+            fctx._regs.append(sig)  # readable from the next statement on
+        body.append(BlockingAssign(Identifier(name), fexpr.expr(rng, depth=rng.randint(1, 3), callables=earlier)))
+        ret_width = rng.choice(_FUNC_WIDTHS)
+        func = FunctionDecl(
+            name,
+            return_range=Range(Literal(ret_width - 1), Literal(0)),
+            signed=rng.choice([True, False]),
+            is_automatic=True,
+            ports=ports,
+            local_vars=[sig.as_variable() for sig in local_sigs],
+            body=SeqBlock(body),
+        )
+        return func, _FuncSpec(name, [sig.width for sig in fctx._inputs])
+
     def _gen_nested_blocks(
         self,
         ctx: SignalContext,
@@ -512,7 +596,11 @@ class ModuleGenerator:
                     # bug: `out` was already added to the readable pool by
                     # `add_output` above, so without this it could pick
                     # itself, generating `assign o9 = {w7, o9};`).
-                    parts.append(expr_gen.leaf(self._rng, exclude=out.name))
+                    expr_gen._in_concat += 1  # a concat operand: no unsized literal
+                    try:
+                        parts.append(expr_gen.leaf(self._rng, exclude=out.name))
+                    finally:
+                        expr_gen._in_concat -= 1
                 rhs: Expression = StreamingConcatenation(parts) if self._rng.random() < 0.3 else Concatenation(parts)
             else:
                 # `exclude=out.name` matches every other strategy's own
@@ -616,3 +704,31 @@ def _collect_assigned_signals(stmt: Statement) -> set[str]:
         if hasattr(node, "update"):
             stack.append(node.update)
     return names
+
+
+def _ensure_comb_blocks_read_a_signal(ctx: SignalContext) -> None:
+    """Make every ``always @(*)`` block read at least one signal it doesn't
+    itself write. One that reads only constants (common since literal
+    operands were added) never executes in Icarus -- IEEE 1364's `@*` with
+    an empty implicit list waits forever -- while veriforge runs it once at
+    time 0 like `always_comb`, an intentional difference not worth fuzzing.
+    The patch `rhs | (input & 1'b0)` leaves the value unchanged."""
+    params = {p.name for p in ctx.parameters}
+    inputs = [s for s in ctx.inputs if s.name != "clk"]
+    if not inputs:
+        return
+    for ab in ctx.always_blocks:
+        if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
+            continue
+        written = _collect_assigned_signals(ab.body)
+        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier)} - written - params
+        if read:
+            continue
+        for node in ab.body.walk():
+            if isinstance(node, BlockingAssign):
+                node.rhs = BinaryOp(
+                    "|",
+                    node.rhs,
+                    BinaryOp("&", inputs[0].as_identifier(), Literal(0, width=1, base="b", original_text="1'b0")),
+                )
+                break

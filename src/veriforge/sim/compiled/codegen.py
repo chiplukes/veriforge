@@ -2052,7 +2052,8 @@ class CythonCodegen(
                 # evaluator below (deferring them to runtime used to leave
                 # e.g. `reg signed [7:0] s = -8'sd5;` x).
                 if (
-                    expr.op in ("-", "~")
+                    width <= 32  # wider: sign-extends (an unsized literal is signed) -- reference evaluator below
+                    and expr.op in ("-", "~")
                     and isinstance(expr.operand, Literal)
                     and not expr.operand.is_x
                     and not expr.operand.is_z
@@ -2244,9 +2245,7 @@ class CythonCodegen(
                         self._struct_signal_types[local_name] = layout
             for local_var in func.locals:
                 local_name = f"{prefix}.{local_var.name}"
-                local_signed = bool(local_var.signed) or getattr(local_var.kind, "value", "") in (
-                    "integer", "int", "shortint", "longint", "byte",
-                )  # fmt: skip
+                local_signed = bool(local_var.signed)  # defaults by kind (`integer` signed)
                 self._register_signal(local_name, _var_width(local_var, senv), local_signed)
                 type_name = getattr(local_var, "type_name", None)
                 if type_name:

@@ -400,7 +400,7 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
         return width_val if width_val is not None else 1
     if isinstance(expr, FunctionCall):
         name = expr.name.lower()
-        if name in ("$signed", "$unsigned") and expr.arguments:
+        if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
             return expr_width(expr.arguments[0], width_of, env)
         return 32
     if isinstance(expr, Mintypmax):
@@ -414,11 +414,16 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
 # ── Signedness (IEEE 1364-2005 §5.5) ────────────────────────────────────────
 
 
-def expr_signed(expr: Expression, signed_of: Callable[[str], bool]) -> bool:
+def expr_signed(
+    expr: Expression,
+    signed_of: Callable[[str], bool],
+    function_signed: Callable[[str], bool] | None = None,
+) -> bool:
     """Whether *expr* is a fully signed expression per IEEE 1364-2005 §5.5.
 
     ``signed_of(name)`` resolves a (possibly hierarchically-prefixed) signal
-    name to its declared signedness.
+    name to its declared signedness; ``function_signed(name)``, when given,
+    a user function's return signedness (else user calls are unsigned).
 
     Per §5.5.1, a bit-select/part-select/range-select result is *always*
     unsigned regardless of the sliced signal's own declared signedness;
@@ -440,19 +445,28 @@ def expr_signed(expr: Expression, signed_of: Callable[[str], bool]) -> bool:
             return False
         if expr.op in _ONE_BIT_UNARY:
             return False
-        return expr_signed(expr.operand, signed_of)
+        return expr_signed(expr.operand, signed_of, function_signed)
     if isinstance(expr, BinaryOp):
         if expr.op in _LEFT_WIDTH_BINARY:
-            return expr_signed(expr.left, signed_of)
+            return expr_signed(expr.left, signed_of, function_signed)
         if expr.op in _ONE_BIT_BINARY:
             return False
-        return expr_signed(expr.left, signed_of) and expr_signed(expr.right, signed_of)
+        return expr_signed(expr.left, signed_of, function_signed) and expr_signed(
+            expr.right, signed_of, function_signed
+        )
     if isinstance(expr, TernaryOp):
-        return expr_signed(expr.true_expr, signed_of) and expr_signed(expr.false_expr, signed_of)
+        return expr_signed(expr.true_expr, signed_of, function_signed) and expr_signed(
+            expr.false_expr, signed_of, function_signed
+        )
     if isinstance(expr, (Concatenation, Replication)):
         return False
     if isinstance(expr, FunctionCall):
-        return expr.name.lower() == "$signed"
+        name = expr.name.lower()
+        if name == "$__2state" and expr.arguments:
+            return expr_signed(expr.arguments[0], signed_of, function_signed)
+        if name.startswith("$"):
+            return name == "$signed"
+        return function_signed(expr.name) if function_signed is not None else False
     if isinstance(expr, WidthCast):
-        return expr_signed(expr.operand, signed_of)
+        return expr_signed(expr.operand, signed_of, function_signed)
     return False

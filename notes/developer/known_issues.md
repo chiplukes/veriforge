@@ -120,6 +120,13 @@ needs a real-valued representation alongside `Value` in all four engines.
 other integer atom types reject `unsigned`. Their default signedness
 (signed) is handled.
 
+### 2-state memories start at x
+
+**Status**: Open (found 2026-10-09). 2-state scalars and vectors (`int`,
+`bit [7:0]`, ...) start at 0 and drop x/z on assignment on every engine
+(`sim/sv_functions.py:lower_two_state`), but a 2-state *memory*
+(`byte m [0:3]`) still starts at x.
+
 ## Reference notes (not defects)
 
 These are deliberate design decisions or investigated-and-closed
@@ -137,6 +144,14 @@ pullups, and high-impedance detection are not simulatable. This is a
 deliberate RTL-subset trade-off (consistent with the support matrix's
 "strength and tristate resolution: low priority"), but note that docs and
 docstrings describing the simulator as "4-state" overstate it slightly.
+
+### Icarus: `**` with a negative exponent and 64-bit-or-wider operands
+
+Icarus returns 0 for any negative signed exponent once the operands are 64
+bits or wider (`1 ** -3`, `(-1) ** -3`, `0 ** -3` all 0), while for 32-bit
+operands it follows IEEE 1364-2005 Table 5-6 (1, -1, x). Every veriforge
+engine follows Table 5-6 at all widths; the fuzzer only generates small
+unsigned exponents. Not a veriforge bug -- do not replicate.
 
 ### Icarus first-activation x-extension artifact (investigated, not a bug — do not replicate)
 

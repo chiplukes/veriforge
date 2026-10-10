@@ -32,6 +32,18 @@ from ._module_gen import ModuleGenerator, Strategy
 from ._signal_context import SignalContext
 
 
+# Messages of documented engine limitations that raise instead of computing
+# a wrong value (see notes/developer/known_issues.md).
+_KNOWN_LIMITATIONS = (
+    "exceeds vm-fast's fixed wide-value capacity",
+    "wider than 64 bits, not yet supported for function arguments",
+)
+
+
+class _IcarusIncomparable(Exception):
+    """A module Icarus legitimately simulates differently (see the raise)."""
+
+
 # Default bias toward simpler strategies for faster iteration.
 _DEFAULT_STRATEGY_WEIGHTS: dict[Strategy, float] = {
     Strategy.FEEDFORWARD: 3.0,
@@ -112,6 +124,8 @@ class FuzzRunner:
         self.total_mismatches = 0
         self.mismatches_by_engine: dict[str, int] = {}
         self.icarus_artifacts_filtered = 0
+        self.known_limitations_skipped = 0
+        self.icarus_skipped = 0
         self._start_time = time.time()
 
     # ------------------------------------------------------------------
@@ -197,6 +211,11 @@ class FuzzRunner:
                 if engine == "reference":
                     oracle = res
             except Exception as exc:
+                if any(marker in str(exc) for marker in _KNOWN_LIMITATIONS):
+                    # A documented engine limitation that fails loudly (not
+                    # a wrong answer): counted, not logged as a mismatch.
+                    self.known_limitations_skipped += 1
+                    continue
                 result.mismatches.append(f"engine {engine} raised: {exc}")
                 continue
 
@@ -233,10 +252,13 @@ class FuzzRunner:
         if self._icarus and not has_streaming_concat:
             try:
                 icarus_res = self._simulate_icarus(verilog, vectors, top)
+                self._self_reading_comb = _self_reading_comb_outputs(top)
                 diffs = self._compare(oracle, icarus_res, "iverilog", vectors)
                 if diffs:
                     result.mismatches.extend(diffs)
                     self.mismatches_by_engine["iverilog"] = self.mismatches_by_engine.get("iverilog", 0) + 1
+            except _IcarusIncomparable:
+                self.icarus_skipped += 1
             except Exception as exc:
                 result.mismatches.append(f"icarus failed: {exc}")
 
@@ -405,6 +427,17 @@ class FuzzRunner:
             if engine == "iverilog" and _is_icarus_first_activation_artifact(sig_mismatches):
                 self.icarus_artifacts_filtered += len(sig_mismatches)
                 continue
+            if (
+                engine == "iverilog"
+                and sig in getattr(self, "_self_reading_comb", ())
+                and all(vi == 0 for vi, _e, _g in sig_mismatches)
+            ):
+                # First evaluation of a combinational block that reads a
+                # signal it writes later: whether it re-runs after its own
+                # write is simulator-dependent (known_issues.md, "self-
+                # referential combinational reads").
+                self.icarus_artifacts_filtered += len(sig_mismatches)
+                continue
             for vi, exp, got_val in sig_mismatches:
                 diffs.append(f"[{engine}] vector {vi} signal {sig}: expected={_val_repr(exp)} got={_val_repr(got_val)}")
         return diffs
@@ -434,7 +467,7 @@ class FuzzRunner:
             tb_path.write_text(self._build_testbench(mod, vectors))
 
             try:
-                subprocess.run(
+                compiled = subprocess.run(
                     ["iverilog", "-g2012", "-o", str(vvp_path), str(dut_path), str(tb_path)],
                     check=True,
                     capture_output=True,
@@ -442,6 +475,12 @@ class FuzzRunner:
                 )
             except subprocess.CalledProcessError as exc:
                 raise RuntimeError(f"iverilog: {exc.stderr.strip()}") from exc
+            if "found no sensitivities so it will never trigger" in compiled.stderr:
+                # An `always @*` whose reads Icarus constant-folds away never
+                # runs there (IEEE 1364: `@*` with an empty list waits
+                # forever); veriforge runs it once at time 0, like
+                # `always_comb`. A known, intentional difference.
+                raise _IcarusIncomparable(compiled.stderr.strip())
 
             try:
                 result = subprocess.run(
@@ -694,6 +733,8 @@ class FuzzRunner:
             "total_mismatches": self.total_mismatches,
             "mismatches_by_engine": self.mismatches_by_engine,
             "icarus_artifacts_filtered": self.icarus_artifacts_filtered,
+            "known_limitations_skipped": self.known_limitations_skipped,
+            "icarus_skipped": self.icarus_skipped,
             "elapsed_seconds": elapsed,
             "rate": self.total_modules / max(elapsed, 0.1),
             "engines": self._engines,
@@ -731,6 +772,31 @@ class FuzzRunner:
                     bits.append("1" if (value.val >> i) & 1 else "0")
             return f"{w}'b{''.join(bits)}"
         return f"{w}'d{value.val}"
+
+
+def _self_reading_comb_outputs(mod: Module) -> set[str]:
+    """Signals written by an ``always @(*)`` block that also reads one of the
+    signals it writes (read-before-write within the block)."""
+    from ..model.behavioral import SensitivityType  # noqa: PLC0415
+    from ..model.expressions import Identifier  # noqa: PLC0415
+    from ..model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
+
+    out: set[str] = set()
+    for ab in mod.always_blocks:
+        if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
+            continue
+        written: set[str] = set()
+        lhs_ids: set[int] = set()
+        for node in ab.body.walk():
+            if isinstance(node, (BlockingAssign, NonblockingAssign)):
+                for ident in node.lhs.walk():
+                    if isinstance(ident, Identifier):
+                        written.add(ident.name)
+                        lhs_ids.add(id(ident))
+        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier) and id(n) not in lhs_ids}
+        if read & written:
+            out |= written
+    return out
 
 
 def _is_icarus_first_activation_artifact(mismatches: list[tuple[int, Value, Value]]) -> bool:

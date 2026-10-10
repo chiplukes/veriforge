@@ -22,6 +22,7 @@ from ..model.expressions import (
     StreamingConcatenation,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 
 from ._signal_context import SignalContext
@@ -37,18 +38,44 @@ _BINARY_OPS = [
     "&",
     "|",
     "^",
+    "~^",
     "<<",
     ">>",
+    "<<<",
+    ">>>",
+    "**",
     "<",
     "<=",
+    ">",
+    ">=",
     "==",
     "!=",
+    "===",
+    "!==",
     "&&",
     "||",
 ]
+_SHIFT_OPS = frozenset({"<<", ">>", "<<<", ">>>"})
 _UNARY_OPS = ["~", "-", "!"]
 _REDUCTION_OPS = ["&", "|", "^", "~&", "~|", "~^"]
-_NODE_KINDS = ("binary", "unary", "reduction", "ternary", "concat", "replicate", "streaming_concat", "cast")
+_NODE_KINDS = (
+    "binary",
+    "unary",
+    "reduction",
+    "ternary",
+    "concat",
+    "replicate",
+    "streaming_concat",
+    "cast",
+    "width_cast",
+)
+# Probability that a leaf is a literal rather than a signal. Literals were
+# never generated as operands before 2026-10-09, so sized/unsized/signed/x
+# constants -- and the width/signedness rules they trigger -- went untested.
+_LITERAL_LEAF_PROBABILITY = 0.2
+# Size-cast widths (`N'(e)`); kept <= 64 because the compiled engine
+# doesn't support casts to wider (see known_issues.md).
+_CAST_WIDTHS = (1, 2, 3, 4, 7, 8, 12, 16, 21, 31, 32, 33, 48, 63, 64)
 
 
 class ExpressionGenerator:
@@ -61,6 +88,9 @@ class ExpressionGenerator:
 
     def __init__(self, ctx: SignalContext) -> None:
         self._ctx = ctx
+        # > 0 while generating operands of a concatenation/replication/
+        # streaming concat: an unsized literal is illegal there (IEEE 5.1.14).
+        self._in_concat = 0
 
     # ------------------------------------------------------------------
     # Leaf / literal
@@ -71,6 +101,8 @@ class ExpressionGenerator:
 
         *exclude*: see ``expr()``'s docstring.
         """
+        if rng.random() < _LITERAL_LEAF_PROBABILITY:
+            return self.operand_literal(rng)
         sig = self._ctx.pick_readable(rng, exclude=exclude)
         if sig.width == 1:
             return sig.as_identifier()
@@ -98,6 +130,33 @@ class ExpressionGenerator:
         has indefinite width" errors.
         """
         return Literal(value, width=32, base="d", signed=False)
+
+    def operand_literal(self, rng: random.Random) -> Expression:
+        """A constant operand in one of the forms that exercise different
+        width/signedness rules: sized unsigned (decimal/hex/binary), sized
+        signed, unsized (32-bit signed, possibly >= 2**31), a negated signed
+        literal, or a sized literal with x/z bits."""
+        roll = rng.random()
+        if roll < 0.25 or (self._in_concat and roll < 0.45):
+            w = self._ctx.pick_width(rng)
+            val = rng.getrandbits(w)
+            base = rng.choice("dhb") if w <= 32 else rng.choice("dh")
+            digits = {"d": str(val), "h": f"{val:x}", "b": f"{val:b}"}[base]
+            return Literal(val, width=w, base=base, signed=False, original_text=f"{w}'{base}{digits}")
+        if roll < 0.45:
+            w = rng.choice((4, 8, 16, 32, 36, 64))
+            val = rng.getrandbits(w - 1)
+            text = f"{w}'sd{val}"
+            lit = Literal(val, width=w, base="d", signed=True, original_text=text)
+            return UnaryOp("-", lit) if rng.random() < 0.5 else lit
+        if roll < 0.75 and not self._in_concat:
+            val = rng.choice((0, 1, 2, 3, 7, 15, 16, 255, 256, 65535, 2**31 - 1, 2**31, 2**32 - 1, rng.getrandbits(31)))
+            return Literal(val, base="d", signed=True, original_text=str(val))
+        w = rng.choice((1, 2, 4, 8, 12, 33))
+        bits = "".join(rng.choice("01xz") if rng.random() < 0.4 else rng.choice("01") for _ in range(w))
+        return Literal(
+            bits, width=w, base="b", signed=False, is_x="x" in bits, is_z="z" in bits, original_text=f"{w}'b{bits}"
+        )
 
     def literal(self, rng: random.Random, *, width: int | None = None) -> Literal:
         """Generate a random literal with optional width constraint."""
@@ -164,6 +223,8 @@ class ExpressionGenerator:
             return self._streaming_concat(rng, depth, callables, exclude)
         if kind == "cast":
             return self._cast(rng, depth, callables, exclude)
+        if kind == "width_cast":
+            return self._width_cast(rng, depth, callables, exclude)
         if kind == "call":
             return self._call(rng, depth, callables, exclude)
         raise AssertionError(f"unknown kind: {kind}")
@@ -175,7 +236,18 @@ class ExpressionGenerator:
     def _binary(self, rng, depth, callables, exclude=None) -> BinaryOp:
         op = rng.choice(self._BINARY_OPS)
         lhs = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
-        rhs = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
+        if op in _SHIFT_OPS and rng.random() < 0.6:
+            # Literal shift amounts, including ones at or past the operand's
+            # width (a shift's result width is its left operand's).
+            amount = rng.choice((0, 1, 2, 3, 7, 8, 15, 16, 31, 32, 33, 63, 64, 65, rng.randrange(130)))
+            rhs: Expression = Literal(amount, base="d", signed=True, original_text=str(amount))
+        elif op == "**":
+            # Small constant exponent: results stay meaningful (not all
+            # wrapped to 0) and no engine hits a pathological loop.
+            exp = rng.choice((0, 1, 2, 3))
+            rhs = Literal(exp, width=2, base="d", signed=False, original_text=f"2'd{exp}")
+        else:
+            rhs = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
         if op in ("/", "%"):
             # Ensure RHS is non-zero to avoid div-by-zero noise
             rhs = self._make_nonzero(rhs)
@@ -198,15 +270,21 @@ class ExpressionGenerator:
 
     def _concat(self, rng, depth, callables, exclude=None) -> Concatenation:
         n = rng.choice((2, 3))
-        parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
+        self._in_concat += 1
+        try:
+            parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
+        finally:
+            self._in_concat -= 1
         return Concatenation(parts)
 
     def _replicate(self, rng, depth, callables, exclude=None) -> Replication:
         n = rng.choice((2, 3))
-        return Replication(
-            Literal(n, width=32, base="d", signed=False),
-            self.expr(rng, depth - 1, callables=callables, exclude=exclude),
-        )
+        self._in_concat += 1
+        try:
+            value = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
+        finally:
+            self._in_concat -= 1
+        return Replication(Literal(n, width=32, base="d", signed=False), value)
 
     def _streaming_concat(self, rng, depth, callables, exclude=None) -> Expression:
         """Generate a `{<<{...}}` / `{>>{...}}` streaming concatenation.
@@ -219,7 +297,11 @@ class ExpressionGenerator:
         constructing a node the real parser would never itself produce.
         """
         n = rng.choice((2, 3))
-        parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
+        self._in_concat += 1
+        try:
+            parts = [self.expr(rng, depth - 1, callables=callables, exclude=exclude) for _ in range(n)]
+        finally:
+            self._in_concat -= 1
         direction = rng.choice(("<<", ">>"))
         if direction == ">>":
             return Concatenation(parts)
@@ -253,6 +335,16 @@ class ExpressionGenerator:
             cast,
             [self.expr(rng, depth - 1, callables=callables, exclude=exclude)],
             is_system=True,
+        )
+
+    def _width_cast(self, rng, depth, callables, exclude=None) -> WidthCast:
+        """SystemVerilog size cast ``N'(e)`` (dropped by the parser until
+        2026-10-09). The operand is evaluated in a context of max(N, its
+        width), so a narrower cast of a wide shift/add is the interesting
+        shape."""
+        n = rng.choice(_CAST_WIDTHS)
+        return WidthCast(
+            Literal(n, original_text=str(n)), self.expr(rng, depth - 1, callables=callables, exclude=exclude)
         )
 
     def _call(self, rng, depth, callables, exclude=None) -> FunctionCall:

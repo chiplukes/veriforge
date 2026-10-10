@@ -1214,10 +1214,14 @@ class Scheduler:  # cm:9a7f2c
         if old is None:
             return None
         new = self.ctx.read_signal(sig_name)
-        if new.mask & 1:
-            return None
         old_bit = old.val & 1
         old_x = old.mask & 1
+        if new.mask & 1:
+            # 0->x is a posedge and 1->x a negedge (IEEE 1364 9.7.2); they
+            # used to be ignored. x->x (incl. z->x, one encoding) isn't.
+            if old_x:
+                return None
+            return "negedge" if old_bit else "posedge"
         new_bit = new.val & 1
         if new_bit and (old_x or not old_bit):
             return "posedge"
@@ -1252,10 +1256,10 @@ class Scheduler:  # cm:9a7f2c
             new_bit = new.val & 1
             new_x = (new.mask & 1) != 0
             if edge_type == "posedge":
-                if not new_x and new_bit == 1 and (old_x or old_bit == 0):
+                if (not new_x and new_bit == 1 and (old_x or old_bit == 0)) or (new_x and not old_x and old_bit == 0):
                     return True
             elif edge_type == "negedge":
-                if not new_x and new_bit == 0 and (old_x or old_bit == 1):
+                if (not new_x and new_bit == 0 and (old_x or old_bit == 1)) or (new_x and not old_x and old_bit == 1):
                     return True
             elif edge_type == "level":
                 # Any change triggers level-sensitive events

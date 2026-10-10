@@ -17,6 +17,10 @@ from ..model.variables import Variable, VariableKind
 _EDGE_WIDTHS = [1, 2, 3, 7, 8, 15, 16, 31, 32, 63, 64, 65, 80, 127, 128]
 _NAME_POOL = [chr(ord("a") + i) for i in range(26)]  # a-z
 
+# Integer atom types and their widths; see `Signal.var_kind`.
+_INTEGER_KINDS = {"integer": 32, "int": 32, "byte": 8, "shortint": 16, "longint": 64}
+_INTEGER_VAR_PROBABILITY = 0.25
+
 # Fraction of inputs/outputs/wires/regs generated with SystemVerilog's
 # `logic` type instead of `wire`/`reg` (see `Signal.use_logic`).
 _LOGIC_PROBABILITY = 0.35
@@ -37,6 +41,12 @@ class Signal:
     # which can only ever be the latter. Decided once at creation time by
     # the `add_*` methods below; consulted by as_net/as_variable/as_port.
     use_logic: bool = False
+    # An integer atom type (`integer`/`int`/`byte`/`shortint`/`longint`)
+    # instead of a ranged `reg`/`logic` -- `width` is then the type's own,
+    # and `signed` its (default-signed, or `int unsigned`) signedness.
+    # Variables only (regs). Added 2026-10-09: `integer` arithmetic was
+    # unsigned on every engine and nothing generated it.
+    var_kind: str | None = None
 
     def as_identifier(self) -> Identifier:
         return Identifier(self.name)
@@ -63,6 +73,8 @@ class Signal:
         return Net(self.name, kind=kind, width=self.as_range(), signed=self.signed)
 
     def as_variable(self) -> Variable:
+        if self.var_kind is not None:
+            return Variable(self.name, kind=VariableKind(self.var_kind), signed=self.signed)
         kind = VariableKind.LOGIC if self.use_logic else VariableKind.REG
         return Variable(self.name, kind=kind, width=self.as_range(), signed=self.signed)
 
@@ -112,6 +124,7 @@ class SignalContext:
         self.always_blocks: list = []
         self.continuous_assigns: list = []
         self.instances: list = []
+        self.functions: list = []
 
     # ------------------------------------------------------------------
     # Signal creation
@@ -162,6 +175,20 @@ class SignalContext:
         return s
 
     def add_reg(self, rng: random.Random, *, width: int | None = None, signed: bool | None = None) -> Signal:
+        if width is None and signed is None and rng.random() < _INTEGER_VAR_PROBABILITY:
+            var_kind = rng.choice(list(_INTEGER_KINDS))
+            # Only `int` gets the `unsigned` variant: the grammar doesn't
+            # accept it on the other atom types yet (known_issues.md).
+            int_signed = not (var_kind == "int" and rng.random() < 0.25)
+            s = Signal(
+                name=self._next_name("r"),
+                width=_INTEGER_KINDS[var_kind],
+                signed=int_signed,
+                kind="reg",
+                var_kind=var_kind,
+            )
+            self._regs.append(s)
+            return s
         s = Signal(
             name=self._next_name("r"),
             width=width if width is not None else self.pick_width(rng),

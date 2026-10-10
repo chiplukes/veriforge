@@ -3684,6 +3684,7 @@ class _WideEmitterMixin:
     }
     _WIDE_SHIFT_PRIMS: ClassVar[dict[str, str]] = {
         "<<": "wide_shl",
+        "<<<": "wide_shl",  # identical to `<<` (was missing: >64-bit `<<<` raised)
         ">>": "wide_shr",
         ">>>": "wide_ashr",
     }
@@ -4446,6 +4447,15 @@ class _WideEmitterMixin:
                     f" _sc{lslot}_v, _sc{lslot}_m,"
                     f" _sc{rslot}_v, _sc{rslot}_m, {n_words}, {prim_width})"
                 )
+                if op in ("~^", "^~"):
+                    # XNOR = inverted XOR on the known bits (the table maps
+                    # both to wide_xor; the inversion used to be missing, so
+                    # every >64-bit XNOR computed XOR).
+                    for wi in range((prim_width + 63) // 64):
+                        lines.append(
+                            f"{pad}_sc{slot}_v[{wi}] = (~_sc{slot}_v[{wi}]) & ~_sc{slot}_m[{wi}]"
+                            f" & _word_mask64({prim_width - wi * 64})"
+                        )
                 # Bitwise-op result only naturally fills op_width bits; when
                 # the enclosing context is wider, extend the RESULT itself
                 # (sign- or zero-, per this BinaryOp's own effective
@@ -4461,8 +4471,46 @@ class _WideEmitterMixin:
                 self._free_scratch(lslot, rslot)
                 return lines
 
+            if op == "**":
+                # Context-determined base at the destination width, self-
+                # determined exponent (<= 64 bits); see wide_pow.
+                exp_w = self._expr_width(expr.right)
+                if exp_w > _WORD_BITS or self._expr_max_internal_width(expr.right) > _WORD_BITS:
+                    return None
+                both_signed = (
+                    signed_override
+                    if signed_override is not None
+                    else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+                )
+                bslot = self._alloc_scratch()
+                blines = self._emit_wide_expr_to_scratch(
+                    expr.left, bslot, n_words, dst_width, indent, signed_override=both_signed
+                )
+                if blines is None:
+                    self._free_scratch(bslot)
+                    return None
+                exp_v = self._emit_expr(expr.right, exp_w, both_signed)
+                exp_m = self._emit_mask_expr(expr.right, exp_w)
+                if both_signed:
+                    exp_v = f"_sign_ext({exp_v}, {exp_w})"
+                self._needs_wide_helpers = True
+                lines = [
+                    *blines,
+                    f"{pad}wide_pow(_sc{slot}_v, _sc{slot}_m, _sc{bslot}_v, _sc{bslot}_m,"
+                    f" <long long>({exp_v}), 1 if (({exp_m}) & wmask({exp_w})) else 0,"
+                    f" {1 if both_signed else 0}, {n_words}, {dst_width})",
+                ]
+                self._free_scratch(bslot)
+                return lines
+
             if op in self._WIDE_SHIFT_PRIMS:
                 prim = self._WIDE_SHIFT_PRIMS[op]
+                if op == ">>>" and not (
+                    signed_override if signed_override is not None else self._expr_signed(expr.left)
+                ):
+                    # `>>>` of an unsigned operand is a logical shift (it
+                    # used to sign-fill: `i6[1] >>> n` gave all ones).
+                    prim = "wide_shr"
                 lslot = self._alloc_scratch()
                 lw = self._expr_width(expr.left)
                 # Source may be wider than destination (e.g. 65-bit >> 4 into 33-bit dst).
@@ -4656,7 +4704,7 @@ class _WideEmitterMixin:
                     lines.append(f"{pad}    _sc{slot}_v[{wi}] = 0")
                     lines.append(f"{pad}    _sc{slot}_m[{wi}] = _word_mask64({remaining})")
                 lines.append(f"{pad}else:")
-                if op == ">>>":
+                if prim == "wide_ashr":
                     lines.append(
                         f"{pad}    {prim}(_sc{slot}_v, _sc{slot}_m,"
                         f" _sc{lslot}_v, _sc{lslot}_m,"
@@ -5405,6 +5453,17 @@ class _WideEmitterMixin:
         # narrower Identifier operand -- otherwise transparent) ──
         if et is FunctionCall:
             fname = expr.name.lower()
+            if fname == "$__2state" and len(expr.arguments) == 1:
+                # Assignment to a 2-state variable: transparent, then x/z -> 0.
+                lines = self._emit_wide_expr_to_scratch(
+                    expr.arguments[0], slot, n_words, dst_width, indent, signed_override=signed_override
+                )
+                if lines is None:
+                    return None
+                for i in range(n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{i}] &= ~_sc{slot}_m[{i}]")
+                    lines.append(f"{pad}_sc{slot}_m[{i}] = 0")
+                return lines
             if fname in {"$signed", "$unsigned"} and len(expr.arguments) == 1:
                 # $signed/$unsigned are themselves SELF-DETERMINED (IEEE
                 # 1364-2005 Table 5-22): the argument must be computed at

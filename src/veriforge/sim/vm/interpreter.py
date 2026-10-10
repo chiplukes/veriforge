@@ -365,6 +365,11 @@ class Interpreter:  # cm:e3f1b4
                 s_append(v.stream_reverse(arg1))
                 continue
 
+            if op == Op.CLEAR_MASK:
+                v = s_pop()
+                s_append(Value(v.val, width=v.width) if v.mask else v)
+                continue
+
             # ── Arithmetic ───────────────────────────────────────
 
             if op == Op.ADD:

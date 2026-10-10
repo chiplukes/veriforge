@@ -39,6 +39,7 @@ from __future__ import annotations
 import pytest
 
 from veriforge.sim.testbench import Simulator
+from veriforge.sim.value import Value
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
@@ -357,9 +358,10 @@ class TestStreamingConcatenationVmFastWideCapacity:
         assert int(sim.signal("o").value) == expected
 
     @pytest.mark.parametrize("engine", ("vm", "vm-fast"))
-    def test_combined_width_over_cap_raises_clearly(self, engine):
-        """Comfortably over even the current (raised) cap -- must raise a
-        clear NotImplementedError at compile time, never silently corrupt.
+    def test_combined_width_over_cap_matches_reference(self, engine):
+        """Comfortably over vm-fast's wide-slot capacity: it used to raise
+        NotImplementedError; since 2026-10-10 such a design runs on the
+        Python interpreter (arbitrary precision) and matches reference.
         """
         mod = _parse("""
             module dut(input logic [127:0] a, input logic [127:0] b,
@@ -368,5 +370,12 @@ class TestStreamingConcatenationVmFastWideCapacity:
             assign o = {<<{a, b, c, d, e}};
             endmodule
         """)
-        with pytest.raises(NotImplementedError, match="exceeds vm-fast's fixed wide-value capacity"):
-            Simulator(mod, engine=engine)
+        values = {"a": 0x1234_5678_9ABC_DEF0_0FED_CBA9_8765_4321, "b": 3, "c": 0, "d": (1 << 127) | 5, "e": 0xFF}
+        results = []
+        for eng in ("reference", engine):
+            sim = Simulator(mod, engine=eng)
+            for name, val in values.items():
+                sim.drive(name, Value(val, width=128))
+            sim.settle()
+            results.append(sim.read("o"))
+        assert results[1] == results[0]

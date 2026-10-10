@@ -532,7 +532,11 @@ class TestEdgeSensitivity:
             (Value.x(1), Value(0, width=1), [neg]),
             (Value(0, width=1), Value(1, width=1), [pos]),
             (Value(1, width=1), Value(0, width=1), [neg]),
-            (Value(0, width=1), Value.x(1), []),
+            # 0->x is a posedge and 1->x a negedge (IEEE 1364 9.7.2, as in
+            # Icarus); x->x is no edge.
+            (Value(0, width=1), Value.x(1), [pos]),
+            (Value(1, width=1), Value.x(1), [neg]),
+            (Value.x(1), Value.x(1), []),
         ):
             sched.ctx.write_signal("clk", old)
             sched._prev_signals = sched._snapshot_signals()

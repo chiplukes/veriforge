@@ -148,6 +148,7 @@ class Compiler:  # cm:8c1e4a
         "_task_map",
         "const_pool",
         "display_formats",
+        "exceeds_fast_width",
         "fopen_tasks",
         "loop_limit",
         "mem_count",
@@ -172,6 +173,8 @@ class Compiler:  # cm:8c1e4a
         # Signal storage
         self.signal_map: dict[str, int] = {}
         self.signal_count: int = 0
+        # Some value is wider than vm-fast's fixed wide slots (see _compile_expr).
+        self.exceeds_fast_width = False
         self.sig_val: list[int] = []
         self.sig_mask: list[int] = []
         self.sig_width: list[int] = []
@@ -232,6 +235,8 @@ class Compiler:  # cm:8c1e4a
         """Register a signal and return its ID. If already registered, return existing ID."""
         if name in self.signal_map:
             return self.signal_map[name]
+        if width > _VM_FAST_WIDE_WORDS * 64:
+            self.exceeds_fast_width = True
         sid = self.signal_count
         self.signal_count += 1
         self.signal_map[name] = sid
@@ -862,6 +867,14 @@ class Compiler:  # cm:8c1e4a
         the conditional operator).
         """
         etype = type(expr)
+        # A value wider than vm-fast's fixed wide-value slots: the design
+        # must run on the Python interpreter (vm-fast silently computed
+        # such values wrong, e.g. `~^{2{{3{i126}}}}`; see `exceeds_fast_width`).
+        if width > _VM_FAST_WIDE_WORDS * 64 or (
+            etype in (Concatenation, Replication, StreamingConcatenation)
+            and self._expr_width(expr) > _VM_FAST_WIDE_WORDS * 64
+        ):
+            self.exceeds_fast_width = True
 
         # -- Identifier: load signal --
         if etype is Identifier:
@@ -1278,6 +1291,12 @@ class Compiler:  # cm:8c1e4a
             # directly. Mirrors the identical fix in `sim/evaluator.py`.
             elif expr.op in _SIGNED_POW_MAP and self._expr_signed(expr.left) and self._expr_signed(expr.right):
                 program.append(instr(_SIGNED_POW_MAP[expr.op]))
+            elif expr.op == ">>>" and not (
+                signed_override if signed_override is not None else self._expr_signed(expr.left)
+            ):
+                # `>>>` of an unsigned operand is a logical shift (it used to
+                # sign-fill); see sim/evaluator.py.
+                program.append(instr(Op.SHR))
             else:
                 op = _BINARY_OP_MAP.get(expr.op)
                 if op is None:
@@ -1541,14 +1560,10 @@ class Compiler:  # cm:8c1e4a
             # "raise clearly instead" choice already made for the
             # `slice_size > 64` case just below, and for the whole-memory-
             # ternary case elsewhere in this file (see its own comment).
-            full_width = sum(self._expr_width(p) for p in expr.parts)
-            if full_width > _VM_FAST_WIDE_WORDS * 64:
-                raise NotImplementedError(
-                    f"Streaming concatenation combined operand width ({full_width} bits) exceeds "
-                    f"vm-fast's fixed wide-value capacity ({_VM_FAST_WIDE_WORDS * 64} bits) -- "
-                    "vm and vm-fast share this compiled bytecode, so both are affected; "
-                    "use engine='reference' or engine='compiled' for this expression"
-                )
+            # (2026-10-09: no longer raises -- a combined width over that
+            # capacity sets `exceeds_fast_width` at the top of this
+            # function, and the design runs on the Python interpreter,
+            # whose `Value.stream_reverse` is arbitrary-precision.)
             for part in expr.parts:
                 self._compile_expr(part, program, self._expr_width(part))
             program.append(instr(Op.CONCAT, len(expr.parts)))
@@ -1649,6 +1664,12 @@ class Compiler:  # cm:8c1e4a
         # -- FunctionCall --
         if etype is FunctionCall:
             fname = expr.name.lower()
+            if fname == "$__2state" and expr.arguments:
+                # Assignment to a 2-state variable (sv_functions.lower_two_state):
+                # transparent, then x/z bits -> 0.
+                self._compile_expr(expr.arguments[0], program, width, signed_override)
+                program.append(instr(Op.CLEAR_MASK))
+                return
             if fname in ("$signed", "$unsigned") and expr.arguments:
                 # $signed/$unsigned are transparent to VALUE -- they only
                 # mark the expression's signedness for the ENCLOSING
@@ -1962,9 +1983,7 @@ class Compiler:  # cm:8c1e4a
             local_name = f"{prefix}.{local_var.name}"
             # `_var_width` knows `integer`/`int`/... (no range); `_range_width`
             # made a function-local `integer` 1 bit wide.
-            local_signed = bool(local_var.signed) or getattr(local_var.kind, "value", "") in (
-                "integer", "int", "shortint", "longint", "byte",
-            )  # fmt: skip
+            local_signed = bool(local_var.signed)  # defaults by kind (`integer` signed)
             self._register_signal(local_name, _var_width(local_var, self._param_env), local_signed)
             layout = self._struct_layout_for_type(getattr(local_var, "type_name", None))
             if layout is not None:
@@ -2683,7 +2702,7 @@ class Compiler:  # cm:8c1e4a
 
         if etype is FunctionCall:
             name = expr.name.lower()
-            if name in ("$signed", "$unsigned") and expr.arguments:
+            if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
                 return self._expr_width(expr.arguments[0])
             # A user-defined function call's self-determined width is its
             # OWN declared return width, not the generic fallback below --
@@ -2766,6 +2785,8 @@ class Compiler:  # cm:8c1e4a
                 result = True
             elif name == "$unsigned":
                 result = False
+            elif name == "$__2state" and expr.arguments:
+                result = self._expr_signed(expr.arguments[0], cache)
             else:
                 # A user function call's own signedness is its declared
                 # return type's signedness, NOT unconditionally False --

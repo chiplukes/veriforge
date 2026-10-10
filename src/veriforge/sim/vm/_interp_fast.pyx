@@ -113,6 +113,7 @@ DEF OP_SMOD           = 83
 DEF OP_SPOW           = 84
 
 DEF OP_STREAM_REVERSE = 85
+DEF OP_CLEAR_MASK     = 86
 
 DEF STACK_MAX         = 256
 DEF NBA_MAX           = 1024
@@ -1100,6 +1101,18 @@ cdef int _execute_core(
                     stack[sp - 1].val   = 0
                     stack[sp - 1].mask  = 0
                 stack[sp - 1].width = arg1
+            continue
+
+        if op == OP_CLEAR_MASK:
+            # 2-state conversion: x/z bits read 0 (val is kept 0 under mask
+            # by every producer, but clear it too to be safe).
+            if wflag[sp - 1]:
+                for wi in range(WIDE_WORDS):
+                    wv[(sp - 1) * WIDE_WORDS + wi] &= ~wm[(sp - 1) * WIDE_WORDS + wi]
+                    wm[(sp - 1) * WIDE_WORDS + wi] = 0
+            else:
+                stack[sp - 1].val &= ~stack[sp - 1].mask
+                stack[sp - 1].mask = 0
             continue
 
         if op == OP_STREAM_REVERSE:
@@ -4291,12 +4304,13 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                         old_x = 1 if (dc.snap_mask[esid] & 1) else 0
                         new_bit = <int>(dc.sig_val[esid] & 1)
                         new_x = 1 if (dc.sig_mask[esid] & 1) else 0
+                        # 0->x / 1->x count too (IEEE 1364 9.7.2).
                         if etype == 0:   # posedge
-                            if not new_x and new_bit == 1 and (old_x or old_bit == 0):
+                            if (not new_x and new_bit == 1 and (old_x or old_bit == 0)) or (new_x and not old_x and old_bit == 0):
                                 hit = 1
                                 break
                         else:            # negedge
-                            if not new_x and new_bit == 0 and (old_x or old_bit == 1):
+                            if (not new_x and new_bit == 0 and (old_x or old_bit == 1)) or (new_x and not old_x and old_bit == 1):
                                 hit = 1
                                 break
                     if hit:

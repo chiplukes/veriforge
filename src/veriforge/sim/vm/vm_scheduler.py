@@ -287,6 +287,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         # Memory elements >64 bits wide need a wide-memory pool (not yet implemented);
         # fall back to the pure-Python interpreter for such designs.
+        if self._use_cython and self.compiler.exceeds_fast_width:
+            # A value wider than vm-fast's fixed wide slots (512 bits): the
+            # Cython path computed it wrong; the Python interpreter doesn't.
+            self._use_cython = False
         if self._use_cython and self.compiler.mem_count > 0:
             if any(info[0] > 64 for info in self.compiler.mem_info):  # noqa: PLR2004
                 self._use_cython = False
@@ -1620,11 +1624,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             new_bit = new_val & 1
             new_x = (new_mask & 1) != 0
 
+            # 0->x/1->x count too (IEEE 1364 9.7.2; they used to be ignored).
             if edge_type == "posedge":
-                if not new_x and new_bit == 1 and (old_x or old_bit == 0):
+                if (not new_x and new_bit == 1 and (old_x or old_bit == 0)) or (new_x and not old_x and old_bit == 0):
                     return True
             elif edge_type == "negedge":
-                if not new_x and new_bit == 0 and (old_x or old_bit == 1):
+                if (not new_x and new_bit == 0 and (old_x or old_bit == 1)) or (new_x and not old_x and old_bit == 1):
                     return True
 
         return False

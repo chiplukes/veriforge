@@ -254,7 +254,11 @@ def lower_width_casts(module: Module) -> Module:
     env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
     all_decls: list[Port | Net | Variable] = [*module.ports, *module.nets, *module.variables]
     signed_names = {d.name for d in all_decls if d.signed}
+    # Parameters too: `12'(p)` of a signed parameter is signed (it used to
+    # be zero-extended into a wider context).
+    signed_names |= {p.name for p in module.parameters if getattr(p, "signed", False)}
     made: dict[str, FunctionDecl] = {}
+    func_signed = {f.name: bool(f.signed) for f in module.functions}
 
     def lower(expr: Expression) -> Expression | None:
         if not isinstance(expr, WidthCast):
@@ -262,7 +266,7 @@ def lower_width_casts(module: Module) -> Module:
         n = const_int(expr.width, env)
         if n is None or n <= 0:
             return None
-        signed = expr_signed(expr.operand, lambda name: name in signed_names)
+        signed = expr_signed(expr.operand, lambda name: name in signed_names, lambda f: func_signed.get(f, False))
         name = f"__vf_cast_{n}_{'s' if signed else 'u'}"
         if name not in made:
             made[name] = _cast_function(name, n, signed)
@@ -346,3 +350,79 @@ def materialize_task_locals(module: Module) -> Module:
                 if isinstance(node, Identifier) and not node.hierarchy and node.name in renames:
                     node.name = renames[node.name]
     return module
+
+
+# SystemVerilog 2-state types (IEEE 1800 6.11): start at 0, and x/z bits
+# become 0 when assigned.
+_TWO_STATE_KINDS = frozenset({"bit", "byte", "shortint", "int", "longint"})
+TWO_STATE_CALL = "$__2state"
+
+
+def lower_two_state(module: Module) -> Module:
+    """2-state variables, in place: give each one without an initializer a
+    0 initializer, and wrap the RHS of every assignment to one in the
+    internal ``$__2state(e)`` -- context/width/sign-transparent, it only
+    clears x/z bits (every engine implements it next to ``$signed``).
+
+    Before 2026-10-09 no engine modeled 2-state types: `int i;` read x and
+    `i = 'x` stored x (Icarus: 0). Memories of 2-state type still start at
+    x (not handled here).
+    """
+    from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
+    from veriforge.model.statements import NonblockingAssign  # noqa: PLC0415
+
+    def is_two_state(decl) -> bool:
+        kind = getattr(getattr(decl, "kind", None), "value", None)
+        data_type = getattr(decl, "data_type", None)
+        return kind in _TWO_STATE_KINDS or data_type in _TWO_STATE_KINDS
+
+    two_state_decls: list[Port | Variable] = [*module.ports, *module.variables]
+    module_two_state = {d.name for d in two_state_decls if is_two_state(d)}
+    if not module_two_state and not any(
+        is_two_state(v) for sub in [*module.functions, *module.tasks] for v in getattr(sub, "locals", [])
+    ):
+        return module
+
+    for var in module.variables:
+        if var.name not in module_two_state or var.dimensions:
+            continue
+        if var.initial_value is None:
+            var.initial_value = Literal(0, base="d", signed=False, original_text="0")
+        elif not _is_two_state_call(var.initial_value):
+            var.initial_value = FunctionCall(name=TWO_STATE_CALL, arguments=[var.initial_value], is_system=True)
+
+    def rewrite(root: object, names: set[str]) -> None:
+        for node in iter_nodes(root, set()):
+            if isinstance(node, (BlockingAssign, NonblockingAssign, ContinuousAssign)):
+                base = _lhs_base_name(node.lhs)
+                if base in names and not _is_two_state_call(node.rhs):
+                    node.rhs = FunctionCall(name=TWO_STATE_CALL, arguments=[node.rhs], is_system=True)
+
+    for block in [*module.always_blocks, *module.initial_blocks, *module.continuous_assigns, *module.tasks]:
+        rewrite(block, module_two_state)
+    for func in module.functions:
+        shadow = {func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)}
+        local_two_state = {v.name for v in func.locals if is_two_state(v)}
+        if func.body is not None:
+            rewrite(func.body, (module_two_state - shadow) | local_two_state)
+            # An automatic function's locals start at their default each call.
+            inits = [
+                BlockingAssign(Identifier(v.name), Literal(0, base="d", signed=False, original_text="0"))
+                for v in func.locals
+                if v.name in local_two_state and v.initial_value is None and not v.dimensions
+            ]
+            if inits:
+                from veriforge.model.statements import SeqBlock  # noqa: PLC0415
+
+                func.body = SeqBlock(statements=[*inits, func.body])
+    return module
+
+
+def _lhs_base_name(lhs: Expression) -> str | None:
+    while isinstance(lhs, (BitSelect,)) or type(lhs).__name__ in ("RangeSelect", "PartSelect"):
+        lhs = lhs.target  # type: ignore[attr-defined]
+    return _arg_name(lhs)
+
+
+def _is_two_state_call(expr: Expression) -> bool:
+    return isinstance(expr, FunctionCall) and expr.name == TWO_STATE_CALL

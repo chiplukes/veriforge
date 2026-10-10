@@ -2069,7 +2069,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         if n_seq:
             lines.extend(
                 [
-                    "    cdef int _q, _qe, _qs, _hit",
+                    "    cdef int _q, _qe, _qs, _hit, _qnx, _qox",
                     f"    cdef unsigned char _sfire[{n_seq}]",
                     f"    cdef unsigned char _sdone[{n_seq}]",
                     f"    memset(_sfire, 0, {n_seq})",
@@ -2108,10 +2108,21 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "                continue",
             "            for _qe in range(DL_SEQ_EDGE_OFF[_q], DL_SEQ_EDGE_OFF[_q + 1]):",
             "                _qs = DL_SEQ_EDGE_SID[_qe]",
+            # IEEE 1364 9.7.2 with x: posedge = 0->1, x->1, 0->x; negedge
+            # = 1->0, x->0, 1->x (masks used to be ignored: 0->x and x->0
+            # never fired).
+            "                _qnx = c.mask[_qs] & 1",
+            # A transition out of x at t=0 is the clock's initialization
+            # (e.g. a forked Python Clock's first drive), which no engine
+            # treats as an edge (see compiled_scheduler's bootstrap
+            # snapshot); afterwards x->0/x->1 are real edges.
+            "                _qox = (sm[_qs] & 1) if c.sim_time > 0 else 0",
             "                if DL_SEQ_EDGE_POS[_qe]:",
-            "                    _hit = (c.val[_qs] & 1) == 1 and (sv[_qs] & 1) == 0",
+            "                    _hit = (not _qnx and (c.val[_qs] & 1) == 1 and (_qox or (sv[_qs] & 1) == 0))"
+            " or (_qnx and not _qox and (sv[_qs] & 1) == 0)",
             "                else:",
-            "                    _hit = (c.val[_qs] & 1) == 0 and (sv[_qs] & 1) == 1",
+            "                    _hit = (not _qnx and (c.val[_qs] & 1) == 0 and (_qox or (sv[_qs] & 1) == 1))"
+            " or (_qnx and not _qox and (sv[_qs] & 1) == 1)",
             "                if _hit:",
             "                    _sfire[_q] = 1",
             "                    break",
