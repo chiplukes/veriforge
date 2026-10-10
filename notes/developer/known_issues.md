@@ -94,6 +94,11 @@ no such limit). Confirmed out of scope with the user when found; not
 attempted. No design encountered so far has actually needed it — scope as
 its own work-plan item if one ever does.
 
+Since 2026-10-09 this also covers SystemVerilog size casts *to* more than
+64 bits (`100'(x)`): every engine lowers `N'(e)` to a generated N-bit
+identity function (`sim/sv_functions.py:lower_width_casts`). Casts to 64
+bits or fewer work on compiled, including from a wide operand.
+
 For the full per-operation wide-signal coverage picture (everything else
 is ✅, backed by real cross-engine tests), see
 `notes/simulation/wide_signal_coverage.md` and

@@ -985,63 +985,64 @@ class Compiler:  # cm:8c1e4a
             # Shift operators — only LEFT operand is context-determined;
             # right is always self-determined.
             elif expr.op in ("<<", ">>", "<<<", ">>>"):
-                if expr.op == ">>>" and self._expr_signed(expr.left):
-                    self._compile_expr(expr.left, program)
-                else:
-                    # Compile the left operand directly at `target` (max of
-                    # the enclosing context width and its own static
-                    # self-determined width), NOT `width` alone --
-                    # `_compile_expr` for some node types (Replication is
-                    # the confirmed case) directly SIZES its result to
-                    # whatever width it's asked to compile at, so
-                    # requesting the (possibly narrower) outer `width` here
-                    # would already discard bits above `width` DURING
-                    # compilation itself, before the RESIZE/SIGN_EXT below
-                    # ever runs -- widening AFTERWARD only zero-pads on top
-                    # of that already-truncated value; it cannot recover
-                    # bits that were never computed. Target max(width,
-                    # static self-determined width) -- NOT `width` alone.
-                    # Context-determined extension must only ever WIDEN an
-                    # operand, never narrow it below its own natural width
-                    # (an operand can legitimately be wider than the
-                    # enclosing context, e.g. a wide concat feeding a
-                    # narrower assignment; SIGN_EXT/RESIZE truncate when
-                    # the target is smaller than the value's current
-                    # width, which would corrupt the operator's input).
-                    # Using the static estimate as a floor is always safe
-                    # even when it's an overestimate (e.g. expr.left
-                    # contains a ternary, whose static width is
-                    # max(branches) but the actual picked branch may be
-                    # narrower): the target is then still >= the true
-                    # runtime width, so this only ever widens or no-ops,
-                    # never truncates. Confirmed against Icarus
-                    # (cross-engine, vm/vm-fast vs reference/compiled) for
-                    # `({2{$unsigned(a5)}} >> (shift amount between the
-                    # enclosing 96-bit context width and the replication's
-                    # own true 130-bit width))`: bits 96-129 of the
-                    # replication (needed once shifted down into the
-                    # visible low bits) were silently dropped by compiling
-                    # the replication at the narrower 96-bit context width
-                    # first.
-                    target = max(width, self._expr_width(expr.left)) if width else width
-                    self._compile_expr(expr.left, program, target, signed_override)
-                    if width:
-                        eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
-                        if eff_signed:
-                            program.append(instr(Op.SIGN_EXT, target, 0))
-                        else:
-                            program.append(instr(Op.RESIZE, target))
-                        # A shift's own result width is exactly its (now
-                        # resized) left operand's width (IEEE 1364-2005
-                        # Table 5-22: "L(i)") -- RESIZE/SIGN_EXT above just
-                        # deterministically set the runtime width to
-                        # `target`, so the shift op's result will be
-                        # `target` too. Recorded so the shared tail below
-                        # can narrow it back to `width` if `target > width`
-                        # (self_width(expr.left) exceeded the requested
-                        # context), the same gap as the arithmetic branch's
-                        # `*` case below.
-                        static_result_w = target
+                # (Signed `>>>` used to compile its left operand with no
+                # width at all, so a context-determined operator inside it
+                # never wrapped: `(p36 * 2) >>> 16` shifted the unwrapped
+                # 37-bit product and lost its sign.)
+                # Compile the left operand directly at `target` (max of
+                # the enclosing context width and its own static
+                # self-determined width), NOT `width` alone --
+                # `_compile_expr` for some node types (Replication is
+                # the confirmed case) directly SIZES its result to
+                # whatever width it's asked to compile at, so
+                # requesting the (possibly narrower) outer `width` here
+                # would already discard bits above `width` DURING
+                # compilation itself, before the RESIZE/SIGN_EXT below
+                # ever runs -- widening AFTERWARD only zero-pads on top
+                # of that already-truncated value; it cannot recover
+                # bits that were never computed. Target max(width,
+                # static self-determined width) -- NOT `width` alone.
+                # Context-determined extension must only ever WIDEN an
+                # operand, never narrow it below its own natural width
+                # (an operand can legitimately be wider than the
+                # enclosing context, e.g. a wide concat feeding a
+                # narrower assignment; SIGN_EXT/RESIZE truncate when
+                # the target is smaller than the value's current
+                # width, which would corrupt the operator's input).
+                # Using the static estimate as a floor is always safe
+                # even when it's an overestimate (e.g. expr.left
+                # contains a ternary, whose static width is
+                # max(branches) but the actual picked branch may be
+                # narrower): the target is then still >= the true
+                # runtime width, so this only ever widens or no-ops,
+                # never truncates. Confirmed against Icarus
+                # (cross-engine, vm/vm-fast vs reference/compiled) for
+                # `({2{$unsigned(a5)}} >> (shift amount between the
+                # enclosing 96-bit context width and the replication's
+                # own true 130-bit width))`: bits 96-129 of the
+                # replication (needed once shifted down into the
+                # visible low bits) were silently dropped by compiling
+                # the replication at the narrower 96-bit context width
+                # first.
+                target = max(width, self._expr_width(expr.left)) if width else width
+                self._compile_expr(expr.left, program, target, signed_override)
+                if width:
+                    eff_signed = signed_override if signed_override is not None else self._expr_signed(expr.left)
+                    if eff_signed:
+                        program.append(instr(Op.SIGN_EXT, target, 0))
+                    else:
+                        program.append(instr(Op.RESIZE, target))
+                    # A shift's own result width is exactly its (now
+                    # resized) left operand's width (IEEE 1364-2005
+                    # Table 5-22: "L(i)") -- RESIZE/SIGN_EXT above just
+                    # deterministically set the runtime width to
+                    # `target`, so the shift op's result will be
+                    # `target` too. Recorded so the shared tail below
+                    # can narrow it back to `width` if `target > width`
+                    # (self_width(expr.left) exceeded the requested
+                    # context), the same gap as the arithmetic branch's
+                    # `*` case below.
+                    static_result_w = target
                 self._compile_expr(expr.right, program)  # self-determined
             # Power operator: grouped with the SHIFT row in IEEE 1364-2005
             # Table 5-22 (`>> << ** >>> <<<` -> `L(i)`), not the generic
@@ -1131,40 +1132,24 @@ class Compiler:  # cm:8c1e4a
                 # ("if any operand is unsigned, the result is unsigned")
                 # governs this alignment too, not just the final
                 # RESULT-to-`width` extension.
+                # IEEE 5.4.1/5.5.2 as Icarus does it (see the identical fix
+                # in `sim/evaluator.py`): both operands compiled AT
+                # max(context, their widths), extended by the signedness
+                # propagated from the context (else both-signed).
                 natural_op_width = max(self._expr_width(expr.left), self._expr_width(expr.right))
+                op_width = max(natural_op_width, width or 0)
                 both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
-                left_compile_width = (
-                    max(natural_op_width, width or 0)
-                    if isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-")
-                    else natural_op_width
-                )
-                right_compile_width = (
-                    max(natural_op_width, width or 0)
-                    if isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-")
-                    else natural_op_width
-                )
-                # `op_width` is fully static (derived only from the AST,
-                # not from anything computed at compile time), so it can
-                # -- and must -- be computed once up front, THEN used to
-                # align both operands, exactly like the original
-                # unconditional-SIGN_EXT/RESIZE-after-each-operand
-                # structure below (the VM's own SIGN_EXT/RESIZE opcodes are
-                # no-ops when the value is already at the target width).
-                op_width = max(natural_op_width, left_compile_width, right_compile_width)
-                self._compile_expr(expr.left, program, left_compile_width, both_signed)
-                program.append(instr(Op.SIGN_EXT if both_signed else Op.RESIZE, op_width, 0))
-                self._compile_expr(expr.right, program, right_compile_width, both_signed)
-                program.append(instr(Op.SIGN_EXT if both_signed else Op.RESIZE, op_width, 0))
+                eff_signed = signed_override if signed_override is not None else both_signed
+                self._compile_expr(expr.left, program, op_width, eff_signed)
+                program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, op_width, 0))
+                self._compile_expr(expr.right, program, op_width, eff_signed)
+                program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, op_width, 0))
                 op = _BINARY_OP_MAP.get(expr.op)
                 if op is None:
                     raise ValueError(f"Unknown binary operator: {expr.op!r}")
                 program.append(instr(op))
                 if width and width != op_width:
-                    result_eff_signed = signed_override if signed_override is not None else both_signed
-                    if result_eff_signed:
-                        program.append(instr(Op.SIGN_EXT, width, 0))
-                    else:
-                        program.append(instr(Op.RESIZE, width))
+                    program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
                 return
             else:
                 # Context-determined arithmetic (+,-,*,/,%): each operand
@@ -1268,6 +1253,8 @@ class Compiler:  # cm:8c1e4a
                 # Mirrors the identical fix in `sim/evaluator.py`.
                 target = max(width, self._expr_width(expr.left), self._expr_width(expr.right))
                 both_signed = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                if signed_override is not None:
+                    both_signed = signed_override  # propagated from the context (IEEE 5.5.2)
                 self._compile_expr(expr.left, program, target, both_signed)
                 self._compile_expr(expr.right, program, target, both_signed)
                 static_result_w = target + target if expr.op == "*" else target
@@ -1726,6 +1713,15 @@ class Compiler:  # cm:8c1e4a
                     program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
                 return
             self._compile_function_call(expr, program)
+            # A user function's result is its declared return width; extend
+            # it to a wider context like any operand (it used to stay at
+            # that width, so `y32 = f4(a) + f4(b)` added at 4 bits).
+            func = self._function_map.get(expr.name)
+            if func is not None and width:
+                own = self._expr_width(expr)
+                if own < width:
+                    eff_signed = signed_override if signed_override is not None else bool(func.signed)
+                    program.append(instr(Op.SIGN_EXT if eff_signed else Op.RESIZE, width, 0))
             return
 
         # -- StringLiteral --
@@ -2643,18 +2639,12 @@ class Compiler:  # cm:8c1e4a
                 "==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||",
             ):  # fmt: skip
                 return 1
-            if expr.op in ("<<", "<<<"):
-                # Left-shift's self-determined width needs left_width +
-                # shift amount, not just max() -- otherwise `hi << 32`
-                # (hi 31 bits) gets underestimated at 32 bits instead of
-                # 63, silently truncating away the shifted-in bits when
-                # this width is used as a bitwise operand's evaluation
-                # width (see the "&"/"|"/"^" branch in `_compile_expr`).
-                lw = self._expr_width(expr.left)
-                if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
-                    return lw + int(expr.right.value)
-                return max(lw, self._expr_width(expr.right))
-            if expr.op in (">>", ">>>", "**"):
+            # Every shift (and `**`): the LEFT operand's width (IEEE 1364-2005
+            # Table 5-22). `<<` by a literal used to count `left + amount` bits,
+            # so the shifted-out bits survived where Icarus drops them
+            # (`(a8 << 2) >> 6` in an 8-bit context gave 0c, not 00); a wider
+            # context is the caller's job.
+            if expr.op in ("<<", "<<<", ">>", ">>>", "**"):
                 # A shift's self-determined width is its LEFT operand's
                 # width only -- the shift amount never contributes bits.
                 # `**` (power) shares this SAME row in IEEE 1364-2005

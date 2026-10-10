@@ -4402,8 +4402,13 @@ class _WideEmitterMixin:
                     # 1364-2005 SS5.5.2's combining rule governs this
                     # alignment, not each operand's own individual type.
                     # Confirmed against Icarus for `(i5 ^ r8bit) & i4`.
-                    combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
-                elif signed_override is not None:
+                    # CORRECTION 2 (2026-10-09): and like every other operator
+                    # it is context-determined -- operands at max(context,
+                    # their widths), signedness propagated from the context
+                    # when there is one (IEEE 5.4.1/5.5.2 as Icarus does it;
+                    # see `sim/evaluator.py`'s bitwise branch).
+                    bitwise_op_width = max(op_width, dst_width)
+                if signed_override is not None:
                     combined_override = signed_override
                 else:
                     combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)

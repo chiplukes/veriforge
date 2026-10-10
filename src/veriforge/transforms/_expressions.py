@@ -26,6 +26,7 @@ from ..model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 from ._tree_utils import _collect_real_number_text, _collect_text, _loc_from_tree
 
@@ -765,18 +766,25 @@ def _build_constant_width_cast(
     source_file: str | None,
     callbacks: _ExpressionCallbacks,
 ) -> Expression:
+    """``N'(expr)`` -> WidthCast (it used to drop the cast, keeping only expr)."""
+    width: Expression | None = None
+    operand: Expression | None = None
     for child in tree.children:
-        if isinstance(child, Tree) and child.data in (
-            "expression",
-            "constant_expression",
-            "constant_mintypmax_expression",
-        ):
-            return _build_constant_expression(child, source_file, callbacks)
-
-    tree_children = [child for child in tree.children if isinstance(child, Tree)]
-    if len(tree_children) >= 2:  # noqa: PLR2004
-        return _build_constant_expression(tree_children[-1], source_file, callbacks)
-    return Identifier("?")
+        if not isinstance(child, Tree):
+            continue
+        if child.data == "unsigned_number" and width is None:
+            digits = "".join(str(tok) for tok in child.scan_values(lambda v: isinstance(v, Token))).replace("_", "")
+            width = Literal(int(digits), original_text=digits)
+        elif child.data in ("expression", "constant_expression", "constant_mintypmax_expression"):
+            operand = _build_constant_expression(child, source_file, callbacks)
+    if operand is None:
+        tree_children = [child for child in tree.children if isinstance(child, Tree)]
+        if len(tree_children) < 2:  # noqa: PLR2004
+            return Identifier("?")
+        operand = _build_constant_expression(tree_children[-1], source_file, callbacks)
+    if width is None:
+        return operand
+    return WidthCast(width, operand, loc=_loc_from_tree(tree, source_file))
 
 
 def _walk_for_expression(
@@ -875,18 +883,25 @@ def _build_width_cast(
     source_file: str | None,
     callbacks: _ExpressionCallbacks,
 ) -> Expression:
+    """``N'(expr)`` -> WidthCast (it used to drop the cast, keeping only expr)."""
+    width: Expression | None = None
+    operand: Expression | None = None
     for child in tree.children:
-        if isinstance(child, Tree) and child.data in (
-            "expression",
-            "constant_expression",
-            "constant_mintypmax_expression",
-        ):
-            return _build_expression(child, source_file, callbacks)
-
-    tree_children = [child for child in tree.children if isinstance(child, Tree)]
-    if len(tree_children) >= 2:  # noqa: PLR2004
-        return _build_expression(tree_children[-1], source_file, callbacks)
-    return Identifier("?")
+        if not isinstance(child, Tree):
+            continue
+        if child.data == "unsigned_number" and width is None:
+            digits = "".join(str(tok) for tok in child.scan_values(lambda v: isinstance(v, Token))).replace("_", "")
+            width = Literal(int(digits), original_text=digits)
+        elif child.data in ("expression", "constant_expression", "constant_mintypmax_expression"):
+            operand = _build_expression(child, source_file, callbacks)
+    if operand is None:
+        tree_children = [child for child in tree.children if isinstance(child, Tree)]
+        if len(tree_children) < 2:  # noqa: PLR2004
+            return Identifier("?")
+        operand = _build_expression(tree_children[-1], source_file, callbacks)
+    if width is None:
+        return operand
+    return WidthCast(width, operand, loc=_loc_from_tree(tree, source_file))
 
 
 def _build_expr_inner(tree: Tree, source_file: str | None, callbacks: _ExpressionCallbacks) -> Expression:

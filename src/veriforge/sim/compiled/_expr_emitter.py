@@ -50,6 +50,9 @@ if TYPE_CHECKING:
     from veriforge.model.variables import Variable
 
 
+_CONTEXT_ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "**", "<<", ">>", "<<<", ">>>"})
+
+
 class _ExprEmitterMixin:
     """Mixin providing expression and signal-walk emitters for CythonCodegen."""
 
@@ -350,6 +353,9 @@ class _ExprEmitterMixin:
             cached_v = self._et_node_vals.get(id(expr))
             if cached_v is not None:
                 return cached_v
+            own = self._own_width_above_context(expr, width)
+            if own is not None:
+                return f"(({self._emit_binary(expr, own, signed_override)}) & wmask({width}))"
             return self._emit_binary(expr, width, signed_override)
 
         if etype is UnaryOp:
@@ -1478,6 +1484,26 @@ class _ExprEmitterMixin:
         )
         return f"(1 if {same} else 0)" if expr.op == "===" else f"(0 if {same} else 1)"
 
+    def _own_width_above_context(self, expr: BinaryOp, width: int) -> int | None:
+        """The width to compute a context-determined arithmetic/shift *expr*
+        at when the caller asked for a NARROWER *width* (then truncate).
+
+        IEEE 1364-2005 5.4.1: an expression's context width is never below
+        its operands' widths -- `y21 <= (p36 + c) >>> 15` adds and shifts at
+        36 bits and only the result is truncated to 21. Callers pass the
+        assignment target's width, and the emitters below compute an
+        arithmetic/shift operator directly at whatever width they get, so
+        the operands were truncated to 21 bits first and the shift brought
+        in garbage instead of the product's high bits. Only right shifts,
+        `/`, `%` and `**` can observe the difference, but widening every
+        such operator keeps one rule. Wider than 64 bits goes through the
+        wide emitter elsewhere.
+        """
+        if expr.op not in _CONTEXT_ARITH_OPS:
+            return None
+        own = self._expr_width(expr)
+        return own if width < own <= _WORD_BITS else None
+
     def _emit_binary(self, expr: BinaryOp, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911
         op_info = _BINARY_VALUE_OP.get(expr.op)
         if op_info is None:
@@ -1566,6 +1592,13 @@ class _ExprEmitterMixin:
             or (isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-"))
         )
         bitwise_op_width = max(op_width, width or 0) if needs_wide_operand_context else op_width
+        if expr.op in ("&", "|", "^", "~^", "^~"):
+            # IEEE 5.4.1 as Icarus does it (see `sim/evaluator.py`'s bitwise
+            # branch): a bitwise operator is context-determined, so its
+            # operands are computed at max(context, their widths) -- not
+            # only for a `~`/`-` operand. Computing at the natural width lost
+            # a nested `+`'s carry or `<<`'s shifted bits.
+            bitwise_op_width = min(max(op_width, width or 0), _WORD_BITS)
 
         # `>>` is ALWAYS a logical (unsigned/zero-fill) shift in Verilog
         # regardless of the left operand's own declared signedness -- only
@@ -1663,7 +1696,14 @@ class _ExprEmitterMixin:
             # `(i5 ^ r8bit) & i4` (root cause of seed 2243 of the
             # `random-verilog-gen` fuzzer batch) -- see `sim/evaluator.py`
             # for the full repro and additional confirmed cases.
-            combined_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+            # Now with the signedness propagated from the context when
+            # there is one (IEEE 5.5.2: `(sa ^ sb) & u16` zero-extends sa
+            # in Icarus).
+            combined_override = (
+                signed_override
+                if signed_override is not None
+                else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+            )
         else:
             combined_override = signed_override
         # `>>` forcing unsigned is a property of how the shift reads its
@@ -2084,6 +2124,8 @@ class _ExprEmitterMixin:
             # modulus's wider context.
             if bitwise_op_width < _WORD_BITS:
                 core = f"(({core}) & wmask({bitwise_op_width}))"
+            if width and width < bitwise_op_width:
+                return f"({core}) & wmask({width})"
             if width and width > bitwise_op_width:
                 eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
                 if eff_signed:
@@ -2980,7 +3022,13 @@ class _ExprEmitterMixin:
             # condition merge computation for the 63/64-bit-wide argument
             # down to 32 bits, corrupting high-order bits of the value
             # actually stored into port `a`.
-            return self._emit_user_func_call_expr(func, call)
+            code = self._emit_user_func_call_expr(func, call)
+            # A signed function's result sign-extends into a wider context
+            # (it used to zero-extend: `y32 = g4(sn)` gave 0000000d).
+            ret_w = self._expr_width(call)
+            if (signed_override if signed_override is not None else func.signed) and width > ret_w:
+                code = f"_sign_ext({code}, {ret_w})"
+            return code
         # Unsupported function ΓåÆ 0
         return "0"
 
@@ -3105,15 +3153,12 @@ class _ExprEmitterMixin:
         if etype is BinaryOp:
             if expr.op in _COMPARISON_OPS:
                 return 1
-            if expr.op in ("<<", "<<<"):
-                # Left-shift result needs left_width + shift bits, not just max().
-                # Without this, pend_is_level_last << 32 in a 32-bit context gets
-                # masked to 0 by wmask(32), corrupting packed tuser fields.
-                lw = self._expr_width(expr.left)
-                if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
-                    return lw + int(expr.right.value)
-                return max(lw, self._expr_width(expr.right))
-            if expr.op in (">>", ">>>", "**"):
+            # Every shift (and `**`): the LEFT operand's width (IEEE 1364-2005
+            # Table 5-22). `<<` by a literal used to count `left + amount` bits,
+            # so the shifted-out bits survived where Icarus drops them
+            # (`(a8 << 2) >> 6` in an 8-bit context gave 0c, not 00); a wider
+            # context is the caller's job.
+            if expr.op in ("<<", "<<<", ">>", ">>>", "**"):
                 # A shift's self-determined width is its LEFT operand's width
                 # only (IEEE 1364-2005 Table 5-22) -- the shift amount (right
                 # operand) never contributes bits to the result and must not
@@ -3336,6 +3381,9 @@ class _ExprEmitterMixin:
                 max(self._expr_width(expr.left), self._expr_width(expr.right)) <= _WORD_BITS
             ):
                 return "0"  # case equality never yields x (_emit_case_equality)
+            own = self._own_width_above_context(expr, width)
+            if own is not None:
+                return f"(({self._emit_mask_expr(expr, own, signed_override)}) & wmask({width}))"
             if expr.op in _NATURAL_WIDTH_OPS:
                 # Must match `_emit_binary`'s IDENTICAL `op_width` gate
                 # (`_NATURAL_WIDTH_OPS`, not just `_COMPARISON_OPS`) --
@@ -3454,7 +3502,11 @@ class _ExprEmitterMixin:
                 # the mask sign-extended the x sign bit into every one of
                 # those same upper bits, corrupting an almost-fully-defined
                 # 25-bit result into an entirely-ambiguous one.
-                mask_override = self._expr_signed(expr.left) and self._expr_signed(expr.right)
+                mask_override = (
+                    signed_override
+                    if signed_override is not None
+                    else (self._expr_signed(expr.left) and self._expr_signed(expr.right))
+                )
             else:
                 mask_override = signed_override
             lm = self._emit_mask_expr(expr.left, bitwise_op_width, mask_override)
@@ -4208,7 +4260,11 @@ class _ExprEmitterMixin:
                 ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
                 if ret_sid is not None:
                     call_expr = self._emit_user_func_call_expr(func, expr)
-                    return f"(c.mask[{ret_sid}] if ({call_expr} or 1) else 0)"
+                    mask = f"(c.mask[{ret_sid}] if ({call_expr} or 1) else 0)"
+                    ret_w = self._expr_width(expr)
+                    if (signed_override if signed_override is not None else func.signed) and width > ret_w:
+                        mask = f"_sign_ext({mask}, {ret_w})"
+                    return mask
             # Fallback (function not found -- shouldn't happen in practice):
             # OR all argument masks, same crude approximation as before.
             if expr.arguments:

@@ -71,6 +71,38 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Expression context width / signedness propagation (RESOLVED 2026-10-09)
+
+User report: compiled computed `s3 <= 21'((p36 + 36'sd16384) >>> 15)` with
+the add and shift at the 21-bit target width (IEEE 1364-2005 5.4.1: max of
+target and operands = 36), losing the high product bits. Fixed in
+`_expr_emitter.py` (`_own_width_above_context`: compute an arithmetic/shift
+node at its own width when the caller asks for less, then truncate). The
+investigation found, all against Icarus (`tests/test_sim/test_expression_semantics.py`):
+
+- `N'(e)` size casts were dropped by the parser (only `e` kept). Now a
+  `WidthCast` model node (parser, Verilog emitter, semantics width/sign/
+  const-fold), lowered for simulation to a generated N-bit identity user
+  function -- argument binding is exactly the cast's assignment rule.
+- All engines: `<<` by a literal had self-width `left + amount`
+  (IEEE: left), so shifted-out bits survived (`(a8 << 2) >> 6` gave 0c).
+- All engines: bitwise operators computed at their operands' natural width
+  and with their own combined signedness. IEEE (and Icarus): context-
+  determined -- operands at max(context, widths), signedness propagated
+  down from the context. `(a8 + b8) ^ (a8 - b8)` into 16 bits lost the
+  carry; `(sa ^ sb) & u16` sign-extended `sa`; `(|r) % ((sa - a0) | 1)`
+  computed the divisor signed. This supersedes the "natural width first,
+  extend afterward" design and its "CORRECTION" comments in the evaluator,
+  vm compiler and compiled emitters, whose Icarus confirmations used values
+  that couldn't distinguish the two rules. Arithmetic now also takes the
+  propagated signedness.
+- vm: signed `>>>` compiled its left operand with no width, so
+  `(p36 * 2) >>> 16` shifted the unwrapped product.
+- vm: a user-function result wasn't extended to a wider context
+  (`f4(a) + f4(b)` added at 4 bits); compiled didn't sign-extend a signed
+  function's result.
+
+
 ### vm-fast: native heap-corruption crash on a wide-signal module (RESOLVED)
 
 **Status**: Fixed (August 2026). Root-caused with `valgrind` after

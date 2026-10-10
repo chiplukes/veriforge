@@ -663,30 +663,29 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # `16'h0080` before ANDing, not sign-extends to `16'hFF80`
                 # -- `a_signed`'s own individual signedness never gets a
                 # say once the operator's combined type is unsigned.
+                # IEEE 1364-2005 5.4.1/5.5.2, as Icarus does it: a bitwise
+                # operator is context-determined -- both operands are
+                # evaluated AT max(context, their widths), with the
+                # signedness propagated down from the context (the incoming
+                # `signed_override`; otherwise this operator's own: signed
+                # only if both operands are). The "natural width first,
+                # extend afterward" design described above computed nested
+                # operators too narrow (`(a8 + b8) ^ x16` lost the carry,
+                # `(u8 << 60) | y` the shifted bits) and let a signed
+                # operand sign-extend inside an unsigned expression
+                # (`(sa ^ sb) & u16`: Icarus zero-extends sa).
                 natural_op_width = max(_expr_self_width(expr.left, ctx), _expr_self_width(expr.right, ctx))
+                op_width = max(natural_op_width, width or 0)
                 both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
-                left_eval_width = (
-                    max(natural_op_width, width or 0)
-                    if isinstance(expr.left, UnaryOp) and expr.left.op in ("~", "-")
-                    else natural_op_width
-                )
-                right_eval_width = (
-                    max(natural_op_width, width or 0)
-                    if isinstance(expr.right, UnaryOp) and expr.right.op in ("~", "-")
-                    else natural_op_width
-                )
-                left = self.eval(expr.left, ctx, left_eval_width, both_signed)
-                right = self.eval(expr.right, ctx, right_eval_width, both_signed)
-                op_width = max(natural_op_width, left.width, right.width)
+                eff_signed = signed_override if signed_override is not None else both_signed
+                left = self.eval(expr.left, ctx, op_width, eff_signed)
+                right = self.eval(expr.right, ctx, op_width, eff_signed)
                 if left.width != op_width:
-                    left = left.sign_extend(op_width) if both_signed else left.resize(op_width)
+                    left = left.sign_extend(op_width) if eff_signed else left.resize(op_width)
                 if right.width != op_width:
-                    right = right.sign_extend(op_width) if both_signed else right.resize(op_width)
+                    right = right.sign_extend(op_width) if eff_signed else right.resize(op_width)
                 result = _eval_binary_op(op, left, right)
                 if width and result.width != width:
-                    # `_expr_signed(expr, ctx)` for this node type computes
-                    # exactly `both_signed` above -- reuse it directly.
-                    eff_signed = signed_override if signed_override is not None else both_signed
                     result = result.sign_extend(width) if eff_signed else result.resize(width)
                 return result
             else:
@@ -797,6 +796,11 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # still wins over this override, exactly like every other
                 # signed_override use in this function.
                 both_signed = _expr_signed(expr.left, ctx) and _expr_signed(expr.right, ctx)
+                # Signedness propagated down from the context when there is
+                # one (IEEE 5.5.2; `(|r) + ((sa - sb) | 1)` is unsigned
+                # throughout in Icarus), else this operator's own.
+                if signed_override is not None:
+                    both_signed = signed_override
                 left = self.eval(expr.left, ctx, target, both_signed)
                 right = self.eval(expr.right, ctx, target, both_signed)
                 # Only ever WIDEN here, never narrow -- `target` is a
@@ -1643,18 +1647,12 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
     if etype is BinaryOp:
         if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):
             return 1
-        if expr.op in ("<<", "<<<"):
-            # Left-shift's self-determined width needs left_width + shift
-            # amount, not just max() -- otherwise `hi << 32` (hi 31 bits)
-            # gets underestimated at 32 bits instead of 63, silently
-            # truncating away the shifted-in bits (mirrors
-            # `sim/vm/compiler.py`'s `_expr_width`, which has the identical
-            # special case and the same rationale in its own docstring).
-            lw = _expr_self_width(expr.left, ctx)
-            if isinstance(expr.right, Literal) and not (expr.right.is_x or expr.right.is_z):
-                return lw + int(expr.right.value)
-            return max(lw, _expr_self_width(expr.right, ctx))
-        if expr.op in (">>", ">>>", "**"):
+        # Every shift (and `**`): the LEFT operand's width (IEEE 1364-2005
+        # Table 5-22). `<<` by a literal used to count `left + amount` bits,
+        # so the shifted-out bits survived where Icarus drops them
+        # (`(a8 << 2) >> 6` in an 8-bit context gave 0c, not 00); a wider
+        # context is the caller's job.
+        if expr.op in ("<<", "<<<", ">>", ">>>", "**"):
             # A shift's self-determined width is its LEFT operand's width
             # only -- the shift amount never contributes bits to the
             # result (mirrors `sim/vm/compiler.py`'s `_expr_width`). `**`

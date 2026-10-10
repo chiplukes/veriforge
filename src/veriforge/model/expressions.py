@@ -317,6 +317,29 @@ class Replication(Expression):
         return d
 
 
+class WidthCast(Expression):
+    """SystemVerilog size cast ``N'(operand)`` (IEEE 1800 6.24.1): the value
+    *operand* would hold after assignment to an N-bit variable -- evaluated
+    in a context of max(N, its own width), then truncated or extended to N
+    bits. Signedness passes through; the result is self-determined."""
+
+    __slots__ = ("operand", "width")
+
+    def __init__(self, width: Expression, operand: Expression, *, loc: SourceLocation | None = None):
+        super().__init__(loc=loc)
+        self.width = width
+        self.operand = operand
+
+    def _child_nodes(self) -> list[VerilogNode]:
+        return [self.width, self.operand]
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["width"] = self.width.to_dict()
+        d["operand"] = self.operand.to_dict()
+        return d
+
+
 class BitSelect(Expression):
     """a[3]"""
 

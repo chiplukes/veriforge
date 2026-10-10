@@ -15,6 +15,7 @@ silently 0.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
@@ -28,13 +29,16 @@ from veriforge.model.expressions import (
     Literal,
     Range,
     UnaryOp,
+    WidthCast,
 )
-from veriforge.semantics import const_int, expr_width
+from veriforge.model.functions import FunctionDecl
+from veriforge.model.ports import Port, PortDirection
+from veriforge.model.statements import BlockingAssign
+from veriforge.semantics import const_int, expr_signed, expr_width
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
     from veriforge.model.nets import Net
-    from veriforge.model.ports import Port
     from veriforge.model.variables import Variable
 
 _RANGE_QUERIES = {"$size", "$high", "$low", "$left", "$right"}
@@ -218,3 +222,100 @@ def _count_ones(arg: Expression, decls, env, width_of) -> Expression | None:
     for bit in bits:
         total = BinaryOp("+", total, BinaryOp("===", bit, one))
     return total
+
+
+def lower_width_casts(module: Module) -> Module:
+    """Rewrite every ``N'(e)`` (WidthCast) in *module*'s behavioral code,
+    continuous assigns and declaration initializers, in place, as a call
+    to a generated function::
+
+        function automatic [signed] [N-1:0] __vf_cast_N_s(input [signed] [N-1:0] v);
+            __vf_cast_N_s = v;
+        endfunction
+
+    Binding *e* to the N-bit input is an assignment, which is exactly the
+    cast's rule (IEEE 1800 6.24.1): *e* evaluated at max(N, its own width),
+    then truncated or extended to N with its signedness; and a call is
+    self-determined --
+    so every engine gets cast semantics from its existing user-function
+    support. (Parameter and range expressions keep the WidthCast node,
+    which semantics' constant folding understands.)
+
+    Before, the parser dropped the cast and kept only *e*, so its operators
+    took the enclosing context: ``y32 = 16'(a16 + b16)`` kept the carry
+    and ``y8 = 4'(x)`` didn't truncate.
+    """
+    from .elaborate import _build_param_env  # noqa: PLC0415
+
+    nodes = list(iter_nodes(module, set()))
+    if not any(isinstance(node, WidthCast) or _cast_call_shape(node) for node in nodes):
+        return module
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    all_decls: list[Port | Net | Variable] = [*module.ports, *module.nets, *module.variables]
+    signed_names = {d.name for d in all_decls if d.signed}
+    made: dict[str, FunctionDecl] = {}
+
+    def lower(expr: Expression) -> Expression | None:
+        if not isinstance(expr, WidthCast):
+            return None
+        n = const_int(expr.width, env)
+        if n is None or n <= 0:
+            return None
+        signed = expr_signed(expr.operand, lambda name: name in signed_names)
+        name = f"__vf_cast_{n}_{'s' if signed else 'u'}"
+        if name not in made:
+            made[name] = _cast_function(name, n, signed)
+        return FunctionCall(name=name, arguments=[expr.operand], loc=expr.loc)
+
+    seen: set[int] = set()
+    for container in (
+        module.always_blocks,
+        module.initial_blocks,
+        module.continuous_assigns,
+        module.functions,
+        module.tasks,
+    ):
+        for node in container:
+            _rewrite(node, lower, seen)
+    inits: list[Net | Variable] = [*module.nets, *module.variables]
+    for decl in inits:
+        init = decl.initial_value
+        if init is not None:
+            _rewrite(init, lower, seen)
+            new = lower(init)
+            if new is not None:
+                decl.initial_value = new
+    # Calls already lowered by an earlier Simulator: the pass rewrites
+    # expression nodes in place, and a design's submodule nodes are shared
+    # by every flattening of it, so a second Simulator on the same design
+    # sees the calls but needs its own declarations.
+    for call in nodes:
+        shape = _cast_call_shape(call)
+        if shape is not None and isinstance(call, FunctionCall) and call.name not in made:
+            made[call.name] = _cast_function(call.name, *shape)
+    existing = {f.name for f in module.functions}
+    module.functions.extend(f for name, f in made.items() if name not in existing)
+    return module
+
+
+_CAST_CALL = re.compile(r"__vf_cast_(\d+)_([su])")
+
+
+def _cast_call_shape(node: object) -> tuple[int, bool] | None:
+    if isinstance(node, FunctionCall) and (m := _CAST_CALL.fullmatch(node.name)):
+        return int(m.group(1)), m.group(2) == "s"
+    return None
+
+
+def _cast_function(name: str, n: int, signed: bool) -> FunctionDecl:  # noqa: FBT001
+    def rng() -> Range:
+        return Range(Literal(n - 1, width=32), Literal(0, width=32))
+
+    return FunctionDecl(
+        name,
+        return_range=rng(),
+        signed=signed,
+        is_automatic=True,
+        ports=[Port("v", PortDirection.INPUT, width=rng(), signed=signed)],
+        body=BlockingAssign(Identifier(name), Identifier("v")),
+    )

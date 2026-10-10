@@ -59,6 +59,7 @@ from .expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 
 # Instances
@@ -188,4 +189,5 @@ __all__ = [
     "VerilogNode",
     "WaitStatement",
     "WhileLoop",
+    "WidthCast",
 ]

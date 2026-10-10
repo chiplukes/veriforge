@@ -28,6 +28,7 @@ from ..model.expressions import (
     Range,
     RangeSelect,
     Replication,
+    WidthCast,
     StreamingConcatenation,
     StringLiteral,
     TernaryOp,
@@ -777,6 +778,8 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
     if isinstance(expr, Concatenation):
         parts = ", ".join(emit_expression(p) for p in expr.parts)
         return "{" + parts + "}"
+    if isinstance(expr, WidthCast):
+        return f"{emit_expression(expr.width)}'({emit_expression(expr.operand)})"
     if isinstance(expr, Replication):
         # When the value is a Concatenation, emit its parts directly inside the
         # replication braces to avoid double-wrapping: {4{a, b}} not {4{{a, b}}}

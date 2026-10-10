@@ -37,6 +37,7 @@ from .model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 from .model.nets import Net
 from .model.parameters import Parameter
@@ -184,6 +185,8 @@ def _eval_const(expr: Expression, env: Mapping[str, int]) -> int:
         return (target_val >> lsb_val) & ((1 << width_val) - 1)
     if isinstance(expr, Mintypmax):
         return _eval_const(expr.typ_val, env)
+    if isinstance(expr, WidthCast):
+        return _eval_const(expr.operand, env) & ((1 << _eval_const(expr.width, env)) - 1)
     if isinstance(expr, FunctionCall):
         return _eval_const_func(expr, env)
     raise ValueError(f"Cannot evaluate {type(expr).__name__} as constant expression")
@@ -402,6 +405,9 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
         return 32
     if isinstance(expr, Mintypmax):
         return expr_width(expr.typ_val, width_of, env)
+    if isinstance(expr, WidthCast):
+        cast_w = const_int(expr.width, env)
+        return cast_w if cast_w is not None else expr_width(expr.operand, width_of, env)
     return 32
 
 
@@ -447,4 +453,6 @@ def expr_signed(expr: Expression, signed_of: Callable[[str], bool]) -> bool:
         return False
     if isinstance(expr, FunctionCall):
         return expr.name.lower() == "$signed"
+    if isinstance(expr, WidthCast):
+        return expr_signed(expr.operand, signed_of)
     return False
