@@ -1676,6 +1676,40 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 sids.add(sid)
         return sids
 
+    def _func_internal_sids(self) -> set[int]:
+        """Signals a process must read live (never from its sv[]/sm[]
+        snapshot) because a user function may write them: each function's
+        own ports/return/locals, and any module signal its body assigns --
+        an impure function's side effect (`calls = calls + 1;`) used to be
+        invisible to the calling clocked process, which read the snapshot."""
+        from veriforge.model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
+
+        sids: set[int] = set()
+        for func in self._function_map.values():
+            prefix = f"__func_{func.name}"
+            local = [func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)]
+            for name in local:
+                sid = self._signal_map.get(f"{prefix}.{name}")
+                if sid is not None:
+                    sids.add(sid)
+            if func.body is None:
+                continue
+            for node in func.body.walk():
+                if not isinstance(node, (BlockingAssign, NonblockingAssign)):
+                    continue
+                targets = [node.lhs]
+                while targets:
+                    t = targets.pop()
+                    if isinstance(t, Concatenation):
+                        targets.extend(t.parts)
+                    elif isinstance(t, (BitSelect, RangeSelect, PartSelect)):
+                        targets.append(t.target)
+                    elif isinstance(t, Identifier) and t.name not in local:
+                        sid = self._signal_map.get(self._identifier_name(t))
+                        if sid is not None:
+                            sids.add(sid)
+        return sids
+
     def _gen_process_functions(self) -> str:
         parts: list[str] = []
 
@@ -1693,14 +1727,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # variable, locals) must also never be rewritten to sv[]/sm[] -- see
         # `_seq_body_to_sv_reads`'s own docstring (func_internal_sids
         # exception) for the concrete Icarus-confirmed repro this avoids.
-        func_internal_sids: set[int] = set()
-        for func in self._function_map.values():
-            prefix = f"__func_{func.name}"
-            names = [func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)]
-            for name in names:
-                sid = self._signal_map.get(f"{prefix}.{name}")
-                if sid is not None:
-                    func_internal_sids.add(sid)
+        func_internal_sids = self._func_internal_sids()
         external_input_sids = self._external_input_sids()
 
         process_groups = (
@@ -1818,14 +1845,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # `_seq_body_to_sv_reads`'s docstring (func_internal_sids exception)
         # for the rationale; this method must stay byte-for-byte identical
         # to that one.
-        func_internal_sids: set[int] = set()
-        for func in self._function_map.values():
-            prefix = f"__func_{func.name}"
-            names = [func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)]
-            for name in names:
-                sid = self._signal_map.get(f"{prefix}.{name}")
-                if sid is not None:
-                    func_internal_sids.add(sid)
+        func_internal_sids = self._func_internal_sids()
         external_input_sids = self._external_input_sids()
 
         process_groups = (

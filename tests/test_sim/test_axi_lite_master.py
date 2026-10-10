@@ -416,3 +416,19 @@ def test_axi_lite_strict_clean_transaction_no_raise(engine: str) -> None:
     step_run_until(sim, 26)  # posedge at t=25: no error raised
 
     responder.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_axi_lite_master_responder_on_bare_stub(engine: str) -> None:
+    """Master and responder on a bare stub's own ports, nothing between them
+    (the AXI4 pair used to time out this way; see
+    test_axi4_responder.py::test_axi4_master_responder_on_bare_stub)."""
+    sim = _make_stub_sim(engine)
+    master = AXILiteMaster(sim, "axi", default_timeout_cycles=30)
+    responder = AXILiteResponder(sim, "axi")
+
+    master.write(0x4, 0x12345678)
+    master.write(0x8, 0x9ABCDEF0)
+    assert master.read(0x4) == 0x12345678
+    assert master.read(0x8) == 0x9ABCDEF0
+    assert responder.write_log == [(0x4, 0x12345678, 0xF), (0x8, 0x9ABCDEF0, 0xF)]

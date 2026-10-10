@@ -71,6 +71,50 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Functions, tasks, integers and $display gaps (RESOLVED 2026-10-09)
+
+Found while closing the `$display` gaps (`tests/test_sim/test_functions_tasks.py`,
+`test_display_format.py`, all against Icarus):
+
+- `integer`/`int`/`shortint`/`longint`/`byte` were **unsigned on every
+  engine** -- the parser never set `Variable.signed` (`integer i = -5;
+  i < 0` was false, `i / 2` was `7ffffffd`). `Variable(signed=None)` now
+  means the kind's default; `unsigned` is honored; the emitter prints
+  `signed`/`unsigned` only against the default.
+- The parser dropped task-local declarations (`TaskDecl.locals` is new); the
+  emitter left out function and task locals. For simulation, task locals
+  are hoisted to module variables `__task_<task>__<var>`
+  (`sim/sv_functions.py:materialize_task_locals`).
+- Function/task ports and locals read as unsigned inside the body
+  (reference/vm/compiled registration); reference didn't create locals
+  with their declared width, ran function bodies on a copy of the signals
+  (module-variable writes were lost) and bound task inputs without the port
+  width; vm made a function-local `integer` 1 bit wide and printed each
+  `$write` as its own line (`severity.WRITE_MARK` + `DisplayLog`); compiled
+  evaluated a user-function call up to three times per use (value + mask;
+  now hoisted once via `_et_pending`) and its clocked processes read a
+  function's module-signal writes from the pre-edge snapshot.
+- `$display`: `$displayh/b/o`/`$writeh/b/o`/... now use their radix for
+  leftover arguments; `%e/%f/%g` with width/precision (integer values --
+  see the open `real` gap); `%m` prints the scope (instance path recorded
+  at flattening, plus named block / function / task); signed `%d` of
+  function/task ports and locals.
+
+### AXI4Master + AXI4Responder pairing on a bare stub (RESOLVED 2026-10-09)
+
+Two independent causes: (1) the responder accepts from time-step callbacks
+during the clock-low phase, so a master drive made after that time step's
+callbacks (with nothing else happening at that time -- a DUT's activity
+used to hide it) was never seen before the edge, while the master counted
+the handshake as done; fixed with `Simulator.add_pre_step_callback`
+(the three Python responders re-sample before every `run_step()`). (2) The
+master sampled right after the edge, assuming the responder holds its
+outputs for the whole cycle, but the responder presents its next R beat at
+the negedge, so multi-beat reads counted a beat twice; the master now
+samples in the clock-low phase before the edge (`_to_sample_point`).
+`sim.fork(Clock)` + `run_step()` remains unsupported (stepping doesn't
+drive coroutine clocks) -- that was the other "hang" in the old notes.
+
 ### Expression context width / signedness propagation (RESOLVED 2026-10-09)
 
 User report: compiled computed `s3 <= 21'((p36 + 36'sd16384) >>> 15)` with

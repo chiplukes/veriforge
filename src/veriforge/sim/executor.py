@@ -52,7 +52,7 @@ from .evaluator import (
     _resolve_struct_write_target,
     _write_whole_memory,
 )
-from .display_format import SIGNED_FLAG, format_value
+from .display_format import SIGNED_FLAG, format_real, format_value
 from .severity import severity_display
 from .value import Value
 
@@ -1330,6 +1330,13 @@ class StatementExecutor:  # cm:c2f9a1
                 while i < len(fmt) and fmt[i].isdigit():
                     width = width * 10 + int(fmt[i])
                     i += 1
+                precision = None  # %<w>.<p>f
+                if i < len(fmt) and fmt[i] == ".":
+                    i += 1
+                    precision = 0
+                    while i < len(fmt) and fmt[i].isdigit():
+                        precision = precision * 10 + int(fmt[i])
+                        i += 1
                 if i >= len(fmt):
                     break
                 spec = fmt[i].lower()
@@ -1359,6 +1366,8 @@ class StatementExecutor:  # cm:c2f9a1
                     arg_idx += 1
                     if spec in "dhxob":
                         result.append(format_value(v, spec, width, zero_pad, signed))
+                    elif spec in "efg":
+                        result.append(format_real(v, spec, width, precision, zero_pad, signed))
                     elif spec == "c":
                         result.append(chr(int(v) & 0xFF) if v.is_defined else "?")
                     elif spec == "s":
@@ -1493,12 +1502,22 @@ class StatementExecutor:  # cm:c2f9a1
 
         # Save any shadowed signals and inject port variables
         saved: dict[str, Value | None] = {}
+        saved_signed: dict[str, bool | None] = {}
         output_bindings: list[tuple[str, Expression]] = []
         for i, port in enumerate(task.ports):
             saved[port.name] = ctx._signals.get(port.name)
+            # A port's own signedness inside the body (it used to read as
+            # unsigned).
+            saved_signed[port.name] = ctx._signal_signed.get(port.name)
+            ctx._signal_signed[port.name] = bool(port.signed)
             if i < len(stmt.arguments):
                 if port.direction == PortDirection.INPUT:
-                    val = self.evaluator.eval(stmt.arguments[i], ctx)
+                    # Bound like an assignment to the port: evaluated at the
+                    # port's width, extended by the argument's signedness.
+                    port_w = self._eval_port_width(port, ctx)
+                    val = self.evaluator.eval(stmt.arguments[i], ctx, port_w or 0)
+                    if port_w is not None and val.width != port_w:
+                        val = val.sign_extend(port_w) if _expr_signed(stmt.arguments[i], ctx) else val.resize(port_w)
                     ctx._signals[port.name] = val
                 elif port.direction in (PortDirection.OUTPUT, PortDirection.INOUT):
                     if port.direction == PortDirection.INOUT:
@@ -1525,6 +1544,23 @@ class StatementExecutor:  # cm:c2f9a1
                 ctx._signals.pop(port_name, None)
             else:
                 ctx._signals[port_name] = old_val
+        for port_name, old_signed in saved_signed.items():
+            if old_signed is None:
+                ctx._signal_signed.pop(port_name, None)
+            else:
+                ctx._signal_signed[port_name] = old_signed
+
+    def _eval_port_width(self, port, ctx: EvalContext) -> int | None:
+        """A task port's declared width, evaluated in *ctx* (parameterized
+        ranges included -- `_port_width` only handles literal ranges); None
+        for a typedef-typed port, whose width isn't resolved here."""
+        if port.width is None:
+            return None if getattr(port, "data_type", None) else 1
+        msb = self.evaluator.eval(port.width.msb, ctx)
+        lsb = self.evaluator.eval(port.width.lsb, ctx)
+        if msb.is_defined and lsb.is_defined:
+            return abs(int(msb) - int(lsb)) + 1
+        return _port_width(port)
 
 
 def _case_match(case_type: str, sel: Value, item: Value) -> bool:

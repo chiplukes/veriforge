@@ -26,6 +26,11 @@ class VariableKind(Enum):
     LONGINT = "longint"
 
 
+SIGNED_KINDS = frozenset(
+    {VariableKind.INTEGER, VariableKind.INT, VariableKind.SHORTINT, VariableKind.LONGINT, VariableKind.BYTE}
+)
+
+
 class Variable(VerilogNode):
     """A variable declaration (reg, integer, real, time, event)."""
 
@@ -48,7 +53,7 @@ class Variable(VerilogNode):
         kind: VariableKind = VariableKind.REG,
         *,
         width: Range | None = None,
-        signed: bool = False,
+        signed: bool | None = None,
         dimensions: list[Range] | None = None,
         packed_dim_count: int = 0,
         initial_value: Expression | None = None,
@@ -59,7 +64,10 @@ class Variable(VerilogNode):
         self.name = name
         self.kind = kind
         self.width = width
-        self.signed = signed
+        # `None`: the kind's default -- `integer`/`int`/`shortint`/`longint`/
+        # `byte` are signed (IEEE 1800 6.11). The parser never set this, so
+        # every engine treated `integer i = -5; i < 0` as false.
+        self.signed = signed if signed is not None else kind in SIGNED_KINDS
         self.dimensions = dimensions or []
         # See `Net.packed_dim_count`'s identical docstring (model/nets.py)
         # for what this counts and why it's needed.

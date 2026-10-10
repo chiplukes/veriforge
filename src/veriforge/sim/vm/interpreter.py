@@ -13,7 +13,7 @@ Design for speed:
 
 from __future__ import annotations
 
-from ..display_format import SIGNED_FLAG, format_value
+from ..display_format import SIGNED_FLAG, format_real, format_value
 from ..value import Value, _mask_for_width, _verilog_pow
 from .opcodes import Op
 
@@ -69,6 +69,13 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
             while i < len(fmt) and fmt[i].isdigit():
                 width = width * 10 + int(fmt[i])
                 i += 1
+            precision = None  # %<w>.<p>f
+            if i < len(fmt) and fmt[i] == ".":
+                i += 1
+                precision = 0
+                while i < len(fmt) and fmt[i].isdigit():
+                    precision = precision * 10 + int(fmt[i])
+                    i += 1
             if i >= len(fmt):
                 break
             spec = fmt[i].lower()
@@ -97,6 +104,8 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
                 arg_idx += 1
                 if spec in "dhxob":
                     result.append(format_value(v, spec, width, zero_pad, signed))
+                elif spec in "efg":
+                    result.append(format_real(v, spec, width, precision, zero_pad, signed))
                 elif spec == "c":
                     if v.is_defined:
                         result.append(chr(int(v) & 0xFF))

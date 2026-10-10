@@ -94,3 +94,127 @@ def test_declaration_initializer_context_width(engine):
     sim = Simulator(design.modules[0], engine=engine, design=design)
     sim.run(max_time=10)
     assert list(sim.display_output) == ["ff fe fffd ff"]
+
+
+# 2026-10-09: ``$displayh/b/o``/``$writeh/b/o`` (leftover arguments in
+# that radix; they were treated as plain $display), ``%e/%f/%g`` with
+# width/precision (unimplemented: printed literally), signed ``%d`` of
+# function/task ports and locals, and vm's ``$write`` (each was its own
+# line). Expected output is Icarus's.
+_RADIX = """module t;
+  function automatic [7:0] f(input signed [7:0] a);
+    reg signed [7:0] loc;
+    integer n;
+    begin loc = a; n = -5; $display("f: %d %d %d", a, loc, n); f = a; end
+  endfunction
+  task automatic tk(input signed [3:0] b);
+    reg signed [3:0] l2;
+    begin l2 = b; $display("tk: %d %d", b, l2); end
+  endtask
+  reg [7:0] a = 8'h5a; reg [11:0] w = 12'habc; integer i = 7; reg [7:0] y; reg [3:0] x4 = 4'b1x01;
+  reg [7:0] x8 = 8'bx; reg signed [7:0] s = -8'sd3;
+  initial begin
+    #1;
+    $displayh(a, " ", w);
+    $displayb(a, x4);
+    $displayo(w, " ", i);
+    $writeh(a); $write("|"); $writeb(x4); $display;
+    y = f(-8'sd3); tk(-4'sd2);
+    $display("[%f][%e][%g][%0.2f][%10.3f][%.1e]", i, i, a, i, a, w);
+    $display("[%f][%e][%g][%010.3f][%f]", x8, x8, x8, s, s);
+  end
+endmodule
+"""
+_RADIX_EXPECTED = [
+    "5a abc",
+    "010110101x01",
+    "5274 00000000007",
+    "5a|1x01",
+    "f:   -3   -3          -5",
+    "tk: -2 -2",
+    "[7.000000][7.000000e+00][90][7.00][    90.000][2.7e+03]",
+    "[0.000000][0.000000e+00][0][-00003.000][-3.000000]",
+]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_radix_tasks_real_formats_and_local_signedness(engine):
+    design = tree_to_design(verilog_parser(start="source_text").build_tree(_RADIX), source_file="radix.v")
+    sim = Simulator(design.modules[0], engine=engine, design=design)
+    sim.run(max_time=10)
+    assert list(sim.display_output) == _RADIX_EXPECTED
+
+
+# The same formats from a clocked process (compiled's native code path), and
+# %m in a named block.
+_RADIX_NATIVE = """module t(input clk);
+  reg [7:0] a = 8'h5a; reg [11:0] w = 12'habc; integer i = 7; reg [3:0] x4 = 4'b1x01;
+  reg [7:0] x8 = 8'bx; reg signed [7:0] s = -8'sd3; reg [99:0] big = {4'h9, 96'h0};
+  always @(posedge clk) begin : blk
+    $displayh(a, " ", w);
+    $displayb(a, x4);
+    $writeh(a); $write("|"); $writeb(x4); $display;
+    $display("%m [%f][%e][%g][%0.2f][%10.3f][%.1e]", i, i, a, i, a, w);
+    $display("[%f][%e][%g][%010.3f][%f][%g]", x8, x8, x8, s, s, big);
+  end
+endmodule
+"""
+_RADIX_NATIVE_EXPECTED = [
+    "5a abc",
+    "010110101x01",
+    "5a|1x01",
+    "t.blk [7.000000][7.000000e+00][90][7.00][    90.000][2.7e+03]",
+    "[0.000000][0.000000e+00][0][-00003.000][-3.000000][7.13053e+29]",
+]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_radix_and_real_formats_native(engine):
+    design = tree_to_design(verilog_parser(start="source_text").build_tree(_RADIX_NATIVE), source_file="rnat.v")
+    sim = Simulator(design.modules[0], engine=engine, design=design)
+    sim.fork(Clock(sim.signal("clk"), period=10))
+    sim.run(max_time=8)
+    assert list(sim.display_output) == _RADIX_NATIVE_EXPECTED
+
+
+# %m: the hierarchical scope (instance path, named block, function/task) --
+# it used to print a "<module>" placeholder.
+_SCOPE = """module t;
+  sub u_a();
+  initial begin : top_blk
+    #2 $display("%m");
+  end
+endmodule
+module sub;
+  function automatic integer f(input integer x); begin $display("in f: %m"); f = x; end endfunction
+  task automatic tk; $display("in tk: %m"); endtask
+  inner u_in();
+  integer r;
+  initial begin
+    #1 $display("sub: %m 100%%m");
+    begin : named
+      $display("named: %m");
+    end
+    r = f(1); tk;
+  end
+endmodule
+module inner;
+  initial #3 $display("inner: %m");
+endmodule
+"""
+_SCOPE_EXPECTED = [
+    "sub: t.u_a 100%m",
+    "named: t.u_a.named",
+    "in f: t.u_a.f",
+    "in tk: t.u_a.tk",
+    "t.top_blk",
+    "inner: t.u_a.u_in",
+]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_scope_name_format(engine):
+    design = tree_to_design(verilog_parser(start="source_text").build_tree(_SCOPE), source_file="scope.v")
+    sim = Simulator(design.modules[0], engine=engine, design=design)
+    sim.run(max_time=10)
+    assert list(sim.display_output) == _SCOPE_EXPECTED

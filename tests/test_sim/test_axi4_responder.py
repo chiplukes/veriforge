@@ -913,11 +913,7 @@ def test_axi4_master_responder_multibeat_burst_with_continuous_rready(engine: st
 @pytest.mark.parametrize("engine", ENGINES)
 def test_axi4_master_responder_through_combinational_passthru(engine: str) -> None:
     """A purely combinational (``assign``-only, no registers) slave-to-master
-    passthrough between AXI4Master and AXI4Responder works fine — pairing
-    them directly on a *bare stub with no module at all* between them is the
-    one combination that doesn't (see the module docstring); any real DUT,
-    combinational or registered, is enough as long as the simulator is built
-    with `_schedule_clock_events` like `_make_passthru_sim`/`Testbench` do."""
+    passthrough between AXI4Master and AXI4Responder."""
     sim = _make_passthru_sim(engine, AXI4_COMBINATIONAL_PASSTHRU_SRC)
     master = AXI4Master(sim, "s_axi", default_timeout_cycles=200)
     responder = AXI4Responder(sim, "m_axi")
@@ -928,18 +924,21 @@ def test_axi4_master_responder_through_combinational_passthru(engine: str) -> No
     responder.close()
 
 
-def test_axi4_master_responder_on_bare_stub_never_completes() -> None:
-    """The one pairing that doesn't work: both endpoints attached to a bare
-    stub's own top-level ports, with no module logic — not even an `assign`
-    — between them. Not a realistic scenario (every real test has a DUT),
-    kept here as a regression/documentation anchor. Confirmed independent
-    of `default_timeout_cycles` (still hangs at 2000 cycles) and of the
-    other changes in this session (`git stash` reproduces it against main)."""
-    engine = "reference"
+@pytest.mark.parametrize("engine", ENGINES)
+def test_axi4_master_responder_on_bare_stub(engine: str) -> None:
+    """Both endpoints on a bare stub's own ports, nothing between them.
+
+    This used to time out: the master raised AWVALID during the clock-low
+    phase *after* that time step's callbacks had run, and the responder
+    (which accepts from low-phase callbacks) got no further callback before
+    the edge -- while the master saw VALID&READY at the edge and considered
+    the handshake done. A DUT's own activity happened to trigger the extra
+    callback. Fixed by Simulator.add_pre_step_callback (fixed 2026-10-09)."""
     sim = _make_stub_sim(engine)
     master = AXI4Master(sim, "m_axi", default_timeout_cycles=50)
     responder = AXI4Responder(sim, "m_axi")
 
-    with pytest.raises(TimeoutError):
-        master.write(0x0, [0xAABBCCDD])
+    assert master.write(0x0, [0xAABBCCDD, 0x01020304]) == 0
+    assert master.read(0x0, length=2) == [0xAABBCCDD, 0x01020304]
+    assert responder.write_log == [(0x0, 0xAABBCCDD, 0xF), (0x4, 0x01020304, 0xF)]
     responder.close()

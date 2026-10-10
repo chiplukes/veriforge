@@ -77,7 +77,7 @@ class _FunctionContext:
 class _BlockVarContext:
     decl_kind: VariableKind = VariableKind.REG
     width: Range | None = None
-    signed: bool = False
+    signed: bool | None = None  # None: the kind's default (see Variable)
     type_name: str | None = None
     decl_list: Tree | None = None
 
@@ -397,6 +397,10 @@ def _extract_tf_direction_ports(
         if isinstance(child, Token):
             if child.type == "KW_SIGNED":
                 spec.signed = True
+            elif child.type == "IDENTIFIER" and spec.data_type is None:
+                # A typedef'd port (`input idx_t x;`): the type used to be
+                # dropped, leaving a 1-bit port.
+                spec.data_type = str(child)
         elif isinstance(child, Tree):
             if child.data == "range":
                 spec.width = callbacks.build_range(child, source_file)
@@ -465,6 +469,8 @@ def _extract_task_declaration(
     name = ""
     is_automatic = False
     ports: list[Port] = []
+    local_vars: list[Variable] = []
+    init_statements: list[Statement] = []
     body: Statement | None = None
     loc = _loc_from_tree(tree, source_file)
 
@@ -477,17 +483,26 @@ def _extract_task_declaration(
         elif isinstance(child, Tree):
             if child.data == "task_port_list":
                 ports.extend(_extract_tf_ports(child, source_file, callbacks))
-            elif child.data == "task_item_declaration":
+            elif child.data in ("task_item_declaration", "block_item_declaration"):
                 ports.extend(_extract_tf_ports(child, source_file, callbacks))
+                # Task-level variable declarations (used to be dropped, so
+                # every engine mis-handled them), as for functions.
+                decl_vars, inits = _extract_function_block_items(child, source_file, callbacks)
+                local_vars.extend(decl_vars)
+                init_statements.extend(inits)
             elif child.data == "statement_or_null":
                 body = callbacks.extract_statement(child, source_file)
 
     if not name:
         return None
 
-    task = TaskDecl(name=name, is_automatic=is_automatic, ports=ports, body=body, loc=loc)
+    if init_statements:
+        body = _combine_function_body([*init_statements, *([body] if body is not None else [])], loc)
+    task = TaskDecl(name=name, is_automatic=is_automatic, ports=ports, local_vars=local_vars, body=body, loc=loc)
     for port in ports:
         port.parent = task
+    for variable in local_vars:
+        variable.parent = task
     if body:
         body.parent = task
     return task

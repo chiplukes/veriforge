@@ -24,7 +24,7 @@ from .elaborate import (
 )
 from .scheduler import Scheduler
 from .display_format import lower_display_args
-from .sv_functions import lower_sv_functions, lower_width_casts
+from .sv_functions import lower_sv_functions, lower_width_casts, materialize_task_locals
 from .value import Value
 
 if TYPE_CHECKING:
@@ -152,6 +152,7 @@ class Simulator:  # cm:a5c8f4
         "_clocks",
         "_engine",
         "_module",
+        "_pre_step_callbacks",
         "_run_cycles_clock_ready",
         "_sched",
         "_signal_cache",
@@ -173,6 +174,7 @@ class Simulator:  # cm:a5c8f4
         # the Clock object: callers pass temporaries, and a freed Clock's
         # id() can be reused by the next one.)
         self._clock_next_edge: dict[str, int] = {}
+        self._pre_step_callbacks: list[Callable[[], None]] = []
         self._run_cycles_clock_ready = False
 
         # Flatten hierarchy if instances or generate blocks are present
@@ -189,6 +191,7 @@ class Simulator:  # cm:a5c8f4
         resolve_sv_imports(module, design)
         _resolve_typedef_widths(module)
         materialize_process_locals(module)
+        materialize_task_locals(module)
         expand_array_concat_operands(module)
         lower_sv_functions(module)
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
@@ -466,6 +469,17 @@ class Simulator:  # cm:a5c8f4
         Returns True if simulation can continue (events remain),
         False if finished or stopped.
         """
+        if self._pre_step_callbacks:
+            # Endpoints that sample from time-step callbacks (the Python
+            # responders) re-sample here: a drive made from Python after
+            # the current time step's callbacks ran -- e.g. AXI4Master
+            # raising AWVALID during the clock-low phase -- would otherwise
+            # never be seen before the next edge, so the two sides
+            # disagreed on whether a handshake happened (it took a DUT's own
+            # activity at that time to trigger another callback).
+            self._sched.settle()
+            for callback in list(self._pre_step_callbacks):
+                callback()
         if self._engine == "reference":
             return self._sched.run_step()
         if self._engine in ("vm", "vm-fast"):
@@ -481,6 +495,17 @@ class Simulator:  # cm:a5c8f4
             assert isinstance(sched, _CSched)  # noqa: S101
             return sched.run_step()
         raise NotImplementedError(f"run_step() not supported for engine {self._engine!r}")
+
+    def add_pre_step_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Call *callback* (after settling pending drives) before every
+        ``run_step()`` advances time; returns a function that removes it."""
+        self._pre_step_callbacks.append(callback)
+
+        def remove() -> None:
+            if callback in self._pre_step_callbacks:
+                self._pre_step_callbacks.remove(callback)
+
+        return remove
 
     def drive(self, name: str, value: Value | int) -> None:
         """Drive a signal by name (convenience method)."""

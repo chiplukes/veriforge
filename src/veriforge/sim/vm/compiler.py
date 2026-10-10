@@ -57,7 +57,7 @@ from veriforge.model.statements import (
 
 from ...semantics import const_int as _const_int
 from ..evaluator import evaluate_constant
-from ..severity import severity_display
+from ..severity import WRITE_MARK, severity_display
 from ...semantics import range_width as _range_width
 from ...semantics import var_width as _var_width
 from ..value import Value
@@ -1948,17 +1948,24 @@ class Compiler:  # cm:8c1e4a
         for port in func.ports:
             local_name = f"{prefix}.{port.name}"
             w = _range_width(port.width, self._param_env)
-            sid = self._register_signal(local_name, w)
+            # With its signedness: a signed port/local used to read as
+            # unsigned inside the body (`n = a` zero-extended a signed a).
+            sid = self._register_signal(local_name, w, bool(port.signed))
             port_sids.append(sid)
             layout = self._struct_layout_for_type(getattr(port, "data_type", None))
             if layout is not None:
                 self._struct_signal_types[local_name] = layout
 
         ret_name = f"{prefix}.{func.name}"
-        ret_sid = self._register_signal(ret_name, ret_width)
+        ret_sid = self._register_signal(ret_name, ret_width, bool(func.signed))
         for local_var in func.locals:
             local_name = f"{prefix}.{local_var.name}"
-            self._register_signal(local_name, _range_width(local_var.width, self._param_env))
+            # `_var_width` knows `integer`/`int`/... (no range); `_range_width`
+            # made a function-local `integer` 1 bit wide.
+            local_signed = bool(local_var.signed) or getattr(local_var.kind, "value", "") in (
+                "integer", "int", "shortint", "longint", "byte",
+            )  # fmt: skip
+            self._register_signal(local_name, _var_width(local_var, self._param_env), local_signed)
             layout = self._struct_layout_for_type(getattr(local_var, "type_name", None))
             if layout is not None:
                 self._struct_signal_types[local_name] = layout
@@ -2066,7 +2073,9 @@ class Compiler:  # cm:8c1e4a
         for port in task.ports:
             local_name = f"{prefix}.{port.name}"
             w = _range_width(port.width, self._param_env)
-            sid = self._register_signal(local_name, w)
+            # With its signedness: a signed port/local used to read as
+            # unsigned inside the body (`n = a` zero-extended a signed a).
+            sid = self._register_signal(local_name, w, bool(port.signed))
             port_sids.append(sid)
 
         # Compile arguments: store inputs/inouts, track output bindings
@@ -2437,8 +2446,14 @@ class Compiler:  # cm:8c1e4a
             if value_args and isinstance(value_args[0], StringLiteral):
                 fmt_str = value_args[0].value
                 fmt_id = len(self.display_formats) + 1  # 1-indexed
-                self.display_formats.append(fmt_str)
+                self.display_formats.append(fmt_str + (WRITE_MARK if name == "$write" else ""))
                 value_args = value_args[1:]  # remaining are data args
+            elif name == "$write":
+                fmt_id = len(self.display_formats) + 1
+                self.display_formats.append("%d" * len(value_args) + WRITE_MARK)
+            # (`$write` shares SYS_DISPLAY; WRITE_MARK makes the DisplayLog
+            # join it with the next line -- each `$write` used to print as
+            # its own line.)
 
             for arg in value_args:
                 self._compile_expr(arg, program)

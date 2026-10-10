@@ -3104,6 +3104,13 @@ class _StmtEmittersMixin:
                 while i < len(fmt) and fmt[i].isdigit():
                     width = width * 10 + int(fmt[i])
                     i += 1
+                precision = -1  # %<w>.<p>f
+                if i < len(fmt) and fmt[i] == ".":
+                    i += 1
+                    precision = 0
+                    while i < len(fmt) and fmt[i].isdigit():
+                        precision = precision * 10 + int(fmt[i])
+                        i += 1
                 if i >= len(fmt):
                     break
                 spec = fmt[i].lower()
@@ -3117,6 +3124,9 @@ class _StmtEmittersMixin:
                     arg_idx += 1
                 elif spec in "dhxob" and arg_idx < len(args):
                     lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, signed, indent))
+                    arg_idx += 1
+                elif spec in "efg" and arg_idx < len(args):
+                    lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, signed, indent, precision))
                     arg_idx += 1
                 elif spec == "s" and arg_idx < len(args):
                     lines.extend(self._emit_string_output(args[arg_idx], indent))
@@ -3154,17 +3164,24 @@ class _StmtEmittersMixin:
         zero_pad: bool,
         signed: bool,
         indent: int,  # noqa: FBT001
+        precision: int = -1,
     ) -> list[str]:
         """``%d``/``%h``/``%x``/``%o``/``%b`` of one argument via ``_out_fmt``
-        (value and x mask; a wide argument through scratch). Before this the
-        mask was ignored and a wide argument printed its low 64 bits."""
+        (value and x mask; a wide argument through scratch), or ``%e``/``%f``/
+        ``%g`` via ``_out_real``. Before this the mask was ignored and a wide
+        argument printed its low 64 bits."""
         pad = "    " * indent
         w = max(self._expr_width(arg), 1)
-        tail = f"{w}, {ord(spec if spec != 'x' else 'h')}, {width}, {1 if zero_pad else 0}, {1 if signed else 0})"
+        if spec in "efg":
+            fn = "_out_real"
+            tail = f"{w}, {ord(spec)}, {width}, {precision}, {1 if zero_pad else 0}, {1 if signed else 0})"
+        else:
+            fn = "_out_fmt"
+            tail = f"{w}, {ord(spec if spec != 'x' else 'h')}, {width}, {1 if zero_pad else 0}, {1 if signed else 0})"
         if w <= _WORD_BITS:
             val = self._emit_expr(arg, w)
             mask = self._emit_mask_expr(arg, w)
-            return [f"{pad}_out_fmt1(c, <unsigned long long>({val}), <unsigned long long>({mask}), {tail}"]
+            return [f"{pad}{fn}1(c, <unsigned long long>({val}), <unsigned long long>({mask}), {tail}"]
         n_words = max((w + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words())
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
         self._reset_scratch()
@@ -3185,7 +3202,7 @@ class _StmtEmittersMixin:
         return [
             *(f"{pad}{t}" for t in et_pending),
             *scratch_lines,
-            f"{pad}_out_fmt(c, <const unsigned long long *>_sc{slot}_v, <const unsigned long long *>_sc{slot}_m, {tail}",
+            f"{pad}{fn}(c, <const unsigned long long *>_sc{slot}_v, <const unsigned long long *>_sc{slot}_m, {tail}",
         ]
 
     def _emit_string_output(self, arg: Expression, indent: int) -> list[str]:

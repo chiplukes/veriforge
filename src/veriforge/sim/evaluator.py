@@ -1534,14 +1534,38 @@ class ExpressionEvaluator:  # cm:7e8b5d
             layout = _struct_layout_for_type(getattr(port, "data_type", None), ctx)
             if layout is not None:
                 local_ctx._struct_types[port.name] = layout
+            # Function scope shadows the module's signedness (a signed port
+            # used to be treated as unsigned inside the body).
+            local_ctx._signal_signed[port.name] = bool(port.signed)
+        local_ctx._signal_signed[func.name] = bool(func.signed)
         for local_var in func.locals:
             layout = _struct_layout_for_type(getattr(local_var, "type_name", None), ctx)
             if layout is not None:
                 local_ctx._struct_types[local_var.name] = layout
+            # Declared width and signedness (a local used to take the width
+            # of whatever was first assigned to it, unsigned).
+            kind = getattr(local_var.kind, "value", "")
+            local_ctx._signal_signed[local_var.name] = bool(local_var.signed) or kind in _SIGNED_KIND_WIDTHS
+            if local_var.name not in local_signals and not local_var.dimensions:
+                local_width = _SIGNED_KIND_WIDTHS.get(kind, 64 if kind == "time" else 1)
+                if local_var.width is not None:
+                    msb_v = self.eval(local_var.width.msb, ctx)
+                    lsb_v = self.eval(local_var.width.lsb, ctx)
+                    if msb_v.is_defined and lsb_v.is_defined:
+                        local_width = abs(int(msb_v) - int(lsb_v)) + 1
+                local_ctx._signals[local_var.name] = Value.x(local_width)
 
         # Execute the function body
+        local_ctx._originals = {}
         if func.body:
             self._executor.execute(func.body, local_ctx)
+
+        # Writes to module-level variables are side effects the caller must
+        # see (they used to be lost: the body runs on a copy of the signals).
+        shadowed = {func.name, *(p.name for p in func.ports), *(v.name for v in func.locals)}
+        for name in local_ctx._originals:
+            if name not in shadowed and name in ctx._signals:
+                ctx.write_signal(name, local_ctx._signals[name])
 
         # Read the return value
         return local_ctx.read_signal(func.name)
@@ -2043,6 +2067,10 @@ def _merge_xz(a: Value, b: Value) -> Value:
     new_mask = ~agree & wmask
     new_val = a.val & b.val & ~new_mask
     return Value(new_val, width=w, mask=new_mask)
+
+
+# Variable kinds that are signed by default, with their implicit widths.
+_SIGNED_KIND_WIDTHS = {"integer": 32, "int": 32, "shortint": 16, "longint": 64, "byte": 8}
 
 
 def evaluate_constant(expr: Expression, width: int, params: Mapping[str, object]) -> Value | None:

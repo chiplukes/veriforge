@@ -1113,6 +1113,7 @@ def _resolve_port_for_conn(conn, sub: Module) -> Port | None:
 
 def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str]) -> None:
     """Deep-copy and rename submodule logic into *flat*."""
+    n_always, n_initial = len(flat.always_blocks), len(flat.initial_blocks)
     for ca in sub.continuous_assigns:
         # A continuous assign whose LHS is a bare dimensioned identifier
         # (`assign arr = ...;`) used to always be expanded here into N
@@ -1172,6 +1173,13 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
         _prefix_identifiers(ib_copy, prefix, sub_signals)
         flat.initial_blocks.append(ib_copy)
 
+    # %m: record this instance's path on the copied display tasks (outer
+    # levels prepend theirs; display_format.lower_display_args substitutes).
+    from .display_format import mark_instance_scope  # noqa: PLC0415
+
+    for block in [*flat.always_blocks[n_always:], *flat.initial_blocks[n_initial:]]:
+        mark_instance_scope(block, prefix)
+
     for func in sub.functions:
         func_copy = copy.deepcopy(func)
         # Function-local names that must NOT be prefix-rewritten: the
@@ -1188,6 +1196,7 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
         outer_names = sub_signals - local_names
         if func_copy.body is not None and outer_names:
             _prefix_identifiers(func_copy.body, prefix, outer_names)
+        mark_instance_scope(func_copy, prefix)
         flat.functions.append(func_copy)
 
     for task in sub.tasks:
@@ -1195,9 +1204,12 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
         local_names = {task_copy.name}
         for p in task_copy.ports:
             local_names.add(p.name)
+        for lv in task_copy.locals:
+            local_names.add(lv.name)
         outer_names = sub_signals - local_names
         if task_copy.body is not None and outer_names:
             _prefix_identifiers(task_copy.body, prefix, outer_names)
+        mark_instance_scope(task_copy, prefix)
         flat.tasks.append(task_copy)
 
 

@@ -127,6 +127,11 @@ class AXILiteResponder(_AXILiteSignals):  # cm:1f5c6a
         self._drive(self.rresp, 0)
         self._drive(self.rvalid, 0)
         self._callback_handle = register_time_step_callback(self.sim._sched, self._on_time_step)
+        # Also just before each run_step(): see Simulator.add_pre_step_callback.
+        add_pre_step = getattr(self.sim, "add_pre_step_callback", None)
+        self._remove_pre_step = (
+            add_pre_step(lambda: self._on_time_step(self.sim._sched)) if add_pre_step is not None else None
+        )
 
     def _resolve_prefixed_signal(self, prefix: str, logical_name: str):
         original_prefix = self.prefix
@@ -138,6 +143,9 @@ class AXILiteResponder(_AXILiteSignals):  # cm:1f5c6a
 
     def close(self) -> None:
         self._callback_handle.close()
+        if self._remove_pre_step is not None:
+            self._remove_pre_step()
+            self._remove_pre_step = None
 
     def __enter__(self) -> AXILiteResponder:
         return self

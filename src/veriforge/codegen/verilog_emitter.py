@@ -73,7 +73,7 @@ from ..model.statements import (
     WaitStatement,
     WhileLoop,
 )
-from ..model.variables import Variable
+from ..model.variables import SIGNED_KINDS, Variable
 
 
 def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True) -> str:
@@ -615,8 +615,11 @@ def _emit_variable(var: Variable, indent: str) -> str:
         parts = [f"{indent}{var.type_name}"]
     else:
         parts = [f"{indent}{var.kind.value}"]
-        if var.signed:
+        # Only where it differs from the kind's default (`integer` is signed).
+        if var.signed and var.kind not in SIGNED_KINDS:
             parts.append("signed")
+        elif not var.signed and var.kind in SIGNED_KINDS:
+            parts.append("unsigned")
         if var.width:
             parts.append(_emit_range(var.width))
     parts.append(var.name)
@@ -1166,6 +1169,7 @@ def _emit_function_decl(fn: FunctionDecl, indent: str, current_indent: str) -> s
         # Old-style: function name;
         lines.append(" ".join(parts) + ";")
 
+    lines.extend(_emit_tf_locals(fn.locals, inner_indent))
     if fn.body:
         lines.append(_emit_statement(fn.body, indent, inner_indent))
     lines.append(f"{current_indent}endfunction")
@@ -1199,10 +1203,25 @@ def _emit_task_decl(tk: TaskDecl, indent: str, current_indent: str) -> str:
         # Old-style: task name;
         lines.append(" ".join(parts) + ";")
 
+    lines.extend(_emit_tf_locals(tk.locals, inner_indent))
     if tk.body:
         lines.append(_emit_statement(tk.body, indent, inner_indent))
     lines.append(f"{current_indent}endtask")
     return "\n".join(lines)
+
+
+def _emit_tf_locals(local_vars: list[Variable], indent: str) -> list[str]:
+    """Function/task-local declarations (they used to be left out, so the
+    emitted Verilog referenced undeclared names). Initializers are already
+    statements at the top of the body (see the parser), so none here."""
+    out = []
+    for var in local_vars:
+        init, var.initial_value = var.initial_value, None
+        try:
+            out.append(_emit_variable(var, indent))
+        finally:
+            var.initial_value = init
+    return out
 
 
 # ---- Generate construct emission ----

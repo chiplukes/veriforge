@@ -3022,7 +3022,8 @@ class _ExprEmitterMixin:
             # condition merge computation for the 63/64-bit-wide argument
             # down to 32 bits, corrupting high-order bits of the value
             # actually stored into port `a`.
-            code = self._emit_user_func_call_expr(func, call)
+            hoisted = self._hoist_user_func_call(func, call)
+            code = hoisted[0] if hoisted is not None else self._emit_user_func_call_expr(func, call)
             # A signed function's result sign-extends into a wider context
             # (it used to zero-extend: `y32 = g4(sn)` gave 0000000d).
             ret_w = self._expr_width(call)
@@ -3031,6 +3032,30 @@ class _ExprEmitterMixin:
             return code
         # Unsupported function ΓåÆ 0
         return "0"
+
+    def _hoist_user_func_call(self, func, call: FunctionCall) -> tuple[str, str] | None:
+        """Evaluate a user-function call ONCE ahead of the statement (via the
+        `_et_pending` temporaries) and return its (value, mask) names; None
+        where no hoisting scope is open. The value and mask emitters used to
+        call the function separately (the mask side even twice), which is
+        only harmless for a pure function -- a `$display` or a module-signal
+        write in the body ran three times."""
+        if self._et_pending is None:
+            return None
+        cached_v = self._et_node_vals.get(id(call))
+        cached_m = self._et_node_masks.get(id(call))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
+        if ret_sid is None:
+            return None
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.append(f"cdef long long _et{n}_v = {self._emit_user_func_call_expr(func, call)}")
+        self._et_pending.append(f"cdef long long _et{n}_m = c.mask[{ret_sid}]")
+        self._et_node_vals[id(call)] = f"_et{n}_v"
+        self._et_node_masks[id(call)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
 
     def _emit_user_func_call_expr(self, func, call: FunctionCall) -> str:
         """Build a `_user_func_XXX(c, v0, m0, v1, m1, ...)` call expression.
@@ -4259,8 +4284,12 @@ class _ExprEmitterMixin:
             if func is not None:
                 ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
                 if ret_sid is not None:
-                    call_expr = self._emit_user_func_call_expr(func, expr)
-                    mask = f"(c.mask[{ret_sid}] if ({call_expr} or 1) else 0)"
+                    hoisted = self._hoist_user_func_call(func, expr)
+                    if hoisted is not None:
+                        mask = hoisted[1]
+                    else:
+                        call_expr = self._emit_user_func_call_expr(func, expr)
+                        mask = f"(c.mask[{ret_sid}] if ({call_expr} or 1) else 0)"
                     ret_w = self._expr_width(expr)
                     if (signed_override if signed_override is not None else func.signed) and width > ret_w:
                         mask = f"_sign_ext({mask}, {ret_w})"

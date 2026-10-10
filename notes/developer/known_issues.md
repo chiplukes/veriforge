@@ -104,6 +104,22 @@ is ✅, backed by real cross-engine tests), see
 `notes/simulation/wide_signal_coverage.md` and
 `notes/plans/architecture_review_2026-07.md`.
 
+### No `real` / `realtime` type
+
+**Status**: Open feature gap (found 2026-10-09).
+
+`real` variables, real literals and real arithmetic are not modeled on any
+engine: `real r = 3.25;` stores the integer `325`. `$display`'s `%e`/`%f`/
+`%g` work (Icarus-exact, with width/precision) but always format the
+argument's *integer* value, which covers `$time`-style use. Real support
+needs a real-valued representation alongside `Value` in all four engines.
+
+### `byte unsigned` / `shortint unsigned` / `longint unsigned` don't parse
+
+**Status**: Open grammar gap (found 2026-10-09). `int unsigned` parses; the
+other integer atom types reject `unsigned`. Their default signedness
+(signed) is handled.
+
 ## Reference notes (not defects)
 
 These are deliberate design decisions or investigated-and-closed

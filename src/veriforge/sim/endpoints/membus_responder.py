@@ -81,6 +81,11 @@ class MemBusResponder:  # cm:c3f9a2
             self._drive(self.rvalid, 0)
 
         self._callback_handle = register_time_step_callback(sim._sched, self._on_time_step)
+        # Also just before each run_step(): see Simulator.add_pre_step_callback.
+        add_pre_step = getattr(sim, "add_pre_step_callback", None)
+        self._remove_pre_step = (
+            add_pre_step(lambda: self._on_time_step(self.sim._sched)) if add_pre_step is not None else None
+        )
 
     # ------------------------------------------------------------------ helpers
 
@@ -103,6 +108,9 @@ class MemBusResponder:  # cm:c3f9a2
     def close(self) -> None:
         """Detach the auto-tick callback."""
         self._callback_handle.close()
+        if self._remove_pre_step is not None:
+            self._remove_pre_step()
+            self._remove_pre_step = None
 
     def __enter__(self) -> MemBusResponder:
         return self

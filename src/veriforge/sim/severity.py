@@ -24,6 +24,9 @@ from veriforge.model.statements import SystemTaskCall
 
 SEVERITIES = {"$info": "INFO", "$warning": "WARNING", "$error": "ERROR", "$fatal": "FATAL"}
 _MARK = "\x1e"
+# Ends the text of a `$write` (no newline) from engines that emit it as a
+# display line (vm/vm-fast): DisplayLog prepends it to the next line.
+WRITE_MARK = "\x1c"
 _SEP = "\x1f"
 _BY_LETTER = {name[0]: name for name in SEVERITIES.values()}
 
@@ -62,9 +65,19 @@ class DisplayLog(list):
         super().__init__()
         self.events: list[tuple[int, str, str]] = []
         self.listeners: list[Callable[[int, str, str], None]] = []
+        self._line_open = False
 
     def append(self, text: str) -> None:  # type: ignore[override]
-        super().append(self._take(text))
+        # A `$write` (WRITE_MARK) is a line in progress: shown as the last
+        # entry, and the next text continues it.
+        partial = text.endswith(WRITE_MARK)
+        if partial:
+            text = text[:-1]
+        if self._line_open:
+            text = self[-1] + text
+            super().pop()
+        self._line_open = partial
+        super().append(text if partial else self._take(text))
 
     def extend(self, texts: Iterable[str]) -> None:  # type: ignore[override]
         for text in texts:

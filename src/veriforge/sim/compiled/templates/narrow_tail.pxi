@@ -280,6 +280,58 @@ cdef void _out_fmt(SimCtx *c, const unsigned long long *v, const unsigned long l
     for d in range(i, n):
         _out_char(c, buf[d])
 
+# ``%e``/``%f``/``%g`` of a (val, mask) word array (sim/display_format.py's
+# format_real): x reads as 0, signed values print negative.
+cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
+                    int w, int spec, int fw, int prec, int zp, int sgn) noexcept nogil:
+    cdef unsigned long long t[_FMT_MAX_WORDS]
+    cdef unsigned long long cur, carry
+    cdef int i, n, nw, neg = 0
+    cdef double x = 0.0
+    cdef char buf[400]
+    if w <= 0:
+        w = 1
+    if w > 64 * _FMT_MAX_WORDS:
+        w = 64 * _FMT_MAX_WORDS
+    nw = (w + 63) >> 6
+    for i in range(nw):
+        if (m[i] if (w - i * 64) >= 64 else m[i] & ((<unsigned long long>1 << (w - i * 64)) - 1)):
+            nw = 0  # any x/z bit: the value reads as 0
+            break
+        t[i] = v[i]
+    if nw:
+        if w & 63:
+            t[nw - 1] &= (<unsigned long long>1 << (w & 63)) - 1
+        if sgn and (t[(w - 1) >> 6] >> ((w - 1) & 63)) & 1:
+            neg = 1
+            carry = 1
+            for i in range(nw):
+                cur = ~t[i]
+                t[i] = cur + carry
+                carry = 1 if (carry and t[i] == 0) else 0
+            if w & 63:
+                t[nw - 1] &= (<unsigned long long>1 << (w & 63)) - 1
+        for i in range(nw - 1, -1, -1):
+            x = x * 18446744073709551616.0 + <double>t[i]
+        if neg:
+            x = -x
+    if prec < 0:
+        prec = 6
+    if spec == 101:  # 'e'
+        n = snprintf(buf, 400, "%0*.*e" if zp and fw else "%*.*e", fw, prec, x)
+    elif spec == 103:  # 'g'
+        n = snprintf(buf, 400, "%0*.*g" if zp and fw else "%*.*g", fw, prec, x)
+    else:
+        n = snprintf(buf, 400, "%0*.*f" if zp and fw else "%*.*f", fw, prec, x)
+    if n > 399:
+        n = 399
+    for i in range(n):
+        _out_char(c, buf[i])
+
+cdef inline void _out_real1(SimCtx *c, unsigned long long v, unsigned long long m,
+                            int w, int spec, int fw, int prec, int zp, int sgn) noexcept nogil:
+    _out_real(c, &v, &m, w, spec, fw, prec, zp, sgn)
+
 cdef inline void _out_fmt1(SimCtx *c, unsigned long long v, unsigned long long m,
                            int w, int spec, int fw, int zp, int sgn) noexcept nogil:
     _out_fmt(c, &v, &m, w, spec, fw, zp, sgn)

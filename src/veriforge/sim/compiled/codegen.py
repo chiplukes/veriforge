@@ -2230,10 +2230,12 @@ class CythonCodegen(
                     ret_width = rw
             elif func.return_kind == "integer":
                 ret_width = 32
-            self._register_signal(f"{prefix}.{func.name}", ret_width)
+            # With signedness (signed ports/locals used to read as unsigned
+            # inside the body, on every engine).
+            self._register_signal(f"{prefix}.{func.name}", ret_width, bool(func.signed))
             for port in func.ports:
                 local_name = f"{prefix}.{port.name}"
-                self._register_signal(local_name, _range_width(port.width, senv))
+                self._register_signal(local_name, _range_width(port.width, senv), bool(port.signed))
                 type_name = getattr(port, "data_type", None)
                 if type_name:
                     bare = type_name.rsplit("::", 1)[-1] if "::" in type_name else type_name
@@ -2242,7 +2244,10 @@ class CythonCodegen(
                         self._struct_signal_types[local_name] = layout
             for local_var in func.locals:
                 local_name = f"{prefix}.{local_var.name}"
-                self._register_signal(local_name, _var_width(local_var, senv))
+                local_signed = bool(local_var.signed) or getattr(local_var.kind, "value", "") in (
+                    "integer", "int", "shortint", "longint", "byte",
+                )  # fmt: skip
+                self._register_signal(local_name, _var_width(local_var, senv), local_signed)
                 type_name = getattr(local_var, "type_name", None)
                 if type_name:
                     bare = type_name.rsplit("::", 1)[-1] if "::" in type_name else type_name
@@ -2255,4 +2260,4 @@ class CythonCodegen(
             prefix = f"__task_{task.name}"
             senv = _scoped_env(prefix, self._param_env)
             for port in task.ports:
-                self._register_signal(f"{prefix}.{port.name}", _range_width(port.width, senv))
+                self._register_signal(f"{prefix}.{port.name}", _range_width(port.width, senv), bool(port.signed))

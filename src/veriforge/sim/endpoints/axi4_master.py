@@ -162,6 +162,19 @@ class AXI4Master:  # cm:2e8d3b
         ):
             self._drive(s, 0)
 
+    def _to_sample_point(self) -> None:
+        """Advance to the clock-low phase before the next rising edge and
+        settle: the values there are what that edge captures. Sampling right
+        after the previous edge instead assumed the other side holds its
+        outputs for the whole cycle -- but AXI4Responder presents its next
+        R beat at the negedge, so a continuously-ready master counted the
+        retiring beat twice (and a bare stub with no DUT never completed)."""
+        _settle_current_time(self.sim, self.clock.name)
+        while int(self.clock.value) == 1:
+            if not self.sim.run_step():
+                raise RuntimeError("simulation stopped before AXI4 transaction completed")
+        _settle_current_time(self.sim, self.clock.name)
+
     def _step_cycle(self) -> None:
         _settle_current_time(self.sim, self.clock.name)
         while True:
@@ -252,7 +265,7 @@ class AXI4Master:  # cm:2e8d3b
         aw_done = False
         beats_done = 0
         for _ in range(timeout * (beat_count + 1)):
-            _settle_current_time(self.sim, self.clock.name)
+            self._to_sample_point()
             aw_take = (not aw_done) and self._is_high(self.awready)
             w_take = (beats_done < beat_count) and self._is_high(self.wready)
             self._step_cycle()
@@ -277,6 +290,7 @@ class AXI4Master:  # cm:2e8d3b
         # B
         self._drive(self.bready, 1)
         for _ in range(timeout):
+            self._to_sample_point()
             if self._is_high(self.bvalid):
                 bresp = int(self.bresp.value)
                 self._step_cycle()
@@ -334,7 +348,7 @@ class AXI4Master:  # cm:2e8d3b
         self._drive(self.aruser, user)
 
         for _ in range(timeout):
-            _settle_current_time(self.sim, self.clock.name)
+            self._to_sample_point()
             ar_take = self._is_high(self.arready)
             self._step_cycle()
             if ar_take:
@@ -348,6 +362,7 @@ class AXI4Master:  # cm:2e8d3b
         self._drive(self.rready, 1)
         beats: list[int] = []
         for _ in range(timeout * length):
+            self._to_sample_point()
             if self._is_high(self.rvalid):
                 rresp = int(self.rresp.value)
                 if rresp != expected_resp:

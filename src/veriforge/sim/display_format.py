@@ -26,10 +26,14 @@ arguments; compiled ignored x bits entirely and truncated wide values to
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from veriforge.model.expressions import Expression, StringLiteral
-from veriforge.model.statements import SystemTaskCall
+from veriforge.model.functions import FunctionDecl, TaskDecl
+from veriforge.model.base import VerilogNode
+from veriforge.model.statements import ParBlock, SeqBlock, SystemTaskCall
+from veriforge.model.variables import Variable
 from veriforge.semantics import expr_signed
 
 from .sv_functions import iter_nodes
@@ -38,17 +42,25 @@ if TYPE_CHECKING:
     from veriforge.model.design import Module
     from veriforge.model.nets import Net
     from veriforge.model.ports import Port
-    from veriforge.model.variables import Variable
 
     from .value import Value
 
 SIGNED_FLAG = "\x1d"
 # Specifiers that consume an argument (the engines' formatters agree).
-CONSUMING = frozenset("dhxobcst")
+CONSUMING = frozenset("dhxobcstefg")
 _DISPLAY_TASKS = {"$display", "$write", "$monitor", "$strobe", "$info", "$warning", "$error", "$fatal"}
 _FILE_TASKS = {"$fdisplay", "$fwrite"}
+_RADIX_TASKS = {
+    f"{base}{radix}"
+    for base in ("$display", "$write", "$strobe", "$monitor", "$fdisplay", "$fwrite")
+    for radix in "hbo"
+}
 _RADIX_BITS = {"h": 4, "x": 4, "o": 3, "b": 1}
 _DIGITS = "0123456789abcdef"
+_SCOPE_TASKS = {
+    "$display", "$write", "$strobe", "$monitor", "$fdisplay", "$fwrite",
+    "$info", "$warning", "$error", "$fatal",
+}  # fmt: skip
 _SIGNED_KINDS = {"integer", "int", "shortint", "longint", "byte"}
 
 
@@ -90,37 +102,144 @@ def format_value(v: Value, spec: str, field_width: int, zero_pad: bool, signed: 
     return s
 
 
+def format_real(  # noqa: PLR0913
+    v: Value,
+    spec: str,
+    field_width: int,
+    precision: int | None,
+    zero_pad: bool,
+    signed: bool,  # noqa: FBT001
+) -> str:
+    """``%e``/``%f``/``%g`` of an integer argument, as C/Icarus print it (an x
+    value reads as 0). There is no ``real`` type in this simulator yet, so
+    the argument is always the integer value."""
+    width = max(v.width, 1)
+    val = 0 if v.mask else v.val & ((1 << width) - 1)
+    if signed and val >> (width - 1):
+        val -= 1 << width
+    pad = "0" if zero_pad and field_width else ""
+    return format(float(val), f"{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
+
+
+_SCOPE_ATTR = "__vf_scope"
+
+
+def mark_instance_scope(node: object, prefix: str) -> None:
+    """Flattening: record that the display tasks below *node* now live in
+    instance *prefix* (relative to the enclosing module; an outer level
+    prepends its own prefix when it inlines this one in turn)."""
+    for task in _iter_scope_tasks(node, set()):
+        inner = task.attributes.get(_SCOPE_ATTR)
+        task.attributes[_SCOPE_ATTR] = f"{prefix}.{inner}" if inner else prefix
+
+
+def substitute_scope_names(module: Module) -> None:
+    """Replace ``%m`` in every display-family format string in the flattened
+    *module*, in place, with the task's hierarchical scope name as Icarus
+    prints it: the top module, the instance path recorded by
+    ``mark_instance_scope``, then any enclosing named block or function/
+    task (``top.u_sub.blk``). It used to print a ``<module>`` placeholder."""
+    _substitute_scope(module, "", module.name, set())
+
+
+def _iter_scope_tasks(node: object, seen: set[int]) -> Iterator[SystemTaskCall]:
+    for n in iter_nodes(node, seen):
+        if isinstance(n, SystemTaskCall) and n.task_name.lower().rstrip("hbo") in _SCOPE_TASKS:
+            yield n
+
+
+def _substitute_scope(node: object, named: str, top: str, seen: set[int]) -> None:
+    if id(node) in seen:
+        return
+    seen.add(id(node))
+    if isinstance(node, (FunctionDecl, TaskDecl)) or (isinstance(node, (SeqBlock, ParBlock)) and node.name):
+        named = f"{named}.{node.name}"
+    if isinstance(node, SystemTaskCall):
+        if node.task_name.lower().rstrip("hbo") in _SCOPE_TASKS:
+            inst = node.attributes.get(_SCOPE_ATTR)
+            scope = f"{top}{'.' + inst if inst else ''}{named}".replace("%", "%%")
+            for arg in node.arguments:
+                if isinstance(arg, StringLiteral) and "%" in arg.value:
+                    arg.value = _replace_scope_spec(arg.value, scope)
+        return
+    for klass in type(node).__mro__:
+        for slot in getattr(klass, "__slots__", ()):
+            if slot in ("parent", "loc", "_parse_tree", "attributes", "comments", "drivers", "loads"):
+                continue
+            value = getattr(node, slot, None)
+            for item in value if isinstance(value, list) else [value]:
+                if isinstance(item, VerilogNode):
+                    _substitute_scope(item, named, top, seen)
+
+
+def _replace_scope_spec(fmt: str, scope: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == "%" and i + 1 < len(fmt):
+            if fmt[i + 1] in "mM":
+                out.append(scope)
+            else:
+                out.append(fmt[i : i + 2])  # incl. "%%"
+            i += 2
+            continue
+        out.append(fmt[i])
+        i += 1
+    return "".join(out)
+
+
 def lower_display_args(module: Module) -> Module:
     """Canonicalize every display-family call in *module*, in place (see
     the module docstring)."""
-    signed_names = _signed_names(module)
-
-    def signed_of(name: str) -> bool:
-        return name in signed_names
-
-    for task in iter_nodes(module, set()):
-        if not isinstance(task, SystemTaskCall):
-            continue
-        name = task.task_name.lower()
-        args = list(task.arguments)
-        if name in _FILE_TASKS:
-            keep = 1
-        elif name == "$fatal" and args and not isinstance(args[0], StringLiteral):
-            keep = 1  # finish_number
-        elif name in _DISPLAY_TASKS:
-            keep = 0
-        else:
-            continue
-        if len(args) <= keep:
-            continue
-        fmt, data = _canonical(args[keep:], signed_of)
-        task.arguments = [*args[:keep], fmt, *data]
+    substitute_scope_names(module)
+    module_signed = _signed_names(module)
+    done: set[int] = set()
+    # Function/task bodies first, so their own ports and locals count too.
+    subs: list[FunctionDecl | TaskDecl] = [*module.functions, *module.tasks]
+    for sub in subs:
+        local_signed = module_signed | _signed_names(sub)
+        for node in iter_nodes(sub, set()):
+            if isinstance(node, SystemTaskCall) and id(node) not in done:
+                done.add(id(node))
+                _lower_task(node, local_signed)
+    for node in iter_nodes(module, set()):
+        if isinstance(node, SystemTaskCall) and id(node) not in done:
+            _lower_task(node, module_signed)
     return module
 
 
-def _signed_names(module: Module) -> set[str]:
+def _lower_task(task: SystemTaskCall, signed_names: set[str]) -> None:
+    name = task.task_name.lower()
+    default_spec = "d"
+    if name in _RADIX_TASKS:
+        # $displayh/$writeb/$fdisplayo/...: the plain task, with leftover
+        # arguments in that radix (they used to be ignored entirely).
+        name, default_spec = name[:-1], name[-1]
+        task.task_name = name
+    args = list(task.arguments)
+    if name in _FILE_TASKS:
+        keep = 1
+    elif name == "$fatal" and args and not isinstance(args[0], StringLiteral):
+        keep = 1  # finish_number
+    elif name in _DISPLAY_TASKS:
+        keep = 0
+    else:
+        return
+    if len(args) <= keep:
+        return
+    fmt, data = _canonical(args[keep:], lambda n: n in signed_names, default_spec)
+    task.arguments = [*args[:keep], fmt, *data]
+
+
+def _signed_names(scope: Module | FunctionDecl | TaskDecl) -> set[str]:
     names: set[str] = set()
-    all_decls: list[Port | Net | Variable] = [*module.ports, *module.nets, *module.variables]
+    if isinstance(scope, (FunctionDecl, TaskDecl)):
+        # Ports, plus every variable declared anywhere inside (function
+        # locals, and a task's block-level declarations).
+        all_decls: list[Port | Net | Variable] = list(scope.ports)
+        all_decls += [n for n in iter_nodes(scope, set()) if isinstance(n, Variable)]
+    else:
+        all_decls = [*scope.ports, *scope.nets, *scope.variables]
     for decl in all_decls:
         kind = getattr(decl, "kind", None)
         if getattr(decl, "signed", False) or getattr(kind, "value", None) in _SIGNED_KINDS:
@@ -128,7 +247,7 @@ def _signed_names(module: Module) -> set[str]:
     return names
 
 
-def _canonical(args: list[Expression], signed_of) -> tuple[StringLiteral, list[Expression]]:
+def _canonical(args: list[Expression], signed_of, default_spec: str = "d") -> tuple[StringLiteral, list[Expression]]:
     out: list[str] = []
     data: list[Expression] = []
     i = 0
@@ -137,7 +256,8 @@ def _canonical(args: list[Expression], signed_of) -> tuple[StringLiteral, list[E
         i += 1
         if not isinstance(arg, StringLiteral):
             data.append(arg)
-            out.append(f"%{SIGNED_FLAG if _signed(arg, signed_of) else ''}d")
+            flag = SIGNED_FLAG if default_spec == "d" and _signed(arg, signed_of) else ""
+            out.append(f"%{flag}{default_spec}")
             continue
         fmt = arg.value
         j = 0
@@ -154,7 +274,7 @@ def _canonical(args: list[Expression], signed_of) -> tuple[StringLiteral, list[E
             k = j + 1
             if k < len(fmt) and fmt[k] == SIGNED_FLAG:
                 k += 1
-            while k < len(fmt) and fmt[k].isdigit():
+            while k < len(fmt) and (fmt[k].isdigit() or fmt[k] == "."):  # width[.precision]
                 k += 1
             if k >= len(fmt):
                 out.append(fmt[j:])
@@ -165,7 +285,7 @@ def _canonical(args: list[Expression], signed_of) -> tuple[StringLiteral, list[E
                 consumed = args[i]
                 i += 1
                 data.append(consumed)
-                if spec == "d" and SIGNED_FLAG not in piece and _signed(consumed, signed_of):
+                if spec in "defg" and SIGNED_FLAG not in piece and _signed(consumed, signed_of):
                     piece = f"%{SIGNED_FLAG}{piece[1:]}"
             out.append(piece)
             j = k + 1

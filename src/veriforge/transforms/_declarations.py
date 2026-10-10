@@ -43,7 +43,7 @@ class _RegVariableContext:
     source_file: str | None
     kind: VariableKind
     width: Range | None
-    signed: bool
+    signed: bool | None
     loc: SourceLocation | None
     build_constant_expression: BuildConstantExpressionFn
 
@@ -480,13 +480,15 @@ def _extract_reg_declaration(
     """Extract variables from a reg_declaration or logic/bit declaration subtree."""
     variables: list[Variable] = []
     width: Range | None = None
-    signed = False
+    signed: bool | None = None  # None: the kind's default (`int` signed, `reg` not)
     loc = _loc_from_tree(tree, source_file)
 
     for child in tree.children:
         if isinstance(child, Token):
             if child.type == "KW_SIGNED":
                 signed = True
+            elif child.type == "KW_UNSIGNED":
+                signed = False
         elif isinstance(child, Tree):
             if child.data == "range":
                 width = _build_range(child, source_file, build_constant_expression)

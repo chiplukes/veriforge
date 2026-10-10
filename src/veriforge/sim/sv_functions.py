@@ -15,6 +15,7 @@ silently 0.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -319,3 +320,29 @@ def _cast_function(name: str, n: int, signed: bool) -> FunctionDecl:  # noqa: FB
         ports=[Port("v", PortDirection.INPUT, width=rng(), signed=signed)],
         body=BlockingAssign(Identifier(name), Identifier("v")),
     )
+
+
+def materialize_task_locals(module: Module) -> Module:
+    """Hoist every task's local variables to module variables named
+    ``__task_<task>__<var>``, renaming the references in its body, in place.
+
+    That is a Verilog-2001 static task variable, and lets every engine use
+    a task's locals without knowing about them (none did: the parser used
+    to drop them). An ``automatic`` task re-entered concurrently from two
+    processes would share them -- not supported.
+    """
+    for task in module.tasks:
+        if not task.locals:
+            continue
+        renames = {var.name: f"__task_{task.name}__{var.name}" for var in task.locals}
+        for var in task.locals:
+            hoisted = copy.copy(var)
+            hoisted.name = renames[var.name]
+            hoisted.initial_value = None  # per-call initializers are body statements
+            module.variables.append(hoisted)
+        task.locals = []
+        if task.body is not None:
+            for node in iter_nodes(task.body, set()):
+                if isinstance(node, Identifier) and not node.hierarchy and node.name in renames:
+                    node.name = renames[node.name]
+    return module

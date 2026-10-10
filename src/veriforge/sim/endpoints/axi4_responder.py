@@ -227,6 +227,11 @@ class AXI4Responder:  # cm:7e9b5d
         self._drive(self.rid, 0)
 
         self._callback_handle = register_time_step_callback(self.sim._sched, self._on_time_step)
+        # Also just before each run_step(): see Simulator.add_pre_step_callback.
+        add_pre_step = getattr(self.sim, "add_pre_step_callback", None)
+        self._remove_pre_step = (
+            add_pre_step(lambda: self._on_time_step(self.sim._sched)) if add_pre_step is not None else None
+        )
 
     # ------------------------------------------------------------------ helpers
 
@@ -300,6 +305,9 @@ class AXI4Responder:  # cm:7e9b5d
 
     def close(self) -> None:
         self._callback_handle.close()
+        if self._remove_pre_step is not None:
+            self._remove_pre_step()
+            self._remove_pre_step = None
 
     def __enter__(self) -> AXI4Responder:
         return self

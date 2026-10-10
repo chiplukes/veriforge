@@ -110,14 +110,15 @@ class FunctionDecl(VerilogNode):
 class TaskDecl(VerilogNode):
     """A Verilog task declaration."""
 
-    __slots__ = ("body", "is_automatic", "name", "ports")
+    __slots__ = ("body", "is_automatic", "locals", "name", "ports")
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         name: str,
         *,
         is_automatic: bool = False,
         ports: list[Port] | None = None,
+        local_vars: list[Variable] | None = None,
         body: Statement | None = None,
         loc: SourceLocation | None = None,
     ):
@@ -125,6 +126,9 @@ class TaskDecl(VerilogNode):
         self.name = name
         self.is_automatic = is_automatic
         self.ports = ports or []
+        # Task-level variable declarations (`reg signed [3:0] l;` between
+        # the ports and the body) -- they used to be dropped by the parser.
+        self.locals = local_vars or []
         self.body: Statement | None = body
 
     def __repr__(self) -> str:
@@ -138,6 +142,7 @@ class TaskDecl(VerilogNode):
         nodes: list[VerilogNode] = list(self.ports)
         if self.body:
             nodes.append(self.body)
+        nodes.extend(self.locals)
         return nodes
 
     def to_dict(self) -> dict:
@@ -147,6 +152,8 @@ class TaskDecl(VerilogNode):
         d["is_automatic"] = self.is_automatic
         if self.ports:
             d["ports"] = [p.to_dict() for p in self.ports]
+        if self.locals:
+            d["locals"] = [v.to_dict() for v in self.locals]
         if self.body:
             d["body"] = self.body.to_dict()
         return d

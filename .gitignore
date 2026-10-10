@@ -17,6 +17,7 @@ reports
 _vt*
 .vtc*/
 .peovim/*
+scratch*/
 
 *.so
 *.pyd
