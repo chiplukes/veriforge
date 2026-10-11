@@ -366,8 +366,19 @@ class Value:  # cm:c8a1e6
             if msb < lsb:
                 msb, lsb = lsb, msb
             w = msb - lsb + 1
-            # Value() already clips both fields to w bits.
-            return Value(self.val >> lsb, width=w, mask=self.mask >> lsb)
+            full = (1 << w) - 1
+            if lsb >= 0:
+                v, m = self.val >> lsb, self.mask >> lsb
+            else:
+                v, m = self.val << -lsb, self.mask << -lsb
+            # Bits outside the value read x (IEEE 1364 5.2.1); they read 0,
+            # and a negative lsb (`d[neg +: 4]`) raised.
+            oor = 0
+            if lsb + w > self.width:
+                oor |= full & ~((1 << max(0, self.width - lsb)) - 1)
+            if lsb < 0:
+                oor |= (1 << min(w, -lsb)) - 1
+            return Value(v & ~oor & full, width=w, mask=(m | oor) & full)
         raise TypeError(f"Invalid index type: {type(index)}")
 
     def set_bit(self, index: int, bit_val: int) -> Value:
@@ -382,7 +393,13 @@ class Value:  # cm:c8a1e6
         return Value(new_val, width=self.width, mask=new_mask)
 
     def set_range(self, msb: int, lsb: int, part: Value) -> Value:
-        """Return a new Value with bits [msb:lsb] replaced by part."""
+        """Return a new Value with bits [msb:lsb] replaced by part (only the
+        bits within the value: a part-select partly out of range)."""
+        if lsb < 0:
+            part = Value(part.val >> -lsb, width=max(part.width + lsb, 1), mask=part.mask >> -lsb)
+            lsb = 0
+        if msb < lsb:
+            return self
         w = msb - lsb + 1
         range_mask = _mask_for_width(w) << lsb
         new_val = (self.val & ~range_mask) | ((part.val & _mask_for_width(w)) << lsb)

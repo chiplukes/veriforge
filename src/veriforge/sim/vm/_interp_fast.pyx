@@ -192,6 +192,155 @@ cdef inline long long _wide_extract(
         lo &= (1ULL << result_w) - 1
     return <long long>lo
 
+cdef inline unsigned long long _sel_window(const unsigned long long *src, int src_w, long long start, int nb) noexcept nogil:
+    """*nb* (<= 64) bits of a *src_w*-bit value (WIDE_WORDS words) from bit
+    *start*, which may be negative or past the end (those bits read 0)."""
+    cdef unsigned long long v
+    if nb <= 0 or start >= src_w or start <= -64:
+        return 0
+    if start < 0:
+        if nb + start <= 0:
+            return 0
+        v = (<unsigned long long>_wide_extract(src, WIDE_WORDS, 0, <int>(nb + start))) << (-start)
+    else:
+        v = <unsigned long long>_wide_extract(src, WIDE_WORDS, <int>start, nb)
+    if nb < 64:
+        v &= (1ULL << nb) - 1
+    return v
+
+
+cdef inline unsigned long long _sel_oor(int src_w, long long start, int nb) noexcept nogil:
+    """Bits of the *nb*-bit window at *start* outside a *src_w*-bit value."""
+    cdef unsigned long long full = <unsigned long long>-1 if nb >= 64 else (1ULL << nb) - 1
+    cdef unsigned long long m = 0
+    if start >= src_w or start + nb <= 0:
+        return full
+    if start + nb > src_w:
+        m |= full & ~((1ULL << (src_w - start)) - 1)
+    if start < 0:
+        m |= (1ULL << (-start)) - 1
+    return m & full
+
+
+cdef inline void _clip_mem_range(SVal *stack, int sp, SVal *msb, SVal *lsb, int w) noexcept nogil:
+    """Clip a narrow memory-element range write [msb:lsb] to the element's
+    *w* bits (out-of-range bits aren't written; a negative lsb drops the
+    value's low bits). An empty range becomes [-1:0]-style no-op masks."""
+    if lsb.val < 0:
+        if lsb.val <= -64:
+            stack[sp].val = 0
+            stack[sp].mask = 0
+        else:
+            stack[sp].val = <long long>((<unsigned long long>stack[sp].val) >> (-lsb.val))
+            stack[sp].mask = <long long>((<unsigned long long>stack[sp].mask) >> (-lsb.val))
+        lsb.val = 0
+    if msb.val >= w:
+        msb.val = w - 1
+    if msb.val < lsb.val or lsb.val >= w:
+        # nothing in range: an empty bit mask
+        msb.val = -1
+        lsb.val = 0
+
+
+cdef void _shr_slot(SVal *stack, int sp, unsigned long long *wv, unsigned long long *wm, int *wflag, int k) noexcept nogil:
+    """Shift stack slot *sp* right by *k* bits (a range write starting below
+    bit 0 drops the value's low bits)."""
+    cdef int wi, ws, bs
+    if k <= 0:
+        return
+    if wflag[sp]:
+        ws = k >> 6
+        bs = k & 63
+        for wi in range(WIDE_WORDS):
+            if wi + ws < WIDE_WORDS:
+                wv[sp * WIDE_WORDS + wi] = wv[sp * WIDE_WORDS + wi + ws] >> bs
+                wm[sp * WIDE_WORDS + wi] = wm[sp * WIDE_WORDS + wi + ws] >> bs
+                if bs and wi + ws + 1 < WIDE_WORDS:
+                    wv[sp * WIDE_WORDS + wi] |= wv[sp * WIDE_WORDS + wi + ws + 1] << (64 - bs)
+                    wm[sp * WIDE_WORDS + wi] |= wm[sp * WIDE_WORDS + wi + ws + 1] << (64 - bs)
+            else:
+                wv[sp * WIDE_WORDS + wi] = 0
+                wm[sp * WIDE_WORDS + wi] = 0
+        stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+        stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
+    elif k >= 64:
+        stack[sp].val = 0
+        stack[sp].mask = 0
+    else:
+        stack[sp].val = <long long>((<unsigned long long>stack[sp].val) >> k)
+        stack[sp].mask = <long long>((<unsigned long long>stack[sp].mask) >> k)
+
+
+cdef void _select_into(
+    SVal *stack, int sp, unsigned long long *wv, unsigned long long *wm, int *wflag,
+    long long lsb, int w,
+) noexcept nogil:
+    """Replace stack slot *sp* (the target) with its *w*-bit select from bit
+    *lsb*: bits outside the target read x (IEEE 1364 5.2.1). They used to
+    read 0, a shift by 64 or more was undefined, and a negative *lsb* (a
+    signed base) wasn't handled."""
+    cdef unsigned long long sv[WIDE_WORDS]
+    cdef unsigned long long sm[WIDE_WORDS]
+    cdef unsigned long long rv, rm, oor
+    cdef int wi, src_w = stack[sp].width, nwords
+    if w > WIDE_WORDS * 64:
+        w = WIDE_WORDS * 64
+    if wflag[sp]:
+        for wi in range(WIDE_WORDS):
+            sv[wi] = wv[sp * WIDE_WORDS + wi]
+            sm[wi] = wm[sp * WIDE_WORDS + wi]
+    else:
+        sv[0] = <unsigned long long>(stack[sp].val & ~stack[sp].mask) & <unsigned long long>mask_for_width(src_w)
+        sm[0] = <unsigned long long>stack[sp].mask & <unsigned long long>mask_for_width(src_w)
+        for wi in range(1, WIDE_WORDS):
+            sv[wi] = 0
+            sm[wi] = 0
+    if w > 64:
+        nwords = (w + 63) >> 6
+        for wi in range(WIDE_WORDS):
+            if wi < nwords:
+                oor = _sel_oor(src_w, lsb + wi * 64, 64 if w - wi * 64 >= 64 else w - wi * 64)
+                wv[sp * WIDE_WORDS + wi] = _sel_window(sv, src_w, lsb + wi * 64, 64 if w - wi * 64 >= 64 else w - wi * 64) & ~oor
+                wm[sp * WIDE_WORDS + wi] = _sel_window(sm, src_w, lsb + wi * 64, 64 if w - wi * 64 >= 64 else w - wi * 64) | oor
+            else:
+                wv[sp * WIDE_WORDS + wi] = 0
+                wm[sp * WIDE_WORDS + wi] = 0
+        wflag[sp] = 1
+        stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+        stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
+    else:
+        oor = _sel_oor(src_w, lsb, w)
+        rv = _sel_window(sv, src_w, lsb, w) & ~oor
+        rm = _sel_window(sm, src_w, lsb, w) | oor
+        stack[sp].val = <long long>rv
+        stack[sp].mask = <long long>rm
+        wflag[sp] = 0
+    stack[sp].width = w
+
+
+cdef inline void _select_x(SVal *stack, int sp, unsigned long long *wv, unsigned long long *wm, int *wflag, int w) noexcept nogil:
+    """Slot *sp* := *w* bits of x (a select with an x/z index)."""
+    cdef int wi
+    if w < 1:
+        w = 1
+    if w > 64:
+        if w > WIDE_WORDS * 64:
+            w = WIDE_WORDS * 64
+        for wi in range(WIDE_WORDS):
+            wv[sp * WIDE_WORDS + wi] = 0
+            wm[sp * WIDE_WORDS + wi] = 0
+        for wi in range((w + 63) >> 6):
+            wm[sp * WIDE_WORDS + wi] = <unsigned long long>-1 if w - wi * 64 >= 64 else (1ULL << (w - wi * 64)) - 1
+        wflag[sp] = 1
+        stack[sp].val = 0
+        stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
+    else:
+        stack[sp].val = 0
+        stack[sp].mask = mask_for_width(w)
+        wflag[sp] = 0
+    stack[sp].width = w
+
+
 # ── Wide helper: insert up to 64 bits at a given bit offset ─────────
 
 cdef inline void _wide_insert(
@@ -570,7 +719,10 @@ cdef void _wide_pow_py(
         b_py = b_py & (((<object>1) << b_width) - 1)
     else:
         b_py = (<object>(<unsigned long long>b_narrow)) & (((<object>1) << b_width) - 1)
-    result_py = a_py ** b_py
+    # The base's width (IEEE 1364 Table 5-22): it wasn't truncated, so the
+    # bits above it leaked into a wider context (and `a ** b` in full could
+    # be huge).
+    result_py = pow(a_py, b_py, (<object>1) << a_width)
     for wi in range(WIDE_WORDS):
         dst_v[wi] = <unsigned long long>((result_py >> (wi * 64)) & <object>0xFFFFFFFFFFFFFFFF)
         dst_m[wi] = 0
@@ -624,7 +776,7 @@ cdef void _wide_spow_py(
     if b_py == 0:
         result_py = <object>1
     elif b_py > 0:
-        result_py = a_py ** b_py
+        result_py = pow(a_py, b_py, (<object>1) << a_width)
     elif a_py == 0:
         # 0 ** negative -- the table's one genuinely-undefined cell.
         for wi in range(WIDE_WORDS):
@@ -639,6 +791,7 @@ cdef void _wide_spow_py(
         # magnitude < 1, truncated toward zero (mirrors the narrow
         # path's already-documented `2 ** -1 == 0` example).
         result_py = <object>0
+    result_py = result_py & (((<object>1) << a_width) - 1)  # (a negative result filled every word)
     for wi in range(WIDE_WORDS):
         dst_v[wi] = <unsigned long long>((result_py >> (wi * 64)) & <object>0xFFFFFFFFFFFFFFFF)
         dst_m[wi] = 0
@@ -1312,6 +1465,13 @@ cdef int _execute_core(
                 w = sig_width[arg1]
                 i = <int>b.val  # lsb
                 n = <int>(t.val - b.val + 1)  # width of range
+                if i < 0 and n > 0:
+                    # Partly below bit 0 (a negative signed base): only the in-range
+                    # bits are written (nothing was).
+                    _shr_slot(stack, sp, wv, wm, wflag, -i)
+                    a = stack[sp]
+                    n += i
+                    i = 0
                 if n > 0:
                     if wctx != NULL and wctx.sig_offset[arg1] >= 0:
                         # Wide signal: update word-by-word
@@ -1388,6 +1548,13 @@ cdef int _execute_core(
             if t.mask == 0 and b.mask == 0:
                 i = <int>b.val         # lsb
                 n = <int>(t.val - b.val + 1)  # width of range
+                if i < 0 and n > 0:
+                    # Partly below bit 0 (a negative signed base): only the in-range
+                    # bits are written (nothing was).
+                    _shr_slot(stack, sp, wv, wm, wflag, -i)
+                    a = stack[sp]
+                    n += i
+                    i = 0
                 if n > 0:
                     if wctx != NULL and wctx.sig_offset[arg1] >= 0:
                         # Wide signal: queue partial NBA for read-modify-write at apply time
@@ -3232,116 +3399,26 @@ cdef int _execute_core(
             sp -= 3
             b = stack[sp + 2]   # lsb (top)
             t = stack[sp + 1]   # msb
-            a = stack[sp]       # target
-            if t.mask == 0 and b.mask == 0:
-                i = <int>b.val   # lsb
-                w = <int>(t.val - b.val + 1)
-                if w > 0:
-                    if wflag[sp] or w > 64:
-                        # Wide source or wide result
-                        if not wflag[sp]:
-                            # promote narrow source
-                            wv[sp * WIDE_WORDS]      = <unsigned long long>(a.val & ~a.mask)
-                            wm[sp * WIDE_WORDS]      = <unsigned long long>(a.mask)
-                            for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0; wm[sp * WIDE_WORDS + wi] = 0
-                        # Extract 'w' bits starting at 'i' into a new wide slot
-                        # For simplicity, use _wide_extract per word of result
-                        if w > 64:
-                            for wi in range(WIDE_WORDS):
-                                wv[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (i + wi * 64 + 64) <= w else w - wi * 64)
-                                wm[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (i + wi * 64 + 64) <= w else w - wi * 64)
-                            wflag[sp] = 1
-                            stack[sp].val = 0; stack[sp].mask = 0
-                        else:
-                            wmask = mask_for_width(w)
-                            stack[sp].val  = <long long>(_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            stack[sp].mask = <long long>(_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            wflag[sp] = 0
-                        stack[sp].width = w
-                    else:
-                        wmask = mask_for_width(w)
-                        stack[sp].val = (a.val >> i) & wmask
-                        stack[sp].mask = (a.mask >> i) & wmask
-                        stack[sp].width = w
-                        wflag[sp] = 0
-                else:
-                    stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
+            if t.mask == 0 and b.mask == 0 and t.val - b.val + 1 > 0:
+                _select_into(stack, sp, wv, wm, wflag, b.val, <int>(t.val - b.val + 1))
             else:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
+                _select_x(stack, sp, wv, wm, wflag, 1)
             sp += 1
             continue
 
-        if op == OP_PART_SEL_UP:
+        if op == OP_PART_SEL_UP or op == OP_PART_SEL_DOWN:
+            # The base is a signed 64-bit value (see the compiler's PartSelect).
             sp -= 3
             t = stack[sp + 2]   # width (top)
             b = stack[sp + 1]   # base
-            a = stack[sp]       # target
-            if b.mask == 0 and t.mask == 0:
-                w = <int>t.val
-                i = <int>b.val
-                if w > 0:
-                    if wflag[sp] or w > 64:
-                        if not wflag[sp]:
-                            wv[sp * WIDE_WORDS]      = <unsigned long long>(a.val & ~a.mask)
-                            wm[sp * WIDE_WORDS]      = <unsigned long long>(a.mask)
-                            for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0; wm[sp * WIDE_WORDS + wi] = 0
-                        if w > 64:
-                            for wi in range(WIDE_WORDS):
-                                wv[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (wi * 64 + 64) <= w else w - wi * 64)
-                                wm[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (wi * 64 + 64) <= w else w - wi * 64)
-                            wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0
-                        else:
-                            wmask = mask_for_width(w)
-                            stack[sp].val  = <long long>(_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            stack[sp].mask = <long long>(_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            wflag[sp] = 0
-                        stack[sp].width = w
-                    else:
-                        wmask = mask_for_width(w)
-                        stack[sp].val = (a.val >> i) & wmask
-                        stack[sp].mask = (a.mask >> i) & wmask
-                        stack[sp].width = w; wflag[sp] = 0
+            if t.mask == 0 and t.val > 0:
+                if b.mask == 0:
+                    _select_into(stack, sp, wv, wm, wflag,
+                                 b.val if op == OP_PART_SEL_UP else b.val - t.val + 1, <int>t.val)
                 else:
-                    stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
+                    _select_x(stack, sp, wv, wm, wflag, <int>t.val)  # (was 1 bit wide)
             else:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
-            sp += 1
-            continue
-
-        if op == OP_PART_SEL_DOWN:
-            sp -= 3
-            t = stack[sp + 2]   # width (top)
-            b = stack[sp + 1]   # base
-            a = stack[sp]       # target
-            if b.mask == 0 and t.mask == 0:
-                w = <int>t.val
-                i = <int>(b.val - w + 1)
-                if w > 0 and i >= 0:
-                    if wflag[sp] or w > 64:
-                        if not wflag[sp]:
-                            wv[sp * WIDE_WORDS]      = <unsigned long long>(a.val & ~a.mask)
-                            wm[sp * WIDE_WORDS]      = <unsigned long long>(a.mask)
-                            for wi in range(1, WIDE_WORDS): wv[sp * WIDE_WORDS + wi] = 0; wm[sp * WIDE_WORDS + wi] = 0
-                        if w > 64:
-                            for wi in range(WIDE_WORDS):
-                                wv[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (wi * 64 + 64) <= w else w - wi * 64)
-                                wm[sp * WIDE_WORDS + wi] = <unsigned long long>_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i + wi * 64, 64 if (wi * 64 + 64) <= w else w - wi * 64)
-                            wflag[sp] = 1; stack[sp].val = 0; stack[sp].mask = 0
-                        else:
-                            wmask = mask_for_width(w)
-                            stack[sp].val  = <long long>(_wide_extract(&wv[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            stack[sp].mask = <long long>(_wide_extract(&wm[sp * WIDE_WORDS], WIDE_WORDS, i, w)) & wmask
-                            wflag[sp] = 0
-                        stack[sp].width = w
-                    else:
-                        wmask = mask_for_width(w)
-                        stack[sp].val = (a.val >> i) & wmask
-                        stack[sp].mask = (a.mask >> i) & wmask
-                        stack[sp].width = w; wflag[sp] = 0
-                else:
-                    stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
-            else:
-                stack[sp].val = 0; stack[sp].mask = 1; stack[sp].width = 1; wflag[sp] = 0
+                _select_x(stack, sp, wv, wm, wflag, 1)
             sp += 1
             continue
 
@@ -3983,6 +4060,7 @@ cdef int _execute_core(
                     n = mem_base[mid] + i
                     w = mem_elem_width[mid]
                     wmask = mask_for_width(w)
+                    _clip_mem_range(stack, sp, &b, &t, w)
                     # Bit-range mask for bits [msb:lsb]
                     new_val = mask_for_width(<int>b.val + 1) ^ mask_for_width(<int>t.val)
                     new_val = new_val & wmask
@@ -4022,6 +4100,7 @@ cdef int _execute_core(
                     n = mem_base[mid] + i
                     w = mem_elem_width[mid]
                     wmask = mask_for_width(w)
+                    _clip_mem_range(stack, sp, &b, &t, w)
                     new_val = mask_for_width(<int>b.val + 1) ^ mask_for_width(<int>t.val)
                     new_val = new_val & wmask
                     result_val = (stack[sp].val << <int>t.val) & new_val & ~(stack[sp].mask << <int>t.val)

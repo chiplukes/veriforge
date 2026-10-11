@@ -572,30 +572,54 @@ class CythonCodegen(
             return None
         return mid, name, ordered_indices
 
-    def _emit_memory_flat_index(self, mid: int, indices: list[Expression]) -> str:
-        """Emit the flattened storage index for a full unpacked-memory element access."""
+    def _emit_memory_flat_index(self, mid: int, indices: list[Expression], *, write: bool = False) -> str:
+        """Emit the flattened storage index for a full unpacked-memory element access.
+
+        An address out of range in any dimension, or with an x/z bit, maps to
+        a spare slot past the end (the arrays have two): `depth` for a read --
+        kept x, so the read is x -- and `depth + 1` for a write, which nothing
+        reads, so the write has no effect (IEEE 1364 5.2.1). There used to be
+        no check: `m[5]` of `m[0:3]` indexed past the C array into whatever
+        state followed it."""
         terms: list[str] = []
+        checks: list[str] = []
         for index_expr, (start, step, depth, stride) in zip(indices, self._mem_layouts[mid], strict=True):
-            raw_index = self._emit_index_expr(index_expr)
+            idx_w = max(1, self._expr_width(index_expr))
+            if idx_w <= _WORD_BITS:
+                # The full value: truncated to 32 bits, a wide index could
+                # wrap back into range.
+                raw_index = f"(({self._emit_expr(index_expr, idx_w)}) & wmask({idx_w}))"
+                idx_mask = f"(({self._emit_mask_expr(index_expr, idx_w)}) & wmask({idx_w}))"
+            else:
+                raw_index = self._emit_index_expr(index_expr)
+                idx_mask = f"({self._emit_mask_expr(index_expr, _WORD_BITS)})"
             # Normalize Verilog index → zero-based C-array position.
             # For descending [HIGH:LOW] the minimum valid index is LOW = start - (depth-1),
             # so the C position is (i - LOW).  Using (start - i) instead would reverse
             # the mapping (MEM[0] ↔ MEM[depth-1]), which is wrong for Verilog semantics.
             low = start - (depth - 1) if step < 0 else start
             pos = f"(({raw_index}) - {low})" if low != 0 else f"({raw_index})"
+            checks.append(f"{idx_mask} == 0 and 0 <= {pos} < {depth}")
             if stride != 1:
                 pos = f"(({pos}) * {stride})"
             terms.append(pos)
         flat_index = " + ".join(terms) if terms else "0"
-        return f"({flat_index})"
+        if not checks:
+            return f"({flat_index})"
+        spare = self._mem_info[mid][1] + (1 if write else 0)
+        return f"(({flat_index}) if ({' and '.join(checks)}) else {spare})"
 
-    def _resolve_memory_element_access(self, expr: Expression) -> tuple[int, str, str, list[Expression]] | None:
-        """Return (mid, flat_index_expr, name, unpacked_indices) for a full memory element access."""
+    def _resolve_memory_element_access(
+        self, expr: Expression, *, write: bool = False
+    ) -> tuple[int, str, str, list[Expression]] | None:
+        """Return (mid, flat_index_expr, name, unpacked_indices) for a full
+        memory element access; *write* for an assignment target (see
+        `_emit_memory_flat_index`)."""
         access = self._resolve_memory_element_expr(expr)
         if access is None:
             return None
         mid, name, indices = access
-        return mid, self._emit_memory_flat_index(mid, indices), name, indices
+        return mid, self._emit_memory_flat_index(mid, indices, write=write), name, indices
 
     def _memory_layout_matches(self, lhs_mid: int, rhs_mid: int) -> bool:
         """Return whether two memories have the same element layout."""
@@ -892,7 +916,7 @@ class CythonCodegen(
             if source is None:
                 return None
             sid, base_lsb = source
-            base_expr = self._emit_expr(expr.base, 32)
+            base_expr = self._emit_select_base(expr.base)
             if expr.direction == "+:":
                 lsb_expr = f"({base_expr})"
             else:
@@ -988,7 +1012,7 @@ class CythonCodegen(
             mem_target = self._resolve_memory_element_access(expr.target)
             if mem_target is not None:
                 mid, idx, name, _indices = mem_target
-                base_expr = self._emit_expr(expr.base, 32)
+                base_expr = self._emit_select_base(expr.base)
                 if expr.direction == "+:":
                     lsb_expr = base_expr
                 else:
@@ -1006,7 +1030,7 @@ class CythonCodegen(
             if source is None:
                 return None
             mid, idx, base_lsb = source
-            base_expr = self._emit_expr(expr.base, 32)
+            base_expr = self._emit_select_base(expr.base)
             if expr.direction == "+:":
                 lsb_expr = base_expr
             else:

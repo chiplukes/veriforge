@@ -6211,6 +6211,21 @@ cdef inline void _whole_stage_insert_word(SimCtx *c, int dst_sid, int lsb, int w
     cdef int bit = lsb
     cdef int word_idx, word_shift, chunk, dst_offset, i
     cdef unsigned long long chunk_mask, clear_mask, base_v, base_m, out_v, out_m
+    # Only the bits within the signal (an out-of-range or x position used
+    # to index past its words, corrupting other state).
+    if lsb < 0:
+        if -lsb >= width:
+            return
+        word_v >>= -lsb
+        word_m >>= -lsb
+        width += lsb
+        lsb = 0
+    if lsb >= c.width[dst_sid]:
+        return
+    if width > c.width[dst_sid] - lsb:
+        width = c.width[dst_sid] - lsb
+    remaining = width
+    bit = lsb
     if c.nba_bit[dst_sid] == 0:
         if c.wide_words[dst_sid] > 0:
             for i in range(c.wide_words[dst_sid]):
@@ -6420,6 +6435,21 @@ cdef inline void _whole_assign_insert_word(SimCtx *c, int dst_sid, int lsb, int 
     cdef int word_idx, word_shift, chunk, dst_offset, changed = 0
     cdef unsigned long long chunk_mask, clear_mask, base_v, base_m, out_v, out_m
     cdef long long new_v, new_m
+    # Only the bits within the signal (an out-of-range or x position used
+    # to index past its words, corrupting other state).
+    if lsb < 0:
+        if -lsb >= width:
+            return
+        word_v >>= -lsb
+        word_m >>= -lsb
+        width += lsb
+        lsb = 0
+    if lsb >= c.width[dst_sid]:
+        return
+    if width > c.width[dst_sid] - lsb:
+        width = c.width[dst_sid] - lsb
+    remaining = width
+    bit = lsb
     while remaining > 0:
         word_idx = bit >> 6
         word_shift = bit & 63

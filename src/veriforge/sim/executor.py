@@ -1023,7 +1023,7 @@ class StatementExecutor:  # cm:c2f9a1
                         idx = int(idx_val)
                         mem_data, _elem_w = ctx._memories[name]
                         if 0 <= idx < len(mem_data):
-                            base_i = int(base_val) - ctx._memory_bases.get(name, 0)
+                            base_i = self._select_base_value(lhs.base, base_val, ctx) - ctx._memory_bases.get(name, 0)
                             width_i = int(width_val)
                             if lhs.direction == "+:":
                                 msb_i = base_i + width_i - 1
@@ -1049,7 +1049,7 @@ class StatementExecutor:  # cm:c2f9a1
                 if struct_target is not None:
                     if base_val.is_defined and width_val.is_defined:
                         base_name, base_index, _field_msb, field_lsb, base_storage_val = struct_target
-                        base_i = int(base_val) - ctx._signal_bases.get(name, 0)
+                        base_i = self._select_base_value(lhs.base, base_val, ctx) - ctx._signal_bases.get(name, 0)
                         width_i = int(width_val)
                         if lhs.direction == "+:":
                             msb_i = base_i + width_i - 1
@@ -1079,7 +1079,7 @@ class StatementExecutor:  # cm:c2f9a1
                 if "[" in name:
                     return
                 if base_val.is_defined and width_val.is_defined:
-                    base_i = int(base_val)
+                    base_i = self._select_base_value(lhs.base, base_val, ctx)
                     width_i = int(width_val)
                     sig_base = ctx._signal_bases.get(name, 0)
                     base_i -= sig_base
@@ -1553,6 +1553,15 @@ class StatementExecutor:  # cm:c2f9a1
 
         for lhs_expr, out_val in out_vals:
             self._write_target(lhs_expr, out_val, ctx, immediate=True)
+
+    @staticmethod
+    def _select_base_value(expr: Expression, base: Value, ctx: EvalContext) -> int:
+        """A `+:`/`-:` base as an integer: negative for a negative signed base
+        (`c[neg +: 4] = ...` writes the in-range bits; it wrote nothing)."""
+        b = int(base)
+        if _expr_signed(expr, ctx) and b >> (base.width - 1):
+            b -= 1 << base.width
+        return b
 
     def _eval_port_width(self, port, ctx: EvalContext) -> int | None:
         """A task port's declared width, evaluated in *ctx* (parameterized

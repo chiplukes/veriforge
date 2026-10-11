@@ -71,6 +71,56 @@ Use `--clear-cython-cache` to wipe and rebuild from scratch.
 
 ## Simulator
 
+### Select/index edges and ascending ranges audit (RESOLVED 2026-10-10)
+
+An audit of compiled's "unmasked storage" write paths, followed by
+probes of every select and write form at the edges of its target
+(`tests/test_sim/test_select_edges.py`). Writes of values wider than
+their target were already clean.
+
+Findings:
+
+- **compiled, memory addresses:** no bounds check at all. `m[5]` of
+  `m[0:3]` read and wrote past the C array into neighbouring state
+  (`m[1]`'s mask, other memories). Addresses that are out of range or
+  have x/z bits now map to one of two spare slots per memory:
+  - `depth` for reads, kept x;
+  - `depth + 1` for writes, never read.
+  The address-resolution call sites for left-hand sides pass
+  `write=True`.
+- **compiled, x/z index:** an x/z index read its x bits as 0, so
+  `a[4'bx01x] = 1` set bit 2 and `a[xi]` read 1. Such an index now
+  becomes a far out-of-range position (`_X_INDEX`).
+- **compiled, out-of-range reads:** an out-of-range bit- or part-select
+  read 0. The signal and wide-memory extractors and `wide_slice_extract`
+  (through `wide_slice_xfill`) now x-fill bits outside the target. The
+  snapshot (`_sv`) extractor of a narrow signal also used `lsb & 63`:
+  `a[70]` read bit 6.
+- **compiled, wide range writes:** the wide insert helpers indexed past a
+  signal's words, so an x-base part-select write on a wide signal crashed
+  the process. They now clip to the signal.
+- **compiled, `$display` arguments:** a narrow argument with a wide
+  intermediate (`^(c ? 1'b1 : 128'h3)`) was computed in one word.
+- **All engines:**
+  - A fully out-of-range part-select read 0 instead of x.
+  - An x part-select base gave a 1-bit x instead of `w` bits of x.
+  - A negative signed part-select base wrapped to a huge position on
+    reads and writes (reference raised on reads). The base is now signed:
+    vm uses a signed 64-bit base (`_compile_select_base`), vm-fast a
+    shared `_select_into` helper, and compiled `_emit_select_base` plus
+    clipped range writes.
+- **All engines, ascending ranges:** `reg [0:7] a` mapped indices as
+  `i - min(L, R)`, so `a[0]` read x and writes landed in the wrong bits.
+  The new `sim/ascending.py` (`lower_ascending_ranges`) rewrites ascending
+  declarations as descending and flips every select on them, covering
+  vectors, memory elements, function/task scopes and initializers.
+- **Fuzzer:**
+  - An Icarus internal crash now counts as incomparable.
+  - Hierarchical input-port actuals are size-cast to the port's width
+    (Icarus quirk, see known_issues.md).
+  - The impure-call counter isn't read in the statements that call it
+    (compiled operand order, see known_issues.md).
+
 ### Short-circuit evaluation, integer atom types, fuzzer round 3 (RESOLVED 2026-10-10)
 
 Covered by `tests/test_sim/test_short_circuit.py`,

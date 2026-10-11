@@ -153,6 +153,61 @@ operands it follows IEEE 1364-2005 Table 5-6 (1, -1, x). Every veriforge
 engine follows Table 5-6 at all widths; the fuzzer only generates small
 unsigned exponents. Not a veriforge bug -- do not replicate.
 
+### Icarus: input port expressions are self-determined
+
+Icarus evaluates an input port connection expression at its own width and
+pads it to the port (`c u(.i9(-{a, 4'd0}))` with a 9-bit port gives
+`001110000`, with a "Padding 2 high bits" warning). IEEE 1364 12.3.9 treats
+the connection as a continuous assignment, evaluated at the port's width:
+Verilator and veriforge give `111110000`. The fuzzer wraps hierarchical
+input-port expressions in a size cast to the port's width, which means the
+same in every simulator. Not a veriforge bug -- do not replicate.
+
+### Icarus: `$signed`/`$unsigned` of a bare parameter is ignored
+
+`parameter signed [69:0] p3 = 70'sd952465042086495645460;` -- Icarus prints
+`$unsigned(p3)` as negative (the cast is dropped). The same cast of a reg,
+or of `{p3}`, works. Verilator and veriforge print it unsigned. The fuzzer
+casts `{p}` instead of `p`. Not a veriforge bug -- do not replicate.
+
+### Icarus: `always @*` sensitivity drops identifiers in constant-folded branches
+
+`always @(*) begin ... if (p1[38]) w8 = 1; else if (i3 ** 2'd3) w8 = 2; ...`
+with `p1[38]` a constant 1: Icarus drops `i3` from the implicit sensitivity
+list. If nothing else external is read, the block never runs, so its
+outputs stay x. IEEE puts every identifier read in the statement into `@*`.
+Not a veriforge bug -- do not replicate.
+
+### All engines run combinational blocks once at t=0 (Icarus doesn't)
+
+Every veriforge engine runs each combinational `always @*` block (and each
+continuous assign) once at t=0, `always_comb`-style. Icarus runs an
+`always @*` block only on an input change. A block whose inputs never
+change, e.g. `o10 = -r9` with `r9` a 2-state `shortint` that stays at its
+initial 0, therefore stays x in Icarus. Strict 1364 `@*` semantics side
+with Icarus here; this is a deliberate choice, and the fuzzer sees it as an
+occasional "first activation" difference.
+
+### Icarus: `signed_port | 1'b1` treated as signed
+
+With `input logic signed [1:0] i5`, Icarus divides by `(i5 | 1'b1)` as if
+it were signed (sign-extended: `x / 3` gives 0 in a 127-bit context). The
+`1'b1` operand makes the expression unsigned, and the same expression on a
+reg is right in Icarus. Verilator and veriforge zero-extend. Not a
+veriforge bug -- do not replicate.
+
+### compiled: operand order around impure function calls
+
+compiled evaluates every user-function call in a statement before the
+statement itself. Each call is guarded, so a call is skipped where `?:`,
+`&&` or `||` wouldn't evaluate it (see known_issues_archive.md, "Short-
+circuit evaluation"). A plain read of a signal the function writes, in
+another operand of the same expression, therefore sees the value after the
+call: `x ? !r8 : f()`, where `f` changes `r8` and `x` is x. Icarus and the
+other engines evaluate left to right. IEEE 1364 5.1.2 leaves the order
+unspecified, so both are legal. The fuzzer doesn't read the impure
+function's counter in the statements that call it.
+
 ### Icarus: `integer unsigned` prints as signed
 
 Icarus prints `integer unsigned iu = 32'hffff_ffff;` with `%0d` as `-1`

@@ -331,11 +331,13 @@ class ExpressionGenerator:
 
     def _cast(self, rng, depth, callables, exclude=None) -> FunctionCall:
         cast = rng.choice(("$signed", "$unsigned"))
-        return FunctionCall(
-            cast,
-            [self.expr(rng, depth - 1, callables=callables, exclude=exclude)],
-            is_system=True,
-        )
+        operand = self.expr(rng, depth - 1, callables=callables, exclude=exclude)
+        params = {p.name for p in self._ctx.parameters}
+        if isinstance(operand, Identifier) and operand.name in params:
+            # Icarus ignores $signed/$unsigned of a bare parameter (a quirk,
+            # see known_issues.md); a parenthesised expression of it is fine.
+            operand = Concatenation([operand])
+        return FunctionCall(cast, [operand], is_system=True)
 
     def _width_cast(self, rng, depth, callables, exclude=None) -> WidthCast:
         """SystemVerilog size cast ``N'(e)`` (dropped by the parser until

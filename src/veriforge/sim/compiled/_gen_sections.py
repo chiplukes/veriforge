@@ -1131,6 +1131,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # The widest single value (temporaries in the wide helpers).
         lines.append(f"DEF MAX_VALUE_WORDS = {max(self._module_max_wide_words(), 16)}")
         lines.append("DEF OUT_BUF_MAX = 65536")
+        lines.append("DEF _X_INDEX = 0x3FFFFFFF")  # an x/z select index (see _emit_index_expr)
         lines.append(f"DEF PROCESS_LOOP_LIMIT = {_PROCESS_LOOP_LIMIT}")
         lines.append("DEF ERR_NONE = 0")
         lines.append("DEF ERR_WHILE_LOOP_LIMIT = 1")
@@ -1286,15 +1287,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ew, depth = self._mem_info[mid]
             if ew > _WORD_BITS:
                 words = self._mem_words(mid)
-                lines.append(f"    unsigned long long wide_mem_{mid}_val[{depth * words}]")
-                lines.append(f"    unsigned long long wide_mem_{mid}_mask[{depth * words}]")
-                lines.append(f"    unsigned long long wide_mem_{mid}_snap_val[{depth * words}]")
-                lines.append(f"    unsigned long long wide_mem_{mid}_snap_mask[{depth * words}]")
+                # (+2 spare elements: an out-of-range/x address's read and
+                # write slots, see `_emit_memory_flat_index`.)
+                lines.append(f"    unsigned long long wide_mem_{mid}_val[{(depth + 2) * words}]")
+                lines.append(f"    unsigned long long wide_mem_{mid}_mask[{(depth + 2) * words}]")
+                lines.append(f"    unsigned long long wide_mem_{mid}_snap_val[{(depth + 2) * words}]")
+                lines.append(f"    unsigned long long wide_mem_{mid}_snap_mask[{(depth + 2) * words}]")
             else:
-                lines.append(f"    long long mem_{mid}_val[{depth}]")
-                lines.append(f"    long long mem_{mid}_mask[{depth}]")
-                lines.append(f"    long long mem_{mid}_snap_val[{depth}]")
-                lines.append(f"    long long mem_{mid}_snap_mask[{depth}]")
+                lines.append(f"    long long mem_{mid}_val[{depth + 2}]")
+                lines.append(f"    long long mem_{mid}_mask[{depth + 2}]")
+                lines.append(f"    long long mem_{mid}_snap_val[{depth + 2}]")
+                lines.append(f"    long long mem_{mid}_snap_mask[{depth + 2}]")
             # Snapshot journal: flat slots written since the last snapshot
             # (see _mem_snap_memcpy_lines).
             lines.append(f"    int       memj_{mid}[{self._mem_journal_cap(mid)}]")
@@ -1557,7 +1560,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 if any("_mwvu" in ln for ln in body_lines):
                     parts.append("    cdef unsigned long long _mwvu, _mwmu")
                 if "_rmw_msb" in joined:
-                    parts.append("    cdef int _rmw_msb, _rmw_lsb")
+                    parts.append("    cdef int _rmw_msb, _rmw_lsb, _rmw_drop")
                     parts.append("    cdef long long _rmw_mask")
                 if "_ps_lsb" in joined:
                     parts.append("    cdef int _ps_lsb")
@@ -1791,7 +1794,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     if "_mwvu" in joined:
                         decls.append("    cdef unsigned long long _mwvu, _mwmu")
                     if "_rmw_msb" in joined:
-                        decls.append("    cdef int _rmw_msb, _rmw_lsb")
+                        decls.append("    cdef int _rmw_msb, _rmw_lsb, _rmw_drop")
                         decls.append("    cdef long long _rmw_mask")
                     if "_ps_lsb" in joined:
                         decls.append("    cdef int _ps_lsb")
@@ -1910,7 +1913,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     if "_mwvu" in joined:
                         decls.append("    cdef unsigned long long _mwvu, _mwmu")
                     if "_rmw_msb" in joined:
-                        decls.append("    cdef int _rmw_msb, _rmw_lsb")
+                        decls.append("    cdef int _rmw_msb, _rmw_lsb, _rmw_drop")
                         decls.append("    cdef long long _rmw_mask")
                     if "_ps_lsb" in joined:
                         decls.append("    cdef int _ps_lsb")
@@ -2734,6 +2737,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     )
                 lines.append(f"            self.ctx.wide_mem_{mid}_snap_val[i] = 0")
                 lines.append(f"            self.ctx.wide_mem_{mid}_snap_mask[i] = 0")
+                # The spare slots: always x (reads of a bad address).
+                lines.append(f"        for i in range({depth * words}, {(depth + 2) * words}):")
+                lines.append(f"            self.ctx.wide_mem_{mid}_val[i] = 0")
+                lines.append(f"            self.ctx.wide_mem_{mid}_snap_val[i] = 0")
+                lines.append(
+                    f"            self.ctx.wide_mem_{mid}_mask[i] = _word_mask64(MEM_{mid}_WIDTH - ((i % MEM_{mid}_WORDS) * 64))"
+                )
+                lines.append(f"            self.ctx.wide_mem_{mid}_snap_mask[i] = self.ctx.wide_mem_{mid}_mask[i]")
             else:
                 lines.append(f"        for i in range({depth}):")
                 lines.append(f"            self.ctx.mem_{mid}_val[i] = 0")
@@ -2741,6 +2752,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append(f"            self.ctx.mem_{mid}_mask[i] = {mem_mask}")
                 lines.append(f"            self.ctx.mem_{mid}_snap_val[i] = 0")
                 lines.append(f"            self.ctx.mem_{mid}_snap_mask[i] = 0")
+                # The spare slots: always x (reads of a bad address).
+                lines.append(f"        for i in range({depth}, {depth + 2}):")
+                lines.append(f"            self.ctx.mem_{mid}_val[i] = 0")
+                lines.append(f"            self.ctx.mem_{mid}_snap_val[i] = 0")
+                lines.append(f"            self.ctx.mem_{mid}_mask[i] = wmask(MEM_{mid}_WIDTH)")
+                lines.append(f"            self.ctx.mem_{mid}_snap_mask[i] = wmask(MEM_{mid}_WIDTH)")
             lines.append(f"        self.ctx.memj_{mid}_n = 0")
         if self._n_mems > 0:
             lines.append("        self.ctx.nba_mem_range_count = 0")
@@ -2790,7 +2807,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append("        cdef unsigned long long _mwvu, _mwmu")
             initial_joined = "\n".join(initial_lines)
             if "_rmw_msb" in initial_joined:
-                lines.append("        cdef int _rmw_msb, _rmw_lsb")
+                lines.append("        cdef int _rmw_msb, _rmw_lsb, _rmw_drop")
                 lines.append("        cdef long long _rmw_mask")
             if "_ps_lsb" in initial_joined:
                 lines.append("        cdef int _ps_lsb")

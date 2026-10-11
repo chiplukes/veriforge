@@ -284,9 +284,12 @@ class SignalContext:
         return list(self._params)
 
     def all_readable(self) -> list[Signal]:
-        """Every signal that can appear in an expression RHS."""
+        """Every signal that can appear in an expression RHS -- except the
+        clock: read through continuous logic by a clocked block, it races
+        the edge (simulators legitimately differ; reading it in the clocked
+        block itself, always 1, adds nothing)."""
         return [
-            *self._inputs,
+            *(s for s in self._inputs if s.name != "clk"),
             *self._wires,
             *self._regs,
             *self._outputs,

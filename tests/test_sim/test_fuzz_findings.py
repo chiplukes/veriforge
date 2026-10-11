@@ -449,6 +449,62 @@ endmodule
 """
 _DIV_ZERO_EXPECTED = ["0 x x x"]
 
+# `$signed`/`$unsigned` results are only widened to their context, never
+# truncated (reference truncated `-$unsigned(33'bx...1)` to 7 bits, dropping
+# the x bits before negating)
+_CAST_NO_TRUNCATE = """module t(input clk);
+  reg [12:0] z = 0;
+  wire [6:0] o1 = -$unsigned(33'bx110010x10111000010110x10x1000111 ~^ z);
+  wire [6:0] o2 = -$unsigned(33'bx110010x10111000010110x10x1000111);
+  wire [6:0] o3 = -(33'bx110010x10111000010110x10x1000111);
+  always @(posedge clk) $display("%b %b %b", o1, o2, o3);
+endmodule
+"""
+_CAST_NO_TRUNCATE_EXPECTED = ["xxxxxxx xxxxxxx xxxxxxx"]
+
+# an unsigned `&`/`|` zero-extends a `$signed` operand in its x mask too
+# (compiled sign-extended the operand's value there)
+_BITWISE_MASK_SIGN = """module t(input clk);
+  reg [2:0] a = 3'b110; reg c = 1;
+  reg [62:0] q1, q2, q3;
+  always @(posedge clk) begin
+    q1 = {1'b1, 12'b11x0101x0011} & $signed(a[1:0] ? a : a);
+    q2 = {1'b1, 12'b11x0101x0011} & $signed(a);
+    q3 = {1'b1, 12'b11x0101x0011} & $signed(c ? a : a);
+    $display("%b %b %b", q1[12:0], q2[12:0], q3[12:0]);
+  end
+endmodule
+"""
+_BITWISE_MASK_SIGN_EXPECTED = ["0000000000010 0000000000010 0000000000010"]
+_BITWISE_MASK_SIGN_WIDE = """module t(input clk);
+  reg [2:0] a = 3'b110; reg c = 1; reg signed [2:0] sa = 3'sb110;
+  reg [99:0] q1, q2, q3, q4;
+  always @(posedge clk) begin
+    q1 = {1'b1, 80'bx0x0, 12'b11x0101x0011} & $signed(a);
+    q2 = {1'b1, 80'bx0x0, 12'b11x0101x0011} | $signed(c ? a : a);
+    q3 = {1'b1, 12'b11x0101x0011} & sa;
+    q4 = $signed({1'b1, 12'b11x0101x0011}) & sa;
+    $display("%h %h %h %h", q1, q2, q3, q4);
+  end
+endmodule
+"""
+_BITWISE_MASK_SIGN_WIDE_EXPECTED = [
+    "0000000000000000000000002 01xxxxxxxxxxxxxxxxxxxXXX7 0000000000000000000000002 ffffffffffffffffffffffXX2"
+]
+
+# a wide `**` result is the base's width (vm-fast kept the full power, so
+# bits above it leaked into a wider context)
+_POW_WIDE_TRUNC = """module t(input clk);
+  reg [107:0] i5 = {4'h9, 104'h1234_5678_9abc_def0_1122_3344_55}; reg b = 1;
+  reg signed [79:0] s = -80'sd3; reg signed [1:0] e2 = 2'sd1;
+  wire [126:0] o6 = $unsigned({i5, b} ** 2'd3);
+  wire [99:0] o7 = $unsigned(s ** 2'd3);
+  wire [99:0] o8 = $unsigned(s ** e2);
+  always @(posedge clk) $display("%h %h %h", o6, o7, o8);
+endmodule
+"""
+_POW_WIDE_TRUNC_EXPECTED = ["00001d9421a11ecfbe4ec3c7d2b92413 00000ffffffffffffffffffe5 00000fffffffffffffffffffd"]
+
 _CASES = {
     "ternary_context_sign": (_TERNARY_CONTEXT_SIGN, _TERNARY_CONTEXT_SIGN_EXPECTED, 8),
     "unsized_literal_wide": (_UNSIZED_LITERAL_WIDE, _UNSIZED_LITERAL_WIDE_EXPECTED, 18),
@@ -478,6 +534,10 @@ _CASES = {
     "cont_mask": (_CONT_MASK, _CONT_MASK_EXPECTED, 8),
     "div_edges": (_DIV_EDGES, _DIV_EDGES_EXPECTED, 8),
     "div_zero": (_DIV_ZERO, _DIV_ZERO_EXPECTED, 8),
+    "cast_no_truncate": (_CAST_NO_TRUNCATE, _CAST_NO_TRUNCATE_EXPECTED, 8),
+    "bitwise_mask_sign": (_BITWISE_MASK_SIGN, _BITWISE_MASK_SIGN_EXPECTED, 8),
+    "bitwise_mask_sign_wide": (_BITWISE_MASK_SIGN_WIDE, _BITWISE_MASK_SIGN_WIDE_EXPECTED, 8),
+    "pow_wide_trunc": (_POW_WIDE_TRUNC, _POW_WIDE_TRUNC_EXPECTED, 8),
 }
 
 

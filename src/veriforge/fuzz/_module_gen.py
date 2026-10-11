@@ -22,6 +22,7 @@ from ..model.expressions import (
     StreamingConcatenation,
     StringLiteral,
     TernaryOp,
+    WidthCast,
 )
 from ..model.instances import Instance, PortConnection
 from ..model.statements import (
@@ -469,6 +470,11 @@ class ModuleGenerator:
         func.body.statements.insert(0, side_effect)
         ctx.functions.append(func)
 
+        # The counter isn't read in these statements: the order of the call's
+        # side effect against another operand's read is unspecified (IEEE
+        # 1364 5.1.2; compiled hoists calls, Icarus/reference go left to
+        # right). Later statements (the $display) still read it.
+        ctx._regs.remove(counter)
         for out in ctx.outputs:
             rhs = expr_gen.expr(rng, depth=rng.randint(1, 3))
             if rng.random() < 0.5:
@@ -483,6 +489,7 @@ class ModuleGenerator:
                 else:
                     rhs = BinaryOp(rng.choice(["+", "^", "-"]), call, rhs)
             stmts.append(NonblockingAssign(out.as_identifier(), rhs))
+        ctx._regs.append(counter)
         stmts.extend(self._maybe_display(expr_gen))
         ab = AlwaysBlock(
             stmt_gen._seq_block_from_stmts(rng, stmts),
@@ -747,6 +754,12 @@ class ModuleGenerator:
                 else:
                     actual = expr_gen.expr(self._rng, depth)
                 ctx._inputs.extend(clocks)
+                # Sized to the port: an input port connection is evaluated in
+                # the port's width (IEEE 1364 12.3.9, as Verilator does), but
+                # Icarus evaluates it self-determined and pads -- a cast
+                # means the same in both.
+                port_w, _signed = _port_width_signed(port)
+                actual = WidthCast(Literal(port_w, width=32), actual)
             port_connections.append(PortConnection(port_name=port.name, expression=actual, is_named=True))
 
         inst = Instance(child.name, ctx._next_name("u"), port_connections=port_connections)

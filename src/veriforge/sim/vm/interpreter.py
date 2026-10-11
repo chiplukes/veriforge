@@ -163,6 +163,12 @@ def _signed_cmp(a: Value, b: Value, op: str) -> Value:
     return Value(1 if result else 0, width=1)
 
 
+def _pos(v: Value) -> int:
+    """A select position: 64-bit positions are signed (see the compiler's
+    `_compile_select_base`)."""
+    return v.val - (1 << 64) if v.width == 64 and v.val >> 63 else v.val
+
+
 class Interpreter:  # cm:e3f1b4
     """Execute bytecode programs against signal storage.
 
@@ -339,7 +345,7 @@ class Interpreter:  # cm:e3f1b4
                 if msb.is_defined and lsb.is_defined:
                     w = sig_width[arg1]
                     current = Value(sig_val[arg1], width=w, mask=sig_mask[arg1])
-                    updated = current.set_range(msb.val, lsb.val, val)
+                    updated = current.set_range(_pos(msb), _pos(lsb), val)
                     if sig_val[arg1] != updated.val or sig_mask[arg1] != updated.mask:
                         sig_val[arg1] = updated.val
                         sig_mask[arg1] = updated.mask
@@ -352,7 +358,7 @@ class Interpreter:  # cm:e3f1b4
                 val = s_pop()
                 if msb.is_defined and lsb.is_defined:
                     # Store as (sid, msb, lsb, field_val) tuple; apply_nba resolves lazily
-                    nba_queue.append((arg1, msb.val, lsb.val, val))
+                    nba_queue.append((arg1, _pos(msb), _pos(lsb), val))
                 continue
 
             if op == Op.SIGN_EXT:
@@ -680,7 +686,7 @@ class Interpreter:  # cm:e3f1b4
                 msb = s_pop()
                 target = s_pop()
                 if msb.is_defined and lsb.is_defined:
-                    s_append(target[msb.val : lsb.val])
+                    s_append(target[_pos(msb) : _pos(lsb)])
                 else:
                     w = (msb.val - lsb.val + 1) if msb.is_defined and lsb.is_defined else 1
                     s_append(Value.x(w))
@@ -693,9 +699,12 @@ class Interpreter:  # cm:e3f1b4
                 if base.is_defined and width.is_defined:
                     w = width.val
                     b = base.val
+                    if base.width == 64 and b >> 63:  # signed 64-bit (see the compiler)
+                        b -= 1 << 64
                     s_append(target[b + w - 1 : b])
                 else:
-                    s_append(Value.x(1))
+                    # w bits of x (an x base; it was 1 bit wide)
+                    s_append(Value.x(width.val if width.is_defined and width.val > 0 else 1))
                 continue
 
             if op == Op.PART_SEL_DOWN:
@@ -705,9 +714,12 @@ class Interpreter:  # cm:e3f1b4
                 if base.is_defined and width.is_defined:
                     w = width.val
                     b = base.val
+                    if base.width == 64 and b >> 63:  # signed 64-bit (see the compiler)
+                        b -= 1 << 64
                     s_append(target[b : b - w + 1])
                 else:
-                    s_append(Value.x(1))
+                    # w bits of x (an x base; it was 1 bit wide)
+                    s_append(Value.x(width.val if width.is_defined and width.val > 0 else 1))
                 continue
 
             if op == Op.CONCAT:
@@ -913,7 +925,7 @@ class Interpreter:  # cm:e3f1b4
                         flat = base + addr
                         wmask = _mask_for_width(ew)
                         current = Value(mem_val[flat] & wmask, width=ew, mask=mem_mask[flat] & wmask)
-                        updated = current.set_range(msb.val, lsb.val, val)
+                        updated = current.set_range(_pos(msb), _pos(lsb), val)
                         new_val = updated.val & wmask & ~updated.mask
                         new_mask = updated.mask & wmask
                         # Only mark dirty on actual value change — see STORE_MEM.
@@ -935,7 +947,7 @@ class Interpreter:  # cm:e3f1b4
                     ew, depth, base = self.mem_info[mid]
                     addr = idx.val
                     if 0 <= addr < depth:
-                        self.nba_mem_queue.append((mid, addr, msb.val, lsb.val, val))
+                        self.nba_mem_queue.append((mid, addr, _pos(msb), _pos(lsb), val))
                 continue
 
             if op == Op.SYS_READMEM:

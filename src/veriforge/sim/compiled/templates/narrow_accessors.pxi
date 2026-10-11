@@ -46,7 +46,7 @@ cdef inline bint _sig_has_unknown(SimCtx *c, int sid) noexcept nogil:
         return False
     return (c.mask[sid] & _word_mask64(c.width[sid])) != 0
 
-cdef inline unsigned long long _sig_extract_word_val(SimCtx *c, int sid, int lsb) noexcept nogil:
+cdef inline unsigned long long _sig_extract_word_val_raw(SimCtx *c, int sid, int lsb) noexcept nogil:
     cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_v = _sig_word_val(c, sid, src_word)
@@ -56,7 +56,7 @@ cdef inline unsigned long long _sig_extract_word_val(SimCtx *c, int sid, int lsb
     hi_v = _sig_word_val(c, sid, src_word + 1)
     return (lo_v >> src_shift) | (hi_v << (64 - src_shift))
 
-cdef inline unsigned long long _sig_extract_word_mask(SimCtx *c, int sid, int lsb) noexcept nogil:
+cdef inline unsigned long long _sig_extract_word_mask_raw(SimCtx *c, int sid, int lsb) noexcept nogil:
     cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_m = _sig_word_mask(c, sid, src_word)
@@ -76,7 +76,7 @@ cdef inline unsigned long long _sig_word_mask_snap(SimCtx *c, int sid, int word_
         return c.wide_snap_mask[c.wide_offset[sid] + word_index]
     return 0
 
-cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
+cdef inline unsigned long long _sig_extract_word_val_sv_raw(long long *sv, long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
     cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_v
@@ -101,7 +101,7 @@ cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long
         return lo_v
     return lo_v >> src_shift
 
-cdef inline unsigned long long _sig_extract_word_mask_sv(long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
+cdef inline unsigned long long _sig_extract_word_mask_sv_raw(long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
     cdef int src_word = lsb >> 6
     cdef int src_shift = lsb & 63
     cdef unsigned long long lo_m
@@ -118,3 +118,66 @@ cdef inline unsigned long long _sig_extract_word_mask_sv(long long *sm, SimCtx *
     if src_shift == 0:
         return lo_m
     return lo_m >> src_shift
+
+
+# Bits of the 64-bit window starting at bit *lsb* that lie outside a *w*-bit
+# signal: a select reaching them reads x (IEEE 1364 5.2.1). The extractors
+# below used to read them as known 0 -- and the snapshot (`_sv`) variant of a
+# narrow signal used `lsb & 63`, so `a[70]` of an 8-bit reg read bit 6.
+cdef inline unsigned long long _oor_bits(int w, int lsb) noexcept nogil:
+    cdef unsigned long long m = 0
+    if lsb >= w or lsb <= -64:
+        return <unsigned long long>-1
+    if lsb + 64 > w:
+        m |= (<unsigned long long>-1) << (w - lsb)
+    if lsb < 0:
+        m |= ((<unsigned long long>1) << (-lsb)) - 1
+    return m
+
+cdef inline unsigned long long _narrow_window(unsigned long long base, int lsb) noexcept nogil:
+    # (*lsb* within -63..63 here: anything further is all out of range)
+    if lsb >= 64 or lsb <= -64:
+        return 0
+    if lsb >= 0:
+        return base >> lsb
+    return base << (-lsb)
+
+cdef inline unsigned long long _sig_extract_word_val(SimCtx *c, int sid, int lsb) noexcept nogil:
+    cdef unsigned long long oor = _oor_bits(c.width[sid], lsb)
+    if oor == <unsigned long long>-1:
+        return 0
+    return _sig_extract_word_val_raw(c, sid, lsb) & ~oor
+
+cdef inline unsigned long long _sig_extract_word_mask(SimCtx *c, int sid, int lsb) noexcept nogil:
+    cdef unsigned long long oor = _oor_bits(c.width[sid], lsb)
+    if oor == <unsigned long long>-1:
+        return oor
+    return _sig_extract_word_mask_raw(c, sid, lsb) | oor
+
+cdef inline unsigned long long _sig_extract_word_val_sv(long long *sv, long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
+    cdef unsigned long long oor = _oor_bits(c.width[sid], lsb)
+    if oor == <unsigned long long>-1:
+        return 0
+    if c.wide_words[sid] > 0:
+        return _sig_extract_word_val_sv_raw(sv, sm, c, sid, lsb) & ~oor
+    return _narrow_window(<unsigned long long>sv[sid] & _word_mask64(c.width[sid]), lsb) & ~oor
+
+cdef inline unsigned long long _sig_extract_word_mask_sv(long long *sm, SimCtx *c, int sid, int lsb) noexcept nogil:
+    cdef unsigned long long oor = _oor_bits(c.width[sid], lsb)
+    if oor == <unsigned long long>-1:
+        return oor
+    if c.wide_words[sid] > 0:
+        return _sig_extract_word_mask_sv_raw(sm, c, sid, lsb) | oor
+    return _narrow_window(<unsigned long long>sm[sid] & _word_mask64(c.width[sid]), lsb) | oor
+
+# A select from an arbitrary <= 64-bit value (*w* bits wide): bits outside
+# it read x, as for signals above.
+cdef inline unsigned long long _nsel_val(long long v, int w, long long lsb) noexcept nogil:
+    if lsb >= w or lsb <= -64:
+        return 0
+    return _narrow_window(<unsigned long long>v & _word_mask64(w), <int>lsb) & ~_oor_bits(w, <int>lsb)
+
+cdef inline unsigned long long _nsel_mask(long long m, int w, long long lsb) noexcept nogil:
+    if lsb >= w or lsb <= -64:
+        return <unsigned long long>-1
+    return _narrow_window(<unsigned long long>m & _word_mask64(w), <int>lsb) | _oor_bits(w, <int>lsb)

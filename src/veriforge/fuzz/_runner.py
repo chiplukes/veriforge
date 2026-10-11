@@ -517,6 +517,10 @@ class FuzzRunner:
                     text=True,
                 )
             except subprocess.CalledProcessError as exc:
+                if exc.returncode < 0 or "assert" in exc.stderr or "Aborted" in exc.stderr:
+                    # An internal Icarus crash (e.g. `expr_synth.cc: failed
+                    # assertion`) is Icarus's bug, not a mismatch.
+                    raise _IcarusIncomparable(f"iverilog crashed: {exc.stderr.strip()[:200]}") from exc
                 raise RuntimeError(f"iverilog: {exc.stderr.strip()}") from exc
             if "found no sensitivities so it will never trigger" in compiled.stderr:
                 # An `always @*` whose reads Icarus constant-folds away never

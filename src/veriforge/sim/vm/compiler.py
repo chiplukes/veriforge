@@ -604,6 +604,14 @@ class Compiler:  # cm:8c1e4a
             self.sig_val[sid] = v.val
             self.sig_mask[sid] = v.mask
 
+    def _compile_select_base(self, expr: Expression, program: list[tuple[int, int, int]]) -> None:
+        """A `+:`/`-:` base as a signed 64-bit value: a negative (signed) base,
+        or one taken below 0 by the declared LSB, selects or writes partly out
+        of range instead of wrapping to a huge position. The interpreters read
+        64-bit select positions as signed."""
+        self._compile_expr(expr, program, self._expr_width(expr))
+        program.append(instr(Op.SIGN_EXT if self._expr_signed(expr) else Op.RESIZE, 64, 0))
+
     def _append_base_adjust(self, program: list[tuple[int, int, int]], base: int) -> None:
         """Adjust the top-of-stack bit index for a declared non-zero packed LSB."""
         if base == 0:
@@ -1720,8 +1728,9 @@ class Compiler:  # cm:8c1e4a
         if etype is PartSelect:
             # Same signed_override reasoning as BitSelect above.
             self._compile_expr(expr.target, program)
-            self._compile_expr(expr.base, program)
+            self._compile_select_base(expr.base, program)
             self._append_base_adjust(program, self._select_base(expr.target))
+            program.append(instr(Op.RESIZE, 64))
             self._compile_expr(expr.width, program)
             if expr.direction == "+:":
                 program.append(instr(Op.PART_SEL_UP))
@@ -3162,19 +3171,19 @@ class Compiler:  # cm:8c1e4a
                     base = self._memory_bases.get(tname, 0)
                     self._compile_expr(lhs.target.index, program)
                     if lhs.direction == "+:":
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         self._append_base_adjust(program, base)
                         self._compile_expr(lhs.width, program)
                         program.append(instr(Op.ADD))
                         one_cid = self._add_int_const(1, 32)
                         program.append(instr(Op.LOAD_CONST, one_cid))
                         program.append(instr(Op.SUB))
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         self._append_base_adjust(program, base)
                     else:
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         self._append_base_adjust(program, base)
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         self._append_base_adjust(program, base)
                         self._compile_expr(lhs.width, program)
                         program.append(instr(Op.SUB))
@@ -3198,7 +3207,7 @@ class Compiler:  # cm:8c1e4a
                         if not self._compile_struct_storage_index(storage_index, program):
                             raise ValueError(f"Unsupported dynamic memory struct index: {tname!r}")
                     if lhs.direction == "+:":
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         if select_base != 0:
                             cid = self._add_int_const(select_base, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
@@ -3212,7 +3221,7 @@ class Compiler:  # cm:8c1e4a
                             cid = self._add_int_const(offset, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
                             program.append(instr(Op.ADD))
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         if select_base != 0:
                             cid = self._add_int_const(select_base, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
@@ -3222,7 +3231,7 @@ class Compiler:  # cm:8c1e4a
                             program.append(instr(Op.LOAD_CONST, cid))
                             program.append(instr(Op.ADD))
                     else:
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         if select_base != 0:
                             cid = self._add_int_const(select_base, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
@@ -3231,7 +3240,7 @@ class Compiler:  # cm:8c1e4a
                             cid = self._add_int_const(offset, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
                             program.append(instr(Op.ADD))
-                        self._compile_expr(lhs.base, program)
+                        self._compile_select_base(lhs.base, program)
                         if select_base != 0:
                             cid = self._add_int_const(select_base, 32)
                             program.append(instr(Op.LOAD_CONST, cid))
@@ -3262,16 +3271,16 @@ class Compiler:  # cm:8c1e4a
                 # For "+:": lsb = base, msb = base + width - 1
                 # For "-:": msb = base, lsb = base - width + 1
                 if lhs.direction == "+:":
-                    self._compile_expr(lhs.base, program)  # base → stack
+                    self._compile_select_base(lhs.base, program)  # base → stack
                     self._compile_expr(lhs.width, program)  # width → stack
                     program.append(instr(Op.ADD))  # base + width
                     one_cid = self._add_int_const(1, 32)
                     program.append(instr(Op.LOAD_CONST, one_cid))
                     program.append(instr(Op.SUB))  # msb = base + width - 1
-                    self._compile_expr(lhs.base, program)  # lsb = base
+                    self._compile_select_base(lhs.base, program)  # lsb = base
                 else:
-                    self._compile_expr(lhs.base, program)  # msb = base
-                    self._compile_expr(lhs.base, program)  # base → stack
+                    self._compile_select_base(lhs.base, program)  # msb = base
+                    self._compile_select_base(lhs.base, program)  # base → stack
                     self._compile_expr(lhs.width, program)  # width → stack
                     program.append(instr(Op.SUB))  # base - width
                     one_cid = self._add_int_const(1, 32)

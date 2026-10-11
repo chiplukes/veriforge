@@ -5257,6 +5257,9 @@ class _WideEmitterMixin:
                 f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m,"
                 f" _sc{tslot}_v, _sc{tslot}_m, {lsb_expr}, {slice_w_expr}, {n_src}, {n_dst})"
             )
+            lines.append(
+                f"{pad}wide_slice_xfill(_sc{slot}_v, _sc{slot}_m, {lsb_expr}, {slice_w_expr}, {src_w}, {n_dst})"
+            )
             # A range-select is always unsigned in its OWN right (IEEE
             # 1364-2005 SS5.5.1), so bits beyond its own width are
             # normally zero -- but when wrapped in `$signed(...)`
@@ -5294,7 +5297,7 @@ class _WideEmitterMixin:
                     lsb_expr = str(base_v - width_v + 1 - sig_base)
             else:
                 # Dynamic base — emit runtime lsb expression
-                base_code = self._emit_expr(expr.base, 32)
+                base_code = self._emit_select_base(expr.base)
                 if expr.direction == "+:":
                     lsb_expr = f"<int>({base_code}) - {sig_base}" if sig_base else f"<int>({base_code})"
                 else:
@@ -5312,6 +5315,7 @@ class _WideEmitterMixin:
                 f"{pad}wide_slice_extract(_sc{slot}_v, _sc{slot}_m,"
                 f" _sc{tslot}_v, _sc{tslot}_m, {lsb_expr}, {width_v}, {n_src}, {n_dst})"
             )
+            lines.append(f"{pad}wide_slice_xfill(_sc{slot}_v, _sc{slot}_m, {lsb_expr}, {width_v}, {src_w}, {n_dst})")
             # Same signed_override reasoning as RangeSelect above.
             if signed_override:
                 lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(width_v), indent))

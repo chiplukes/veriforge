@@ -448,7 +448,8 @@ class _ExprEmitterMixin:
             base = self._select_base(expr.target)
             if base != 0:
                 index = f"(({index}) - {base})"
-            return f"(({target}) >> ({index})) & 1"
+            tw = self._expr_width(expr.target)
+            return f"(0 if not (0 <= ({index}) < {tw}) else ((({target}) >> ({index})) & 1))"
 
         if etype is RangeSelect:
             if isinstance(expr.target, Identifier):
@@ -561,7 +562,7 @@ class _ExprEmitterMixin:
                 sid = self._signal_map.get(tname)
                 sig_base = self._signal_bases.get(tname, 0)
                 if sid is not None:
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -579,7 +580,7 @@ class _ExprEmitterMixin:
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -598,7 +599,7 @@ class _ExprEmitterMixin:
                         return "0"
                     mid = storage_info[1]
                     offset = storage_info[3]
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -616,7 +617,7 @@ class _ExprEmitterMixin:
                 mid, idx, name, _indices = plain_mem_target
                 elem_width = self._mem_info[mid][0]
                 if elem_width > _WORD_BITS:
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     bit_base = self._memory_bases.get(name, 0)
                     if bit_base != 0:
                         base = f"(({base}) - {bit_base})"
@@ -633,7 +634,7 @@ class _ExprEmitterMixin:
                         return self._emit_wide_mem_dynamic_slice_expr(mid, idx, lsb_expr, width_arg)
                     return f"(_wmem{mid}_extract_val(c, ({idx}), {lsb_expr}) & _word_mask64({width_expr}))"
             target = self._emit_expr(expr.target, self._expr_width(expr.target))
-            base = self._emit_expr(expr.base, 32)
+            base = self._emit_select_base(expr.base)
             sig_base = self._select_base(expr.target)
             if sig_base != 0:
                 base = f"(({base}) - {sig_base})"
@@ -645,10 +646,13 @@ class _ExprEmitterMixin:
                 width_expr = self._emit_expr(expr.width, 32)
                 mask_hex = f"wmask({width_expr})"
                 sel_w = None
+            tw = self._expr_width(expr.target)
+            # (Out-of-range bits read x -- see the mask side -- and 0 here;
+            # a plain shift by 64+ or a negative base was undefined.)
             if expr.direction == "+:":
-                result = f"(({target}) >> ({base})) & {mask_hex}"
+                result = f"<long long>(_nsel_val({target}, {tw}, {base}) & {mask_hex})"
             else:
-                result = f"(({target}) >> (({base}) - ({self._emit_expr(expr.width, 32)}) + 1)) & {mask_hex}"
+                result = f"<long long>(_nsel_val({target}, {tw}, ({base}) - ({self._emit_expr(expr.width, 32)}) + 1) & {mask_hex})"
             if sel_w is not None:
                 if self._expr_signed(expr) and width > sel_w:
                     result = f"_sign_ext({result}, {sel_w})"
@@ -1064,7 +1068,7 @@ class _ExprEmitterMixin:
             target = self._emit_py_expr(expr.target, target_width)
             if target is None:
                 return None
-            base = self._emit_expr(expr.base, 32)
+            base = self._emit_select_base(expr.base)
             sig_base = 0
             if isinstance(expr.target, Identifier):
                 sig_base = self._signal_bases.get(expr.target.name, 0)
@@ -1323,7 +1327,7 @@ class _ExprEmitterMixin:
             target_mask = self._emit_py_mask_expr(expr.target, target_width)
             if target_mask is None:
                 return None
-            base = self._emit_expr(expr.base, 32)
+            base = self._emit_select_base(expr.base)
             sig_base = 0
             if isinstance(expr.target, Identifier):
                 sig_base = self._signal_bases.get(expr.target.name, 0)
@@ -3411,6 +3415,19 @@ class _ExprEmitterMixin:
             cache[key] = result
         return result
 
+    def _emit_select_base(self, expr: Expression) -> str:
+        """A `+:`/`-:` base: sign-extended when signed (`d[neg +: 4]` selects
+        partly below bit 0), and far out of range when it has an x/z bit (a
+        select of x; it used to read the x bits as 0)."""
+        w = max(1, min(self._expr_width(expr), _WORD_BITS))
+        v = self._emit_expr(expr, w)
+        if self._expr_signed(expr):
+            v = f"_sign_ext({v}, {w})"
+        else:
+            v = f"(({v}) & wmask({w}))"
+        m = self._emit_mask_expr(expr, w)
+        return f"(_X_INDEX if (({m}) & wmask({w})) else {v})"
+
     def _emit_index_expr(self, expr: Expression) -> str:
         """Emit an index expression using its natural width for wrap semantics."""
         idx_width = self._expr_width(expr)
@@ -3419,7 +3436,11 @@ class _ExprEmitterMixin:
         if idx_width > 32:
             idx_width = 32
         idx_expr = self._emit_expr(expr, idx_width)
-        return f"(({idx_expr}) & wmask({idx_width}))"
+        # An index with an x/z bit selects nothing (IEEE 1364 5.2.1): a
+        # position far out of range, which reads x and writes nowhere. It
+        # used to read x bits as 0 (`a[4'bx01x] = 1` set bit 2).
+        idx_mask = self._emit_mask_expr(expr, idx_width)
+        return f"(_X_INDEX if (({idx_mask}) & wmask({idx_width})) else (({idx_expr}) & wmask({idx_width})))"
 
     # ΓöÇΓöÇ Mask expression generation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -3931,8 +3952,11 @@ class _ExprEmitterMixin:
             # begin with). The earlier fix's own verification of this
             # exact case was mistaken.
             if expr.op == "|":
-                lv = self._emit_expr(expr.left, bitwise_op_width)
-                rv = self._emit_expr(expr.right, bitwise_op_width)
+                # (Values extended like the masks above, with the combined
+                # signedness: `{...} & $signed(a)` sign-extended a's value
+                # here, letting x bits through where a zero-extends.)
+                lv = self._emit_expr(expr.left, bitwise_op_width, mask_override)
+                rv = self._emit_expr(expr.right, bitwise_op_width, mask_override)
                 if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
@@ -3944,8 +3968,11 @@ class _ExprEmitterMixin:
                     lm = f"_et{n}_m"
                 return f"((({lm}) | ({rm})) & ~(({lv}) & ~({lm})) & ~(({rv}) & ~({rm})) & wmask({bitwise_op_width}))"
             if expr.op == "&":
-                lv = self._emit_expr(expr.left, bitwise_op_width)
-                rv = self._emit_expr(expr.right, bitwise_op_width)
+                # (Values extended like the masks above, with the combined
+                # signedness: `{...} & $signed(a)` sign-extended a's value
+                # here, letting x bits through where a zero-extends.)
+                lv = self._emit_expr(expr.left, bitwise_op_width, mask_override)
+                rv = self._emit_expr(expr.right, bitwise_op_width, mask_override)
                 if self._et_pending is not None and isinstance(expr.left, BinaryOp) and expr.left.op in {"|", "&"}:
                     n = self._et_count
                     self._et_count += 1
@@ -4149,7 +4176,8 @@ class _ExprEmitterMixin:
             base = self._select_base(expr.target)
             if base != 0:
                 index = f"(({index}) - {base})"
-            return f"(({target_m}) >> ({index})) & 1"
+            tw = self._expr_width(expr.target)
+            return f"(1 if not (0 <= ({index}) < {tw}) else ((({target_m}) >> ({index})) & 1))"
 
         if etype is RangeSelect:
             if isinstance(expr.target, Identifier):
@@ -4254,7 +4282,7 @@ class _ExprEmitterMixin:
                 sid = self._signal_map.get(tname)
                 sig_base = self._signal_bases.get(tname, 0)
                 if sid is not None:
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -4269,7 +4297,7 @@ class _ExprEmitterMixin:
                 struct_info = self._resolve_struct_access(tname)
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -4286,7 +4314,7 @@ class _ExprEmitterMixin:
                         return "0"
                     mid = storage_info[1]
                     offset = storage_info[3]
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     if isinstance(expr.width, Literal):
                         width_expr = str(int(expr.width.value))
                     else:
@@ -4304,7 +4332,7 @@ class _ExprEmitterMixin:
                 mid, idx, name, _indices = plain_mem_target
                 elem_width = self._mem_info[mid][0]
                 if elem_width > _WORD_BITS:
-                    base = self._emit_expr(expr.base, 32)
+                    base = self._emit_select_base(expr.base)
                     bit_base = self._memory_bases.get(name, 0)
                     if bit_base != 0:
                         base = f"(({base}) - {bit_base})"
@@ -4321,7 +4349,7 @@ class _ExprEmitterMixin:
                         return self._emit_wide_mem_dynamic_slice_expr(mid, idx, lsb_expr, width_arg, mask=True)
                     return f"(_wmem{mid}_extract_mask(c, ({idx}), {lsb_expr}) & _word_mask64({width_expr}))"
             target_m = self._emit_mask_expr(expr.target, self._expr_width(expr.target))
-            base = self._emit_expr(expr.base, 32)
+            base = self._emit_select_base(expr.base)
             # Adjust for non-zero base offset (scalar signal or memory-element packed base)
             sig_base = self._select_base(expr.target)
             if sig_base != 0:
@@ -4332,8 +4360,11 @@ class _ExprEmitterMixin:
             else:
                 mask_hex = f"wmask({self._emit_expr(expr.width, 32)})"
             if expr.direction == "+:":
-                return f"(({target_m}) >> ({base})) & {mask_hex}"
-            return f"(({target_m}) >> (({base}) - ({self._emit_expr(expr.width, 32)}) + 1)) & {mask_hex}"
+                return f"<long long>(_nsel_mask({target_m}, {self._expr_width(expr.target)}, {base}) & {mask_hex})"
+            return (
+                f"<long long>(_nsel_mask({target_m}, {self._expr_width(expr.target)},"
+                f" ({base}) - ({self._emit_expr(expr.width, 32)}) + 1) & {mask_hex})"
+            )
 
         if etype is FunctionCall:
             fname = expr.name.lower()

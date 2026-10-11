@@ -864,9 +864,15 @@ def _pre_apply_param_overrides(flat: Module, inst: Instance, sub: Module) -> Mod
 def _resolved_param_literal_width(param: Parameter, env: dict[str, int | str]) -> int | None:
     """Resolve the width to preserve when materializing a constant parameter value."""
     if param.width is not None:
+        # In the parameter's own (flattened instance) scope: an inner
+        # `logic [N*8-1:0] P` refers to its instance's `N` (it fell back to
+        # the override literal's width -- 47 bits for 48'h6050...).
+        from .scheduler import _scoped_env  # noqa: PLC0415
+
+        scoped = _scoped_env(param.name, env)
         try:
-            msb_val = _eval_const_expr(param.width.msb, env)
-            lsb_val = _eval_const_expr(param.width.lsb, env)
+            msb_val = _eval_const_expr(param.width.msb, scoped)
+            lsb_val = _eval_const_expr(param.width.lsb, scoped)
         except (ValueError, TypeError):
             return None
         if isinstance(msb_val, int) and isinstance(lsb_val, int):

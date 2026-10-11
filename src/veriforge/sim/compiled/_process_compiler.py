@@ -356,8 +356,11 @@ class _ProcessCompilerMixin:
                     rhs_mid = self._mem_map.get(rhs_name)
                     if rhs_mid is not None:
                         rhs_elem_w, _depth = self._mem_info[rhs_mid]
-                        if lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS:
-                            idx = self._emit_index_expr(assign.rhs.index)
+                        mem_access = self._resolve_memory_element_access(assign.rhs)
+                        if (lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS) and mem_access is not None:
+                            # (Bounds-checked: an out-of-range/x address reads
+                            # the x spare slot; it read past the array.)
+                            idx = mem_access[1]
                             lines = [f"    _whole_assign_mem_elem_{rhs_mid}(c, {lhs_sid}, ({idx}))"]
                             self._processes.append((sensitivity, lines))
                             continue
@@ -761,7 +764,7 @@ class _ProcessCompilerMixin:
                 lsb_expr = offset_expr if rhs_base_lsb == "0" else f"({rhs_base_lsb}) + ({offset_expr})"
                 extract = self._emit_signal_slice_expr(rhs_sid, lsb_expr, width_expr)
                 mask_extract = self._emit_signal_slice_expr(rhs_sid, lsb_expr, width_expr, mask=True)
-            mem_access = self._resolve_memory_element_access(part)
+            mem_access = self._resolve_memory_element_access(part, write=True)
             if mem_access is not None:
                 mid, idx, _name, _indices = mem_access
                 lines = self._emit_const_mem_range_write_lines(
@@ -795,7 +798,7 @@ class _ProcessCompilerMixin:
                     else:
                         msb_src = part.base
                         lsb_src = part.base if pw == 1 else BinaryOp("-", part.base, Literal(pw - 1, width=32))
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit_base = self._memory_bases.get(name, 0)
@@ -836,7 +839,7 @@ class _ProcessCompilerMixin:
                     struct_storage_range = self._resolve_struct_storage_mem_select_range(part.target, msb_src, lsb_src)
                     if struct_storage_range is not None:
                         mem_lhs, msb, lsb = struct_storage_range
-                        access = self._resolve_memory_element_access(mem_lhs)
+                        access = self._resolve_memory_element_access(mem_lhs, write=True)
                         if access is not None:
                             mid, idx, _name, _indices = access
                             if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -927,7 +930,7 @@ class _ProcessCompilerMixin:
                         self._processes.append((sensitivity, lines))
                         continue
             if isinstance(part, RangeSelect):
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit_base = self._memory_bases.get(name, 0)
@@ -970,7 +973,7 @@ class _ProcessCompilerMixin:
                     )
                     if struct_storage_range is not None:
                         mem_lhs, msb, lsb = struct_storage_range
-                        access = self._resolve_memory_element_access(mem_lhs)
+                        access = self._resolve_memory_element_access(mem_lhs, write=True)
                         if access is not None:
                             mid, idx, _name, _indices = access
                             if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -1061,7 +1064,7 @@ class _ProcessCompilerMixin:
                         self._processes.append((sensitivity, lines))
                         continue
             if isinstance(part, BitSelect):
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit = self._emit_index_expr(part.index)
@@ -1087,7 +1090,7 @@ class _ProcessCompilerMixin:
                     )
                     if struct_storage_range is not None:
                         mem_lhs, msb, lsb = struct_storage_range
-                        access = self._resolve_memory_element_access(mem_lhs)
+                        access = self._resolve_memory_element_access(mem_lhs, write=True)
                         if access is not None:
                             mid, idx, _name, _indices = access
                             if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -1254,7 +1257,7 @@ class _ProcessCompilerMixin:
                     mem_lhs, msb, lsb = struct_storage_range
                     if not isinstance(msb, Literal) or not isinstance(lsb, Literal):
                         continue
-                    access = self._resolve_memory_element_access(mem_lhs)
+                    access = self._resolve_memory_element_access(mem_lhs, write=True)
                     if access is None:
                         continue
                     mid, idx, _name, _indices = access
@@ -1340,7 +1343,7 @@ class _ProcessCompilerMixin:
         """Compile continuous assign with BitSelect LHS: assign out[idx] = rhs."""
         lhs = assign.lhs
 
-        mem_access = self._resolve_memory_element_access(lhs)
+        mem_access = self._resolve_memory_element_access(lhs, write=True)
         if mem_access is not None:
             mid, idx, _name, indices = mem_access
             elem_w, _depth = self._mem_info[mid]
@@ -1418,7 +1421,7 @@ class _ProcessCompilerMixin:
             return
 
         # Memory element bit write: assign MEM[addr][bit] = rhs
-        mem_target = self._resolve_memory_element_access(lhs.target)
+        mem_target = self._resolve_memory_element_access(lhs.target, write=True)
         if mem_target is not None:
             mid, addr, name, indices = mem_target
             marker_sid = self._mem_marker_sigs[mid]
@@ -1484,8 +1487,13 @@ class _ProcessCompilerMixin:
             self._processes.append((sensitivity, lines))
             return
 
+        sig_w = self._signal_widths[sid]
         lines = [
-            f"    cdef long long idx = ({idx}) & 0x3f",
+            # Out of range (or an x index): no write. It was `& 0x3f`, which
+            # wrapped the index onto a real bit.
+            f"    cdef long long idx = ({idx})",
+            f"    if not (0 <= idx < {sig_w}):",
+            "        return",
             f"    cdef long long rval = ({rhs_val}) & 1",
             f"    cdef long long m = ({mask_expr}) & 1",
             f"    cdef long long new_val = (c.val[{sid}] & ~(1LL << idx)) | (rval << idx)",

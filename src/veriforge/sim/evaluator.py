@@ -1260,10 +1260,13 @@ class ExpressionEvaluator:  # cm:7e8b5d
             if base.is_defined and part_w.is_defined:
                 w = int(part_w)
                 b = int(base)
+                if _expr_signed(expr.base, ctx) and b >> (base.width - 1):
+                    b -= 1 << base.width  # a negative base (`d[neg +: 4]`; it read as huge)
                 b -= _select_base(expr.target, ctx)
                 result = target[b + w - 1 : b] if expr.direction == "+:" else target[b : b - w + 1]
             else:
-                result = Value.x(1)
+                # w bits of x for an x base (it was 1 bit wide)
+                result = Value.x(int(part_w) if part_w.is_defined and int(part_w) > 0 else 1)
             # Same signed_override reasoning as BitSelect above.
             if width and result.width < width:
                 return result.sign_extend(width) if signed_override else result.resize(width)
@@ -1354,7 +1357,10 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # modulus should see at its own (self-determined, un-
                 # propagated) width.
                 result = self.eval(inner, ctx, _expr_self_width(inner, ctx))
-                if width and result.width != width:
+                # Only ever widened to the context (it was also truncated:
+                # `-$unsigned(33'bx...1)` into 7 bits dropped the x bits
+                # before negating).
+                if width and result.width < width:
                     eff_signed = signed_override if signed_override is not None else (fname == "$signed")
                     return result.sign_extend(width) if eff_signed else result.resize(width)
                 return result

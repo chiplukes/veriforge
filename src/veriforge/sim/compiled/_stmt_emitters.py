@@ -484,7 +484,7 @@ class _StmtEmittersMixin:
                     width_expr = (
                         str(part_w) if part_w is not None else self._emit_expr(rhs.width, self._expr_width(rhs.width))
                     )
-                    base_expr = self._emit_expr(rhs.base, 32)
+                    base_expr = self._emit_select_base(rhs.base)
                     sig_base = self._signal_bases.get(target_name, 0)
                     if rhs.direction == "+:":
                         lsb_expr = f"(({base_expr}) - {sig_base})"
@@ -495,7 +495,7 @@ class _StmtEmittersMixin:
                 if struct_info is not None:
                     base_sid, offset, _field_width = struct_info
                     helper = "_whole_stage_slice_width_signal" if is_nba else "_whole_assign_slice_width_signal"
-                    base_expr = self._emit_expr(rhs.base, 32)
+                    base_expr = self._emit_select_base(rhs.base)
                     if isinstance(rhs.width, Literal):
                         width_expr = str(int(rhs.width.value))
                     else:
@@ -597,7 +597,7 @@ class _StmtEmittersMixin:
                     return self._emit_mem_range_write(mem_lhs, bit_expr_msb, bit_expr_lsb, rhs, indent, is_nba=is_nba)
                 if self._resolve_struct_access(self._identifier_name(lhs.target)) is not None:
                     return self._emit_range_write(lhs.target, lhs.index, lhs.index, rhs, indent, is_nba=is_nba)
-            mem_target = self._resolve_memory_element_access(lhs.target)
+            mem_target = self._resolve_memory_element_access(lhs.target, write=True)
             if mem_target is not None:
                 mid, idx, name, _indices = mem_target
                 marker_sid = self._mem_marker_sigs[mid]
@@ -665,13 +665,20 @@ class _StmtEmittersMixin:
                     pw = _const_int(lhs.width, self._param_env)
                     if pw is None:
                         pw = 1
-                if lhs.direction == "+:":
-                    lsb_expr = lhs.base
-                    msb_expr = lhs.base if pw == 1 else BinaryOp("+", lhs.base, Literal(pw - 1, width=32))
-                else:
-                    msb_expr = lhs.base
-                    lsb_expr = lhs.base if pw == 1 else BinaryOp("-", lhs.base, Literal(pw - 1, width=32))
-                return self._emit_mem_range_write(lhs.target, msb_expr, lsb_expr, rhs, indent, is_nba=is_nba)
+                if isinstance(lhs.base, Literal):
+                    if lhs.direction == "+:":
+                        lsb_expr = lhs.base
+                        msb_expr = lhs.base if pw == 1 else BinaryOp("+", lhs.base, Literal(pw - 1, width=32))
+                    else:
+                        msb_expr = lhs.base
+                        lsb_expr = lhs.base if pw == 1 else BinaryOp("-", lhs.base, Literal(pw - 1, width=32))
+                    return self._emit_mem_range_write(lhs.target, msb_expr, lsb_expr, rhs, indent, is_nba=is_nba)
+                # A dynamic base: signed and x-aware (see `_emit_select_base`).
+                base = self._emit_select_base(lhs.base)
+                part_lsb = base if lhs.direction == "+:" else f"(({base}) - {pw - 1})"
+                return self._emit_mem_range_write(
+                    lhs.target, lhs.base, lhs.base, rhs, indent, is_nba=is_nba, part_lsb=part_lsb, part_w=pw
+                )
             struct_storage_target = False
             if isinstance(lhs.target, Identifier):
                 struct_storage_target = (
@@ -760,9 +767,17 @@ class _StmtEmittersMixin:
         indent: int,
         *,
         is_nba: bool,
+        part_lsb: str | None = None,
+        part_w: int = 1,
     ) -> list[str]:
         """Emit range-select LHS write targeting a resolved signal ID."""
         sig_base = self._signal_bases.get(self._signal_names[sid], 0)
+        if part_lsb is not None:
+            # A `+:`/`-:` part select (see `_emit_range_write_dynamic_part`):
+            # msb/lsb computed here, signed.
+            return self._emit_range_write_general(
+                sid, f"(({part_lsb}) + {part_w - 1})", part_lsb, rhs, indent, is_nba=is_nba
+            )
         rhs_source = self._resolve_signal_slice_source(rhs) if self._signal_widths[sid] > _WORD_BITS else None
         rhs_mem_source = self._resolve_memory_slice_source(rhs) if self._signal_widths[sid] > _WORD_BITS else None
         if rhs_source is not None or rhs_mem_source is not None:
@@ -822,13 +837,19 @@ class _StmtEmittersMixin:
                 indent,
                 is_nba=is_nba,
             )
-        pad = "    " * indent
-        lhs_w = self._signal_widths[sid]
         msb = self._emit_expr(msb_expr, 32)
         lsb = self._emit_expr(lsb_expr, 32)
         if sig_base != 0:
             msb = f"(({msb}) - {sig_base})"
             lsb = f"(({lsb}) - {sig_base})"
+        return self._emit_range_write_general(sid, msb, lsb, rhs, indent, is_nba=is_nba)
+
+    def _emit_range_write_general(  # noqa: PLR0913
+        self, sid: int, msb: str, lsb: str, rhs: Expression, indent: int, *, is_nba: bool
+    ) -> list[str]:
+        """`_emit_range_write_sid`'s general (runtime msb/lsb) case."""
+        pad = "    " * indent
+        lhs_w = self._signal_widths[sid]
         if lhs_w > _WORD_BITS:
             return [
                 f"{pad}_rmw_msb = ({msb})",
@@ -839,10 +860,23 @@ class _StmtEmittersMixin:
             ]
         rhs_val = self._emit_expr(rhs, lhs_w)
         rhs_mask = self._emit_mask_expr(rhs, lhs_w)
+        # Only the bits within the signal are written (IEEE 1364 5.2.1): a
+        # range starting below bit 0 drops the value's low bits, and one
+        # entirely outside writes nothing. (A negative lsb used to shift by
+        # a negative amount -- undefined -- and write nothing.)
+        rhs_val = f"<long long>(<unsigned long long>({rhs_val}) >> _rmw_drop)"
+        rhs_mask = f"<long long>(<unsigned long long>({rhs_mask}) >> _rmw_drop)"
         return [
             f"{pad}_rmw_msb = ({msb})",
             f"{pad}_rmw_lsb = ({lsb})",
-            f"{pad}_rmw_mask = wmask(_rmw_msb - _rmw_lsb + 1) << _rmw_lsb",
+            f"{pad}_rmw_drop = 0",
+            f"{pad}if _rmw_lsb < 0:",
+            f"{pad}    _rmw_drop = -_rmw_lsb",
+            f"{pad}    _rmw_lsb = 0",
+            f"{pad}if _rmw_msb >= {lhs_w}:",
+            f"{pad}    _rmw_msb = {lhs_w - 1}",
+            f"{pad}if _rmw_msb >= _rmw_lsb and _rmw_drop < 64:",
+            f"{pad}    _rmw_mask = wmask(_rmw_msb - _rmw_lsb + 1) << _rmw_lsb",
             *self._narrow_partial_write_lines(
                 sid,
                 "_rmw_mask",
@@ -850,7 +884,7 @@ class _StmtEmittersMixin:
                 rhs_val,
                 "wmask(_rmw_msb - _rmw_lsb + 1)",
                 "_rmw_lsb",
-                pad,
+                pad + "    ",
                 is_nba,
             ),
         ]
@@ -1089,6 +1123,24 @@ class _StmtEmittersMixin:
             pw = _const_int(lhs.width, self._param_env)
             if pw is None:
                 pw = 1
+        if isinstance(lhs.target, Identifier) and pw >= 1:
+            name = self._identifier_name(lhs.target)
+            sid = self._signal_map.get(name)
+            if (
+                sid is not None
+                and self._resolve_struct_signal_select_range(lhs.target, lhs.base, lhs.base) is None
+                and self._resolve_struct_storage_mem_select_range(lhs.target, lhs.base, lhs.base) is None
+            ):
+                # The base signed and x-aware (`_emit_select_base`): a
+                # negative base writes its in-range bits, an x base nothing.
+                base = self._emit_select_base(lhs.base)
+                sig_base = self._signal_bases.get(name, 0)
+                if sig_base:
+                    base = f"(({base}) - {sig_base})"
+                lsb = base if lhs.direction == "+:" else f"(({base}) - {pw - 1})"
+                return self._emit_range_write_sid(
+                    sid, lhs.base, lhs.base, rhs, indent, is_nba=is_nba, part_lsb=lsb, part_w=pw
+                )
         if lhs.direction == "+:":
             lsb_expr = lhs.base
             msb_expr = lhs.base if pw == 1 else BinaryOp("+", lhs.base, Literal(pw - 1, width=32))
@@ -1224,7 +1276,7 @@ class _StmtEmittersMixin:
                 lsb_expr = offset_expr if rhs_base_lsb == "0" else f"({rhs_base_lsb}) + ({offset_expr})"
                 extract = self._emit_signal_slice_expr(rhs_sid, lsb_expr, width_expr)
                 mask_extract = self._emit_signal_slice_expr(rhs_sid, lsb_expr, width_expr, mask=True)
-            mem_access = self._resolve_memory_element_access(part)
+            mem_access = self._resolve_memory_element_access(part, write=True)
             if mem_access is not None:
                 mid, idx, _name, _indices = mem_access
                 mem_part_lines.extend(
@@ -1244,7 +1296,7 @@ class _StmtEmittersMixin:
                 continue
 
             if isinstance(part, RangeSelect):
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit_base = self._memory_bases.get(name, 0)
@@ -1313,7 +1365,7 @@ class _StmtEmittersMixin:
                         )
                         if struct_storage_range is not None:
                             mem_lhs, msb, lsb = struct_storage_range
-                            access = self._resolve_memory_element_access(mem_lhs)
+                            access = self._resolve_memory_element_access(mem_lhs, write=True)
                             if access is not None:
                                 mid, idx, _name, _indices = access
                                 if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -1393,7 +1445,7 @@ class _StmtEmittersMixin:
                     else:
                         msb_src = part.base
                         lsb_src = part.base if pw == 1 else BinaryOp("-", part.base, Literal(pw - 1, width=32))
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit_base = self._memory_bases.get(name, 0)
@@ -1436,7 +1488,7 @@ class _StmtEmittersMixin:
                     struct_storage_range = self._resolve_struct_storage_mem_select_range(part.target, msb_src, lsb_src)
                     if struct_storage_range is not None:
                         mem_lhs, msb, lsb = struct_storage_range
-                        access = self._resolve_memory_element_access(mem_lhs)
+                        access = self._resolve_memory_element_access(mem_lhs, write=True)
                         if access is not None:
                             mid, idx, _name, _indices = access
                             if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -1535,7 +1587,7 @@ class _StmtEmittersMixin:
                                     part_ops, part.target, msb_src, lsb_src, extract, mask_extract
                                 )
             elif isinstance(part, BitSelect):
-                mem_target = self._resolve_memory_element_access(part.target)
+                mem_target = self._resolve_memory_element_access(part.target, write=True)
                 if mem_target is not None:
                     mid, addr, name, _indices = mem_target
                     bit_expr = self._emit_index_expr(part.index)
@@ -1583,7 +1635,7 @@ class _StmtEmittersMixin:
                         )
                         if struct_storage_range is not None:
                             mem_lhs, msb, lsb = struct_storage_range
-                            access = self._resolve_memory_element_access(mem_lhs)
+                            access = self._resolve_memory_element_access(mem_lhs, write=True)
                             if access is not None:
                                 mid, idx, _name, _indices = access
                                 if isinstance(msb, Literal) and isinstance(lsb, Literal):
@@ -1726,7 +1778,7 @@ class _StmtEmittersMixin:
                             and isinstance(struct_storage_range[2], Literal)
                         ):
                             mem_lhs, msb, lsb = struct_storage_range
-                            access = self._resolve_memory_element_access(mem_lhs)
+                            access = self._resolve_memory_element_access(mem_lhs, write=True)
                             if access is not None:
                                 mid, idx, _name, _indices = access
                                 mem_part_lines.extend(
@@ -1847,7 +1899,7 @@ class _StmtEmittersMixin:
             if not (isinstance(part.msb, Literal) and isinstance(part.lsb, Literal)):
                 return None
             target, base = part.target, int(part.lsb.value)
-        elif (access := self._resolve_memory_element_access(part)) is not None:
+        elif (access := self._resolve_memory_element_access(part, write=True)) is not None:
             # Whole wide memory element: the RangeSelect path subtracts the
             # memory's declared bit base, so add it here.
             target, base = part, self._memory_bases.get(access[2], 0)
@@ -1954,7 +2006,7 @@ class _StmtEmittersMixin:
     ) -> list[str]:
         """Emit memory write: mem[addr] = rhs or mem[addr] <= rhs."""
         pad = "    " * indent
-        access = self._resolve_memory_element_access(lhs)
+        access = self._resolve_memory_element_access(lhs, write=True)
         if access is None:
             raise NotImplementedError(
                 "Compiled engine cannot resolve memory element write target: "
@@ -2221,8 +2273,27 @@ class _StmtEmittersMixin:
                 indent=indent,
                 is_nba=is_nba,
             )
+        # Only the bits within the element (IEEE 1364 5.2.1): a range below
+        # bit 0 drops the value's low bits, one entirely outside writes
+        # nothing (a negative lsb used to shift by a negative amount).
+        clip = [
+            f"{pad}_rmw_msb = ({msb_expr})",
+            f"{pad}_rmw_lsb = ({lsb_expr})",
+            f"{pad}_rmw_drop = 0",
+            f"{pad}if _rmw_lsb < 0:",
+            f"{pad}    _rmw_drop = -_rmw_lsb",
+            f"{pad}    _rmw_lsb = 0",
+            f"{pad}if _rmw_msb >= {elem_w}:",
+            f"{pad}    _rmw_msb = {elem_w - 1}",
+            f"{pad}if _rmw_msb >= _rmw_lsb and _rmw_drop < 64:",
+        ]
+        msb_expr, lsb_expr = "_rmw_msb", "_rmw_lsb"
+        rhs_val = f"<long long>(<unsigned long long>({rhs_val}) >> _rmw_drop)"
+        rhs_mask = f"<long long>(<unsigned long long>({rhs_mask}) >> _rmw_drop)"
+        pad = pad + "    "
         if is_nba:
             return [
+                *clip,
                 f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
                 f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = ({idx})",
                 f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = ({msb_expr})",
@@ -2233,6 +2304,7 @@ class _StmtEmittersMixin:
                 f"{pad}c.nba_pending = 1",
             ]
         return [
+            *clip,
             f"{pad}_mwi = ({idx})",
             f"{pad}_mwv = (c.mem_{mid}_val[_mwi]"
             f" & ~(wmask(({msb_expr}) - ({lsb_expr}) + 1) << ({lsb_expr})))"
@@ -2255,10 +2327,12 @@ class _StmtEmittersMixin:
         indent: int,
         *,
         is_nba: bool,
+        part_lsb: str | None = None,
+        part_w: int = 1,
     ) -> list[str]:
         """Emit memory partial-range write: memory[addr][msb:lsb] = rhs."""
         pad = "    " * indent
-        access = self._resolve_memory_element_access(mem_lhs)
+        access = self._resolve_memory_element_access(mem_lhs, write=True)
         if access is None:
             raise NotImplementedError(
                 "Compiled engine cannot resolve memory range-select write target: "
@@ -2269,7 +2343,7 @@ class _StmtEmittersMixin:
         elem_w, _depth = self._mem_info[mid]
         marker_sid = self._mem_marker_sigs[mid]
         sig_base = self._memory_bases.get(name, 0)
-        if isinstance(msb_expr, Literal) and isinstance(lsb_expr, Literal):
+        if part_lsb is None and isinstance(msb_expr, Literal) and isinstance(lsb_expr, Literal):
             msb_v = int(msb_expr.value) - sig_base
             lsb_v = int(lsb_expr.value) - sig_base
             sel_w = msb_v - lsb_v + 1
@@ -2311,8 +2385,12 @@ class _StmtEmittersMixin:
                 is_nba=is_nba,
             )
         # Dynamic msb/lsb (rare)
-        msb = self._emit_expr(msb_expr, 32)
-        lsb = self._emit_expr(lsb_expr, 32)
+        if part_lsb is not None:
+            lsb = part_lsb
+            msb = f"(({part_lsb}) + {part_w - 1})"
+        else:
+            msb = self._emit_expr(msb_expr, 32)
+            lsb = self._emit_expr(lsb_expr, 32)
         if sig_base != 0:
             msb = f"(({msb}) - {sig_base})"
             lsb = f"(({lsb}) - {sig_base})"
@@ -3165,11 +3243,14 @@ class _StmtEmittersMixin:
         else:
             fn = "_out_fmt"
             tail = f"{w}, {ord(spec if spec != 'x' else 'h')}, {width}, {1 if zero_pad else 0}, {1 if signed else 0})"
-        if w <= _WORD_BITS:
+        internal_w = self._expr_max_internal_width(arg)
+        if w <= _WORD_BITS and internal_w <= _WORD_BITS:
             val = self._emit_expr(arg, w)
             mask = self._emit_mask_expr(arg, w)
             return [f"{pad}{fn}1(c, <unsigned long long>({val}), <unsigned long long>({mask}), {tail}"]
-        n_words = max((w + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words())
+        # (Also a narrow result computed through a wide intermediate, e.g.
+        # `^(c ? 1'b1 : 128'h3)`: the narrow emitter computed it in one word.)
+        n_words = max((max(w, internal_w) + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words())
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
         self._reset_scratch()
         slot = self._alloc_scratch()
@@ -3180,6 +3261,10 @@ class _StmtEmittersMixin:
         et_pending = self._et_pending
         self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
         self._reset_scratch()
+        if scratch_lines is None and w <= _WORD_BITS:
+            val = self._emit_expr(arg, w)
+            mask = self._emit_mask_expr(arg, w)
+            return [f"{pad}{fn}1(c, <unsigned long long>({val}), <unsigned long long>({mask}), {tail}"]
         if scratch_lines is None:
             raise NotImplementedError(
                 f"Compiled engine: a {w}-bit $display argument has an expression shape not yet supported "
