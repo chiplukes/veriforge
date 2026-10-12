@@ -72,21 +72,69 @@ _UNARY_CONST_OPS: dict[str, Callable[[int], int | None]] = {
     "^~": lambda _v: None,
 }
 
+# Constant folding works on unbounded Python ints before the final width is
+# known. Only the low bits ever survive, so astronomically large results are
+# reduced mod 2**_FOLD_BITS -- exact for any width up to that. (`3 ** 2**33`
+# or `1 << 2**33` in a parameter used to hang building the full number.)
+_FOLD_BITS = 1 << 16
+
+
+def const_pow(a: int, b: int) -> int | None:
+    """``a ** b`` per IEEE 1364-2005 Table 5-6; None for the undefined
+    ``0 ** negative`` cell. (A negative exponent used to give 0 for every
+    base here, and a Python float in elaboration's folder.)"""
+    if b < 0:
+        if a == 0:
+            return None
+        if a == 1:
+            return 1
+        if a == -1:
+            return -1 if b % 2 else 1
+        return 0
+    if abs(a) > 1 and b * a.bit_length() > _FOLD_BITS:
+        return pow(a, b, 1 << _FOLD_BITS)
+    return a**b
+
+
+def const_div(a: int, b: int) -> int | None:
+    """``a / b`` truncating toward zero, as Verilog does (Python's ``//``
+    floors: ``-7 / 2`` folded to -4, not -3). None for division by zero."""
+    if b == 0:
+        return None
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def const_mod(a: int, b: int) -> int | None:
+    """``a % b`` with the sign of ``a`` (``-7 % 2`` is -1, not Python's 1)."""
+    q = const_div(a, b)
+    return None if q is None else a - b * q
+
+
+def const_shl(a: int, b: int) -> int | None:
+    """``a << b``; None for a negative shift count."""
+    if b < 0:
+        return None
+    if b >= _FOLD_BITS:
+        return 0  # every bit within _FOLD_BITS shifted out
+    return a << b
+
+
 _BINARY_CONST_OPS: dict[str, Callable[[int, int], int | None]] = {
     "+": lambda a, b: a + b,
     "-": lambda a, b: a - b,
     "*": lambda a, b: a * b,
-    "/": lambda a, b: a // b if b != 0 else None,
-    "%": lambda a, b: a % b if b != 0 else None,
-    "**": lambda a, b: 0 if b < 0 else a**b,
+    "/": const_div,
+    "%": const_mod,
+    "**": const_pow,
     "&": lambda a, b: a & b,
     "|": lambda a, b: a | b,
     "^": lambda a, b: a ^ b,
     "~^": lambda a, b: ~(a ^ b),
     "^~": lambda a, b: ~(a ^ b),
-    "<<": lambda a, b: a << b if b >= 0 else None,
+    "<<": const_shl,
     ">>": lambda a, b: a >> b if b >= 0 else None,
-    "<<<": lambda a, b: a << b if b >= 0 else None,
+    "<<<": const_shl,
     ">>>": lambda a, b: a >> b if b >= 0 else None,
     "==": lambda a, b: 1 if a == b else 0,
     "!=": lambda a, b: 1 if a != b else 0,

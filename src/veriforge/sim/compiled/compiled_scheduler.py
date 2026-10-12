@@ -27,6 +27,7 @@ from veriforge.sim.evaluator import EvalContext, ExpressionEvaluator
 from veriforge.sim.severity import DisplayLog
 from veriforge.sim.event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from veriforge.sim.executor import StatementExecutor, StopExecution
+from veriforge.sim.scheduler import init_declaration_info
 from veriforge.sim.trace import flush_dump, start_dump
 from veriforge.sim.value import Value
 
@@ -510,6 +511,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         self._ref_executor._function_map = {f.name: f for f in module.functions}
         self._ref_executor._task_map = {t.name: t for t in module.tasks}
         self._ref_ctx = EvalContext()
+        init_declaration_info(self._ref_ctx, module)
         from ..elaborate import _build_struct_env
 
         _type_map, struct_signal_map = _build_struct_env(module)

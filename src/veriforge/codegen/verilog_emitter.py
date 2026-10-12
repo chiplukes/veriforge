@@ -759,7 +759,9 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         # they never need extra parens (confirmed against both this
         # project's grammar and Icarus Verilog: `~&{a,b}`, `~|{2{a}}`,
         # and `^foo(a)` all parse fine unparenthesized).
-        if isinstance(expr.operand, (BinaryOp, TernaryOp, UnaryOp)):
+        # A negative literal (the DSL's `lnot(-255)`) is no primary either:
+        # `!-255` didn't parse.
+        if isinstance(expr.operand, (BinaryOp, TernaryOp, UnaryOp)) or operand_str.startswith("-"):
             operand_str = f"({operand_str})"
         return f"{expr.op}{operand_str}"
     if isinstance(expr, BinaryOp):
@@ -1063,6 +1065,10 @@ def _emit_case_item(item: CaseItem, indent: str, current_indent: str) -> str:
 def _emit_for_loop(stmt: ForLoop, indent: str, current_indent: str, prefix: str) -> str:
     """Emit for loop."""
     init = f"{emit_expression(stmt.init.lhs)} = {emit_expression(stmt.init.rhs)}"
+    if stmt.declares_var:
+        # `for (int i = ...)`: the loop's own variable. It used to be dropped,
+        # so the loop used an outer `i` (or an undeclared one).
+        init = f"{'int' if stmt.signed_var else 'int unsigned'} {init}"
     cond = emit_expression(stmt.condition)
     update = f"{emit_expression(stmt.update.lhs)} = {emit_expression(stmt.update.rhs)}"
     inner_indent = current_indent + indent

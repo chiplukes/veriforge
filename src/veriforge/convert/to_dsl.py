@@ -23,6 +23,10 @@ Usage::
 
 from __future__ import annotations
 
+import copy
+import re
+from collections.abc import Callable
+
 from ..model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
 from ..model.design import Design, Module
 from ..model.expressions import (
@@ -41,10 +45,11 @@ from ..model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 from ..model.instances import Instance
 from ..model.interface import Interface
-from ..model.nets import Net
+from ..model.nets import Net, NetKind
 from ..model.package import ImportDecl, Package
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
@@ -117,9 +122,12 @@ _UNOP_FUNC = {
     "&": "reduce_and",
     "|": "reduce_or",
     "^": "reduce_xor",
-    "~&": None,
-    "~|": None,
-    "~^": None,  # lowered to bitwise-not reduction
+    # (These were `~reduce_and(x)` etc. -- a context-sized bitwise NOT of
+    # the 1-bit reduction, which set every upper bit in a wider context.)
+    "~&": "reduce_nand",
+    "~|": "reduce_nor",
+    "~^": "reduce_xnor",
+    "^~": "reduce_xnor",
 }
 
 # System tasks with direct DSL methods
@@ -210,19 +218,50 @@ def _needs_parens(expr: Expression, parent_op: str | None = None) -> bool:
     return False
 
 
+def _literal_to_python(expr: Literal) -> str:
+    """A literal as DSL code: a Python int only for a plain unsized decimal
+    (which is what a DSL int means), else ``lit("<Verilog text>")``, which
+    keeps the size, base, signedness and x/z bits. (Sized literals used to
+    lose their width -- `2'b11` became `3` -- and the parser's string-valued
+    ones came out as Python strings, `i['7':'2']`.)"""
+    text = expr.original_text.strip()
+    if isinstance(expr.value, float):
+        return text or str(expr.value)
+    if text and "'" not in text and text.isdigit() and int(text) < (1 << 31):
+        return str(int(text))
+    if text:
+        return f'lit("{text}")'
+    if isinstance(expr.value, int) and expr.width is None and not expr.is_x and not expr.is_z:
+        return str(expr.value)
+    # Built without source text (e.g. by a transform): spell it out.
+    base = expr.base or ("h" if expr.width is not None and expr.width > 8 else "d")
+    if isinstance(expr.value, int):
+        digits: dict[str, Callable[[int], str]] = {
+            "d": str,
+            "h": lambda v: format(v, "x"),
+            "b": lambda v: format(v, "b"),
+            "o": lambda v: format(v, "o"),
+        }
+        number = expr.value
+        if number < 0 and expr.width is not None:
+            number &= (1 << expr.width) - 1  # two's complement in the literal's width
+        if number < 0:
+            # An unsized negative value (a sized one was masked above).
+            return f"-{_literal_to_python(Literal(-number, width=expr.width, base=expr.base, signed=expr.signed))}"
+        value = digits.get(base.lower(), str)(number)
+    else:
+        value = str(expr.value)
+    size = str(expr.width) if expr.width is not None else ""
+    sign = "s" if expr.signed else ""
+    return f'lit("{size}\'{sign}{base}{value}")'
+
+
 def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
     """Convert a model Expression to a Python DSL expression string."""
 
     # --- Literal ---
     if isinstance(expr, Literal):
-        if isinstance(expr.value, int):
-            # Prefer hex for values >= 256 with explicit width
-            if expr.width is not None and expr.value >= 256:  # noqa: PLR2004
-                return hex(expr.value)
-            return str(expr.value)
-        if isinstance(expr.value, float):
-            return str(expr.value)
-        return repr(expr.value)
+        return _literal_to_python(expr)
 
     # --- StringLiteral ---
     if isinstance(expr, StringLiteral):
@@ -237,12 +276,6 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
     # --- UnaryOp ---
     if isinstance(expr, UnaryOp):
         operand = _expr_to_python(expr.operand)
-        if expr.op == "~&":
-            return f"~reduce_and({operand})"
-        if expr.op == "~|":
-            return f"~reduce_or({operand})"
-        if expr.op == "~^":
-            return f"~reduce_xor({operand})"
         if expr.op in _UNOP_PYTHON:
             op = _UNOP_PYTHON[expr.op]
             if isinstance(expr.operand, BinaryOp):
@@ -252,8 +285,8 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
             func = _UNOP_FUNC[expr.op]
             if func is not None:
                 return f"{func}({operand})"
-            return f"({operand})  # UNSUPPORTED: unary {expr.op}"
-        return f"({operand})  # UNSUPPORTED: unary {expr.op}"
+            return f'unsupported("unary operator {expr.op}")'
+        return f'unsupported("unary operator {expr.op}")'
 
     # --- BinaryOp ---
     if isinstance(expr, BinaryOp):
@@ -269,12 +302,12 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
         if expr.op in _BINOP_PYTHON:
             return f"{left} {_BINOP_PYTHON[expr.op]} {right}"
         if expr.op in _BINOP_FUNC:
-            func = _BINOP_FUNC[expr.op]
-            if func is not None:
-                return f"{func}({left}, {right})"
+            helper = _BINOP_FUNC[expr.op]
+            if helper is not None:
+                return f"{helper}({left}, {right})"
             # No DSL helper
-            return f"{left}  # UNSUPPORTED: operator {expr.op}"
-        return f"{left}  # UNSUPPORTED: operator {expr.op}"
+            return f'unsupported("operator {expr.op}")'
+        return f'unsupported("operator {expr.op}")'
 
     # --- TernaryOp ---
     if isinstance(expr, TernaryOp):
@@ -322,15 +355,21 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
         helper = _system_function_helper_name(expr)
         if helper is not None:
             return f"{helper}({args})"
+        # (These used to be followed by a `# ...` comment, which cut off the
+        # rest of the enclosing expression.)
         if expr.is_system or expr.name.startswith("$"):
-            return f'FunctionCall("{expr.name}", [{args}])  # system function'
-        return f"{expr.name}({args})  # user function"
+            return f'unsupported("system function {expr.name}")'
+        return f'unsupported("call of function {expr.name}")'
 
     # --- Mintypmax ---
     if isinstance(expr, Mintypmax):
         return _expr_to_python(expr.typ_val)  # use typ value
 
-    return f"None  # UNSUPPORTED expression: {type(expr).__name__}"
+    if isinstance(expr, WidthCast):
+        width = _expr_to_python(expr.width)
+        return f"cast({width}, {_expr_to_python(expr.operand)})"
+
+    return f'unsupported("{type(expr).__name__} expression")'
 
 
 # ---------------------------------------------------------------------------
@@ -338,11 +377,25 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
 # ---------------------------------------------------------------------------
 
 
-def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR0911, PLR0912, PLR0915
+def _unsupported_stmt(pfx: str, description: str) -> list[str]:
+    """A statement the DSL can't express: an `unsupported(...)` call, so
+    building the converted module fails there (see `dsl.unsupported`)."""
+    return [f'{pfx}unsupported("{description}")']
+
+
+def _body_lines(stmt: Statement | None, depth: int, mv: str) -> list[str]:
+    """A `with` block's body; ``pass`` when empty (`if (c) ;` used to leave
+    the `with` line with no body -- a syntax error)."""
+    lines = _stmt_to_lines(stmt, depth, mv) if stmt is not None else []
+    return lines or [f"{_INDENT * depth}pass"]
+
+
+def _stmt_to_lines(stmt: Statement, depth: int = 0, mv: str = "m") -> list[str]:  # noqa: PLR0911, PLR0912, PLR0915
     """Convert a model Statement to lines of Python DSL code.
 
     Returns a list of strings (no trailing newlines).  ``depth`` tracks
-    the indentation level within the behavioral block.
+    the indentation level within the behavioral block; ``mv`` is the
+    module variable (it used to be a hardcoded ``m``).
     """
     pfx = _INDENT * depth
 
@@ -350,7 +403,7 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR09
     if isinstance(stmt, SeqBlock):
         lines: list[str] = []
         for s in stmt.statements:
-            lines.extend(_stmt_to_lines(s, depth))
+            lines.extend(_stmt_to_lines(s, depth, mv))
         return lines
 
     # --- NonblockingAssign (NBA): lhs <= rhs → lhs <<= rhs ---
@@ -368,38 +421,32 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR09
     # --- IfStatement ---
     if isinstance(stmt, IfStatement):
         cond = _expr_to_python(stmt.condition)
-        lines = [f"{pfx}with m.if_({cond}):"]
-        if stmt.then_body:
-            body_lines = _stmt_to_lines(stmt.then_body, depth + 1)
-            lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
+        lines = [f"{pfx}with {mv}.if_({cond}):"]
+        lines.extend(_body_lines(stmt.then_body, depth + 1, mv))
         # Handle else / else-if chain
         if stmt.else_body:
             if isinstance(stmt.else_body, IfStatement):
                 # else if → elif_
                 elif_stmt = stmt.else_body
                 econd = _expr_to_python(elif_stmt.condition)
-                lines.append(f"{pfx}with m.elif_({econd}):")
-                if elif_stmt.then_body:
-                    body_lines = _stmt_to_lines(elif_stmt.then_body, depth + 1)
-                    lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
+                lines.append(f"{pfx}with {mv}.elif_({econd}):")
+                lines.extend(_body_lines(elif_stmt.then_body, depth + 1, mv))
                 # Recurse for the rest of the elif/else chain
                 rest = elif_stmt.else_body
                 while rest is not None:
                     if isinstance(rest, IfStatement):
                         rcond = _expr_to_python(rest.condition)
-                        lines.append(f"{pfx}with m.elif_({rcond}):")
-                        if rest.then_body:
-                            body_lines = _stmt_to_lines(rest.then_body, depth + 1)
-                            lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
+                        lines.append(f"{pfx}with {mv}.elif_({rcond}):")
+                        lines.extend(_body_lines(rest.then_body, depth + 1, mv))
                         rest = rest.else_body
                     else:
-                        lines.append(f"{pfx}with m.else_():")
-                        body_lines = _stmt_to_lines(rest, depth + 1)
+                        lines.append(f"{pfx}with {mv}.else_():")
+                        body_lines = _stmt_to_lines(rest, depth + 1, mv)
                         lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
                         rest = None
             else:
-                lines.append(f"{pfx}with m.else_():")
-                body_lines = _stmt_to_lines(stmt.else_body, depth + 1)
+                lines.append(f"{pfx}with {mv}.else_():")
+                body_lines = _stmt_to_lines(stmt.else_body, depth + 1, mv)
                 lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
         return lines
 
@@ -411,16 +458,17 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR09
             case_method = "casex"
         elif stmt.case_type == "casez":
             case_method = "casez"
-        lines = [f"{pfx}with m.{case_method}({expr}) as _c:"]
+        # One name per nesting depth: with a single `_c`, an inner case
+        # rebound it and the outer case's later items joined the inner one.
+        cv = f"_c{depth}"
+        lines = [f"{pfx}with {mv}.{case_method}({expr}) as {cv}:"]
         for item in stmt.items:
             if item.is_default or item.values is None:
-                lines.append(f"{pfx}{_INDENT}with _c.default():")
+                lines.append(f"{pfx}{_INDENT}with {cv}.default():")
             else:
                 vals = ", ".join(_expr_to_python(v) for v in item.values)
-                lines.append(f"{pfx}{_INDENT}with _c.when({vals}):")
-            if item.body:
-                body_lines = _stmt_to_lines(item.body, depth + 2)
-                lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}{_INDENT}pass"])
+                lines.append(f"{pfx}{_INDENT}with {cv}.when({vals}):")
+            lines.extend(_body_lines(item.body, depth + 2, mv))
         return lines
 
     # --- SystemTaskCall ---
@@ -430,18 +478,17 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR09
         if name in _SYSTASK_METHOD:
             method = _SYSTASK_METHOD[name]
             if method in ("finish", "stop") and not args:
-                return [f"{pfx}m.{method}()"]
-            return [f"{pfx}m.{method}({args})"]
-        # Unsupported system task — emit as comment
-        return [f"{pfx}# UNSUPPORTED: {name}({args})"]
+                return [f"{pfx}{mv}.{method}()"]
+            return [f"{pfx}{mv}.{method}({args})"]
+        return _unsupported_stmt(pfx, f"system task {name}")
 
     # --- DelayControl ---
     if isinstance(stmt, DelayControl):
         delay = _expr_to_python(stmt.delay)
         if stmt.body is None:
-            return [f"{pfx}m.delay({delay})"]
-        lines = [f"{pfx}with m.delay({delay}):"]
-        body_lines = _stmt_to_lines(stmt.body, depth + 1)
+            return [f"{pfx}{mv}.delay({delay})"]
+        lines = [f"{pfx}with {mv}.delay({delay}):"]
+        body_lines = _stmt_to_lines(stmt.body, depth + 1, mv)
         lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
         return lines
 
@@ -449,53 +496,44 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0) -> list[str]:  # noqa: PLR09
     if isinstance(stmt, EventControl):
         sens_args = _sensitivity_args(stmt.events)
         if stmt.body is None:
-            return [f"{pfx}m.wait_event({sens_args})"]
-        lines = [f"{pfx}with m.wait_event({sens_args}):"]
-        body_lines = _stmt_to_lines(stmt.body, depth + 1)
+            return [f"{pfx}{mv}.wait_event({sens_args})"]
+        lines = [f"{pfx}with {mv}.wait_event({sens_args}):"]
+        body_lines = _stmt_to_lines(stmt.body, depth + 1, mv)
         lines.extend(body_lines if body_lines else [f"{pfx}{_INDENT}pass"])
         return lines
 
     # --- ForLoop ---
+    # (It used to be "translated" by writing the body out once, so the
+    # converted design ran it once instead of N times.)
     if isinstance(stmt, ForLoop):
-        # Translate to Python for loop where possible
-        init_var = _expr_to_python(stmt.init.lhs)
-        init_val = _expr_to_python(stmt.init.rhs)
-        cond = _expr_to_python(stmt.condition)
-        update = _expr_to_python(stmt.update.rhs)
-        lines = [f"{pfx}# Verilog for-loop: for ({init_var}={init_val}; {cond}; {init_var}={update})"]
-        lines.append(f"{pfx}# Translated as inline statements (for-loops not in DSL)")
-        body_lines = _stmt_to_lines(stmt.body, depth) if stmt.body is not None else []
-        lines.extend(body_lines)
-        return lines
+        return _unsupported_stmt(pfx, "for loop")
 
     # --- Unsupported loops ---
     if isinstance(stmt, WhileLoop):
-        return [f"{pfx}# UNSUPPORTED: while loop"]
+        return _unsupported_stmt(pfx, "while loop")
     if isinstance(stmt, ForeverLoop):
-        return [f"{pfx}# UNSUPPORTED: forever loop"]
+        return _unsupported_stmt(pfx, "forever loop")
     if isinstance(stmt, RepeatLoop):
-        return [f"{pfx}# UNSUPPORTED: repeat loop"]
+        return _unsupported_stmt(pfx, "repeat loop")
 
     # --- ParBlock (fork/join) ---
+    # (Its statements used to run in sequence instead.)
     if isinstance(stmt, ParBlock):
-        lines = [f"{pfx}# UNSUPPORTED: fork/join block"]
-        for s in stmt.statements:
-            lines.extend(_stmt_to_lines(s, depth))
-        return lines
+        return _unsupported_stmt(pfx, "fork/join block")
 
     # --- Misc unsupported ---
+    # (Each of these used to become a `# UNSUPPORTED` comment, so the
+    # converted design silently left the statement out.)
     if isinstance(stmt, WaitStatement):
-        cond = _expr_to_python(stmt.condition)
-        return [f"{pfx}# UNSUPPORTED: wait({cond})"]
+        return _unsupported_stmt(pfx, "wait statement")
     if isinstance(stmt, DisableStatement):
-        return [f"{pfx}# UNSUPPORTED: disable {stmt.target}"]
+        return _unsupported_stmt(pfx, f"disable {stmt.target}")
     if isinstance(stmt, EventTrigger):
-        return [f"{pfx}# UNSUPPORTED: -> {stmt.event}"]
+        return _unsupported_stmt(pfx, f"event trigger -> {stmt.event}")
     if isinstance(stmt, TaskEnable):
-        args = ", ".join(_expr_to_python(a) for a in stmt.arguments)
-        return [f"{pfx}# UNSUPPORTED: {stmt.task_name}({args})"]
+        return _unsupported_stmt(pfx, f"call of task {stmt.task_name}")
 
-    return [f"{pfx}# UNSUPPORTED statement: {type(stmt).__name__}"]
+    return _unsupported_stmt(pfx, f"{type(stmt).__name__} statement")
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +560,22 @@ def _sensitivity_args(sens_list: list) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _zero_based_ranges(module: Module) -> Module:
+    """A copy of *module* with every constant packed range rewritten as
+    ``[w-1:0]`` and its selects remapped, since a DSL signal of width *w* is
+    always ``[w-1:0]``. (``[15:8]`` used to become ``[7:0]`` with its selects
+    unchanged -- ``a[15:12]`` then read x -- and ``[0:7]`` a negative width.)"""
+    from veriforge.sim.ascending import (  # noqa: PLC0415
+        flatten_unpacked_arrays,
+        lower_ascending_ranges,
+        lower_memory_bases,
+    )
+
+    # (Memories too: `reg m [1:4]` used to become a negative depth.)
+    module = lower_memory_bases(lower_ascending_ranges(copy.deepcopy(module), offsets=True))
+    return flatten_unpacked_arrays(module)
+
+
 def module_to_dsl(module: Module, *, module_var: str = "m") -> str:  # noqa: PLR0912  # cm:3e2a4c
     """Convert a parsed Verilog Module to Python DSL code.
 
@@ -538,6 +592,7 @@ def module_to_dsl(module: Module, *, module_var: str = "m") -> str:  # noqa: PLR
         Complete Python source code that uses the DSL to construct
         the same module.
     """
+    module = _zero_based_ranges(module)
     lines: list[str] = []
     v = module_var
 
@@ -605,9 +660,9 @@ def module_to_dsl(module: Module, *, module_var: str = "m") -> str:  # noqa: PLR
     for task in module.tasks:
         lines.append(f"# UNSUPPORTED: task {task.name}")
 
-    # --- Generate blocks (unsupported) ---
+    # --- Generate blocks (unsupported; they hold logic, so building fails) ---
     for gen in module.generate_blocks:
-        lines.append(f"# UNSUPPORTED: generate block ({type(gen).__name__})")
+        lines.append(f'unsupported("generate block ({type(gen).__name__})")')
 
     # --- Specify blocks (unsupported) ---
     for _spec in module.specify_blocks:
@@ -617,7 +672,26 @@ def module_to_dsl(module: Module, *, module_var: str = "m") -> str:  # noqa: PLR
     lines.append(f"module = {v}.build()")
     lines.append("")
 
+    lines[0] = _add_used_helpers(lines[0], lines[1:])
     return "\n".join(lines)
+
+
+def _add_used_helpers(import_line: str, body: list[str]) -> str:
+    """Add to *import_line* every DSL helper *body* calls (`lit`, `cast`,
+    `unsupported`, ... -- `_collect_imports` only knows the ones it derives
+    from the model)."""
+    from .. import dsl  # noqa: PLC0415
+
+    prefix = "from veriforge.dsl import "
+    if not import_line.startswith(prefix):
+        return import_line
+    names = {n.strip() for n in import_line[len(prefix) :].split(",")}
+    text = "\n".join(body)
+    for name in dsl.__all__:
+        if name[0].islower() and name not in names and re.search(rf"(?<![\w.]){name}\(", text):
+            names.add(name)
+    ordered = sorted(names, key=lambda n: (n != "Module", n.lower()))
+    return prefix + ", ".join(ordered)
 
 
 def design_to_dsl(design: Design, *, module_var: str = "m") -> str:
@@ -770,6 +844,10 @@ def _emit_port(lines: list[str], port: Port, v: str) -> None:
 def _emit_net(lines: list[str], net: Net, v: str) -> None:
     """Emit an internal net declaration."""
     name = net.name
+    if len(net.dimensions) > 1 or net.packed_dim_count:
+        # (Only the first dimension used to be kept.)
+        lines.append(f'{net.name} = unsupported("multi-dimensional array {net.name}")')
+        return
     width = _width_arg(net.width)
     extras = _signed_kwarg(net.signed)
 
@@ -785,22 +863,36 @@ def _emit_net(lines: list[str], net: Net, v: str) -> None:
     if width == "1":
         width_str = ""
 
+    if net.kind == NetKind.LOGIC:
+        # A `logic` declaration is a variable (it may be assigned in an
+        # always block); it used to become a `wire`.
+        lines.append(f'{name} = {v}.reg("{name}"{width_str}{extras}, kind="logic")')
+        return
     lines.append(f'{name} = {v}.wire("{name}"{width_str}{extras})')
 
 
 def _emit_variable(lines: list[str], var: Variable, v: str) -> None:
     """Emit an internal variable (reg, integer) declaration."""
     name = var.name
-    if var.kind == VariableKind.INTEGER:
-        lines.append(f'{name} = {v}.integer("{name}")')
-        return
     if var.kind in (VariableKind.REAL, VariableKind.REALTIME, VariableKind.TIME, VariableKind.EVENT):
-        lines.append(f"# UNSUPPORTED: {var.kind.value} {name}")
+        lines.append(f'{name} = unsupported("{var.kind.value} variable {name}")')
         return
 
-    # REG
+    # reg, or a SystemVerilog variable kind (`logic`, `bit`, `int`, ...;
+    # these used to become a `wire` or a 1-bit `reg`).
+    if len(var.dimensions) > 1 or var.packed_dim_count:
+        # (Only the first dimension used to be kept.)
+        lines.append(f'{var.name} = unsupported("multi-dimensional array {var.name}")')
+        return
     width = _width_arg(var.width)
     extras = _signed_kwarg(var.signed)
+    atom = var.kind in _ATOM_KINDS
+    if var.kind != VariableKind.REG:
+        extras += f', kind="{var.kind.value}"'
+    if atom:
+        width = None
+        default_signed = True
+        extras = extras.replace(", signed=True", "") if var.signed == default_signed else extras + ", signed=False"
 
     if var.initial_value is not None:
         init_val = _expr_to_python(var.initial_value)
@@ -815,6 +907,11 @@ def _emit_variable(lines: list[str], var: Variable, v: str) -> None:
         width_str = ""
 
     lines.append(f'{name} = {v}.reg("{name}"{width_str}{extras})')
+
+
+_ATOM_KINDS = frozenset(
+    {VariableKind.INT, VariableKind.INTEGER, VariableKind.BYTE, VariableKind.SHORTINT, VariableKind.LONGINT}
+)
 
 
 def _signed_kwarg(signed: bool) -> str:
@@ -878,7 +975,7 @@ def _emit_always(lines: list[str], blk: AlwaysBlock, v: str) -> None:
         args = _sensitivity_args(blk.sensitivity_list)
         lines.append(f"with {v}.always({args}):")
 
-    body_lines = _stmt_to_lines(blk.body, depth=1)
+    body_lines = _stmt_to_lines(blk.body, depth=1, mv=v)
     if body_lines:
         lines.extend(body_lines)
     else:
@@ -888,7 +985,7 @@ def _emit_always(lines: list[str], blk: AlwaysBlock, v: str) -> None:
 def _emit_initial(lines: list[str], blk: InitialBlock, v: str) -> None:
     """Emit an initial block."""
     lines.append(f"with {v}.initial():")
-    body_lines = _stmt_to_lines(blk.body, depth=1)
+    body_lines = _stmt_to_lines(blk.body, depth=1, mv=v)
     if body_lines:
         lines.extend(body_lines)
     else:

@@ -545,6 +545,10 @@ class VerilogFormatter:
 
     def _for_loop(self, stmt: ForLoop, ci: str) -> str:
         init = f"{emit_expression(stmt.init.lhs)} = {emit_expression(stmt.init.rhs)}"
+        if stmt.declares_var:
+            # `for (int i = ...)`: the loop's own variable. It used to be dropped,
+            # so the loop used an outer `i` (or an undeclared one).
+            init = f"{'int' if stmt.signed_var else 'int unsigned'} {init}"
         cond = emit_expression(stmt.condition)
         update = f"{emit_expression(stmt.update.lhs)} = {emit_expression(stmt.update.rhs)}"
         return self._controlled_body(f"{ci}for ({init}; {cond}; {update})", stmt.body, ci)

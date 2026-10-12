@@ -51,6 +51,7 @@ from ..model.ports import Port, PortDirection
 from ..model.statements import BlockingAssign, ForLoop, IfStatement, ParBlock, SeqBlock
 from ..model.sv_types import TypedefDecl
 from ..model.variables import Variable, VariableKind
+from ..semantics import const_div, const_mod, const_pow, const_shl
 
 SYNTH_LOCAL_LOOP_PREFIX = "__vt_local_for_"
 SYNTH_LOCAL_BLOCK_PREFIX = "__vt_local_blk_"
@@ -1399,12 +1400,23 @@ _UNARY_OPS: dict[str, object] = {
     "^~": lambda v: int(bin(v & 0xFFFFFFFF).count("1") % 2 == 0),
 }
 
+
+def _defined(value: int | None, what: str) -> int:
+    if value is None:
+        raise ValueError(f"{what} in constant expression")
+    return value
+
+
+def _const_pow(a: int, b: int) -> int:
+    return _defined(const_pow(a, b), "0 ** negative (x)")
+
+
 _BINARY_OPS: dict[str, object] = {
     "+": lambda a, b: a + b,
     "-": lambda a, b: a - b,
     "*": lambda a, b: a * b,
-    "/": lambda a, b: a // b if b else 0,
-    "%": lambda a, b: a % b if b else 0,
+    "/": lambda a, b: const_div(a, b) if b else 0,
+    "%": lambda a, b: const_mod(a, b) if b else 0,
     "==": lambda a, b: int(a == b),
     "!=": lambda a, b: int(a != b),
     "<": lambda a, b: int(a < b),
@@ -1413,14 +1425,14 @@ _BINARY_OPS: dict[str, object] = {
     ">=": lambda a, b: int(a >= b),
     "&&": lambda a, b: int(bool(a) and bool(b)),
     "||": lambda a, b: int(bool(a) or bool(b)),
-    "<<": lambda a, b: a << b,
+    "<<": lambda a, b: _defined(const_shl(a, b), "negative shift count"),
     ">>": lambda a, b: a >> b,
     "&": lambda a, b: a & b,
     "|": lambda a, b: a | b,
     "^": lambda a, b: a ^ b,
     "~^": lambda a, b: ~(a ^ b) & 0xFFFFFFFF,
     "^~": lambda a, b: ~(a ^ b) & 0xFFFFFFFF,
-    "**": lambda a, b: a**b,
+    "**": _const_pow,
 }
 
 

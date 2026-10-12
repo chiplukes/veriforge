@@ -1339,6 +1339,43 @@ arbitrary Verilog modules from the parse grammar, cross-checks all engines +
 Icarus, logs mismatches to disk.  Runs as a standalone CLI tool
 (`uv run -m veriforge.fuzz`).
 
+### Diagnostics fuzzing (broken Verilog) — TODO
+
+Fuzz our handling of *invalid* input: every error we report should be
+detected, located correctly, and explained well. Today the fuzzer only
+generates valid designs. Plan:
+
+- **Mutate valid fuzz designs into broken ones.** Candidates: delete or
+  duplicate a token (`;`, `end`, `)`); misspell a keyword; use an undeclared
+  signal; redeclare one; give a port the wrong width or direction; assign a
+  net procedurally or a reg continuously; misuse a constant expression (a
+  variable in a range or a parameter); drop an instance port; use a
+  `+:`/`-:` width that isn't constant; recurse a module instantiation.
+- **Check each mutant** for:
+  - a clean diagnostic, never a Python traceback or a crash in an engine
+    (lark exceptions, KeyError, ...);
+  - the reported line/column landing at or near the mutation;
+  - the message naming the actual problem;
+  - no silent acceptance where Icarus/Verilator reject the input. Use them as
+    the oracle for "is this an error", and flag cases where we accept what
+    they reject (or the reverse).
+- **Score message quality** over a corpus: whether the location points at the
+  edit and whether the message mentions the right construct. Track the score
+  so regressions show.
+- Also cover the semantic checks that already exist (`check_signed_declarations`,
+  `check_input_port_init`, the parser's own errors, the compiled engine's
+  `NotImplementedError`s): each should fail with an actionable message, not
+  later as a wrong simulation.
+- **Known seed cases** (found 2026-10-11 while fuzzing the DSL; Icarus
+  rejects each, while `veriforge lint` only gives a width warning or nothing
+  and every engine simulates them):
+  - `{a, 1}`: unsized concatenation operand (simulated as 32 bits);
+  - `{a{3}}`: non-constant replication count, unsized operand;
+  - `a[0:3]` of `reg [7:0] a`: part select out of order.
+
+  `a[8]` / `a[-1]` of an 8-bit `a` are legal but always x; worth a lint
+  warning for constant indices.
+
 Proposed markers from [notes/test_taxonomy.md](test_taxonomy.md) not yet applied:
 
 - `cross_engine` — tests that parametrize behavior across engines

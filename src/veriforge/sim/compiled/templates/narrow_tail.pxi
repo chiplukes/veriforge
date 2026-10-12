@@ -79,6 +79,19 @@ cdef inline long long _sign_ext(long long v, int w) noexcept nogil:
         return v | (~((1LL << w) - 1))
     return v
 
+cdef inline unsigned long long _upow64(unsigned long long base, unsigned long long exp) noexcept nogil:
+    # base ** exp mod 2**64 by square-and-multiply. (The old loop ran `exp`
+    # times on an `<int>` cast: a 35-bit exponent like 2**33 became 0 --
+    # `a ** 35'sd8589934592` was 1 -- and a large 32-bit one spun for
+    # seconds. Unsigned, so the wrapping multiply is defined C.)
+    cdef unsigned long long result = 1
+    while exp:
+        if exp & 1:
+            result = result * base
+        base = base * base
+        exp >>= 1
+    return result
+
 # IEEE 1364-2005 Table 5-6 -- integer power-operator special-value rules,
 # pure-integer (never `pow()`/`double`, which is imprecise for large
 # integers and undefined behavior in C when casting an infinite/negative
@@ -97,16 +110,10 @@ cdef inline long long _sign_ext(long long v, int w) noexcept nogil:
 # the same convention `sim/vm/_interp_fast.pyx`'s OP_SPOW and
 # `sim/vm/interpreter.py`'s Op.SPOW use.
 cdef inline long long _verilog_ipow(long long base, long long exp) noexcept nogil:
-    cdef long long result
-    cdef int i, n
     if exp == 0:
         return 1
     if exp > 0:
-        result = 1
-        n = <int>exp
-        for i in range(n):
-            result = result * base
-        return result
+        return <long long>_upow64(<unsigned long long>base, <unsigned long long>exp)
     if base == 0:
         return 0
     if base == 1:

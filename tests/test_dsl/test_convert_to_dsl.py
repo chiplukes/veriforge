@@ -109,12 +109,12 @@ class TestExprToLiteral:
     def test_large_hex(self):
         lit = Literal(0xDEAD)
         lit.width = 16
-        assert _expr_to_python(lit) == "0xdead"
+        assert _expr_to_python(lit) == 'lit("16\'hdead")'
 
     def test_small_no_hex(self):
         lit = Literal(255)
         lit.width = 8
-        assert _expr_to_python(lit) == "255"
+        assert _expr_to_python(lit) == 'lit("8\'d255")'
 
     def test_string_literal(self):
         assert _expr_to_python(StringLiteral("hello")) == "'hello'"
@@ -161,15 +161,15 @@ class TestExprUnary:
 
     def test_reduce_nand(self):
         result = _expr_to_python(UnaryOp("~&", Identifier("sig")))
-        assert result == "~reduce_and(sig)"
+        assert result == "reduce_nand(sig)"
 
     def test_reduce_nor(self):
         result = _expr_to_python(UnaryOp("~|", Identifier("sig")))
-        assert result == "~reduce_or(sig)"
+        assert result == "reduce_nor(sig)"
 
     def test_reduce_xnor(self):
         result = _expr_to_python(UnaryOp("~^", Identifier("sig")))
-        assert result == "~reduce_xor(sig)"
+        assert result == "reduce_xnor(sig)"
 
     def test_not_on_binop(self):
         result = _expr_to_python(UnaryOp("~", BinaryOp("+", Identifier("a"), Literal(1))))
@@ -177,7 +177,7 @@ class TestExprUnary:
 
     def test_unsupported_unary_operator(self):
         result = _expr_to_python(UnaryOp("~!", Identifier("a")))
-        assert result == "(a)  # UNSUPPORTED: unary ~!"
+        assert result == 'unsupported("unary operator ~!")'
 
 
 class TestExprBinary:
@@ -273,7 +273,7 @@ class TestExprBinary:
 
     def test_unsupported_binary_operator(self):
         result = _expr_to_python(BinaryOp("inside", Identifier("a"), Identifier("b")))
-        assert result == "a  # UNSUPPORTED: operator inside"
+        assert result == 'unsupported("operator inside")'
 
     def test_lt(self):
         result = _expr_to_python(BinaryOp("<", Identifier("a"), Identifier("b")))
@@ -360,7 +360,7 @@ class TestExprMintypmax:
         class DummyExpr(Expression):
             __slots__ = ()
 
-        assert _expr_to_python(DummyExpr()) == "None  # UNSUPPORTED expression: DummyExpr"
+        assert _expr_to_python(DummyExpr()) == 'unsupported("DummyExpr expression")'
 
 
 # ===================================================================
@@ -469,9 +469,9 @@ class TestStmtCase:
         ]
         stmt = CaseStatement("case", Identifier("sel"), items)
         lines = _stmt_to_lines(stmt)
-        assert lines[0] == "with m.case(sel) as _c:"
-        assert any("_c.when(0)" in ln for ln in lines)
-        assert any("_c.default()" in ln for ln in lines)
+        assert lines[0] == "with m.case(sel) as _c0:"
+        assert any("_c0.when(0)" in ln for ln in lines)
+        assert any("_c0.default()" in ln for ln in lines)
 
 
 class TestStmtSeqBlock:
@@ -511,7 +511,7 @@ class TestStmtSystemTask:
     def test_unsupported_task(self):
         stmt = SystemTaskCall("$fwrite", [Identifier("fd"), StringLiteral("text")])
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: $fwrite(fd, 'text')"]
+        assert lines == ['unsupported("system task $fwrite")']
 
 
 class TestStmtDelay:
@@ -529,53 +529,53 @@ class TestStmtDelay:
 
 
 class TestStmtUnsupported:
-    """Test unsupported statement translation (comments)."""
+    """Test unsupported statement translation (`unsupported(...)` calls)."""
 
     def test_while_loop(self):
         stmt = WhileLoop(Identifier("go"), None)
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: while loop"]
+        assert lines == ['unsupported("while loop")']
 
     def test_forever_loop(self):
         stmt = ForeverLoop(None)
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: forever loop"]
+        assert lines == ['unsupported("forever loop")']
 
     def test_repeat_loop(self):
         stmt = RepeatLoop(Literal(10), None)
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: repeat loop"]
+        assert lines == ['unsupported("repeat loop")']
 
     def test_wait_statement(self):
         stmt = WaitStatement(Identifier("ready"), None)
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: wait(ready)"]
+        assert lines == ['unsupported("wait statement")']
 
     def test_disable(self):
         stmt = DisableStatement("my_block")
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: disable my_block"]
+        assert lines == ['unsupported("disable my_block")']
 
     def test_event_trigger(self):
         stmt = EventTrigger("done")
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: -> done"]
+        assert lines == ['unsupported("event trigger -> done")']
 
     def test_task_enable(self):
         stmt = TaskEnable("my_task", [Identifier("a")])
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: my_task(a)"]
+        assert lines == ['unsupported("call of task my_task")']
 
     def test_par_block(self):
         stmt = ParBlock([NonblockingAssign(Identifier("a"), Literal(0))], name="fork_blk")
         lines = _stmt_to_lines(stmt)
-        assert lines == ["# UNSUPPORTED: fork/join block", "a <<= 0"]
+        assert lines == ['unsupported("fork/join block")']
 
     def test_unknown_statement_node(self):
         class DummyStmt(Statement):
             __slots__ = ()
 
-        assert _stmt_to_lines(DummyStmt()) == ["# UNSUPPORTED statement: DummyStmt"]
+        assert _stmt_to_lines(DummyStmt()) == ['unsupported("DummyStmt statement")']
 
 
 # ===================================================================
@@ -698,8 +698,8 @@ class TestModuleToDsl:
         mod = m.build()
         code = module_to_dsl(mod)
         assert "m.case(sel)" in code
-        assert "_c.when(" in code
-        assert "_c.default()" in code
+        assert "_c1.when(" in code
+        assert "_c1.default()" in code
 
 
 class TestModuleUnsupported:
@@ -723,7 +723,7 @@ class TestModuleUnsupported:
             GenerateFor("i", Literal(0), Literal(1), Literal(1), GenerateBlock()),
         )
         code = module_to_dsl(mod)
-        assert "# UNSUPPORTED: generate block (GenerateFor)" in code.splitlines()
+        assert 'unsupported("generate block (GenerateFor)")' in code.splitlines()
 
     def test_unsupported_specify_block(self):
         mod = Module("with_specify").build()
@@ -734,10 +734,10 @@ class TestModuleUnsupported:
     @pytest.mark.parametrize(
         ("kind", "name", "expected"),
         [
-            (VariableKind.REAL, "gain", "# UNSUPPORTED: real gain"),
-            (VariableKind.REALTIME, "stamp_rt", "# UNSUPPORTED: realtime stamp_rt"),
-            (VariableKind.TIME, "stamp", "# UNSUPPORTED: time stamp"),
-            (VariableKind.EVENT, "done_evt", "# UNSUPPORTED: event done_evt"),
+            (VariableKind.REAL, "gain", 'gain = unsupported("real variable gain")'),
+            (VariableKind.REALTIME, "stamp_rt", 'stamp_rt = unsupported("realtime variable stamp_rt")'),
+            (VariableKind.TIME, "stamp", 'stamp = unsupported("time variable stamp")'),
+            (VariableKind.EVENT, "done_evt", 'done_evt = unsupported("event variable done_evt")'),
         ],
     )
     def test_unsupported_variable_kinds(self, kind, name, expected):
@@ -1196,7 +1196,7 @@ class TestImportCollection:
         m.assign(y, UnaryOp("~&", a._as_expr()))
         mod = m.build()
         code = module_to_dsl(mod)
-        assert "reduce_and" in code.split("\n")[0]
+        assert "reduce_nand" in code.split("\n")[0]
 
     def test_arithmetic_shift_helper_imports(self):
         mod = _parse_module(

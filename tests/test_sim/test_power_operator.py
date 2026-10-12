@@ -201,7 +201,35 @@ _WIDE_DEST_CASES = [
     ),
 ]
 
-ALL_CASES: list[PowCase] = _WIDTH_CASES + _TABLE_5_6_CASES + _WIDE_DEST_CASES
+# =====================================================================
+# Exponents beyond 32 bits / huge exponents (values confirmed with Icarus).
+# vm-fast and compiled multiplied in a loop over `<int>exp`: a 35-bit
+# exponent of 2**33 truncated to 0 (every result 1), 2e9 spun for seconds,
+# and compiled read an unsigned 64-bit exponent with its top bit set as
+# negative (0). reference/vm built the full power before masking and hung
+# on `3 ** 2**33`.
+# =====================================================================
+
+
+def _huge(name: str, base_decl: str, base: int, exp_text: str, expect: int) -> PowCase:
+    return PowCase(
+        id=f"huge_exp_{name}",
+        source=f"module t(input clk, input {base_decl} a, output [15:0] y);\n    assign y = a ** {exp_text};\nendmodule\n",
+        drives=(("a", Value(base & 0xFF, width=8)),),
+        expected=(("y", Value(expect, width=16)),),
+    )
+
+
+_HUGE_EXP_CASES = [
+    _huge("35bit_unsigned", "[7:0]", 3, "35'sd8589934592", 0x0001),
+    _huge("35bit_unsigned_even_base", "[7:0]", 2, "35'sd8589934592", 0x0000),
+    _huge("35bit_signed", "signed [7:0]", 3, "35'sd8589934591", 0xAAAB),
+    _huge("35bit_signed_minus_one", "signed [7:0]", -1, "35'sd8589934591", 0xFFFF),
+    _huge("32bit_large", "[7:0]", 3, "32'd2000000001", 0x3003),
+    _huge("64bit_top_bit_unsigned", "[7:0]", 3, "64'h8000000000000001", 0x0003),
+]
+
+ALL_CASES: list[PowCase] = _WIDTH_CASES + _TABLE_5_6_CASES + _WIDE_DEST_CASES + _HUGE_EXP_CASES
 
 
 def _combo_params() -> list:

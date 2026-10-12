@@ -17,6 +17,7 @@ from veriforge.dsl import (
     case_ne,
     clog2,
     land,
+    lit,
     lnot,
     lor,
     mux,
@@ -853,11 +854,17 @@ class TestHelperFunctions:
         assert isinstance(expr, Concatenation)
         assert len(expr.parts) == 2
 
-    def test_cat_with_int(self):
+    def test_cat_with_int_raises(self):
+        # `{a, 0}`: an unsized literal can't be concatenated (Icarus rejects it).
         m = Module("test")
         a = m.input("a", width=4)
-        result = cat(a, 0)
-        expr = result._as_expr()
+        with pytest.raises(TypeError, match="no width inside a concatenation"):
+            cat(a, 0)
+
+    def test_cat_with_sized_literal(self):
+        m = Module("test")
+        a = m.input("a", width=4)
+        expr = cat(a, lit("2'b0"))._as_expr()
         assert isinstance(expr, Concatenation)
         assert isinstance(expr.parts[1], Literal)
 

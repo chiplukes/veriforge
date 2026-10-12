@@ -1956,7 +1956,7 @@ def _eval_signed_pow(left: Value, right: Value) -> Value:
     w = left.width
     if left.mask or right.mask:
         return Value.x(w)
-    result = _verilog_pow(left.as_signed(), right.as_signed())
+    result = _verilog_pow(left.as_signed(), right.as_signed(), w)
     return Value.x(w) if result is None else Value(result, width=w)
 
 

@@ -1089,6 +1089,11 @@ class AXI4SlaveLowering:  # cm:c9a1e6
         n_bytes = self.data_width // 8
         word_addr_shift = (n_bytes - 1).bit_length()  # log2(n_bytes), 0 for 1 byte
         addr_index_width = _bit_width_for(depth + 1)
+        # The word index's top address bit, within the address bus: the index
+        # is a bit wider than the memory needs, and when the memory fills the
+        # whole address space (64 x 4 bytes, 8-bit address) it used to select
+        # awaddr[8] of awaddr[7:0] -- always x. The assignment zero-extends.
+        index_msb = min(word_addr_shift + addr_index_width, self.addr_width) - 1
         len_width = 8  # AXI4 awlen/arlen are 8 bits
         n_out = self.max_outstanding
         count_width = _bit_width_for(n_out + 1)
@@ -1328,9 +1333,9 @@ class AXI4SlaveLowering:  # cm:c9a1e6
                 # ---- AW accept: latch the write burst's running address/id ----
                 with wrapper.if_(awvalid & awready):
                     if word_addr_shift > 0:
-                        w_cur_addr <<= awaddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
+                        w_cur_addr <<= awaddr[index_msb:word_addr_shift]
                     else:
-                        w_cur_addr <<= awaddr[addr_index_width - 1 : 0]
+                        w_cur_addr <<= awaddr[index_msb:0]
                     if w_cur_id is not None and awid_w is not None:
                         w_cur_id <<= awid_w
                     aw_count <<= aw_count + 1
@@ -1357,9 +1362,9 @@ class AXI4SlaveLowering:  # cm:c9a1e6
                 for i in range(n_out):
                     with wrapper.if_(r_enq & (mux(r_deq, r_count - 1, r_count) == i)):
                         if word_addr_shift > 0:
-                            r_fifo_addr[i] <<= araddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]  # noqa: PLW2901
+                            r_fifo_addr[i] <<= araddr[index_msb:word_addr_shift]  # noqa: PLW2901
                         else:
-                            r_fifo_addr[i] <<= araddr[addr_index_width - 1 : 0]  # noqa: PLW2901
+                            r_fifo_addr[i] <<= araddr[index_msb:0]  # noqa: PLW2901
                         r_fifo_len[i] <<= arlen  # noqa: PLW2901
                         if r_fifo_id is not None and arid_w is not None:
                             r_fifo_id[i] <<= arid_w  # noqa: PLW2901
@@ -1633,6 +1638,7 @@ class AXILiteSlaveLowering:  # cm:7d6f3a
         n_bytes = self.data_width // 8
         word_addr_shift = (n_bytes - 1).bit_length()  # log2(n_bytes), 0 for 8-bit data
         addr_index_width = _bit_width_for(depth + 1)
+        index_msb = min(word_addr_shift + addr_index_width, self.addr_width) - 1  # (see AXI4SlaveLowering)
 
         # State encoding: IDLE=0, WRITE=1, BRESP=2, RRESP=3
         S_IDLE = 0
@@ -1718,16 +1724,16 @@ class AXILiteSlaveLowering:  # cm:7d6f3a
                         # AW has priority over AR.
                         with wrapper.if_(awvalid & awready):
                             if word_addr_shift > 0:
-                                cur_addr <<= awaddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
+                                cur_addr <<= awaddr[index_msb:word_addr_shift]
                             else:
-                                cur_addr <<= awaddr[addr_index_width - 1 : 0]
+                                cur_addr <<= awaddr[index_msb:0]
                             aw_count <<= aw_count + 1
                             state <<= S_WRITE
                         with wrapper.elif_(arvalid & arready):
                             if word_addr_shift > 0:
-                                cur_addr <<= araddr[word_addr_shift + addr_index_width - 1 : word_addr_shift]
+                                cur_addr <<= araddr[index_msb:word_addr_shift]
                             else:
-                                cur_addr <<= araddr[addr_index_width - 1 : 0]
+                                cur_addr <<= araddr[index_msb:0]
                             ar_count <<= ar_count + 1
                             state <<= S_RRESP
                     with c.when(S_WRITE):
@@ -2364,7 +2370,7 @@ class MemBusResponderLowering:
         rdata_w = wrapper.wire(f"{prefix}_rsp_rdata", width=self.data_width)
 
         # MemBus uses word addresses directly (unlike AXI byte addresses).
-        word_addr = addr_w[addr_index_width - 1 : 0]
+        word_addr = addr_w[min(addr_index_width, self.addr_width) - 1 : 0]  # (see AXI4SlaveLowering)
 
         # Combinational read-data mux.
         rdata_expr: object = 0

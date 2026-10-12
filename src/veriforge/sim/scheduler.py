@@ -1473,6 +1473,33 @@ def _has_timing(stmt) -> bool:  # noqa: PLR0911
     return False
 
 
+def init_declaration_info(ctx: EvalContext, module: Module) -> None:
+    """Record *module*'s declared signedness and non-zero bit bases in *ctx*
+    (as `Scheduler.elaborate` does), for the reference executor that vm,
+    vm-fast and compiled run timing-control blocks with. Its context used
+    to have neither: an `integer` read as unsigned there (`k = -2; if (k <
+    0)` was false, so `for (k = -2; ...)` never ran) and a bit select of
+    `reg [15:8] a` was off by 8."""
+    from .elaborate import _build_param_env  # noqa: PLC0415
+
+    param_env = _build_param_env(module)
+    for param in module.parameters:
+        if param.signed:
+            ctx._signal_signed[param.name] = True
+    for decl in [*module.nets, *module.variables, *module.ports]:
+        if decl.signed:
+            ctx._signal_signed[decl.name] = True
+        if decl.width is None:
+            continue
+        lsb = _const_int(decl.width.lsb, _scoped_env(decl.name, param_env))
+        if not lsb:
+            continue
+        if decl.dimensions:
+            ctx._memory_bases[decl.name] = lsb
+        else:
+            ctx._signal_bases[decl.name] = lsb
+
+
 def _scoped_env(signal_name: str, param_env: dict[str, int]) -> dict[str, int]:
     """Build a param env with unprefixed aliases for a hierarchically-prefixed signal.
 

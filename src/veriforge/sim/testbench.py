@@ -23,7 +23,7 @@ from .elaborate import (
     resolve_sv_imports,
     _resolve_typedef_widths,
 )
-from .ascending import lower_ascending_ranges
+from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases
 from .scheduler import Scheduler
 from .display_format import lower_display_args
 from .sv_functions import lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
@@ -198,6 +198,8 @@ class Simulator:  # cm:a5c8f4
         expand_array_concat_operands(module)
         lower_sv_functions(module)
         lower_ascending_ranges(module)  # after lower_sv_functions: $left/$right
+        lower_memory_bases(module)
+        flatten_unpacked_arrays(module)  # after lower_memory_bases: 0-based dims
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
         lower_width_casts(module)
         lower_two_state(module)

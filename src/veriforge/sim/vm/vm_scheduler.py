@@ -23,6 +23,7 @@ from ..evaluator import EvalContext, ExpressionEvaluator
 from ..severity import DisplayLog
 from ..event_queue import CoroutineMixin, EventQueueMixin, SignalDictBase, TimedEvent
 from ..executor import StatementExecutor
+from ..scheduler import init_declaration_info
 from ..trace import flush_dump, start_dump
 from ..value import Value
 from .compiler import Compiler, CompiledProcess, ProcessType
@@ -455,6 +456,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         self._ref_executor._function_map = {f.name: f for f in module.functions}
         self._ref_executor._task_map = {t.name: t for t in module.tasks}
         self._ref_ctx = EvalContext()
+        init_declaration_info(self._ref_ctx, module)
         from ..elaborate import _build_struct_env
 
         _type_map, struct_signal_map = _build_struct_env(module)

@@ -256,6 +256,9 @@ w0 = m.wire("w0", width=8, init=0)            # wire [7:0] w0 = 0
 r  = m.reg("state", width=4)                  # reg [3:0] state
 r0 = m.reg("cnt", width=8, init=0)            # reg [7:0] cnt = 0
 i  = m.integer("i")                           # integer i (no declarative equivalent)
+l  = m.reg("l", width=4, kind="logic")        # logic [3:0] l (may be continuously assigned)
+n  = m.reg("n", kind="int")                   # int n (atom kinds: int, integer, byte,
+                                              #  shortint, longint -- fixed width, signed)
 
 # Memory arrays
 mem = m.reg("mem", width=8, depth=256)        # reg [7:0] mem [0:255]
@@ -399,6 +402,12 @@ data.bits(lsb=i, width=8)   # Part select: data[i +: 8]  (keyword form)
 data.bits(msb=i, width=8)   # Part select: data[i -: 8]
 ```
 
+Selects are Verilog selects, not Python indexing: a range is `[msb:lsb]`, MSB
+first, with both bounds. On a plain vector (not a memory) a constant index
+outside `[w-1:0]` raises `IndexError`, as do negative indices (`data[-1]` is not
+the MSB; write `data[w-1]`) and a reversed range (`data[0:3]`); `data[3:]` and
+`data[::2]` raise `TypeError`.
+
 **Important:** Comparison operators return `Expr` objects, not Python booleans. Using a `Signal` in an `if` statement or `bool()` raises `TypeError` — use `m.if_(expr)` instead.
 
 Reverse operators work too: `1 + a` produces `BinaryOp("+", Literal(1), Identifier("a"))`.
@@ -412,10 +421,17 @@ from veriforge.dsl import cat, rep, mux, when, select, land, lor, lnot
 from veriforge.dsl import reduce_and, reduce_or, reduce_xor
 from veriforge.dsl import ashl, ashr, case_eq, case_ne
 from veriforge.dsl import clog2, signed, unsigned, sim_time
+from veriforge.dsl import reduce_nand, reduce_nor, reduce_xnor, lit, cast
 
 cat(a, b, c)        # Concatenation: {a, b, c}
 cat([a, b, c])       # Lists/tuples are flattened — same as above
 rep(4, a)            # Replication:   {4{a}}
+# A bare int has no width, so cat()/rep() reject one ({a, 1} is an error in
+# Verilog): use lit("1'b1") or cast(1, 1). rep()'s count must be an int or a
+# parameter.
+lit("8'hff")         # A Verilog literal, verbatim: size, base, signedness, x/z
+lit("4'b10x1")
+cast(4, a)           # Size cast:     4'(a)
 mux(sel, t, f)       # Ternary:       sel ? t : f
 
 land(a, b)           # Logical AND:   a && b
@@ -425,6 +441,9 @@ lnot(a)              # Logical NOT:   !a
 reduce_and(a)        # Reduction AND: &a
 reduce_or(a)         # Reduction OR:  |a
 reduce_xor(a)        # Reduction XOR: ^a
+reduce_nand(a)       # Reduction NAND: ~&a (1 bit; ~reduce_and(a) is a bitwise NOT
+reduce_nor(a)        # Reduction NOR:  ~|a  that a wider context widens first)
+reduce_xnor(a)       # Reduction XNOR: ~^a
 
 # Operators not expressible via Python's own operator overloading:
 ashl(a, b)           # Arithmetic left shift:  a <<< b

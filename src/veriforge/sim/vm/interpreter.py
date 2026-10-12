@@ -442,7 +442,7 @@ class Interpreter:  # cm:e3f1b4
                 if a.mask or b.mask:
                     s_append(Value.x(a.width))
                     continue
-                result = _verilog_pow(a.as_signed(), b.as_signed())
+                result = _verilog_pow(a.as_signed(), b.as_signed(), a.width)
                 s_append(Value.x(a.width) if result is None else Value(result, width=a.width))
                 continue
 

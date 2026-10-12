@@ -66,7 +66,7 @@ def signed_literal_width(n: int) -> int:
     return 32
 
 
-def _verilog_pow(base: int, exp: int) -> int | None:
+def _verilog_pow(base: int, exp: int, width: int | None = None) -> int | None:
     """IEEE 1364-2005 Table 5-6 -- integer power-operator special-value rules.
 
     *base*/*exp* are plain Python ints, already sign-interpreted by the
@@ -103,6 +103,12 @@ def _verilog_pow(base: int, exp: int) -> int | None:
     if exp == 0:
         return 1
     if exp > 0:
+        if width is not None:
+            # Only the low *width* bits survive, so reduce as we go: a huge
+            # exponent (`a ** 35'sd8589934592`) used to build a gigantic int
+            # and hang. (Python's three-argument pow is non-negative mod
+            # 2**width, i.e. the same two's-complement bits.)
+            return pow(base, exp, 1 << width)
         return base**exp
     if base == 0:
         return None
@@ -798,7 +804,7 @@ class Value:  # cm:c8a1e6
         w = self.width
         if self.mask or other.mask:
             return Value.x(w)
-        result = _verilog_pow(self.val, other.val)
+        result = _verilog_pow(self.val, other.val, w)
         return Value.x(w) if result is None else Value(result, width=w)
 
 

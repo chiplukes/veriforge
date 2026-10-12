@@ -407,6 +407,19 @@ cdef inline bint _wide_eq(
 
 # ── Inline helpers ───────────────────────────────────────────────────
 
+cdef inline unsigned long long _upow64(unsigned long long base, unsigned long long exp) noexcept nogil:
+    # base ** exp mod 2**64 by square-and-multiply. (The old loop ran `exp`
+    # times on an `<int>` cast: a 35-bit exponent like 2**33 became 0 --
+    # `a ** 35'sd8589934592` was 1 -- and a large 32-bit one spun for
+    # seconds. Unsigned, so the wrapping multiply is defined C.)
+    cdef unsigned long long result = 1
+    while exp:
+        if exp & 1:
+            result = result * base
+        base = base * base
+        exp >>= 1
+    return result
+
 cdef inline long long mask_for_width(int w) noexcept nogil:
     if w >= 64:
         return <long long>(-1)   # all bits set
@@ -693,12 +706,8 @@ cdef void _wide_pow_py(
 
     Mirrors `_wide_mul_py`'s exact structure/aliasing discipline (`dst_v`
     may alias `a_v` -- every read happens before any write). Uses
-    Python's arbitrary-precision `**` (efficient O(log n) repeated
-    squaring) rather than OP_POW's narrow-path O(n) multiply loop --
-    strictly better, not a regression, for large exponents (the O(n)
-    loop's own theoretical hang-on-huge-exponent risk is pre-existing and
-    out of scope here either way -- real RTL never uses `**` with an
-    astronomically large exponent). `dst_m` is always 0: an unsigned
+    Python's three-argument `pow` (O(log n) repeated squaring, like the
+    narrow path's `_upow64`). `dst_m` is always 0: an unsigned
     power of two fully-defined operands is always fully defined (unlike
     the signed case's `0 ** negative` special value -- see
     `_wide_spow_py`).
@@ -2056,10 +2065,10 @@ cdef int _execute_core(
                 # in the C-native wrapping domain and masking down to `w`
                 # at the end gives the exact same answer as full-precision
                 # math would.
-                result_val = 1
-                n = <int>b.val
-                for i in range(n):
-                    result_val = result_val * a.val
+                result_val = <long long>_upow64(
+                    <unsigned long long>a.val,
+                    <unsigned long long>b.val & <unsigned long long>mask_for_width(b.width),
+                )
                 stack[sp].val = result_val & wmask
                 stack[sp].mask = 0
                 stack[sp].width = w
@@ -2155,10 +2164,7 @@ cdef int _execute_core(
             if sb == 0:
                 result_val = 1
             elif sb > 0:
-                result_val = 1
-                n = <int>sb
-                for i in range(n):
-                    result_val = result_val * sa
+                result_val = <long long>_upow64(<unsigned long long>sa, <unsigned long long>sb)
             elif sa == 0:
                 # 0 ** (negative) is the table's one genuinely-undefined
                 # ('bx) cell.

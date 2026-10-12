@@ -5,8 +5,14 @@ It complements `notes\dsl\dsl_coverage.md`, which focuses on the DSL builder
 itself.
 
 The converter is intentionally conservative: when it cannot produce equivalent
-DSL code, it emits an `UNSUPPORTED` comment rather than silently dropping the
-construct.
+DSL code, it writes an `unsupported("<construct>")` call in its place. Running
+the converted file then raises `NotImplementedError` naming the construct, so a
+converted design either builds the same hardware or fails loudly. (It used to
+write `# UNSUPPORTED` comments, which let a converted design run without the
+construct: a `for` loop became one pass of its body and a task call vanished.)
+Declarations the DSL has no counterpart for (function, task and specify
+blocks) are still written as `# UNSUPPORTED` comments, since they do nothing
+until called, and a call is itself `unsupported(...)`.
 
 ## Current supported conversion areas
 
@@ -14,15 +20,18 @@ construct.
 | --- | --- |
 | Modules | Emits a `Module(...)` builder and final `module = m.build()`. |
 | Ports | Converts common input, output, output-reg, and inout declarations. |
-| Nets and regs | Converts common wire/reg declarations, widths, signedness, initial values, and simple memory depths. |
+| Nets and regs | Converts wire/reg declarations, widths, signedness, initial values and memory depths; `logic`, `bit` and the integer atom types (`int`, `integer`, `byte`, `shortint`, `longint`) become `m.reg(..., kind=...)`. |
+| Ranges | Every packed range becomes `[w-1:0]` and memory dimensions `[0:depth-1]`, with selects and word indices remapped (`[15:8]`, ascending `[0:7]`, `m [1:4]`); multi-dimensional unpacked arrays are flattened row-major. |
+| Literals | A plain decimal below 2**31 stays a Python int; anything else (sized, based, x/z, wide) becomes `lit("<Verilog text>")`. |
 | Parameters and localparams | Converts common value and width forms. |
 | Instances | Converts named instance connections and parameter dictionaries. |
 | Assignments | Converts continuous, blocking, and nonblocking assignments for supported expression forms. |
-| Always and initial blocks | Converts common sensitivity lists and statement bodies. |
-| If/else and case | Converts common conditional and case structures. |
+| Always and initial blocks | Converts common sensitivity lists and statement bodies; empty bodies become `pass`. |
+| If/else and case | Converts common conditional and case structures (nested cases get distinct `_c<depth>` names). |
 | Delay and event controls | Converts to `m.delay(...)` and `m.wait_event(...)` forms. |
 | Common system tasks | Converts `$display`, `$write`, `$monitor`, `$finish`, `$stop`, `$readmemh`, and `$readmemb`. |
 | Common system functions | Converts `$time`, `$clog2`, `$signed`, and `$unsigned` to explicit DSL helpers. |
+| Size casts | `N'(x)` becomes `cast(N, x)`. |
 | Packages and interfaces | Has dedicated package/interface conversion paths. |
 
 ## Expression gaps
@@ -32,38 +41,42 @@ construct.
 | Binary XNOR: `~^`, `^~` | Lowered to bitwise NOT of XOR | Keep this lowering unless later width-specific DSL helpers become necessary. |
 | Arithmetic shifts: `<<<`, `>>>` | Converted via explicit `ashl(...)` / `ashr(...)` helpers | Keep helper-based lowering so signed shift intent stays explicit in generated DSL. |
 | Case equality: `===`, `!==` | Converted via explicit `case_eq(...)` / `case_ne(...)` helpers | Keep helper-based lowering so four-state intent stays explicit in generated DSL. |
-| Reduction NAND/NOR/XNOR: `~&`, `~|`, `~^` | Lowered to bitwise NOT of `reduce_and/or/xor(...)` | Keep this lowering unless later one-bit helper APIs are added. |
+| Reduction NAND/NOR/XNOR: `~&`, `~|`, `~^` | `reduce_nand/nor/xnor(...)` (1-bit; `~reduce_or(x)` is a context-widened NOT, which is what it used to emit) | — |
 | Common system functions: `$time`, `$clog2`, `$signed`, `$unsigned` | Converted via explicit `sim_time()`, `clog2(...)`, `signed(...)`, and `unsigned(...)` helpers | Extend this explicit-helper pattern only for stable, common builtins. |
-| Unrecognized expression nodes | Emits `UNSUPPORTED expression: <type>` | Add targeted tests before adding conversions. |
+| Streaming concatenation, user function calls, other system functions, other operators | `unsupported("...")` | Add by usage frequency. |
+| Unrecognized expression nodes | `unsupported("<type> expression")` | Add targeted tests before adding conversions. |
 
 ## Statement gaps
 
-| Construct | Current behavior | Suggested next step |
-| --- | --- | --- |
-| `while` | Emits `UNSUPPORTED: while loop` | Decide whether to model as Python control flow or leave manual. |
-| `forever` | Emits `UNSUPPORTED: forever loop` | Usually testbench-oriented; likely manual unless DSL adds a direct helper. |
-| `repeat` | Emits `UNSUPPORTED: repeat loop` | Could map to Python `for` for constant counts if safe. |
-| `fork` / `join` | Emits `UNSUPPORTED: fork/join block` and attempts child statement conversion | Needs explicit parallel testbench DSL semantics before conversion. |
-| `wait` | Emits `UNSUPPORTED: wait(...)` | Could map if DSL wait semantics become explicit. |
-| `disable` | Emits `UNSUPPORTED: disable ...` | Low priority; control-flow semantics are nontrivial. |
-| Event trigger `-> event` | Emits `UNSUPPORTED: -> ...` | Needs event object semantics in DSL. |
-| Task enable | Emits `UNSUPPORTED: task(...)` | Depends on DSL task/function policy. |
-| Unknown system tasks | Emits `UNSUPPORTED: $task(...)` | Add by usage frequency. |
+All of these become `unsupported("...")` calls.
+
+| Construct | Suggested next step |
+| --- | --- |
+| `for` | Could map to a Python `for` for constant bounds (unrolled). |
+| `while` | Decide whether to model as Python control flow or leave manual. |
+| `forever` | Usually testbench-oriented; likely manual unless DSL adds a direct helper. |
+| `repeat` | Could map to Python `for` for constant counts if safe. |
+| `fork` / `join` | Needs explicit parallel testbench DSL semantics before conversion. |
+| `wait` | Could map if DSL wait semantics become explicit. |
+| `disable` | Low priority; control-flow semantics are nontrivial. |
+| Event trigger `-> event` | Needs event object semantics in DSL. |
+| Task enable | Depends on DSL task/function policy. |
+| Unknown system tasks | Add by usage frequency. |
 
 ## Module-level gaps
 
 | Construct | Current behavior | Suggested next step |
 | --- | --- | --- |
-| Function declarations | Emits `UNSUPPORTED: function ...` | Prefer Python expression helpers; manual rewrite patterns are documented below. |
-| Task declarations | Emits `UNSUPPORTED: task ...` | Prefer Python builder helpers; manual rewrite patterns are documented below. |
-| Generate blocks | Emits `UNSUPPORTED: generate block (...)` | Prefer Python elaboration-time control flow; manual rewrite patterns are documented below. |
-| Specify blocks | Emits `UNSUPPORTED: specify block` | Keep out of scope unless specify timing becomes a project target. |
-| Real, realtime, time, event variables | Emits `UNSUPPORTED: <kind> <name>` | Low priority unless DSL gains explicit support. |
+| Function declarations | `# UNSUPPORTED: function ...` comment (a call is `unsupported(...)`) | Prefer Python expression helpers; manual rewrite patterns are documented below. |
+| Task declarations | `# UNSUPPORTED: task ...` comment (a call is `unsupported(...)`) | Prefer Python builder helpers; manual rewrite patterns are documented below. |
+| Generate blocks | `unsupported("generate block (...)")` | Prefer Python elaboration-time control flow; manual rewrite patterns are documented below. |
+| Specify blocks | `# UNSUPPORTED: specify block` comment | Keep out of scope unless specify timing becomes a project target. |
+| Real, realtime, time, event variables | `name = unsupported("<kind> variable name")` | Low priority unless DSL gains explicit support. |
+| Multi-dimensional packed arrays | `name = unsupported("multi-dimensional array name")` | Could flatten like unpacked arrays. |
 
 ## Manual conversion patterns
 
-The converter intentionally leaves some Verilog constructs as `UNSUPPORTED`
-comments because the DSL treats them as Python-side structure instead of as
+The converter intentionally leaves some Verilog constructs unconverted because the DSL treats them as Python-side structure instead of as
 first-class model nodes. The recommended manual translations are:
 
 ### Function declarations -> Python expression helpers
@@ -169,7 +182,7 @@ runtime procedural control flow.
 
 ### What should stay unsupported for now
 
-Keep these as manual conversions or explicit `UNSUPPORTED` outputs until the
+Keep these as manual conversions or explicit `unsupported(...)` outputs until the
 DSL has matching semantics:
 
 - behavioral `while`, `forever`, `repeat`
@@ -179,7 +192,7 @@ DSL has matching semantics:
 
 ## Recommended implementation order
 
-1. Keep converter tests in sync so every current `UNSUPPORTED` output shape stays pinned.
+1. Keep converter tests in sync so every current `unsupported(...)` output shape stays pinned.
 2. Add converter coverage for any newly supported expression lowering so regressions stay obvious.
 3. Expand the manual conversion guidance when new intentional non-goals are identified.
 4. Only convert control-flow-heavy testbench constructs after the DSL has direct

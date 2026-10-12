@@ -44,6 +44,7 @@ from ..model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 from ..model.nets import Net, NetKind
 from ..model.package import ImportDecl
@@ -66,6 +67,8 @@ from ..model.sv_types import EnumMember, EnumType, StructField, StructType, Type
 from ..model.variables import Variable, VariableKind
 from .interface import BoundInterface, Interface
 
+import copy
+import functools
 import re
 import warnings
 
@@ -252,6 +255,20 @@ def _emit_attr(attrs: dict[str, str | None]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# `Module.reg(kind=...)`: variable kind, and the fixed width of an integer
+# atom type (None: sized by `width`).
+_REG_KINDS: dict[str, tuple[VariableKind, int | None]] = {
+    "reg": (VariableKind.REG, None),
+    "logic": (VariableKind.LOGIC, None),
+    "bit": (VariableKind.BIT, None),
+    "int": (VariableKind.INT, 32),
+    "integer": (VariableKind.INTEGER, 32),
+    "byte": (VariableKind.BYTE, 8),
+    "shortint": (VariableKind.SHORTINT, 16),
+    "longint": (VariableKind.LONGINT, 64),
+}
+
+
 class Expr:
     """Expression proxy that builds model Expression trees via operator overloading.
 
@@ -409,9 +426,16 @@ class Expr:
     def __getitem__(self, key: object) -> Expr:
         """Bit select (int/Expr index) or range select (slice)."""
         if isinstance(key, slice):
+            if key.start is None or key.stop is None or key.step is not None:
+                raise TypeError(
+                    "A range select is sig[msb:lsb], both bounds given, MSB first (Verilog order, "
+                    "not a Python slice); use sig.bits(lsb=..., width=...) for a part select"
+                )
+            _check_select(self, key.start, key.stop)
             msb = _to_expr_node(key.start)
             lsb = _to_expr_node(key.stop)
             return Expr(self._builder, RangeSelect(self._as_expr(), msb, lsb))
+        _check_select(self, key, key)
         return Expr(self._builder, BitSelect(self._as_expr(), _to_expr_node(key)))
 
     def part_select(self, base: Signal | Expr | int, width: Signal | Expr | int) -> Expr:
@@ -567,6 +591,24 @@ class Expr:
 # ---------------------------------------------------------------------------
 
 
+def _check_select(target: Expr, msb: object, lsb: object) -> None:
+    """Constant selects on a plain vector must be inside its ``[w-1:0]`` and
+    MSB first. (`a[-1]`, `a[8]` of an 8-bit `a` read x and `a[0:3]` is an
+    elaboration error in other tools; all three used to emit silently.)"""
+    if not isinstance(target, Signal) or target._depth is not None:
+        return  # a memory index selects a word
+    width = target._width
+    if not isinstance(width, int) or isinstance(width, bool) or width <= 1:
+        return
+    name = target._name
+    for idx in (msb, lsb):
+        if isinstance(idx, int) and not isinstance(idx, bool) and not 0 <= idx < width:
+            hint = f"; the MSB is {name}[{width - 1}] (no Python-style negative indexing)" if idx < 0 else ""
+            raise IndexError(f"{name}[{idx}] is outside {name}[{width - 1}:0]{hint}")
+    if isinstance(msb, int) and isinstance(lsb, int) and msb < lsb:
+        raise IndexError(f"{name}[{msb}:{lsb}] is out of order: ranges are MSB first, {name}[{lsb}:{msb}]")
+
+
 class Signal(Expr):  # cm:7d5f3a
     """A named signal (port, wire, reg) in the DSL.
 
@@ -574,12 +616,13 @@ class Signal(Expr):  # cm:7d5f3a
     is an Identifier with the signal's name.
     """
 
-    __slots__ = ("_attributes", "_comments", "_name", "_width")
+    __slots__ = ("_attributes", "_comments", "_depth", "_name", "_width")
 
-    def __init__(self, builder: Module, name: str, width: int | Expr | None):
+    def __init__(self, builder: Module, name: str, width: int | Expr | None, depth: int | None = None):
         super().__init__(builder, Identifier(name))
         self._name = name
         self._width = width
+        self._depth = depth
         self._comments: list[str] = []
         self._attributes: dict[str, str | None] = {}
 
@@ -843,7 +886,7 @@ class _CaseContext:
     Use ``c.when(value)`` and ``c.default()`` within this context.
     """
 
-    __slots__ = ("_builder", "_case_type", "_expr", "_items")
+    __slots__ = ("_builder", "_case_type", "_closed", "_expr", "_items")
 
     def __init__(self, builder: Module, case_type: str, expr: Expression):
         if case_type not in ("case", "casex", "casez"):
@@ -852,21 +895,41 @@ class _CaseContext:
         self._case_type = case_type
         self._expr = expr
         self._items: list[CaseItem] = []
+        self._closed = False
+
+    def _check_open(self, what: str) -> None:
+        # An item added after the `with` block ended went into the already-
+        # emitted statement: with nested cases sharing one `as c` name, the
+        # outer case's later items silently joined the inner case.
+        if self._closed:
+            raise RuntimeError(
+                f"'{what}' on a case whose 'with m.case(...)' block has already ended "
+                "(nested cases need distinct 'as' names)"
+            )
 
     def when(self, *values: object) -> _CaseWhenContext:
         """Add a case item matching the given value(s)."""
+        self._check_open("when")
         return _CaseWhenContext(self._builder, self, values)
 
     def default(self) -> _CaseDefaultContext:
         """Add a default case item."""
+        self._check_open("default")
         return _CaseDefaultContext(self._builder, self)
 
     def __enter__(self) -> _CaseContext:
+        # Statements directly in the case body (not in a when/default) land
+        # here; they used to go silently into the enclosing block.
+        self._builder._push_block()
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool:
+        stray = self._builder._pop_block()
+        self._closed = True
         if exc_type is not None:
             return False
+        if stray:
+            raise RuntimeError("Statements inside 'with m.case(...)' must be inside a 'when' or 'default' block")
         # M18: empty case statement
         if not self._items:
             raise RuntimeError("Empty case statement — no 'when' or 'default' items inside 'with m.case(...)'")
@@ -1087,16 +1150,19 @@ class Module:  # cm:2b9e4c
             node.comments.append(_make_comment(text, block=is_block))
         self._pending_comments.clear()
 
+    def _is_parameter(self, name: str) -> bool:
+        return any(p.name == name for p in self._parameters)
+
     def _check_duplicate_signal(self, name: str) -> None:
         """Raise ValueError if a signal with *name* already exists."""
         if name in self._signals:
             raise ValueError(f"Signal '{name}' already declared in module '{self._name}'")
 
-    def _declare_signal(self, name: str, width: int | Expr | None = 1) -> Signal:
+    def _declare_signal(self, name: str, width: int | Expr | None = 1, depth: int | None = None) -> Signal:
         """Validate and register a new signal, returning the Signal proxy."""
         _check_identifier(name)
         self._check_duplicate_signal(name)
-        sig = Signal(self, name, width)
+        sig = Signal(self, name, width, depth)
         self._signals[name] = sig
         return sig
 
@@ -1358,30 +1424,45 @@ class Module:  # cm:2b9e4c
         net = Net(name, NetKind.WIRE, width=range_obj, signed=signed, dimensions=dims, initial_value=init_expr)
         self._flush_pending(net)
         self._nets.append(net)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, depth)
 
     def reg(
         self,
         name: str,
         width: int | Expr = 1,
         *,
-        signed: bool = False,
+        signed: bool | None = None,
         init: int | Expr | None = None,
         depth: int | None = None,
+        kind: str = "reg",
     ) -> Signal:
         """Declare an internal reg.
 
         Args:
             init: Initial value (``reg [7:0] r = 0;``).
             depth: Memory depth (``reg [7:0] mem [0:depth-1];``).
+            kind: The variable type: ``"reg"`` (default), ``"logic"``, ``"bit"``,
+                or an integer atom type ``"int"``, ``"integer"``, ``"byte"``,
+                ``"shortint"``, ``"longint"`` (fixed width, signed unless
+                ``signed=False``; *width* is then ignored).
         """
-        range_obj = _make_range(width)
+        if kind not in _REG_KINDS:
+            raise ValueError(f"reg {name!r}: unknown kind {kind!r} (one of {', '.join(_REG_KINDS)})")
+        var_kind, atom_width = _REG_KINDS[kind]
+        range_obj = _make_range(width) if atom_width is None else None
         dims = [_make_dim(depth)] if depth is not None else None
         init_expr = _to_expr_node(init) if init is not None else None
-        var = Variable(name, VariableKind.REG, width=range_obj, signed=signed, dimensions=dims, initial_value=init_expr)
+        var = Variable(
+            name,
+            var_kind,
+            width=range_obj,
+            signed=bool(signed) if atom_width is None else signed,
+            dimensions=dims,
+            initial_value=init_expr,
+        )
         self._flush_pending(var)
         self._variables.append(var)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width if atom_width is None else atom_width, depth)
 
     def integer(self, name: str) -> Signal:
         """Declare an integer variable."""
@@ -1649,7 +1730,9 @@ class Module:  # cm:2b9e4c
             raise ValueError(f"Cannot assign to input port '{lhs._name}' — inputs are driven externally")
         # M10: continuous assign to reg-type signal
         if isinstance(lhs, Signal):
-            reg_names = {v.name for v in self._variables}
+            # (SystemVerilog variables -- `logic`, `bit`, `int`, ... -- may be
+            # continuously assigned; only a Verilog `reg` can't.)
+            reg_names = {v.name for v in self._variables if v.kind == VariableKind.REG}
             out_reg_names = {p.name for p in self._ports if p.data_type == "reg"}
             if lhs._name in reg_names or lhs._name in out_reg_names:
                 raise ValueError(f"Cannot continuous-assign to reg '{lhs._name}' — use procedural assignment instead")
@@ -2109,9 +2192,23 @@ def cat(*args: Signal | Expr | int | list | tuple) -> Expr:
     # M28: empty concatenation
     if not flat:
         raise ValueError("cat() requires at least one argument")
+    for a in flat:
+        _check_sized(a, "cat()")
     exprs = [_to_expr_node(a) for a in flat]
     builder = _find_builder(flat)
     return Expr(builder, Concatenation(exprs))
+
+
+def _check_sized(a: object, where: str) -> None:
+    # A bare int is an unsized Verilog literal, which a concatenation can't
+    # hold (`{a, 1}` is an error in Icarus; it used to emit silently).
+    if isinstance(a, int):
+        raise TypeError(
+            f"{where}: the int {a!r} has no width inside a concatenation; "
+            f'give it one, e.g. lit("8\'d{int(a)}") or cast(8, {int(a)})'
+            if a >= 0
+            else f"{where}: the int {a!r} has no width inside a concatenation; give it one with cast(width, ...)"
+        )
 
 
 def rep(count: int, sig: Signal | Expr | int) -> Expr:
@@ -2119,6 +2216,10 @@ def rep(count: int, sig: Signal | Expr | int) -> Expr:
     # M29: replication count validation
     if isinstance(count, int) and not isinstance(count, bool) and count <= 0:
         raise ValueError(f"Replication count must be positive, got {count}")
+    if isinstance(count, Signal) and not count._builder._is_parameter(count._name):
+        # `{a{3}}`: the count must be constant.
+        raise TypeError(f"rep(): the count must be a constant (an int or a parameter), not signal {count._name!r}")
+    _check_sized(sig, "rep()")
     count_expr = _to_lit(count) if isinstance(count, int) else _to_expr_node(count)
     sig_expr = _to_expr_node(sig)
     builder = sig._builder if isinstance(sig, Expr) else None
@@ -2276,3 +2377,62 @@ def unsigned(a: Signal | Expr | int) -> Expr:
     """System function: ``$unsigned(a)``"""
     builder = a._builder if isinstance(a, Expr) else None
     return Expr(builder, FunctionCall("$unsigned", [_to_expr_node(a)], is_system=True))
+
+
+@functools.lru_cache(maxsize=4096)
+def _parse_literal_text(text: str) -> Expression:
+    from ..transforms.tree_to_model import _build_expression  # noqa: PLC0415
+    from ..verilog_parser import verilog_parser  # noqa: PLC0415
+
+    node = _build_expression(verilog_parser(start="expression").build_tree(text), None)
+    if not isinstance(node, Literal):
+        raise ValueError(f"lit(): {text!r} is not a single Verilog number literal")
+    return node
+
+
+def lit(text: str) -> Expr:
+    """A Verilog number literal, written as in Verilog: ``lit("8'hFF")``,
+    ``lit("4'sb1x0z")``, ``lit("32'd0")``.
+
+    A plain Python int becomes an unsized 32-bit signed literal, so use
+    this where the size, signedness or x/z bits matter: ``8'd5 + 8'd255``
+    wraps at 8 bits, ``5 + 255`` doesn't.
+    """
+    return Expr(None, copy.deepcopy(_parse_literal_text(text.strip())))
+
+
+def cast(width: int, a: Signal | Expr | int) -> Expr:
+    """Size cast ``width'(a)`` (IEEE 1800 6.24.1): *a* as it would be after
+    assignment to a *width*-bit variable."""
+    if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
+        raise ValueError(f"cast(): the width must be a positive int, got {width!r}")
+    builder = a._builder if isinstance(a, Expr) else None
+    return Expr(builder, WidthCast(Literal(width, width=32), _to_expr_node(a)))
+
+
+def unsupported(description: str) -> Expr:
+    """Placeholder the Verilog-to-DSL converter writes for a construct the
+    DSL can't express: building the module fails here, naming it, instead
+    of the converted design silently differing from the original."""
+    raise NotImplementedError(
+        f"The DSL can't express {description}; port it by hand (left by the Verilog-to-DSL converter)."
+    )
+
+
+def reduce_nand(a: Signal | Expr) -> Expr:
+    """Reduction NAND: ``~&a`` (1 bit -- not ``~(&a)``, which a wider
+    context would widen before inverting)."""
+    builder = a._builder if isinstance(a, Expr) else None
+    return Expr(builder, UnaryOp("~&", _to_expr_node(a)))
+
+
+def reduce_nor(a: Signal | Expr) -> Expr:
+    """Reduction NOR: ``~|a`` (1 bit)."""
+    builder = a._builder if isinstance(a, Expr) else None
+    return Expr(builder, UnaryOp("~|", _to_expr_node(a)))
+
+
+def reduce_xnor(a: Signal | Expr) -> Expr:
+    """Reduction XNOR: ``~^a`` (1 bit)."""
+    builder = a._builder if isinstance(a, Expr) else None
+    return Expr(builder, UnaryOp("~^", _to_expr_node(a)))

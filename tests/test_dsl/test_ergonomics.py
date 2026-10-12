@@ -377,8 +377,8 @@ class TestCatFlattening:
             a = m.input("a", 8)
             b = m.input("b", 8)
             c = m.input("c", 8)
-            expr = cat(a, [b, (c, 1)])
-        assert emit_expression(expr._as_expr()) == "{a, b, c, 1}"
+            expr = cat(a, [b, (c, a[0])])
+        assert emit_expression(expr._as_expr()) == "{a, b, c, a[0]}"
 
     def test_cat_empty_list_raises(self):
         with pytest.raises(ValueError, match="at least one"):

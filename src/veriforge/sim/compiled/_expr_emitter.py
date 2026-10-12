@@ -1910,9 +1910,12 @@ class _ExprEmitterMixin:
             if both_signed:
                 pow_base = f"_sign_ext({left}, {self._expr_width(expr.left)})"
                 pow_exp = f"_sign_ext({right}, {self._expr_width(expr.right)})"
-            else:
-                pow_base, pow_exp = left, right
-            return f"(_verilog_ipow({pow_base}, {pow_exp})) & wmask({width})"
+                return f"(_verilog_ipow({pow_base}, {pow_exp})) & wmask({width})"
+            # Unsigned: never negative (a 64-bit exponent with its top bit
+            # set must not hit `_verilog_ipow`'s negative-exponent rules).
+            ew = self._expr_width(expr.right)
+            pow_exp = f"(<unsigned long long>({right}) & <unsigned long long>wmask({ew}))"
+            return f"<long long>_upow64(<unsigned long long>({left}), {pow_exp}) & wmask({width})"
 
         # Arithmetic right shift: preserve the signed operand width before
         # truncating to the surrounding assignment width. A shift amount

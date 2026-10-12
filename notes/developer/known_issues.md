@@ -127,6 +127,22 @@ other integer atom types reject `unsigned`. Their default signedness
 (`sim/sv_functions.py:lower_two_state`), but a 2-state *memory*
 (`byte m [0:3]`) still starts at x.
 
+### Memory lowering gaps: `$readmem` `@address`, sub-array access
+
+**Status**: Open (found 2026-10-11). `sim/ascending.py:lower_memory_bases`
+rebases memories whose dimensions don't start at 0 (`reg m [1:4]`) and
+`flatten_unpacked_arrays` flattens multi-dimensional unpacked arrays
+row-major, for every engine. Not covered:
+
+- `@address` lines in a `$readmemh`/`$readmemb` file loading a rebased
+  memory are taken as slot numbers (`@1` into `m [1:4]` lands on `m[2]`).
+  Files without addresses load correctly (from the lowest address).
+- A multi-dimensional array that is also accessed as a sub-array (`m[i]`
+  alone, SystemVerilog) is left unflattened, and its `m[i][j]` accesses still
+  read bit `j` of word `i`, as all of them used to.
+- Hierarchical references into another module's rebased memory aren't
+  remapped.
+
 ## Reference notes (not defects)
 
 These are deliberate design decisions or investigated-and-closed

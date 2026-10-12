@@ -22,7 +22,7 @@ from pathlib import Path
 
 import signal
 
-from ..model.design import Module
+from ..model.design import Design, Module
 from ..model.expressions import StreamingConcatenation
 from ..sim.testbench import Simulator
 from ..sim.value import Value
@@ -399,6 +399,15 @@ class FuzzRunner:
         design = tree_to_design(tree, source_file="fuzz.v")
         link_instances(design)
         resolve_port_connections(design)
+        return self._simulate_design(design, engine, vectors)
+
+    def _simulate_design(
+        self,
+        design: Design,
+        engine: str,
+        vectors: list[dict[str, Value]],
+    ) -> list[dict[str, Value]]:
+        """`_simulate` of an in-memory *design* (no text round trip)."""
         top = next(m for m in design.modules if m.name == "t")
         sim = Simulator(top, engine=engine, design=design)
 
