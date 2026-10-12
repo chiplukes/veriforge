@@ -7,6 +7,7 @@ src/veriforge/
 ├── __init__.py
 ├── _version.py           # Single source of truth for __version__; zero imports (safe for isolated builds)
 ├── _env.py               # VERIFORGE_<suffix> env var reads with VERILOG_TOOLS_<suffix> legacy-prefix fallback
+├── _recursion.py         # ensure_deep_recursion(): raises the recursion limit for deeply nested expressions
 ├── __main__.py           # CLI entry point
 ├── verilog_parser.py     # Main parser class (Layer 1)
 ├── preprocessor.py       # Verilog preprocessor (`define/`ifdef/`include/`timescale etc.)
@@ -90,6 +91,10 @@ src/veriforge/
 │   ├── scheduler.py      # EventQueue, Process types, Scheduler (delta cycles, struct registration, memory registration, run_step)
 │   ├── event_queue.py    # TimedEvent + EventQueueMixin + CoroutineMixin + SignalDictBase (shared primitives for all engines)
 │   ├── elaborate.py      # Generate elaboration, hierarchy flattening, enum/package/struct resolution, interface binding
+│   ├── ascending.py      # lower_ascending_ranges(): ascending [L:R] packed ranges rewritten as descending, selects flipped
+│   ├── sv_functions.py   # SV query/bit functions ($size/$left/$countones...), width casts, 2-state lowering
+│   ├── display_format.py # $display-family formatting (Icarus conventions), %m scope names, display-arg lowering
+│   ├── severity.py       # $info/$warning/$error/$fatal lowered to marked $display (+ $finish)
 │   ├── testbench.py      # SignalHandle, Triggers, Clock, Simulator (engine selection)
 │   ├── vcd.py            # VCD waveform output (IEEE 1364-2001)
 │   ├── vcd_compare.py    # VCD parser + comparator for cross-sim validation
@@ -236,7 +241,8 @@ src/veriforge/
     ├── _expression_gen.py # Expression generator — random Expression model objects
     ├── _statement_gen.py # Statement generator — random Statement model objects
     ├── _module_gen.py    # Module generation strategies + top-level ModuleGenerator
-    └── _runner.py        # Long-running loop: generate → simulate (all engines) → compare → log
+    ├── _runner.py        # Long-running loop: generate → simulate (all engines) → compare → log
+    └── _runner_marks.py  # Constants shared by generator and runner (DISPLAY_MARK)
 ```
 
 The top-level `veriforge_lsp/` package (language server: `server.py`, `workspace.py`,
