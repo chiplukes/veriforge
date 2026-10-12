@@ -984,6 +984,20 @@ def _emit_par_block(stmt: ParBlock, indent: str, current_indent: str, prefix: st
     return "\n".join(lines)
 
 
+def _ends_with_open_if(stmt: Statement | None) -> bool:
+    """True if `stmt`, emitted without begin/end, ends in an `if` that has no `else`.
+
+    Such a statement must not be the bare then-body of an if/else: Verilog binds
+    an `else` to the nearest unmatched `if`, so the outer `else` would attach to
+    the inner `if` (the classic dangling else).
+    """
+    if isinstance(stmt, IfStatement):
+        return stmt.else_body is None or _ends_with_open_if(stmt.else_body)
+    if isinstance(stmt, (ForLoop, WhileLoop, RepeatLoop, ForeverLoop)):
+        return _ends_with_open_if(stmt.body)
+    return False
+
+
 def _emit_if_statement(stmt: IfStatement, indent: str, current_indent: str, prefix: str) -> str:
     """Emit if/else statement."""
     lines: list[str] = []
@@ -993,6 +1007,11 @@ def _emit_if_statement(stmt: IfStatement, indent: str, current_indent: str, pref
     if stmt.then_body:
         if isinstance(stmt.then_body, SeqBlock):
             lines.append(_emit_statement(stmt.then_body, indent, current_indent))
+        elif stmt.else_body and _ends_with_open_if(stmt.then_body):
+            # Wrap so the else below binds to this if, not to an if inside the body.
+            lines.append(f"{current_indent}begin")
+            lines.append(_emit_statement(stmt.then_body, indent, inner_indent))
+            lines.append(f"{current_indent}end")
         else:
             lines.append(_emit_statement(stmt.then_body, indent, inner_indent))
 

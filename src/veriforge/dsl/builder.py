@@ -99,7 +99,16 @@ def _to_expr_node(value: object) -> Expression:
     if isinstance(value, Expr):
         return value._as_expr()
     if isinstance(value, int):  # bool is subclass of int
-        return Literal(int(value), original_text=str(int(value)), signed=True)
+        v = int(value)
+        if -(1 << 31) <= v < (1 << 31):
+            return Literal(v, original_text=str(v), signed=True)
+        # Beyond a 32-bit integer an unsized decimal is tool-dependent: Vivado
+        # truncates it to 32 bits while Icarus/Verilator keep the full value.
+        # Emit a sized signed literal one bit wider than the magnitude, so the
+        # value and signedness match the unsized form everywhere.
+        width = abs(v).bit_length() + 1
+        text = f"{width}'sd{abs(v)}"
+        return Literal(v, width=width, base="d", signed=True, original_text=f"-{text}" if v < 0 else text)
     if isinstance(value, str):
         return StringLiteral(value)
     if isinstance(value, Expression):
