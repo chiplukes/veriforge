@@ -233,6 +233,7 @@ class Scheduler:  # cm:9a7f2c
         "evaluator",
         "event_queue",
         "executor",
+        "memory_label",
         "time",
     )
 
@@ -290,6 +291,8 @@ class Scheduler:  # cm:9a7f2c
         # (all delta cycles resolved).  Signature: callback(scheduler)
         self._on_time_step: Callable[[Scheduler], None] | None = None
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
+        # Simulator's slot -> declared-address name for memory elements, for traces.
+        self.memory_label: Callable[[str], str] | None = None
         # $finish/$fatal ran this time step: complete the step, then stop
         # (see _run_active_region).
         self._finish_requested = False
@@ -1100,7 +1103,10 @@ class Scheduler:  # cm:9a7f2c
             # Adjust for non-zero base (e.g. logic [31:1] foo → foo[1] is bit 0)
             idx -= self.ctx._signal_bases.get(name, 0)
             current = self.ctx.read_signal(name)
-            return Value(int((current.val >> idx) & 1), width=1)
+            # (With the bit's x/z: an x bit and a 0 bit compared equal, so a
+            # bit-select continuous assign going x -> 0 never marked its
+            # target changed and nothing downstream re-ran.)
+            return Value(int((current.val >> idx) & 1), width=1, mask=int((current.mask >> idx) & 1))
         if (
             isinstance(lhs, BitSelect)
             and isinstance(lhs.target, BitSelect)
@@ -1117,7 +1123,9 @@ class Scheduler:  # cm:9a7f2c
                 if 0 <= outer_idx < len(mem_data):
                     current = mem_data[outer_idx]
                     inner_idx = int(inner_idx_val)
-                    return Value(int((current.val >> inner_idx) & 1), width=1)
+                    return Value(
+                        int((current.val >> inner_idx) & 1), width=1, mask=int((current.mask >> inner_idx) & 1)
+                    )
             return None
         if isinstance(lhs, RangeSelect) and isinstance(lhs.target, Identifier):
             name = lhs.target.name

@@ -13,15 +13,18 @@ from ..model.design import Design, Module
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.expressions import (
     BinaryOp,
+    BitSelect,
     Concatenation,
     Expression,
     FunctionCall,
     Identifier,
     Literal,
     Range,
+    RangeSelect,
     StreamingConcatenation,
     StringLiteral,
     TernaryOp,
+    UnaryOp,
     WidthCast,
 )
 from ..model.instances import Instance, PortConnection
@@ -35,7 +38,8 @@ from ..model.statements import (
     Statement,
 )
 from ..model.assignments import ContinuousAssign
-from ..model.nets import NetKind
+from ..model.generate import GenerateBlock, GenerateFor
+from ..model.nets import Net, NetKind
 from ..model.ports import Port, PortDirection
 from ..model.variables import Variable, VariableKind
 
@@ -55,6 +59,7 @@ class Strategy(Enum):
     MIXED = auto()  # random mix
     HIERARCHICAL = auto()  # child module instance + port connections
     WITH_TASKS = auto()  # tasks with output ports + an impure function, clocked
+    MEMORY = auto()  # memories: non-zero/negative bases, both directions, 2-D, wide words
 
     def __str__(self) -> str:
         return self.name.lower()
@@ -70,6 +75,7 @@ _STRATEGY_WEIGHTS: dict[Strategy, float] = {
     Strategy.NESTED_BLOCKS: 1.0,
     Strategy.MIXED: 1.0,
     Strategy.HIERARCHICAL: 1.0,
+    Strategy.MEMORY: 1.0,
 }
 
 # `$display` observation (see `ModuleGenerator._maybe_display`).
@@ -81,6 +87,14 @@ _DISPLAY_PROBABILITY = 0.4
 _DISPLAY_SPECS = (
     "%d", "%0d", "%h", "%0h", "%b", "%0b", "%o", "%x", "%5d", "%08h", "%3h", "%m",
 )  # fmt: skip
+
+
+def _int_literal(value: int) -> Expression:
+    """A plain decimal (`3`, `-2` as unary minus)."""
+    if value < 0:
+        return UnaryOp("-", Literal(-value, base="d", signed=True, original_text=str(-value)))
+    return Literal(value, base="d", signed=True, original_text=str(value))
+
 
 # Function port/return widths: <= 64 bits, the compiled engine's limit for
 # user-function ports/returns (known_issues.md).
@@ -141,6 +155,7 @@ class ModuleGenerator:
             Strategy.HIERARCHICAL: self._gen_hierarchical,
             Strategy.WITH_FUNCTIONS: self._gen_with_functions,
             Strategy.WITH_TASKS: self._gen_with_tasks,
+            Strategy.MEMORY: self._gen_memory,
         }
 
         expr_gen = ExpressionGenerator(ctx)
@@ -158,6 +173,9 @@ class ModuleGenerator:
             mod.nets.append(net)
         for var in ctx.emit_variables():
             mod.variables.append(var)
+        for memory in ctx.memories:
+            (mod.nets if isinstance(memory, Net) else mod.variables).append(memory)
+        mod.generate_blocks.extend(ctx.generate_blocks)
         for param in ctx.emit_parameters():
             mod.parameters.append(param)
         for inst in ctx.instances:
@@ -396,6 +414,217 @@ class ModuleGenerator:
     # ------------------------------------------------------------------
     # Strategy: NESTED_BLOCKS
     # ------------------------------------------------------------------
+
+    def _gen_memory(
+        self,
+        ctx: SignalContext,
+        expr_gen: ExpressionGenerator,
+        stmt_gen: StatementGenerator,
+    ) -> None:
+        """Memories written on posedge clk and read by continuous assigns.
+        Dimensions start anywhere (negative too) in either direction, some
+        are 2-D, words may be wider than 64 bits or have an offset packed
+        range; indices are input slices (in and out of range), signed
+        slices, or constants. (The fuzzer had no memories at all: words of
+        `m [1:4]` were misaddressed and `m[i][j]` read a bit on every
+        engine, unnoticed.)"""
+        rng = self._rng
+        ctx.add_clock()
+        for _ in range(rng.randint(2, 4)):
+            ctx.add_input(rng, width=rng.randint(4, 12))
+        writes: list[Statement] = []
+        reads: list[Expression] = []
+        mems: list[tuple[str, int, int, list[tuple[int, int]], Callable[..., Expression]]] = []
+        for k in range(rng.randint(1, 2)):
+            width = rng.choice((1, 3, 8, 13, 64, 65, 100))
+            lsb = rng.choice((0, 0, 0, 4, -2))
+            dims: list[tuple[int, int]] = []
+            n_dims = rng.choice((1, 1, 2))
+            for _ in range(n_dims):
+                # (2-D: no negative bounds -- Icarus mishandles an unsigned
+                # 32-bit index like `i + -3`, address -3 to Icarus's own 1-D
+                # arrays and to Verilator, on a multi-dimensional array.)
+                low, size = rng.randint(-3 if n_dims == 1 else 0, 5), rng.randint(2, 5)
+                dims.append((low, size))
+            name = f"mem{k}"
+            ranges = []
+            for low, size in dims:
+                bounds = (low, low + size - 1) if rng.random() < 0.6 else (low + size - 1, low)
+                ranges.append(Range(_int_literal(bounds[0]), _int_literal(bounds[1])))
+            packed = Range(_int_literal(lsb + width - 1), _int_literal(lsb)) if width > 1 or lsb else None
+            ctx.memories.append(Variable(name, VariableKind.REG, width=packed, dimensions=ranges))
+
+            def element(dims=dims, name=name, *, selected: bool = False, wide_ok: bool = True) -> Expression:
+                # Icarus quirks avoided (known_issues.md): with several
+                # dimensions it range-checks only the flattened address, so
+                # a variable index out of one dimension's range aliases
+                # another row -- variable indices stay in range there; and
+                # a constant out-of-range word followed by a bit/part select
+                # reads the whole element as x -- no such constants then.
+                node: Expression = Identifier(name)
+                multi = len(dims) > 1
+                for low, size in dims:
+                    node = BitSelect(
+                        node,
+                        self._memory_index(ctx, low, size, in_range=multi, const_ok=not selected, wide_ok=wide_ok),
+                    )
+                return node
+
+            mems.append((name, width, lsb, dims, element))
+            for _ in range(rng.randint(2, 4)):
+                rhs = expr_gen.expr(rng, depth=rng.randint(1, 3))
+                bit = width > 1 and rng.random() < 0.3
+                target = element()
+                if bit:
+                    target = BitSelect(target, _int_literal(lsb + rng.randrange(width)))
+                writes.append(NonblockingAssign(target, rhs))
+            for _ in range(rng.randint(1, 3)):
+                part = width > 2 and rng.random() < 0.3
+                # (No wide index in a continuous-assign read: Icarus doesn't
+                # truncate one there, unlike procedurally and Verilator.)
+                read = element(selected=part, wide_ok=False)
+                if part:
+                    hi = lsb + rng.randrange(1, width)
+                    read = RangeSelect(read, _int_literal(hi), _int_literal(rng.randint(lsb, hi)))
+                reads.append(read)
+        clocked_reads: list[Expression] = []
+        self._memory_extras(ctx, expr_gen, mems, writes, reads, clocked_reads)
+        for read in clocked_reads:
+            # (A function call: read at the clock edge -- a continuous assign
+            # re-runs only when the call's arguments change, not the memory.)
+            out = ctx.add_output(rng, width=rng.choice((8, 16, 64)))
+            writes.append(NonblockingAssign(out.as_identifier(), read))
+        ab = AlwaysBlock(
+            stmt_gen._seq_block_from_stmts(rng, writes),
+            sensitivity_list=[SensitivityEdge("posedge", Identifier("clk"))],
+            sensitivity_type=SensitivityType.SEQUENTIAL,
+        )
+        ctx.always_blocks = [ab]
+        for read in reads:
+            out = ctx.add_output(rng, width=rng.choice((8, 16, 64, 100)))
+            if rng.random() < 0.6:
+                rhs = read
+            else:
+                other = expr_gen.expr(rng, depth=1, exclude=out.name)  # (no self-reference)
+                rhs = BinaryOp(rng.choice(("+", "^", "&")), read, other)
+            ctx.continuous_assigns.append(ContinuousAssign(out.as_identifier(), rhs))
+
+    def _memory_extras(  # noqa: PLR0913
+        self,
+        ctx: SignalContext,
+        expr_gen: ExpressionGenerator,
+        mems: list,
+        writes: list[Statement],
+        reads: list[Expression],
+        clocked_reads: list[Expression],
+    ) -> None:
+        """Memory copies, a task writing a word, a function reading one, and
+        a net array driven by a generate loop (none of which the fuzzer
+        produced; a function's scalar `input j;` turned out never to bind)."""
+        rng = self._rng
+        one_d = [m for m in mems if len(m[3]) == 1 and m[1] <= 64]  # (compiled: function/task ports <= 64 bits)
+        if len(mems) >= 2 and rng.random() < 0.4:
+            (_n0, _w0, _l0, _d0, src), (_n1, _w1, _l1, _d1, dst) = rng.sample(mems, 2)
+            writes.append(NonblockingAssign(dst(), src()))
+        if one_d and rng.random() < 0.3:
+            name, width, _lsb, ((low, size),), _element = rng.choice(one_d)
+            bits = max(1, (size - 1).bit_length())
+            idx = Port("i", PortDirection.INPUT, width=Range(Literal(bits - 1), Literal(0)) if bits > 1 else None)
+            data = Port("d", PortDirection.INPUT, width=Range(Literal(width - 1), Literal(0)) if width > 1 else None)
+            index: Expression = Identifier("i")
+            if low:
+                index = BinaryOp("+", index, _int_literal(low))
+            body = BlockingAssign(BitSelect(Identifier(name), index), Identifier("d"))
+            ctx.tasks.append(TaskDecl("tmw", ports=[idx, data], body=SeqBlock([body])))
+            source = rng.choice([s for s in ctx.inputs if s.name != "clk"])
+            arg = RangeSelect(source.as_identifier(), _int_literal(bits - 1), _int_literal(0))
+            writes.insert(rng.randint(0, len(writes)), TaskEnable("tmw", [arg, expr_gen.expr(rng, depth=1)]))
+        if one_d and rng.random() < 0.3:
+            name, width, _lsb, ((low, size),), _element = rng.choice(one_d)
+            bits = max(1, (size - 1).bit_length())
+            idx = Port("i", PortDirection.INPUT, width=Range(Literal(bits - 1), Literal(0)) if bits > 1 else None)
+            index = Identifier("i") if not low else BinaryOp("+", Identifier("i"), _int_literal(low))
+            # (Sometimes no return range: a 1-bit `function f;` returned 32 bits.)
+            ret = Range(Literal(width - 1), Literal(0)) if width > 1 or rng.random() < 0.5 else None
+            body = BlockingAssign(Identifier("fmr"), BitSelect(Identifier(name), index))
+            ctx.functions.append(FunctionDecl("fmr", return_range=ret, ports=[idx], body=SeqBlock([body])))
+            source = rng.choice([s for s in ctx.inputs if s.name != "clk"])
+            arg = RangeSelect(source.as_identifier(), _int_literal(bits - 1), _int_literal(0))
+            clocked_reads.append(FunctionCall("fmr", [arg]))
+        if rng.random() < 0.35:
+            width = rng.choice((1, 8, 13, 70))
+            # (Non-negative: Icarus sign-extends a negative genvar in an
+            # unsigned context, IEEE and Verilator zero-extend it -- see
+            # test_functions_indices_genvars.py for negative genvars.)
+            low, size = rng.randint(0, 4), rng.randint(2, 4)
+            high = low + size - 1
+            bounds = (low, high) if rng.random() < 0.6 else (high, low)
+            packed = Range(Literal(width - 1), Literal(0)) if width > 1 else None
+            ctx.memories.append(
+                Net(
+                    "nmem",
+                    NetKind.WIRE,
+                    width=packed,
+                    dimensions=[Range(_int_literal(bounds[0]), _int_literal(bounds[1]))],
+                )
+            )
+            value = BinaryOp(rng.choice(("^", "+", "&")), expr_gen.expr(rng, depth=1), Identifier("g"))
+            loop = GenerateFor(
+                "g",
+                _int_literal(low),
+                BinaryOp("<=", Identifier("g"), _int_literal(high)),
+                BinaryOp("+", Identifier("g"), _int_literal(1)),
+                GenerateBlock(
+                    name="gnm", items=[ContinuousAssign(BitSelect(Identifier("nmem"), Identifier("g")), value)]
+                ),
+                genvar_local=True,
+            )
+            ctx.generate_blocks.append(loop)
+            for _ in range(rng.randint(1, 2)):
+                reads.append(BitSelect(Identifier("nmem"), self._memory_index(ctx, low, size, wide_ok=False)))
+
+    def _memory_index(  # noqa: PLR0913
+        self,
+        ctx: SignalContext,
+        low: int,
+        size: int,
+        *,
+        in_range: bool = False,
+        const_ok: bool = True,
+        wide_ok: bool = True,  # (procedural context: wide and signed indices allowed)
+    ) -> Expression:
+        rng = self._rng
+        kind = rng.random()
+        if kind < 0.25:
+            if in_range or not const_ok:
+                return _int_literal(rng.randint(low, low + size - 1))
+            return _int_literal(rng.randint(low - 1, low + size))  # sometimes out of range
+        source = rng.choice([s for s in ctx.inputs if s.name != "clk"])
+        if in_range:
+            # An unsigned slice no wider than the dimension, offset to its low end.
+            bits = max(1, (size).bit_length() - 1)
+            msb = rng.randint(bits - 1, source.width - 1)
+            sliced = RangeSelect(source.as_identifier(), _int_literal(msb), _int_literal(msb - bits + 1))
+            return sliced if low == 0 else BinaryOp("+", sliced, _int_literal(low))
+        bits = rng.randint(1, 3)
+        msb = rng.randint(bits - 1, source.width - 1)
+        part: Expression = RangeSelect(source.as_identifier(), _int_literal(msb), _int_literal(msb - bits + 1))
+        if kind > 0.85 and wide_ok:
+            # Wider than 32 bits: only the low 32 count (Icarus, Verilator).
+            # (A constant high part: with an x above bit 31, Icarus treats the
+            # whole index as x rather than truncating it away.)
+            top = rng.randrange(1, 32)
+            high = Literal(top, width=5, base="d", original_text=f"5'd{top}")
+            zero = Literal(0, width=31, base="d", original_text="31'd0")
+            part = Concatenation([high, zero, part])
+        # (No signed slices: a negative narrow signed index is out of range
+        # per IEEE, and to Icarus in an initial block, but Icarus elsewhere
+        # and Verilator read it as unsigned -- an unusable oracle; see
+        # test_memory_base_and_multidim.py for signed indices.)
+        offset = low + rng.choice((0, 0, -1, 1))
+        if offset == 0:
+            return part
+        return BinaryOp("+", part, _int_literal(offset))
 
     def _gen_with_functions(
         self,

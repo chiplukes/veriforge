@@ -2279,9 +2279,9 @@ class TestUnifiedHierarchyBoundaryMoveCommand:
         assert preview["applyReady"] is True
         review_files = {Path(entry["file"]).name: entry["proposedText"] for entry in payload["review"]["files"]}
         assert "function calc_next;" in review_files["func_child.v"]
-        assert "function u_child__calc_next;" in review_files["top_a.v"]
+        assert "function u_child__calc_next (input current, input strobe);" in review_files["top_a.v"]
         assert "pulse_a <= u_child__calc_next(pulse_a, strobe_a);" in review_files["top_a.v"]
-        assert "function u_child_b__calc_next;" in review_files["top_b.v"]
+        assert "function u_child_b__calc_next (input current, input strobe);" in review_files["top_b.v"]
         assert "pulse_mid <= u_child_b__calc_next(pulse_mid, strobe_b);" in review_files["top_b.v"]
 
     def test_unified_pull_up_instance_supports_child_functions(self, local_function_pull_up_design):

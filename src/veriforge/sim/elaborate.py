@@ -2567,6 +2567,16 @@ def _promote_block_items(  # noqa: PLR0912, PLR0913
             )
 
 
+def _genvar_literal(value: int) -> Literal:
+    # A genvar is a signed integer: `i2 & g` of a signed 4-bit `i2` and g = -1
+    # sign-extends (it was zero-extended: an unsigned literal made the whole
+    # expression unsigned).
+    # (As its 32-bit pattern: a negative Python value read as all ones at any
+    # width, so `(a || b) ^ g` of g = -2 in a 70-bit unsigned context was
+    # sign-extended instead of zero-extended -- Verilator agrees.)
+    return Literal(value & 0xFFFFFFFF, width=32, signed=True, original_text=str(value) if value >= 0 else "")
+
+
 def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int) -> None:
     """Replace ``Identifier(genvar_name)`` with ``Literal(value)`` throughout the subtree."""
     index_pattern = re.compile(rf"\[\s*{re.escape(genvar_name)}\s*\]")
@@ -2579,7 +2589,7 @@ def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int) -> None:
         if attr is None:
             continue
         if isinstance(attr, Identifier) and attr.name == genvar_name:
-            setattr(root, slot, Literal(value, width=32))
+            setattr(root, slot, _genvar_literal(value))
         elif isinstance(attr, Identifier):
             attr.name = _replace_embedded_index(attr.name)
             if attr.hierarchy:
@@ -2589,7 +2599,7 @@ def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int) -> None:
         elif isinstance(attr, list):
             for i, item in enumerate(attr):
                 if isinstance(item, Identifier) and item.name == genvar_name:
-                    attr[i] = Literal(value, width=32)
+                    attr[i] = _genvar_literal(value)
                 elif isinstance(item, Identifier):
                     item.name = _replace_embedded_index(item.name)
                     if item.hierarchy:

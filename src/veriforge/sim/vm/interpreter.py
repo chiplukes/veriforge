@@ -14,6 +14,7 @@ Design for speed:
 from __future__ import annotations
 
 from ..display_format import SIGNED_FLAG, format_real, format_value
+from .. import readmem
 from ..value import Value, _mask_for_width, _verilog_pow
 from .opcodes import Op
 
@@ -237,7 +238,8 @@ class Interpreter:  # cm:e3f1b4
         self.mem_info: list[tuple[int, int, int]] = []  # (elem_width, depth, base_addr)
 
         # $readmemh/$readmemb task table (set by scheduler from compiler)
-        self.readmem_tasks: list[tuple[str, int, bool]] = []  # (filename, mem_id, is_hex)
+        # (filename, mem_id, is_hex, start, end, address base) -- see Compiler
+        self.readmem_tasks: list[tuple[str, int, bool, int | None, int | None, int | None]] = []
 
         # $fopen task table (set by scheduler from compiler)
         self.fopen_tasks: list[tuple[str, str]] = []  # (filename, mode)
@@ -320,7 +322,7 @@ class Interpreter:  # cm:e3f1b4
                     w = sig_width[arg1]
                     if 0 <= i < w:
                         current = Value(sig_val[arg1], width=w, mask=sig_mask[arg1])
-                        updated = current.set_bit(i, val.val & 1)
+                        updated = current.set_bit(i, val.val & 1, val.mask & 1)
                         if sig_val[arg1] != updated.val or sig_mask[arg1] != updated.mask:
                             sig_val[arg1] = updated.val
                             sig_mask[arg1] = updated.mask
@@ -953,30 +955,30 @@ class Interpreter:  # cm:e3f1b4
             if op == Op.SYS_READMEM:
                 # arg1 = task_id into readmem_tasks table
                 if arg1 < len(self.readmem_tasks):
-                    filename, mid, is_hex = self.readmem_tasks[arg1]
+                    filename, mid, is_hex, start, end, base = self.readmem_tasks[arg1]
                     if mid < len(self.mem_info):
-                        ew, depth, base = self.mem_info[mid]
-                        wmask = _mask_for_width(ew)
+                        ew, depth, mem_base = self.mem_info[mid]
+
+                        def store(slot: int, val: int, mask: int, mem_base=mem_base, depth=depth) -> None:
+                            if 0 <= slot < depth:
+                                self.mem_val[mem_base + slot] = val
+                                self.mem_mask[mem_base + slot] = mask
+
                         try:
                             with open(filename) as f:
-                                addr = 0
-                                for line in f:
-                                    line = line.strip()
-                                    if not line or line.startswith("//"):
-                                        continue
-                                    if line.startswith("@"):
-                                        # Address specification: @addr
-                                        addr = int(line[1:], 16)
-                                        continue
-                                    for token in line.split():
-                                        if addr >= depth:
-                                            break
-                                        val = int(token, 16 if is_hex else 2)
-                                        self.mem_val[base + addr] = val & wmask
-                                        self.mem_mask[base + addr] = 0
-                                        addr += 1
+                                text = f.read()
                         except FileNotFoundError:
                             raise FileNotFoundError("VM interpreter: $readmemh/$readmemb file not found") from None
+                        readmem.load(
+                            text,
+                            is_hex=is_hex,
+                            width=ew,
+                            depth=depth,
+                            base=base or 0,
+                            start=start,
+                            end=end,
+                            store=store,
+                        )
                 continue
 
             # ── Ternary merge ────────────────────────────────────

@@ -286,7 +286,7 @@ def _update_block_var_token(ctx: _BlockVarContext, token: Token) -> None:
         ctx.signed = True
     elif token.type == "KW_UNSIGNED":
         ctx.signed = False
-    elif token.type == "IDENTIFIER" and ctx.type_name is None:
+    elif token.type in ("IDENTIFIER", "TYPE_IDENTIFIER") and ctx.type_name is None:
         ctx.type_name = str(token)
 
 

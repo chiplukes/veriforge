@@ -78,6 +78,14 @@ _LITERAL_LEAF_PROBABILITY = 0.2
 _CAST_WIDTHS = (1, 2, 3, 4, 7, 8, 12, 16, 21, 31, 32, 33, 48, 63, 64)
 
 
+def _declared_value(param) -> int:
+    """A generated parameter's value as its declaration reads it."""
+    value = int(param.value) & ((1 << param.width) - 1)
+    if param.signed and value >> (param.width - 1):
+        value -= 1 << param.width
+    return value
+
+
 class ExpressionGenerator:
     """Generates random ``Expression`` trees over a ``SignalContext``."""
 
@@ -314,7 +322,9 @@ class ExpressionGenerator:
         # the legal range; most won't (params are generated with the same
         # wide-edge-case-biased widths/values as everything else), so this
         # is usually just a plain literal.
-        safe_params = [p for p in self._ctx.parameters if p.value is not None and 1 <= p.value <= 64]
+        # (By its value as declared: `parameter signed [1:0] p = 2'sd2` is
+        # -2, an illegal slice size, which the engines read differently.)
+        safe_params = [p for p in self._ctx.parameters if p.value is not None and 1 <= _declared_value(p) <= 64]
 
         slice_size: Expression | None
         roll = rng.random()

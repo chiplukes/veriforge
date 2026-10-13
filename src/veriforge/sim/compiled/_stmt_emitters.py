@@ -381,7 +381,7 @@ class _StmtEmittersMixin:
                         )
                         return [f"{pad}{call}"]
                     rhs_source = self._resolve_signal_slice_source(rhs)
-                    if field_width > _WORD_BITS and rhs_source is not None:
+                    if field_width > _WORD_BITS and rhs_source is not None and self._slice_covers(rhs, field_width):
                         rhs_source_sid, rhs_source_lsb = rhs_source
                         call = self._whole_stage_call(
                             "insert_signal_slice",
@@ -605,9 +605,8 @@ class _StmtEmittersMixin:
                 bit_base = self._memory_bases.get(name, 0)
                 if bit_base != 0:
                     bit = f"(({bit}) - {bit_base})"
-                rhs_val = self._emit_expr(rhs, 1)
-                rhs_mask = self._emit_mask_expr(rhs, 1)
-                return self._emit_mem_bit_write_lines(
+                setup, rhs_val, rhs_mask = self._emit_rhs_low_word(rhs, 1, indent)
+                return setup + self._emit_mem_bit_write_lines(
                     mid,
                     idx,
                     bit,
@@ -632,16 +631,16 @@ class _StmtEmittersMixin:
                 sig_base = self._signal_bases.get(self._identifier_name(lhs.target), 0)
                 if sig_base != 0:
                     idx = f"(({idx}) - {sig_base})"
-                rhs_val = self._emit_expr(rhs, 1)
-                rhs_mask = self._emit_mask_expr(rhs, 1)
+                setup, rhs_val, rhs_mask = self._emit_rhs_low_word(rhs, 1, indent)
                 if lhs_w > _WORD_BITS:
                     helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
                     return [
+                        *setup,
                         f"{pad}{helper}(c, {sid}, <int>({idx}), 1, <unsigned long long>(({rhs_val}) & 1),"
                         f" <unsigned long long>(({rhs_mask}) & 1))",
                     ]
                 bit = f"(<long long>1 << ({idx}))"
-                return self._narrow_partial_write_lines(
+                return setup + self._narrow_partial_write_lines(
                     sid, bit, f"((({rhs_mask}) & 1) << ({idx}))", rhs_val, "1", f"({idx})", pad, is_nba
                 )
             raise NotImplementedError(
@@ -780,6 +779,12 @@ class _StmtEmittersMixin:
             )
         rhs_source = self._resolve_signal_slice_source(rhs) if self._signal_widths[sid] > _WORD_BITS else None
         rhs_mem_source = self._resolve_memory_slice_source(rhs) if self._signal_widths[sid] > _WORD_BITS else None
+        if (
+            isinstance(msb_expr, Literal)
+            and isinstance(lsb_expr, Literal)
+            and not self._slice_covers(rhs, abs(int(msb_expr.value) - int(lsb_expr.value)) + 1)
+        ):
+            rhs_source = rhs_mem_source = None  # (see _slice_covers)
         if rhs_source is not None or rhs_mem_source is not None:
             if isinstance(msb_expr, Literal) and isinstance(lsb_expr, Literal):
                 lsb_str = str(int(lsb_expr.value) - sig_base)
@@ -946,7 +951,7 @@ class _StmtEmittersMixin:
         sel_w = msb_val - lsb_val + 1
         if self._signal_widths[sid] > _WORD_BITS:
             rhs_source = self._resolve_signal_slice_source(rhs)
-            if rhs_source is not None:
+            if rhs_source is not None and self._slice_covers(rhs, sel_w):
                 rhs_source_sid, rhs_source_lsb = rhs_source
                 call = self._whole_stage_call(
                     "insert_signal_slice",
@@ -1042,6 +1047,97 @@ class _StmtEmittersMixin:
             f"{pad}    c.mask[{sid}] = _cdm",
             f"{pad}    mark_dirty(c, {sid})",
         ]
+
+    def _emit_rhs_low_word(self, rhs: Expression, width: int, indent: int) -> tuple[list[str], str, str]:
+        """(setup lines, value, mask) of *rhs* at *width* (<= 64) bits. An RHS
+        computed above 64 bits inside (`|{<<8{128'd..., {2{c}}}}`) is
+        evaluated into scratch first: the narrow emitter can't, and a bit
+        write of one stored 0."""
+        if not self._rhs_needs_wide_eval(rhs):
+            return [], self._emit_expr(rhs, width), self._emit_mask_expr(rhs, width)
+        pad = "    " * indent
+        n_words = max(
+            (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words(), 1
+        )
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, width, indent)
+        et_pending = self._et_pending
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._reset_scratch()
+        if scratch_lines is None:
+            return [], self._emit_expr(rhs, width), self._emit_mask_expr(rhs, width)
+        self._needs_wide_helpers = True
+        lines = [f"{pad}{t}" for t in et_pending] + scratch_lines
+        return lines, f"<long long>_sc{slot}_v[0]", f"<long long>_sc{slot}_m[0]"
+
+    def _emit_wide_mem_range_insert_lines(  # noqa: PLR0913
+        self,
+        mid: int,
+        idx: str,
+        lsb_code: str,
+        width_code: str,
+        max_width: int,
+        rhs: Expression,
+        indent: int,
+        *,
+        marker_sid: int,
+        is_nba: bool,
+    ) -> list[str]:
+        """`_emit_wide_range_insert_lines` for a >64-bit memory element:
+        ``mem[idx][lsb +: width] = rhs`` for an arbitrary RHS, evaluated into
+        scratch at the range's width (extended by its signedness) and
+        inserted in <=64-bit chunks. (A RHS that wasn't a plain signal or
+        memory slice went through the narrow emitter at the range width, so
+        anything above bit 63 was garbage: `m[1][99:0] <= sb`.)"""
+        pad = "    " * indent
+        n_words = max(
+            (max_width + _WORD_BITS - 1) // _WORD_BITS,
+            (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS,
+            self._module_max_wide_words(),
+        )
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        self._reset_scratch()
+        slot = self._alloc_scratch()
+        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
+        et_pending = self._et_pending
+        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._reset_scratch()
+        if scratch_lines is None:
+            raise NotImplementedError(
+                f"Compiled engine: range-select assignment into a {self._mem_info[mid][0]}-bit memory element "
+                f"has an RHS shape not yet supported above {_WORD_BITS} bits. Use engine='vm' or "
+                f"engine='reference' for this design, or simplify the expression."
+            )
+        self._needs_wide_helpers = True
+        lines = [f"{pad}{t}" for t in et_pending] + scratch_lines
+        if not is_nba:
+            lines.append(f"{pad}_mchg = 0")
+        static_width = int(width_code) if width_code.isdigit() else None
+        for k in range((max_width + _WORD_BITS - 1) // _WORD_BITS):
+            lo = k * _WORD_BITS
+            call_lsb = f"({lsb_code}) + {lo}" if lo else f"({lsb_code})"
+            if static_width is not None:
+                chunk = str(min(_WORD_BITS, static_width - lo))
+            else:
+                rem = f"(({width_code}) - {lo})"
+                chunk = f"({rem} if {rem} < {_WORD_BITS} else {_WORD_BITS})"
+            args = f"c, ({idx}), <int>({call_lsb}), <int>{chunk}, _sc{slot}_v[{k}], _sc{slot}_m[{k}]"
+            if is_nba:
+                lines.append(f"{pad}_wmem{mid}_stage_insert_word({args})")
+            else:
+                lines.append(f"{pad}if _wmem{mid}_assign_insert_word({args}):")
+                lines.append(f"{pad}    _mchg = 1")
+        if not is_nba:
+            lines.extend(
+                [f"{pad}if _mchg:", f"{pad}    c.val[{marker_sid}] ^= 1", f"{pad}    mark_dirty(c, {marker_sid})"]
+            )
+        return lines
 
     def _emit_wide_range_insert_lines(  # noqa: PLR0913
         self,
@@ -2033,7 +2129,11 @@ class _StmtEmittersMixin:
                         track_change=False,
                     )
             rhs_source = self._resolve_signal_slice_source(rhs)
-            if rhs_source is not None:
+            # (Only a source at least as wide as the element: a narrower one
+            # -- `mem[i] <= b` of a 1-bit `b` into a 65-bit element -- had
+            # elem_w bits copied from it, past its end: x and garbage above
+            # its width instead of zero extension.)
+            if rhs_source is not None and self._slice_covers(rhs, elem_w):
                 return self._emit_const_mem_range_write_lines(
                     mid,
                     idx,
@@ -2047,7 +2147,15 @@ class _StmtEmittersMixin:
                     is_nba=is_nba,
                 )
             flat_parts = self._flatten_concat_identifier_parts(rhs)
-            if flat_parts is not None:
+            # Only a real concatenation, or a plain unsigned signal/slice:
+            # concat parts are self-determined and zero-extended, but a bare
+            # `~a`/`-a` takes the element's width (it was computed at a's
+            # 8 bits: `m[i] <= ~a` of a 100-bit element gave 'hca), and a
+            # signed `sb` sign-extends.
+            if flat_parts is not None and (
+                isinstance(rhs, Concatenation)
+                or (all(part[0] == "sig" for part in flat_parts) and not self._expr_signed(rhs))
+            ):
                 return self._emit_wide_mem_flat_concat_lines(
                     mid,
                     idx,
@@ -2095,9 +2203,8 @@ class _StmtEmittersMixin:
                 f"whole-memory-element write (memory element width {elem_w}). Use engine='vm' "
                 f"for this construct."
             )
-        rhs_val = self._emit_expr(rhs, elem_w)
-        rhs_mask = self._emit_mask_expr(rhs, elem_w)
-        return self._emit_scalar_mem_write_lines(
+        setup, rhs_val, rhs_mask = self._emit_rhs_low_word(rhs, elem_w, indent)
+        return setup + self._emit_scalar_mem_write_lines(
             mid, idx, rhs_val, rhs_mask, elem_w, marker_sid=marker_sid, indent=indent, is_nba=is_nba, track_change=False
         )
 
@@ -2349,7 +2456,7 @@ class _StmtEmittersMixin:
             sel_w = msb_v - lsb_v + 1
             rhs_source = None
             rhs_mem_source = None
-            if elem_w > _WORD_BITS and sel_w > _WORD_BITS:
+            if elem_w > _WORD_BITS and sel_w > _WORD_BITS and self._slice_covers(rhs, sel_w):
                 rhs_source = self._resolve_signal_slice_source(rhs)
                 rhs_mem_source = self._resolve_memory_slice_source(rhs)
                 if (
@@ -2370,6 +2477,10 @@ class _StmtEmittersMixin:
                         indent=indent,
                         is_nba=is_nba,
                     )
+            if elem_w > _WORD_BITS and sel_w > _WORD_BITS and rhs_source is None:
+                return self._emit_wide_mem_range_insert_lines(
+                    mid, idx, str(lsb_v), str(sel_w), sel_w, rhs, indent, marker_sid=marker_sid, is_nba=is_nba
+                )
             rhs_val = self._emit_expr(rhs, sel_w)
             rhs_mask = self._emit_mask_expr(rhs, sel_w)
             return self._emit_const_mem_range_write_lines(
@@ -2395,7 +2506,9 @@ class _StmtEmittersMixin:
             msb = f"(({msb}) - {sig_base})"
             lsb = f"(({lsb}) - {sig_base})"
         if elem_w > _WORD_BITS:
-            rhs_source = self._resolve_signal_slice_source(rhs)
+            # (A part select's width is static; see _slice_covers.)
+            covered = part_lsb is None or self._slice_covers(rhs, part_w)
+            rhs_source = self._resolve_signal_slice_source(rhs) if covered else None
             if rhs_source is not None:
                 rhs_sid, rhs_lsb = rhs_source
                 sel_w_expr = f"(({msb}) - ({lsb}) + 1)"
@@ -2403,7 +2516,7 @@ class _StmtEmittersMixin:
                 if is_nba:
                     return [f"{pad}{helper}(c, ({idx}), ({lsb}), {rhs_sid}, <int>({rhs_lsb}), {sel_w_expr})"]
                 return [f"{pad}{helper}(c, ({idx}), ({lsb}), {rhs_sid}, <int>({rhs_lsb}), {sel_w_expr}, {marker_sid})"]
-            rhs_mem_source = self._resolve_memory_slice_source(rhs)
+            rhs_mem_source = self._resolve_memory_slice_source(rhs) if covered else None
             if (
                 rhs_mem_source is not None
                 and rhs_mem_source[0] != mid
@@ -2421,6 +2534,10 @@ class _StmtEmittersMixin:
                     marker_sid=marker_sid,
                     indent=indent,
                     is_nba=is_nba,
+                )
+            if part_lsb is not None:
+                return self._emit_wide_mem_range_insert_lines(
+                    mid, idx, lsb, str(part_w), part_w, rhs, indent, marker_sid=marker_sid, is_nba=is_nba
                 )
         rhs_val = self._emit_expr(rhs, elem_w)
         rhs_mask = self._emit_mask_expr(rhs, elem_w)

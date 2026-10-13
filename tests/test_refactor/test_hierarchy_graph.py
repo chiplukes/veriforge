@@ -5273,9 +5273,9 @@ def test_pull_up_range_moves_child_procedural_logic_with_functions_into_all_pare
     assert set(edits_by_name) == {"func_child.v", "top_a.v", "top_b.v"}
     assert "function calc_next;" in edits_by_name["func_child.v"]
     assert "always @(posedge clk)" not in edits_by_name["func_child.v"]
-    assert "function u_child__calc_next;" in edits_by_name["top_a.v"]
+    assert "function u_child__calc_next (input current, input strobe);" in edits_by_name["top_a.v"]
     assert "pulse_a <= u_child__calc_next(pulse_a, strobe_a);" in edits_by_name["top_a.v"]
-    assert "function u_child_b__calc_next;" in edits_by_name["top_b.v"]
+    assert "function u_child_b__calc_next (input current, input strobe);" in edits_by_name["top_b.v"]
     assert "pulse_mid <= u_child_b__calc_next(pulse_mid, strobe_b);" in edits_by_name["top_b.v"]
 
 

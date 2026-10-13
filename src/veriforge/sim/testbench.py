@@ -9,6 +9,7 @@ Provides:
 from __future__ import annotations
 
 import functools
+import re
 from typing import TYPE_CHECKING
 
 from veriforge._recursion import ensure_deep_recursion
@@ -23,11 +24,14 @@ from .elaborate import (
     resolve_sv_imports,
     _resolve_typedef_widths,
 )
-from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases
+from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases, lower_signed_indices
 from .scheduler import Scheduler
 from .display_format import lower_display_args
 from .sv_functions import lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
 from .value import Value
+
+_ELEMENT_NAME = re.compile(r"^(.+?)((?:\[-?\d+\])+)$")
+_INDEX = re.compile(r"\[(-?\d+)\]")
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -153,6 +157,8 @@ class Simulator:  # cm:a5c8f4
         "_clock_next_edge",
         "_clocks",
         "_engine",
+        "_memory_lows",
+        "_memory_shapes",
         "_module",
         "_pre_step_callbacks",
         "_run_cycles_clock_ready",
@@ -197,9 +203,16 @@ class Simulator:  # cm:a5c8f4
         materialize_task_locals(module)
         expand_array_concat_operands(module)
         lower_sv_functions(module)
-        lower_ascending_ranges(module)  # after lower_sv_functions: $left/$right
-        lower_memory_bases(module)
-        flatten_unpacked_arrays(module)  # after lower_memory_bases: 0-based dims
+        # Every constant packed range becomes [w-1:0] (selects remapped): the
+        # engines' own lsb-base handling misread negative indices (`m[i][-1]` of
+        # `reg [61:-2] m []`, compiled).
+        lower_ascending_ranges(module, offsets=True)  # after lower_sv_functions: $left/$right
+        # (Recorded so `read("m[4]")` of `reg m [1:4]` still means address 4.)
+        self._memory_lows: dict[str, list[int]] = {}
+        self._memory_shapes: dict[str, list[int]] = {}
+        lower_memory_bases(module, self._memory_lows)
+        flatten_unpacked_arrays(module, self._memory_shapes)  # after lower_memory_bases: 0-based dims
+        lower_signed_indices(module)
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
         lower_width_casts(module)
         lower_two_state(module)
@@ -221,6 +234,10 @@ class Simulator:  # cm:a5c8f4
             self._sched = Scheduler(delta_limit=delta_limit)
         else:
             raise ValueError(f"Unknown engine: {engine!r}. Use 'reference', 'vm', 'vm-fast', or 'compiled'.")
+
+        # Traces label memory elements by declared address (see _slot_name).
+        if self._memory_lows or self._memory_shapes:
+            self._sched.memory_label = self._address_name
 
         # Elaborate
         if engine == "compiled" and design is not None:
@@ -289,6 +306,7 @@ class Simulator:  # cm:a5c8f4
         Raises:
             KeyError: If the signal name does not exist.
         """
+        name = self._slot_name(name)
         if name in self._signal_cache:
             return self._signal_cache[name]
         all_names = self._all_signal_names()
@@ -516,7 +534,7 @@ class Simulator:  # cm:a5c8f4
 
     def drive(self, name: str, value: Value | int) -> None:
         """Drive a signal by name (convenience method)."""
-        self._sched.drive_signal(name, value)
+        self._sched.drive_signal(self._slot_name(name), value)
 
     @_reports_failures
     def settle(self) -> None:
@@ -532,7 +550,59 @@ class Simulator:  # cm:a5c8f4
 
     def read(self, name: str) -> Value:
         """Read a signal by name (convenience method)."""
-        return self._sched.read_signal(name)
+        return self._sched.read_signal(self._slot_name(name))
+
+    def _address_name(self, name: str) -> str:
+        """The inverse of `_slot_name`: slot ``m[3]`` of ``m [1:4]`` is
+        ``m[4]``; slot ``z[4]`` of ``z [0:1][0:2]`` is ``z[1][1]``."""
+        match = _ELEMENT_NAME.match(name)
+        if match is None:
+            return name
+        mem = match.group(1)
+        lows = self._memory_lows.get(mem)
+        shape = self._memory_shapes.get(mem)
+        indices = [int(i) for i in _INDEX.findall(match.group(2))]
+        if (lows is None and shape is None) or len(indices) != 1:
+            return name
+        if shape is not None:
+            flat = indices[0]
+            indices = []
+            for n in reversed(shape):
+                flat, i = divmod(flat, n)
+                indices.insert(0, i)
+        if lows is not None and len(lows) == len(indices):
+            indices = [i + low for i, low in zip(indices, lows, strict=True)]
+        return mem + "".join(f"[{i}]" for i in indices)
+
+    def _slot_name(self, name: str) -> str:
+        """``m[i]`` / ``m[i][j]`` with declared addresses -> the engines' slot
+        name, for memories `lower_memory_bases` rebased or
+        `flatten_unpacked_arrays` flattened (``m [1:4]``: ``m[4]`` is slot 3)."""
+        if not name.endswith("]") or not (self._memory_lows or self._memory_shapes):
+            return name
+        match = _ELEMENT_NAME.match(name)
+        if match is None:
+            return name
+        mem = match.group(1)
+        lows = self._memory_lows.get(mem)
+        shape = self._memory_shapes.get(mem)
+        if lows is None and shape is None:
+            return name
+        indices = [int(i) for i in _INDEX.findall(match.group(2))]
+        if lows is not None:
+            if len(indices) != len(lows):
+                return name
+            indices = [i - low for i, low in zip(indices, lows, strict=True)]
+        if shape is not None:
+            if len(indices) != len(shape):
+                return name
+            flat = 0
+            for i, n in zip(indices, shape, strict=True):
+                if not 0 <= i < n:
+                    return f"{mem}[-1]"  # out of range: reads x
+                flat = flat * n + i
+            indices = [flat]
+        return f"{mem}[{indices[0]}]"
 
     @property
     def memory_names(self) -> list[str]:

@@ -32,6 +32,8 @@ from veriforge.model.expressions import (
 )
 
 from .elaborate import match_assignment_pattern_layout
+from veriforge.model.functions import unranged_return_width
+
 from .value import Value, _verilog_pow, signed_literal_width
 
 if TYPE_CHECKING:
@@ -244,6 +246,20 @@ def _identifier_name(expr: Identifier) -> str:
     if expr.hierarchy:
         return ".".join(expr.hierarchy) + "." + expr.name
     return expr.name
+
+
+def _index_int(evaluator: ExpressionEvaluator, value: Value, expr: Expression, ctx: EvalContext) -> int:
+    """A defined select index/bound as an int, negative when its expression
+    is signed: `m[5:-2]` of `reg [61:-2] m` used to read `-2` as 4294967294,
+    so the select was garbage. The sign is taken at the expression's full
+    self-determined width (an unsized `3` can evaluate at 2 bits, `11`, which
+    is not -1)."""
+    if not _expr_signed(expr, ctx):
+        return int(value)
+    width = _expr_self_width(expr, ctx)
+    if value.width < width:
+        value = evaluator.eval(expr, ctx, width, True)
+    return value.as_signed()
 
 
 def _select_base(target: Expression, ctx: EvalContext) -> int:
@@ -1119,7 +1135,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 index = self.eval(expr.index, ctx)
                 if index.is_defined:
                     mem_data, elem_w = ctx._memories[target_name]
-                    idx = int(index)
+                    idx = _index_int(self, index, expr.index, ctx)
                     result = mem_data[idx] if 0 <= idx < len(mem_data) else Value.x(elem_w)
                 else:
                     _mem_data, elem_w = ctx._memories[target_name]
@@ -1128,7 +1144,7 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 target = self.eval(expr.target, ctx)
                 index = self.eval(expr.index, ctx)
                 if index.is_defined:
-                    idx = int(index)
+                    idx = _index_int(self, index, expr.index, ctx)
                     idx -= _select_base(expr.target, ctx)
                     result = target[idx]
                 else:
@@ -1160,12 +1176,16 @@ class ExpressionEvaluator:  # cm:7e8b5d
                     msb = self.eval(expr.msb, ctx)
                     lsb = self.eval(expr.lsb, ctx)
                     if msb.is_defined and lsb.is_defined:
-                        bounds = (int(msb), int(lsb))
+                        bounds = (_index_int(self, msb, expr.msb, ctx), _index_int(self, lsb, expr.lsb, ctx))
                         self._range_literal_bounds[expr] = bounds
             else:
                 msb = self.eval(expr.msb, ctx)
                 lsb = self.eval(expr.lsb, ctx)
-                bounds = (int(msb), int(lsb)) if msb.is_defined and lsb.is_defined else None
+                bounds = (
+                    (_index_int(self, msb, expr.msb, ctx), _index_int(self, lsb, expr.lsb, ctx))
+                    if msb.is_defined and lsb.is_defined
+                    else None
+                )
             if bounds is not None:
                 m, l = bounds
                 base = (
@@ -1489,14 +1509,12 @@ class ExpressionEvaluator:  # cm:7e8b5d
         func: FunctionDecl
 
         # Determine return width
-        ret_width = 32
+        ret_width = unranged_return_width(func.return_kind)
         if func.return_range is not None:
             msb_v = self.eval(func.return_range.msb, ctx)
             lsb_v = self.eval(func.return_range.lsb, ctx)
             if msb_v.is_defined and lsb_v.is_defined:
                 ret_width = abs(int(msb_v) - int(lsb_v)) + 1
-        elif func.return_kind == "integer":
-            ret_width = 32
 
         # Create local context: copy parent signals, add port bindings + return var
         local_signals = dict(ctx._signals)
@@ -1774,6 +1792,8 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
             msb, lsb = func.return_range.msb, func.return_range.lsb
             if isinstance(msb, Literal) and isinstance(lsb, Literal):
                 return abs(int(msb.value) - int(lsb.value)) + 1
+        elif func is not None:
+            return unranged_return_width(func.return_kind)
         return 32
     if etype is StringLiteral:
         return len(expr.value) * 8

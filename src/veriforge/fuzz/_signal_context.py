@@ -126,6 +126,10 @@ class SignalContext:
         self.instances: list = []
         self.functions: list = []
         self.tasks: list = []
+        # Memory declarations (`Variable`s with unpacked dimensions), added
+        # by the MEMORY strategy; emitted as-is.
+        self.memories: list = []
+        self.generate_blocks: list = []  # (MEMORY strategy: generate loops)
 
     # ------------------------------------------------------------------
     # Signal creation

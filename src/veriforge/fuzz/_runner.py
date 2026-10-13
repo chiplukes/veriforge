@@ -8,6 +8,7 @@ oracle, and logs any mismatches for later reduction into dedicated tests.
 
 from __future__ import annotations
 
+import re
 import datetime
 import json
 import os
@@ -41,6 +42,9 @@ _KNOWN_LIMITATIONS = (
 
 
 from ._runner_marks import DISPLAY_MARK  # noqa: E402
+
+
+_BITS = re.compile(r"[01xzXZ]+")
 
 
 def _x_case_only(a: str, b: str) -> bool:
@@ -745,7 +749,10 @@ class FuzzRunner:
             if not line or line.startswith(DISPLAY_MARK):
                 continue  # a design's own $display (compared separately)
             parts = line.split()
-            if len(parts) != len(output_names):
+            # (Only bit strings: an Icarus warning line with as many words as
+            # there are outputs used to be read as a vector -- "zip() argument
+            # 2 is longer than argument 1".)
+            if len(parts) != len(output_names) or not all(_BITS.fullmatch(p) for p in parts):
                 continue
 
             vec: dict[str, Value] = {}

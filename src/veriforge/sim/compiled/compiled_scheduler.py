@@ -343,6 +343,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         "ctx",
         "delta_limit",
         "display_output",
+        "memory_label",
     )
 
     def __init__(self, *, compiler: CythonCompiler | None = None, delta_limit: int = 10_000) -> None:
@@ -378,6 +379,8 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         # Time-step callback (VCD recording)
         self._on_time_step: Callable[[CompiledScheduler], None] | None = None
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
+        # Simulator's slot -> declared-address name for memory elements, for traces.
+        self.memory_label: Callable[[str], str] | None = None
 
         # Track whether a snapshot has been taken before external drives
         self._has_drive_snapshot: bool = False

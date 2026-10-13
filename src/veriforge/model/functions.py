@@ -31,6 +31,19 @@ from .statements import Statement
 from .variables import Variable
 
 
+_KIND_RETURN_WIDTHS = {"time": 64, "realtime": 64, "real": 64, "shortreal": 32}
+
+
+def unranged_return_width(return_kind: str | None) -> int:
+    """A function's return width when it has no return range: 1 bit for a
+    plain `function f;` (or `reg`/`logic`/`bit`, IEEE 1364 10.4.1), else the
+    kind's own width. (Every engine used 32: `function f;` printed 32 bits.)
+    The integer atom kinds always come with a range."""
+    if return_kind is None or return_kind in ("reg", "logic", "bit"):
+        return 1
+    return _KIND_RETURN_WIDTHS.get(return_kind, 32)
+
+
 class FunctionDecl(VerilogNode):
     """A Verilog function declaration."""
 

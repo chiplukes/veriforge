@@ -58,6 +58,8 @@ from veriforge.model.statements import (
 from ...semantics import const_int as _const_int
 from ...semantics import has_impure_call
 from ..evaluator import evaluate_constant
+from ..readmem import BASE_ARG
+from ...model.functions import unranged_return_width
 from ..sv_functions import is_two_state
 from ..severity import WRITE_MARK, severity_display
 from ...semantics import range_width as _range_width
@@ -200,7 +202,8 @@ class Compiler:  # cm:8c1e4a
         self._const_cache: dict[tuple[int, int, int], int] = {}  # (val,mask,width) → pool index
 
         # $readmemh/$readmemb task table: (filename, mem_id, is_hex)
-        self.readmem_tasks: list[tuple[str, int, bool]] = []
+        # (filename, mem_id, is_hex, start, end, address base)
+        self.readmem_tasks: list[tuple[str, int, bool, int | None, int | None, int | None]] = []
 
         # $fopen task table: (filename, mode) per task_id
         self.fopen_tasks: list[tuple[str, str]] = []
@@ -2036,12 +2039,10 @@ class Compiler:  # cm:8c1e4a
         self._func_call_depth += 1
 
         # Determine return width
-        ret_width = 32
+        ret_width = unranged_return_width(func.return_kind) if func.return_range is None else 32
         if func.return_range is not None:
             if isinstance(func.return_range.msb, Literal) and isinstance(func.return_range.lsb, Literal):
                 ret_width = abs(int(func.return_range.msb.value) - int(func.return_range.lsb.value)) + 1
-        elif func.return_kind == "integer":
-            ret_width = 32
 
         # Register local signals for ports and return variable
         port_sids: list[int] = []
@@ -2593,8 +2594,20 @@ class Compiler:  # cm:8c1e4a
                     if self._is_memory(self._resolve_id_name(mem_expr)):
                         mid = self.mem_map[self._resolve_id_name(mem_expr)]
                         is_hex = name == "$readmemh"
+                        # Start/end addresses and the internal address base
+                        # (see sim/readmem.py): constants here. (Start/end
+                        # used to be ignored.)
+                        addrs: list[int | None] = []
+                        for index in (2, 3, BASE_ARG):
+                            if len(task.arguments) <= index:
+                                addrs.append(None)
+                                continue
+                            value = _const_int(task.arguments[index], self._param_env)
+                            if value is None:
+                                raise NotImplementedError(f"{name}: the vm engine needs constant address arguments")
+                            addrs.append(value)
                         task_id = len(self.readmem_tasks)
-                        self.readmem_tasks.append((filename_expr.value, mid, is_hex))
+                        self.readmem_tasks.append((filename_expr.value, mid, is_hex, *addrs))
                         program.append(instr(Op.SYS_READMEM, task_id))
             return False
 
@@ -2811,6 +2824,8 @@ class Compiler:  # cm:8c1e4a
                 msb, lsb = func.return_range.msb, func.return_range.lsb
                 if isinstance(msb, Literal) and isinstance(lsb, Literal):
                     return abs(int(msb.value) - int(lsb.value)) + 1
+            elif func is not None:
+                return unranged_return_width(func.return_kind)
 
         return 32  # fallback
 

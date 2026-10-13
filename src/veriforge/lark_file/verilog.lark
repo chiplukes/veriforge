@@ -1142,8 +1142,13 @@ block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_blo
     | attribute_instance* KW_BYTE _signing? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_SHORTINT _signing? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_LONGINT _signing? list_of_block_variable_identifiers ";"
-    | attribute_instance* IDENTIFIER list_of_block_variable_identifiers ";"
+    | attribute_instance* TYPE_IDENTIFIER list_of_block_variable_identifiers ";"
     | attribute_instance* scoped_identifier list_of_block_variable_identifiers ";"
+
+// A user-defined type name in a block declaration -- never a port direction:
+// with a plain IDENTIFIER, a function's scalar `input j;` also parsed as a
+// local variable `j` of "type" `input`, so the argument was never bound.
+TYPE_IDENTIFIER: /(?!(?:input|output|inout|ref)(?![a-zA-Z0-9_$]))[a-zA-Z_][a-zA-Z0-9_$]*/
 
 // BNF: list_of_block_variable_identifiers ::= block_variable_type { , block_variable_type }
 // PRIORITY: HIGH

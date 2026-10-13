@@ -54,6 +54,7 @@ from .evaluator import (
 )
 from .display_format import SIGNED_FLAG, format_real, format_value
 from .severity import severity_display
+from . import readmem
 from .value import Value
 
 log = logging.getLogger(__name__)
@@ -912,7 +913,7 @@ class StatementExecutor:  # cm:c2f9a1
                         )
                         return
                     if immediate:
-                        updated = current.set_bit(idx_int, value.val & 1)
+                        updated = current.set_bit(idx_int, value.val & 1, value.mask & 1)
                         ctx.write_signal(name, updated)
                     else:
                         bit_val = Value(value.val & 1, width=1, mask=value.mask & 1)
@@ -931,7 +932,7 @@ class StatementExecutor:  # cm:c2f9a1
                         if 0 <= outer_idx < len(mem_data) and 0 <= inner_idx < elem_w:
                             bit_val = Value(value.val & 1, width=1, mask=value.mask & 1)
                             if immediate:
-                                mem_data[outer_idx] = mem_data[outer_idx].set_bit(inner_idx, bit_val.val)
+                                mem_data[outer_idx] = mem_data[outer_idx].set_bit(inner_idx, bit_val.val, bit_val.mask)
                                 if ctx._originals is not None and name not in ctx._originals:
                                     ctx._originals[name] = Value(0)
                             else:
@@ -1210,7 +1211,7 @@ class StatementExecutor:  # cm:c2f9a1
                 current = pending.get(name)
                 if current is None:
                     current = ctx.read_signal(name)
-                pending[name] = current.set_bit(int(idx_val), part_val.val & 1)
+                pending[name] = current.set_bit(int(idx_val), part_val.val & 1, part_val.mask & 1)
             return
         if ptype is RangeSelect and type(part.target) is Identifier:
             name = part.target.name
@@ -1422,25 +1423,35 @@ class StatementExecutor:  # cm:c2f9a1
         if mem_name not in ctx._memory_names:
             return
         mem_data, elem_w = ctx._memories[mem_name]
-        depth = len(mem_data)
-        wmask = (1 << elem_w) - 1
+
+        def address_arg(index: int) -> int | None:
+            if len(task.arguments) <= index:
+                return None
+            arg = task.arguments[index]
+            value = self.evaluator.eval(arg, ctx)
+            if value.mask:
+                return None
+            return value.as_signed() if _expr_signed(arg, ctx) else value.val
+
         loaded = False
+
+        def store(slot: int, val: int, mask: int) -> None:
+            nonlocal loaded
+            if 0 <= slot < len(mem_data):
+                mem_data[slot] = Value(val, width=elem_w, mask=mask)
+                loaded = True
+
         with open(filename) as f:
-            addr = 0
-            for line in f:  # noqa: PLW2901
-                line = line.strip()
-                if not line or line.startswith("//"):
-                    continue
-                if line.startswith("@"):
-                    addr = int(line[1:], 16)
-                    continue
-                for token in line.split():
-                    if addr >= depth:
-                        break
-                    val = int(token, 16 if is_hex else 2)
-                    mem_data[addr] = Value(val & wmask, width=elem_w)
-                    addr += 1
-                    loaded = True
+            readmem.load(
+                f.read(),
+                is_hex=is_hex,
+                width=elem_w,
+                depth=len(mem_data),
+                base=address_arg(readmem.BASE_ARG) or 0,
+                start=address_arg(2),
+                end=address_arg(3),
+                store=store,
+            )
         # Flag memory as dirty so combo blocks re-trigger
         if loaded and ctx._originals is not None and mem_name not in ctx._originals:
             ctx._originals[mem_name] = Value(0)

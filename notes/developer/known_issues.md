@@ -177,9 +177,21 @@ Found by the fuzzer's MEMORY strategy (2026-10-12); veriforge follows IEEE
 - **Constant out-of-range word with a select**: `mem[2][9:1]` of
   `reg [12:0] mem [6:3]` reads the whole element (13 bits) as x instead of 9.
 
+- **Wide index in a continuous assign**: an index wider than 32 bits is
+  truncated to its low 32 bits procedurally (Icarus, Verilator, veriforge), but
+  Icarus doesn't truncate one in a continuous assign (`assign o = m[{h, 31'd0,
+  b} + 4]` reads x when `h` is non-zero).
+- **Negative narrow signed index**: `m[$signed(i[2:0])]` with `i = 3'b100`
+  (-4) is out of range per IEEE, in veriforge, and in Icarus inside an
+  initial block; Icarus in a continuous assign or `always` block, and
+  Verilator everywhere, read it as unsigned (`m[4]`).
+- **Negative genvar in an unsigned context**: `(a || b) ^ g` with g = -2 into
+  a 70-bit word -- a genvar is a signed 32-bit value, zero-extended in an
+  unsigned expression (IEEE, Verilator, veriforge); Icarus sign-extends it.
+
 Indices are 32-bit two's-complement integers in both Icarus and Verilator:
-`m[i + -3]` (unsigned 0xfffffffd) is address -3; a narrow signed index
-(`m[$signed(i[1:0])]`, -1) is negative and out of range.
+`m[i + -3]` (unsigned 0xfffffffd) is address -3, and an index wider than 32
+bits counts only its low 32 bits.
 
 ### Icarus: input port expressions are self-determined
 

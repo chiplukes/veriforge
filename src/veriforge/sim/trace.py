@@ -397,8 +397,9 @@ class VcdTraceSession(_TraceSink):
         # session's initial values are this moment's values.
         hub.dispatch(sched.time, hub._poll())
         initial = {name: sched.read_signal(name) for name in self._signal_names}
+        label = getattr(sched, "memory_label", None)  # (memory elements by declared address)
         for signal_name in self._signal_names:
-            scope, leaf = _split_hierarchy(signal_name)
+            scope, leaf = _split_hierarchy(label(signal_name) if label is not None else signal_name)
             scope = root_scope if scope == "top" else f"{root_scope}.{scope}"
             self._writer.add_signal(signal_name, width=initial[signal_name].width, scope=scope, vcd_name=leaf)
         self._writer.write_header()
@@ -794,8 +795,9 @@ class CaptureSession(_TraceSink):
             state[k] = (ov, om)
         path = _capture_path(self._pattern, len(self.files))
         writer = VcdWriter(path, timescale=self._timescale)
+        label = getattr(self._sched, "memory_label", None)  # (as VcdTraceSession)
         for name, w in zip(self._vcd_names, self._widths, strict=False):
-            scope, leaf = _split_hierarchy(name)
+            scope, leaf = _split_hierarchy(label(name) if label is not None else name)
             scope = self._root if scope == "top" else f"{self._root}.{scope}"
             writer.add_signal(name, width=w, scope=scope, vcd_name=leaf)
         writer.write_header()

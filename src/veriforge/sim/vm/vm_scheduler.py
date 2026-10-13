@@ -148,6 +148,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "delta_limit",
         "display_output",
         "interpreter",
+        "memory_label",
         "time",
     )
 
@@ -183,6 +184,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # Optional callback fired after each time step completes
         self._on_time_step: Callable[[VMScheduler], None] | None = None
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
+        # Simulator's slot -> declared-address name for memory elements, for traces.
+        self.memory_label: Callable[[str], str] | None = None
         # A process ran $finish this time step (see _run_process_list).
         self._finish_requested = False
 

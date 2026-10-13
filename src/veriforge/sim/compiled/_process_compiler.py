@@ -1365,7 +1365,9 @@ class _ProcessCompilerMixin:
                         self._processes.append((sensitivity, lines))
                         return
                 rhs_source = self._resolve_signal_slice_source(assign.rhs)
-                if rhs_source is not None:
+                # (Guards as in _stmt_emitters._emit_mem_write: a narrower slice,
+                # a bare operator or a signed signal needs extending first.)
+                if rhs_source is not None and self._slice_covers(assign.rhs, elem_w):
                     lines = self._emit_const_mem_range_write_lines(
                         mid,
                         idx,
@@ -1381,7 +1383,10 @@ class _ProcessCompilerMixin:
                     self._processes.append((sensitivity, lines))
                     return
                 flat_parts = self._flatten_concat_identifier_parts(assign.rhs)
-                if flat_parts is not None:
+                if flat_parts is not None and (
+                    isinstance(assign.rhs, Concatenation)
+                    or (all(part[0] == "sig" for part in flat_parts) and not self._expr_signed(assign.rhs))
+                ):
                     lines = self._emit_wide_mem_flat_concat_lines(
                         mid,
                         idx,
@@ -1411,10 +1416,21 @@ class _ProcessCompilerMixin:
                     )
                     self._processes.append((sensitivity, lines))
                     return
+                # Any other RHS: computed wide (the narrow scalar write below
+                # can't even compile for a >64-bit element).
+                wide_lines = self._emit_wide_mem_whole_write_lines(
+                    mid, idx, assign.rhs, elem_w, marker_sid=marker_sid, indent=1, is_nba=False
+                )
+                if wide_lines is None:
+                    raise NotImplementedError(
+                        f"Compiled engine cannot yet compute this RHS as a {elem_w}-bit memory element. "
+                        "Use engine='vm' for this construct."
+                    )
+                self._processes.append((sensitivity, wide_lines))
+                return
 
-            rhs_val = self._emit_expr(assign.rhs, elem_w)
-            rhs_mask = self._emit_mask_expr(assign.rhs, elem_w)
-            lines = self._emit_scalar_mem_write_lines(
+            setup, rhs_val, rhs_mask = self._emit_rhs_low_word(assign.rhs, elem_w, 1)
+            lines = setup + self._emit_scalar_mem_write_lines(
                 mid, idx, rhs_val, rhs_mask, elem_w, marker_sid=marker_sid, indent=1, is_nba=False, track_change=True
             )
             self._processes.append((sensitivity, lines))
@@ -1434,9 +1450,8 @@ class _ProcessCompilerMixin:
             bit_base = self._memory_bases.get(name, 0)
             if bit_base != 0:
                 bit = f"(({bit}) - {bit_base})"
-            rhs_val = self._emit_expr(assign.rhs, 1)
-            rhs_mask = self._emit_mask_expr(assign.rhs, 1)
-            lines = self._emit_mem_bit_write_lines(
+            setup, rhs_val, rhs_mask = self._emit_rhs_low_word(assign.rhs, 1, 1)
+            lines = setup + self._emit_mem_bit_write_lines(
                 mid, addr, bit, rhs_val, rhs_mask, marker_sid=marker_sid, indent=1, is_nba=False, track_change=True
             )
             self._processes.append((sensitivity, lines))

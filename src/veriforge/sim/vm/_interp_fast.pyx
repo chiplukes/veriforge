@@ -1373,6 +1373,10 @@ cdef int _execute_core(
             b = stack[sp]      # index
             sp -= 1
             a = stack[sp]      # value (1-bit)
+            if wflag[sp]:
+                # (A wide value's narrow slot can be stale; see OP_STORE_MEM.)
+                a.val = <long long>wv[sp * WIDE_WORDS]
+                a.mask = <long long>wm[sp * WIDE_WORDS]
             if b.mask == 0:
                 i = <int>b.val
                 w = sig_width[arg1]
@@ -1385,8 +1389,9 @@ cdef int _execute_core(
                         if wi < WIDE_WORDS:
                             wtmp = wctx.sig_val[wsp + wi]           # save old val
                             result_mask = wctx.sig_mask[wsp + wi]   # save old mask
-                            wctx.sig_val[wsp + wi]  = (wtmp & ~(1ULL << n_bits)) | ((<unsigned long long>(a.val & 1)) << n_bits)
-                            wctx.sig_mask[wsp + wi] = <unsigned long long>result_mask & ~(1ULL << n_bits)
+                            # (The bit's own x/z is stored too: `w[i] = 1'bx` used to store 0.)
+                            wctx.sig_val[wsp + wi]  = (wtmp & ~(1ULL << n_bits)) | ((<unsigned long long>(a.val & ~a.mask & 1)) << n_bits)
+                            wctx.sig_mask[wsp + wi] = (<unsigned long long>result_mask & ~(1ULL << n_bits)) | ((<unsigned long long>(a.mask & 1)) << n_bits)
                             if wctx.sig_val[wsp + wi] != wtmp or wctx.sig_mask[wsp + wi] != <unsigned long long>result_mask:
                                 if dirty_mark[arg1] == 0 and dirty_idx < dirty_max:
                                     dirty_mark[arg1] = 1
@@ -1395,9 +1400,10 @@ cdef int _execute_core(
                     else:
                         new_val = sig_val[arg1]
                         new_mask = sig_mask[arg1]
-                        # Clear x/z for this bit
-                        new_mask = new_mask & ~(1LL << i)
-                        if a.val & 1:
+                        # This bit's x/z from the value (it used to be cleared:
+                        # `r[i] = 1'bx` stored 0)
+                        new_mask = (new_mask & ~(1LL << i)) | ((a.mask & 1) << i)
+                        if a.val & ~a.mask & 1:
                             new_val = new_val | (1LL << i)
                         else:
                             new_val = new_val & ~(1LL << i)
@@ -1415,6 +1421,10 @@ cdef int _execute_core(
             b = stack[sp]      # index
             sp -= 1
             a = stack[sp]      # value
+            if wflag[sp]:
+                # (A wide value's narrow slot can be stale; see OP_STORE_MEM.)
+                a.val = <long long>wv[sp * WIDE_WORDS]
+                a.mask = <long long>wm[sp * WIDE_WORDS]
             if b.mask == 0:
                 i = <int>b.val
                 w = sig_width[arg1]
@@ -3994,6 +4004,12 @@ cdef int _execute_core(
             b = stack[sp]     # index
             sp -= 1
             a = stack[sp]     # value
+            if wflag[sp]:
+                # A wide (>64-bit) value: the narrow slot can be stale (after
+                # a wide RESIZE/TERNARY); its low word is in wv/wm. (A wide
+                # ternary into a narrow memory element stored 0.)
+                a.val = <long long>wv[sp * WIDE_WORDS]
+                a.mask = <long long>wm[sp * WIDE_WORDS]
             mid = arg1 & 0xFFFF
             marker_sid = arg1 >> 16
             if mem_val != NULL and b.mask == 0 and mid < mem_count:
@@ -4020,6 +4036,12 @@ cdef int _execute_core(
             b = stack[sp]     # index
             sp -= 1
             a = stack[sp]     # value
+            if wflag[sp]:
+                # A wide (>64-bit) value: the narrow slot can be stale (after
+                # a wide RESIZE/TERNARY); its low word is in wv/wm. (A wide
+                # ternary into a narrow memory element stored 0.)
+                a.val = <long long>wv[sp * WIDE_WORDS]
+                a.mask = <long long>wm[sp * WIDE_WORDS]
             mid = arg1 & 0xFFFF
             if mem_val != NULL and b.mask == 0 and mid < mem_count:
                 i = <int>b.val
@@ -4058,6 +4080,10 @@ cdef int _execute_core(
             sp -= 1; b = stack[sp]   # msb
             sp -= 1; a = stack[sp]   # idx (array index)
             sp -= 1                   # val is now at stack[sp]
+            if wflag[sp]:
+                # (A wide value's narrow slot can be stale; see OP_STORE_MEM.)
+                stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+                stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
             mid = arg1 & 0xFFFF
             marker_sid = arg1 >> 16
             if mem_val != NULL and t.mask == 0 and b.mask == 0 and a.mask == 0 and mid < mem_count:
@@ -4098,6 +4124,10 @@ cdef int _execute_core(
             sp -= 1; b = stack[sp]   # msb
             sp -= 1; a = stack[sp]   # idx
             sp -= 1                   # val at stack[sp]
+            if wflag[sp]:
+                # (A wide value's narrow slot can be stale; see OP_STORE_MEM.)
+                stack[sp].val = <long long>wv[sp * WIDE_WORDS]
+                stack[sp].mask = <long long>wm[sp * WIDE_WORDS]
             mid = arg1 & 0xFFFF
             marker_sid = arg1 >> 16
             if mem_val != NULL and t.mask == 0 and b.mask == 0 and a.mask == 0 and mid < mem_count:

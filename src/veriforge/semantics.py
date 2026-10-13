@@ -164,7 +164,12 @@ def _eval_const(expr: Expression, env: Mapping[str, int]) -> int:
             return int(expr.value)
         if isinstance(expr.value, float):
             return int(expr.value)
-        return int(expr.value)
+        value = int(expr.value)
+        if expr.signed and expr.width and 0 <= value and value >> (expr.width - 1):
+            # A signed sized literal's own value (`Literal(0xffffffff, width=32,
+            # signed=True)` is -1: a negative genvar substituted as its pattern).
+            value -= 1 << expr.width
+        return value
     if isinstance(expr, Identifier):
         name = expr.name
         if expr.hierarchy:

@@ -36,6 +36,7 @@ from veriforge.model.expressions import (
     TernaryOp,
     UnaryOp,
 )
+from veriforge.model.functions import unranged_return_width
 from veriforge.model.ports import PortDirection
 from veriforge.model.statements import (
     BlockingAssign,
@@ -877,6 +878,13 @@ class CythonCodegen(
             return f"({helper}(c, ({idx_expr}), {lsb_expr}) & {wmask})"
         helper = f"_wmem{mid}_py_extract_mask" if mask else f"_wmem{mid}_py_extract_val"
         return f"{helper}(c, ({idx_expr}), {lsb_expr}, {width_expr})"
+
+    def _slice_covers(self, rhs: Expression, width: int) -> bool:
+        """Whether *rhs* is at least *width* bits wide, so copying *width*
+        bits from its signal-slice source is the assignment (a narrower one
+        must be zero- or sign-extended: `w[80:10] = b` of a 1-bit `b` copied
+        71 bits from `b`, past its end -- x and garbage)."""
+        return self._expr_width(rhs) >= width
 
     def _resolve_signal_slice_source(self, expr: Expression) -> tuple[int, str] | None:
         if isinstance(expr, Identifier):
@@ -2323,13 +2331,11 @@ class CythonCodegen(
             prefix = f"__func_{func.name}"
             senv = _scoped_env(prefix, self._param_env)
             # Return width
-            ret_width = 32
+            ret_width = unranged_return_width(func.return_kind) if func.return_range is None else 32
             if func.return_range is not None:
                 rw = _range_width(func.return_range, senv)
                 if rw > 0:
                     ret_width = rw
-            elif func.return_kind == "integer":
-                ret_width = 32
             # With signedness (signed ports/locals used to read as unsigned
             # inside the body, on every engine).
             self._register_signal(f"{prefix}.{func.name}", ret_width, bool(func.signed))

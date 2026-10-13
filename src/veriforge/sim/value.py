@@ -387,11 +387,14 @@ class Value:  # cm:c8a1e6
             return Value(v & ~oor & full, width=w, mask=(m | oor) & full)
         raise TypeError(f"Invalid index type: {type(index)}")
 
-    def set_bit(self, index: int, bit_val: int) -> Value:
-        """Return a new Value with bit at index set to 0 or 1."""
+    def set_bit(self, index: int, bit_val: int, bit_mask: int = 0) -> Value:
+        """Return a new Value with bit at index set to 0, 1, or (with
+        *bit_mask*) x. (Writes passed no mask, so `r[i] = 1'bx` stored 0.)"""
         if index < 0 or index >= self.width:
             raise IndexError(f"Bit index {index} out of range for width {self.width}")
-        new_mask = self.mask & ~(1 << index)  # clear x/z for this bit
+        new_mask = (self.mask & ~(1 << index)) | ((bit_mask & 1) << index)
+        if bit_mask & 1:
+            bit_val = 0
         if bit_val:
             new_val = self.val | (1 << index)
         else:
