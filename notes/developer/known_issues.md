@@ -127,21 +127,15 @@ other integer atom types reject `unsigned`. Their default signedness
 (`sim/sv_functions.py:lower_two_state`), but a 2-state *memory*
 (`byte m [0:3]`) still starts at x.
 
-### Memory lowering gaps: `$readmem` `@address`, sub-array access
+### Multi-dimensional array sub-array access not supported
 
-**Status**: Open (found 2026-10-11). `sim/ascending.py:lower_memory_bases`
-rebases memories whose dimensions don't start at 0 (`reg m [1:4]`) and
-`flatten_unpacked_arrays` flattens multi-dimensional unpacked arrays
-row-major, for every engine. Not covered:
-
-- `@address` lines in a `$readmemh`/`$readmemb` file loading a rebased
-  memory are taken as slot numbers (`@1` into `m [1:4]` lands on `m[2]`).
-  Files without addresses load correctly (from the lowest address).
-- A multi-dimensional array that is also accessed as a sub-array (`m[i]`
-  alone, SystemVerilog) is left unflattened, and its `m[i][j]` accesses still
-  read bit `j` of word `i`, as all of them used to.
-- Hierarchical references into another module's rebased memory aren't
-  remapped.
+**Status**: Not supported, fails loudly (2026-10-12). `m[0] = m[1]` on
+`reg m [0:1][0:2]` (an SV array slice) raises `NotImplementedError` from
+`sim/ascending.py:flatten_unpacked_arrays`; it used to simulate wrongly. Icarus
+doesn't support array slices either ("sorry: ... not yet supported").
+Elements (`m[i][j]`), `$readmem` into rebased memories, hierarchical
+references and the Python API (`sim.read("m[4]")`, VCD labels) all use declared
+addresses (fixed 2026-10-12).
 
 ## Reference notes (not defects)
 
@@ -168,6 +162,24 @@ bits or wider (`1 ** -3`, `(-1) ** -3`, `0 ** -3` all 0), while for 32-bit
 operands it follows IEEE 1364-2005 Table 5-6 (1, -1, x). Every veriforge
 engine follows Table 5-6 at all widths; the fuzzer only generates small
 unsigned exponents. Not a veriforge bug -- do not replicate.
+
+### Icarus: out-of-range memory accesses (multi-dimensional arrays, constant words)
+
+Found by the fuzzer's MEMORY strategy (2026-10-12); veriforge follows IEEE
+1800 7.4.6 and Verilator here, and the generator avoids these shapes:
+
+- **Multi-dimensional arrays, variable index**: Icarus range-checks only the
+  flattened address, so `m[0][3]` of `reg m [0:1][0:2]` reads and writes
+  `m[1][0]` (with constant indices it returns x, as IEEE says).
+- **Multi-dimensional arrays, negative bounds**: an unsigned 32-bit index
+  like `i + -3` is address -3 to Icarus's 1-D arrays and to Verilator, but
+  not on a multi-dimensional array.
+- **Constant out-of-range word with a select**: `mem[2][9:1]` of
+  `reg [12:0] mem [6:3]` reads the whole element (13 bits) as x instead of 9.
+
+Indices are 32-bit two's-complement integers in both Icarus and Verilator:
+`m[i + -3]` (unsigned 0xfffffffd) is address -3; a narrow signed index
+(`m[$signed(i[1:0])]`, -1) is negative and out of range.
 
 ### Icarus: input port expressions are self-determined
 

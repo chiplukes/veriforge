@@ -1628,7 +1628,7 @@ class TestReadmem:
         ops = [i[0] for i in init_procs[0].program]
         assert Op.SYS_READMEM in ops
         assert len(c.readmem_tasks) == 1
-        fname, mid, is_hex = c.readmem_tasks[0]
+        fname, mid, is_hex, *_addresses = c.readmem_tasks[0]
         assert fname == "test.hex"
         assert is_hex is True
 
@@ -1672,7 +1672,7 @@ class TestReadmem:
         c = Compiler()
         c.compile_module(m)
         assert len(c.readmem_tasks) == 1
-        fname, mid, is_hex = c.readmem_tasks[0]
+        fname, mid, is_hex, *_addresses = c.readmem_tasks[0]
         assert fname == "data.bin"
         assert is_hex is False
 
