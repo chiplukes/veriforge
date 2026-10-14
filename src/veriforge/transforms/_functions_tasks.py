@@ -149,7 +149,12 @@ def _update_function_context(
         ctx.ports.extend(_extract_tf_ports(child, source_file, callbacks))
     elif child.data == "function_item_declaration":
         ctx.ports.extend(_extract_tf_ports(child, source_file, callbacks))
-        _extend_block_items(ctx, child, source_file, callbacks)
+        # (An old-style function's locals sit one level down, inside the
+        # function_item_declaration: `reg [3:0] l1;` after `input a;` used to
+        # be dropped, leaving the body writing an undeclared name.)
+        for item in child.children:
+            if isinstance(item, Tree) and item.data == "block_item_declaration":
+                _extend_block_items(ctx, item, source_file, callbacks)
     elif child.data == "block_item_declaration":
         _extend_block_items(ctx, child, source_file, callbacks)
     elif child.data == "function_statement":
@@ -524,9 +529,20 @@ def _extract_task_declaration(
                 ports.extend(_extract_tf_ports(child, source_file, callbacks))
                 # Task-level variable declarations (used to be dropped, so
                 # every engine mis-handled them), as for functions.
-                decl_vars, inits = _extract_function_block_items(child, source_file, callbacks)
-                local_vars.extend(decl_vars)
-                init_statements.extend(inits)
+                # (Old-style: the block_item_declaration is one level down.)
+                blocks = (
+                    [child]
+                    if child.data == "block_item_declaration"
+                    else [
+                        item
+                        for item in child.children
+                        if isinstance(item, Tree) and item.data == "block_item_declaration"
+                    ]
+                )
+                for block in blocks:
+                    decl_vars, inits = _extract_function_block_items(block, source_file, callbacks)
+                    local_vars.extend(decl_vars)
+                    init_statements.extend(inits)
             elif child.data == "statement_or_null":
                 stmt = callbacks.extract_statement(child, source_file)
                 if stmt is not None:

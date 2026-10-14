@@ -11,6 +11,13 @@ Phase 5: functions, tasks, generate constructs, specify blocks.
 
 from __future__ import annotations
 
+import random
+import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+
 from ..model.assignments import ContinuousAssign
 from ..model.base import Comment, VerilogNode
 from ..model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
@@ -76,6 +83,40 @@ from ..model.statements import (
 from ..model.variables import INTEGER_ATOM_WIDTHS, SIGNED_KINDS, Variable
 
 
+@dataclass
+class EmitStyle:
+    """Alternative spellings of the same model, for fuzzing the parser
+    (`veriforge.fuzz`: emit both ways, the parsed results must agree). The
+    canonical emitter only ever prints one spelling of each construct, so a
+    form like a function's old-style scalar `input j;` -- which the parser
+    took for a local variable -- was never exercised."""
+
+    old_style_ports: bool = False  # module/function/task ports declared in the body
+    star_paren: bool = True  # `@(*)` (else `@*`)
+    sensitivity_comma: bool = False  # `@(a, b)` (else `@(a or b)`)
+    extra_parens: bool = False  # parenthesize every binary/ternary operand
+    literal_rng: random.Random | None = None  # re-spell literals (base, `_`, case)
+    positional_connections: bool = False  # instance ports/parameters by position (needs linked instances)
+
+
+_STYLE: ContextVar[EmitStyle | None] = ContextVar("verilog_emit_style", default=None)
+_CANONICAL = EmitStyle()
+
+
+def _style() -> EmitStyle:
+    return _STYLE.get() or _CANONICAL
+
+
+@contextmanager
+def emit_style(style: EmitStyle) -> Iterator[None]:
+    """Emit with *style* inside the ``with`` block."""
+    token = _STYLE.set(style)
+    try:
+        yield
+    finally:
+        _STYLE.reset(token)
+
+
 def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True) -> str:
     """Emit a full Design as Verilog source text.
 
@@ -138,7 +179,10 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
             header += ")"
 
     # Port list
-    if module.ports:
+    old_style = _style().old_style_ports and module.ports and not any(p.default_value for p in module.ports)
+    if old_style:
+        header += " (" + ", ".join(p.name for p in module.ports) + ");"
+    elif module.ports:
         header += " ("
         port_strs = [_emit_port(p) for p in module.ports]
         has_port_extras = emit_comments and any(p.comments for p in module.ports)
@@ -169,6 +213,8 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
 
     # Body declarations
     body_items: list[str] = []
+    if old_style:
+        body_items.extend(f"{indent}{_emit_port(p)};" for p in module.ports)
 
     # Localparams (from parameter list with is_local=True)
     for p in module.parameters:
@@ -661,10 +707,29 @@ def _emit_instance(inst: Instance, indent: str) -> str:
     """
     parts = [f"{indent}{inst.module_name}"]
 
+    positional = _style().positional_connections and _positional_order(inst) is not None
+    child = inst.resolved_module
     # Parameter overrides: #(...)
     if inst.has_parameter_override:
         parts.append(" #(")
-        parts.append(_emit_parameter_bindings(inst.parameter_bindings))
+        param_order = [p.name for p in child.parameters if not p.is_local] if positional and child is not None else None
+        bindings = {b.name: b for b in inst.parameter_bindings}
+        if param_order is not None and all(b.name in param_order for b in inst.parameter_bindings):
+            # Positional: every parameter up to the last overridden one, in
+            # declaration order (a gap can't be skipped).
+            last = max(param_order.index(b.name) for b in inst.parameter_bindings if b.name is not None)
+            values = []
+            for name in param_order[: last + 1]:
+                binding = bindings.get(name)
+                if binding is not None and binding.value is not None:
+                    values.append(emit_expression(binding.value))
+                    continue
+                assert child is not None  # (param_order came from it)
+                default = next(p for p in child.parameters if p.name == name).default_value
+                values.append(emit_expression(default) if default is not None else "")
+            parts.append(", ".join(values))
+        else:
+            parts.append(_emit_parameter_bindings(inst.parameter_bindings))
         parts.append(")")
 
     # Instance name and optional array range
@@ -674,10 +739,26 @@ def _emit_instance(inst: Instance, indent: str) -> str:
 
     # Port connections: (...)
     parts.append(" (")
-    parts.append(_emit_port_connections(inst.port_connections))
+    order = _positional_order(inst) if positional else None
+    if order is not None:
+        by_name = {c.port_name: c.expression for c in inst.port_connections}
+        parts.append(", ".join("" if (e := by_name.get(name)) is None else emit_expression(e) for name in order))
+    else:
+        parts.append(_emit_port_connections(inst.port_connections))
     parts.append(");")
 
     return "".join(parts)
+
+
+def _positional_order(inst: Instance) -> list[str] | None:
+    """The child's port order, when every connection is named and resolvable."""
+    child = inst.resolved_module
+    if child is None or not inst.port_connections or not all(c.is_named for c in inst.port_connections):
+        return None
+    order = [p.name for p in child.ports]
+    if not all(c.port_name in order for c in inst.port_connections):
+        return None
+    return order
 
 
 def _emit_parameter_bindings(bindings: list[ParameterBinding]) -> str:
@@ -770,21 +851,27 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         right_str = emit_expression(expr.right)
         # Left operand: parenthesize only if it has strictly lower precedence.
         # Equal-precedence on the left is fine for left-associative operators.
-        if isinstance(expr.left, TernaryOp) or (isinstance(expr.left, BinaryOp) and _prec(expr.left.op) < this_prec):
+        extra = _style().extra_parens
+        if isinstance(expr.left, TernaryOp) or (
+            isinstance(expr.left, BinaryOp) and (extra or _prec(expr.left.op) < this_prec)
+        ):
             left_str = f"({left_str})"
         # Right operand: parenthesize if equal or lower precedence to handle
         # non-associativity (a - (b - c) differs from a - b - c).
         if isinstance(expr.right, TernaryOp) or (
-            isinstance(expr.right, BinaryOp) and _prec(expr.right.op) <= this_prec
+            isinstance(expr.right, BinaryOp) and (extra or _prec(expr.right.op) <= this_prec)
         ):
             right_str = f"({right_str})"
         return f"{left_str} {expr.op} {right_str}"
     if isinstance(expr, TernaryOp):
         cond_str = emit_expression(expr.condition)
         # Nested ternary as condition is ambiguous (right-associative in Verilog).
-        if isinstance(expr.condition, TernaryOp):
+        if isinstance(expr.condition, TernaryOp) or (_style().extra_parens and isinstance(expr.condition, BinaryOp)):
             cond_str = f"({cond_str})"
-        return f"{cond_str} ? {emit_expression(expr.true_expr)} : {emit_expression(expr.false_expr)}"
+        true_str, false_str = emit_expression(expr.true_expr), emit_expression(expr.false_expr)
+        if _style().extra_parens:
+            true_str, false_str = f"({true_str})", f"({false_str})"
+        return f"{cond_str} ? {true_str} : {false_str}"
     if isinstance(expr, Concatenation):
         parts = ", ".join(emit_expression(p) for p in expr.parts)
         return "{" + parts + "}"
@@ -825,11 +912,38 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
     return "/* unknown expression */"
 
 
+_SIZED_LITERAL = re.compile(r"^(\d+)'([sS]?)([bBoOdDhH])([0-9a-fA-FxXzZ?_]+)$")
+_BASE_DIGITS = {"b": 2, "o": 8, "d": 10, "h": 16}
+
+
+def _respell_literal(text: str, rng: random.Random) -> str:
+    """The same literal value, spelled differently: another base for a
+    known sized value, `_` separators, upper/lower case."""
+    match = _SIZED_LITERAL.match(text)
+    if match is None:
+        return text  # (an unsized decimal may be a cast's width: `12'(x)`)
+    size, sign, base, digits = match.groups()
+    clean = digits.replace("_", "")
+    if not any(c in "xXzZ?" for c in clean) and rng.random() < 0.6:
+        value = int(clean, _BASE_DIGITS[base.lower()])
+        if value < 1 << int(size):
+            base = rng.choice("bodh")
+            clean = {"b": f"{value:b}", "o": f"{value:o}", "d": f"{value}", "h": f"{value:x}"}[base]
+    if rng.random() < 0.5:
+        base = base.upper()
+        clean = clean.upper()
+    if len(clean) > 2 and rng.random() < 0.5:
+        cut = rng.randrange(1, len(clean))
+        clean = f"{clean[:cut]}_{clean[cut:]}"
+    return f"{size}'{sign}{base}{clean}"
+
+
 def _emit_literal(lit: Literal) -> str:  # noqa: PLR0911
     """Emit a Literal as Verilog text."""
     # Prefer original text if available (preserves formatting)
     if lit.original_text:
-        return lit.original_text
+        rng = _style().literal_rng
+        return _respell_literal(lit.original_text, rng) if rng is not None else lit.original_text
 
     # Reconstruct from components
     if lit.width is not None and lit.base:
@@ -862,7 +976,7 @@ def _emit_always_block(ab: AlwaysBlock, indent: str, current_indent: str) -> str
     if ab.sensitivity_list:
         result += "@(" + _emit_sensitivity_list(ab.sensitivity_list) + ") "
     elif ab.sensitivity_type == SensitivityType.COMBINATIONAL:
-        result += "@(*) "
+        result += "@(*) " if _style().star_paren else "@* "
     # else: no sensitivity (bare always begin...end)
 
     # Body
@@ -885,7 +999,7 @@ def _emit_sensitivity_list(edges: list[SensitivityEdge]) -> str:
             parts.append(emit_expression(edge.signal))
         else:
             parts.append(f"{edge.edge} {emit_expression(edge.signal)}")
-    return " or ".join(parts)
+    return (", " if _style().sensitivity_comma else " or ").join(parts)
 
 
 def _emit_statement_inline(stmt: Statement, indent: str, current_indent: str) -> str:
@@ -1147,7 +1261,7 @@ def _emit_event_control(stmt: EventControl, indent: str, current_indent: str, pr
     if stmt.events:
         result = f"{prefix}@({_emit_sensitivity_list(stmt.events)}) "
     else:
-        result = f"{prefix}@(*) "
+        result = f"{prefix}@(*) " if _style().star_paren else f"{prefix}@* "
 
     if stmt.body:
         result += _emit_statement_inline(stmt.body, indent, current_indent)
@@ -1194,7 +1308,11 @@ def _emit_function_decl(fn: FunctionDecl, indent: str, current_indent: str) -> s
     parts.append(fn.name)
     lines: list[str] = []
 
-    if fn.ports:
+    if fn.ports and _style().old_style_ports:
+        # Old-style: function name; then one `input ...;` per port
+        lines.append(" ".join(parts) + ";")
+        lines.extend(f"{inner_indent}{_emit_port(p)};" for p in fn.ports)
+    elif fn.ports:
         # ANSI-style: function name(port_list);
         port_strs = [_emit_port(p) for p in fn.ports]
         header = " ".join(parts)
@@ -1228,7 +1346,11 @@ def _emit_task_decl(tk: TaskDecl, indent: str, current_indent: str) -> str:
     parts.append(tk.name)
     lines: list[str] = []
 
-    if tk.ports:
+    if tk.ports and _style().old_style_ports:
+        # Old-style: task name; then one `input ...;` per port
+        lines.append(" ".join(parts) + ";")
+        lines.extend(f"{inner_indent}{_emit_port(p)};" for p in tk.ports)
+    elif tk.ports:
         # ANSI-style: task name(port_list);
         port_strs = [_emit_port(p) for p in tk.ports]
         header = " ".join(parts)

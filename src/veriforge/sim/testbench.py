@@ -203,6 +203,10 @@ class Simulator:  # cm:a5c8f4
         materialize_task_locals(module)
         expand_array_concat_operands(module)
         lower_sv_functions(module)
+        # Indices first: a wide one cut to its low 32 bits, a narrow signed one
+        # sign-extended (flattening's per-dimension range check used to see the
+        # untruncated value and drop a valid write).
+        lower_signed_indices(module)
         # Every constant packed range becomes [w-1:0] (selects remapped): the
         # engines' own lsb-base handling misread negative indices (`m[i][-1]` of
         # `reg [61:-2] m []`, compiled).
@@ -212,7 +216,6 @@ class Simulator:  # cm:a5c8f4
         self._memory_shapes: dict[str, list[int]] = {}
         lower_memory_bases(module, self._memory_lows)
         flatten_unpacked_arrays(module, self._memory_shapes)  # after lower_memory_bases: 0-based dims
-        lower_signed_indices(module)
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
         lower_width_casts(module)
         lower_two_state(module)

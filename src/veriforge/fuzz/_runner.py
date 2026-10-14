@@ -133,8 +133,15 @@ class FuzzRunner:
         icarus: bool = True,
         verilator: bool = False,
         strategy: Strategy | None = None,
+        x_stimulus: bool = True,
+        memory_in_range: bool = False,
     ) -> None:
         self.strategy = strategy  # None: weighted mix
+        # False: no x on inputs (the same random draws, so seeds still
+        # reproduce) -- for Verilator, which is 2-state: an x write index
+        # it reads as 0 diverged the memory state from the reference.
+        self.x_stimulus = x_stimulus
+        self.memory_in_range = memory_in_range  # see ModuleGenerator
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.seed = seed
@@ -216,7 +223,7 @@ class FuzzRunner:
     def _run_one(self) -> None:
         """Generate, simulate, and cross-check one module."""
         rng = random.Random(self.seed)  # noqa: S311
-        gen = ModuleGenerator(rng)
+        gen = ModuleGenerator(rng, memory_in_range=self.memory_in_range)
 
         design = gen.generate_design(self.strategy)
         top = design.get_module("t")
@@ -362,7 +369,7 @@ class FuzzRunner:
                 val = rng.getrandbits(width) if width > 0 else 0
                 # 1 in 6 chance of x-contamination on a random input
                 mask = 0
-                if rng.random() < 0.15:
+                if rng.random() < 0.15 and getattr(self, "x_stimulus", True):
                     x_signal_width = width
                     mask = rng.getrandbits(x_signal_width) if x_signal_width > 0 else 1
                     mask = mask & ((1 << x_signal_width) - 1)

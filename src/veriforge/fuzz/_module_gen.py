@@ -118,8 +118,12 @@ class ModuleGenerator:
         Pre-seeded random instance — ensures reproducibility.
     """
 
-    def __init__(self, rng: random.Random) -> None:
+    def __init__(self, rng: random.Random, *, memory_in_range: bool = False) -> None:
         self._rng = rng
+        # MEMORY strategy: every index in range, for an oracle whose
+        # out-of-range accesses are implementation-defined (Verilator wraps
+        # an out-of-range write onto a valid word).
+        self._memory_in_range = memory_in_range
         # Stashed by _gen_hierarchical (side channel, not returned by
         # generate() itself since its signature stays single-Module for
         # every existing caller): generate_design() reads this right after
@@ -528,7 +532,7 @@ class ModuleGenerator:
             writes.append(NonblockingAssign(dst(), src()))
         if one_d and rng.random() < 0.3:
             name, width, _lsb, ((low, size),), _element = rng.choice(one_d)
-            bits = max(1, (size - 1).bit_length())
+            bits = max(1, (size - 1).bit_length() if not self._memory_in_range else size.bit_length() - 1)
             idx = Port("i", PortDirection.INPUT, width=Range(Literal(bits - 1), Literal(0)) if bits > 1 else None)
             data = Port("d", PortDirection.INPUT, width=Range(Literal(width - 1), Literal(0)) if width > 1 else None)
             index: Expression = Identifier("i")
@@ -541,7 +545,7 @@ class ModuleGenerator:
             writes.insert(rng.randint(0, len(writes)), TaskEnable("tmw", [arg, expr_gen.expr(rng, depth=1)]))
         if one_d and rng.random() < 0.3:
             name, width, _lsb, ((low, size),), _element = rng.choice(one_d)
-            bits = max(1, (size - 1).bit_length())
+            bits = max(1, (size - 1).bit_length() if not self._memory_in_range else size.bit_length() - 1)
             idx = Port("i", PortDirection.INPUT, width=Range(Literal(bits - 1), Literal(0)) if bits > 1 else None)
             index = Identifier("i") if not low else BinaryOp("+", Identifier("i"), _int_literal(low))
             # (Sometimes no return range: a 1-bit `function f;` returned 32 bits.)
@@ -595,6 +599,7 @@ class ModuleGenerator:
     ) -> Expression:
         rng = self._rng
         kind = rng.random()
+        in_range = in_range or self._memory_in_range
         if kind < 0.25:
             if in_range or not const_ok:
                 return _int_literal(rng.randint(low, low + size - 1))
@@ -604,7 +609,11 @@ class ModuleGenerator:
             # An unsigned slice no wider than the dimension, offset to its low end.
             bits = max(1, (size).bit_length() - 1)
             msb = rng.randint(bits - 1, source.width - 1)
-            sliced = RangeSelect(source.as_identifier(), _int_literal(msb), _int_literal(msb - bits + 1))
+            sliced: Expression = RangeSelect(source.as_identifier(), _int_literal(msb), _int_literal(msb - bits + 1))
+            if self._memory_in_range and kind > 0.85 and wide_ok:
+                top = rng.randrange(1, 32)
+                high = Literal(top, width=5, base="d", original_text=f"5'd{top}")
+                sliced = Concatenation([high, Literal(0, width=31, base="d", original_text="31'd0"), sliced])
             return sliced if low == 0 else BinaryOp("+", sliced, _int_literal(low))
         bits = rng.randint(1, 3)
         msb = rng.randint(bits - 1, source.width - 1)

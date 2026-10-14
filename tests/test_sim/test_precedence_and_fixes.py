@@ -250,8 +250,11 @@ class TestOperatorPrecedence:
         assert isinstance(expr.left, BinaryOp)
         assert expr.left.op == "+"
 
-    def test_power_is_right_associative(self):
-        """2**3**4 is right-assoc: 2**(3**4)."""
+    def test_power_is_left_associative(self):
+        """2**3**4 is (2**3)**4: every binary operator associates left to
+        right (IEEE 1364-2005 5.1.2, IEEE 1800 table 11-2). Icarus and
+        Verilator both print 64 for `2 ** 3 ** 2`; this used to group right
+        (and assert it), giving 512."""
         m = _parse_module("""
         module t(output [31:0] y);
             assign y = 2 ** 3 ** 4;
@@ -260,8 +263,8 @@ class TestOperatorPrecedence:
         expr = self._get_assign_expr(m)
         assert isinstance(expr, BinaryOp)
         assert expr.op == "**"
-        assert isinstance(expr.right, BinaryOp)
-        assert expr.right.op == "**"
+        assert isinstance(expr.left, BinaryOp)
+        assert expr.left.op == "**"
 
     def test_parentheses_override_precedence(self):
         """(a + b) * c  →  parens respected."""

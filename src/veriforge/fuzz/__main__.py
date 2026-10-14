@@ -115,6 +115,16 @@ def main() -> None:
         "2-state only, so comparison is value-only on reference-defined bits)",
     )
     parser.add_argument(
+        "--in-range",
+        action="store_true",
+        help="MEMORY strategy: keep every memory index in range (for --verilator)",
+    )
+    parser.add_argument(
+        "--no-x",
+        action="store_true",
+        help="No x on stimulus inputs (useful with --verilator, which is 2-state)",
+    )
+    parser.add_argument(
         "--engines",
         type=str,
         nargs="+",
@@ -174,6 +184,8 @@ def main() -> None:
         icarus=not args.no_icarus,
         verilator=args.verilator,
         strategy=Strategy[args.strategy.upper()] if args.strategy else None,
+        x_stimulus=not args.no_x,
+        memory_in_range=args.in_range,
     )
 
     try:

@@ -201,10 +201,10 @@ def _rebuild_with_precedence(
         while op_stack:
             top_op, top_loc = op_stack[-1]
             top_prec = _VERILOG_PRECEDENCE.get(top_op, _DEFAULT_PRECEDENCE)
-            if top_op == _POWER_OPERATOR:
-                should_pop = top_prec < prec
-            else:
-                should_pop = top_prec <= prec
+            # Every binary operator is left-associative, `**` included (IEEE
+            # 1364-2005 5.1.2, 1800 table 11-2; Icarus and Verilator: `2 ** 3 **
+            # 2` is 64). `**` used to group right, giving 512.
+            should_pop = top_prec <= prec
             if not should_pop:
                 break
             op_stack.pop()

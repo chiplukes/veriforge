@@ -45,12 +45,22 @@ uv run -m veriforge.fuzz [--seed N] [--max MODULES] [--hours H]
 | `--no-icarus` | off | Disable Icarus cross-check. |
 | `--verilator` | off | Enable Verilator cross-check (opt-in: ~8-10x slower per module than Icarus). |
 | `--engines` | all available | Veriforge engines to test: `reference`, `vm`, `vm-fast`, `compiled`. |
+| `--strategy` | weighted mix | Generate only this strategy (e.g. `memory`, `with_tasks`). |
+| `--no-x` | off | No x on stimulus inputs (the same random draws, so seeds still reproduce). |
+| `--in-range` | off | `memory` strategy: every memory index in range. |
+
+`--verilator --no-x --in-range --strategy memory` makes Verilator a usable
+second oracle for memories: it is 2-state (an x write index becomes 0 and
+writes a word the reference leaves alone) and wraps an out-of-range write
+onto a valid word, both of which otherwise diverge the memory state.
+Remaining known Verilator deviation: an unsized decimal >= 2**31
+(`2147483648`) is sign-extended into a 64-bit destination.
 
 If neither `--max` nor `--hours` is specified, the fuzzer runs until interrupted.
 
 ## What It Generates
 
-The fuzzer uses **seven module strategies**, chosen randomly with weights
+The fuzzer uses **ten module strategies**, chosen randomly with weights
 favoring simpler shapes:
 
 | Strategy | Description |
@@ -62,6 +72,13 @@ favoring simpler shapes:
 | **nested_blocks** | Deeply nested `begin/end` with local variables |
 | **mixed** | Random mix of assigns + always blocks + internal nets |
 | **hierarchical** | Flat child module + parent module + an `Instance` connecting them |
+| **with_functions** | User functions (calling earlier ones) used in expressions |
+| **with_tasks** | Tasks with output ports plus an impure function, clocked |
+| **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array, >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
+
+Separately, `tests/test_fuzz/test_syntax_variants.py` re-emits fuzz designs
+with an `EmitStyle` (old-style ports, `@*`, `,` sensitivity lists, redundant
+parentheses, re-spelled literals) and checks the parser reads them the same.
 
 Each module gets random signal widths (biased toward edge cases: 1, 8, 16,
 32, 63, 64, 65, 80, 127, 128), random signedness, random types (each

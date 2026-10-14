@@ -1313,6 +1313,7 @@ class Module:  # cm:2b9e4c
         *,
         role: str = "master",
         reg: bool = False,
+        init: int | dict[str, int] | None = None,
     ) -> BoundInterface:
         """Bind an interface to this module, creating prefixed ports.
 
@@ -1326,6 +1327,10 @@ class Module:  # cm:2b9e4c
             role:   ``"master"`` or ``"slave"`` — determines port directions.
             reg:    If ``True``, output signals use ``output_reg`` instead
                     of ``output``.
+            init:   Initial value of the output regs (requires ``reg=True``):
+                    one value for all of them, or a dict by signal name
+                    (e.g. ``{"tvalid": 0, "tready": 1}``); signals left out
+                    of the dict get no initial value.
 
         Returns:
             A :class:`BoundInterface` with attribute access to individual
@@ -1349,13 +1354,21 @@ class Module:  # cm:2b9e4c
         # M23: duplicate interface prefix
         if prefix in self._interfaces:
             raise ValueError(f"Interface prefix '{prefix}' already bound in module '{self._name}'")
+        if init is not None and not reg:
+            raise ValueError("interface init= needs reg=True")
+        if isinstance(init, dict):
+            outputs = {isig.name for isig in intf._signals if isig.src == role}
+            unknown = set(init) - outputs
+            if unknown:
+                raise ValueError(f"interface init= names {sorted(unknown)}, not output signals of '{prefix}'")
         signals: dict[str, Signal] = {}
         for isig in intf._signals:
             port_name = f"{prefix}_{isig.name}"
             is_output = isig.src == role
             if is_output:
                 if reg:
-                    sig = self.output_reg(port_name, width=isig.width, signed=isig.signed)
+                    sig_init = init.get(isig.name) if isinstance(init, dict) else init
+                    sig = self.output_reg(port_name, width=isig.width, signed=isig.signed, init=sig_init)
                 else:
                     sig = self.output(port_name, width=isig.width, signed=isig.signed)
             else:

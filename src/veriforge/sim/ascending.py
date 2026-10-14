@@ -478,8 +478,8 @@ def lower_signed_indices(module: Module) -> Module:
     (-1) reads x and writes nowhere (Icarus agrees). The engines took the
     index's bits at its own width -- 3 -- and read/wrote ``m[3]``. Sign
     extended to 32 bits it is far out of range, which every engine already
-    handles. Runs last of the index passes (rebased/flattened indices are
-    already 32 bits).
+    handles. Runs first of the index passes (rebasing works modulo 2**32,
+    and flattening's range checks need the truncated value).
     """
     from veriforge.semantics import expr_signed, expr_width  # noqa: PLC0415
     from veriforge.sim.sv_functions import _declarations  # noqa: PLC0415
