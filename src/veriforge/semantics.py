@@ -19,7 +19,7 @@ always unsigned regardless of the sliced signal's own declared signedness).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 
 from .model.base import VerilogNode
 from .model.expressions import (
@@ -478,6 +478,7 @@ def expr_signed(
     expr: Expression,
     signed_of: Callable[[str], bool],
     function_signed: Callable[[str], bool] | None = None,
+    signed_memories: Collection[str] = frozenset(),
 ) -> bool:
     """Whether *expr* is a fully signed expression per IEEE 1364-2005 §5.5.
 
@@ -498,6 +499,10 @@ def expr_signed(
         return signed_of(name)
     if isinstance(expr, Literal):
         return expr.signed
+    if isinstance(expr, BitSelect) and isinstance(expr.target, Identifier) and signed_memories:
+        target = ".".join([*expr.target.hierarchy, expr.target.name]) if expr.target.hierarchy else expr.target.name
+        if target in signed_memories:
+            return True  # an element of a signed memory (`signed_memory_names`)
     if isinstance(expr, (BitSelect, RangeSelect, PartSelect)):
         return False
     if isinstance(expr, UnaryOp):
@@ -505,20 +510,20 @@ def expr_signed(
             return False
         if expr.op in _ONE_BIT_UNARY:
             return False
-        return expr_signed(expr.operand, signed_of, function_signed)
+        return expr_signed(expr.operand, signed_of, function_signed, signed_memories)
     if isinstance(expr, BinaryOp):
         if expr.op in _LEFT_WIDTH_BINARY or expr.op == "**":
             # `**` too: its result takes the base's signedness, as Icarus
             # and every engine's own evaluation do (`3'(s ** 2'd1)` of a
             # signed `s` sign-extends).
-            return expr_signed(expr.left, signed_of, function_signed)
+            return expr_signed(expr.left, signed_of, function_signed, signed_memories)
         if expr.op in _ONE_BIT_BINARY:
             return False
-        return expr_signed(expr.left, signed_of, function_signed) and expr_signed(
+        return expr_signed(expr.left, signed_of, function_signed, signed_memories) and expr_signed(
             expr.right, signed_of, function_signed
         )
     if isinstance(expr, TernaryOp):
-        return expr_signed(expr.true_expr, signed_of, function_signed) and expr_signed(
+        return expr_signed(expr.true_expr, signed_of, function_signed, signed_memories) and expr_signed(
             expr.false_expr, signed_of, function_signed
         )
     if isinstance(expr, (Concatenation, Replication)):
@@ -526,12 +531,12 @@ def expr_signed(
     if isinstance(expr, FunctionCall):
         name = expr.name.lower()
         if name == "$__2state" and expr.arguments:
-            return expr_signed(expr.arguments[0], signed_of, function_signed)
+            return expr_signed(expr.arguments[0], signed_of, function_signed, signed_memories)
         if name.startswith("$"):
             return name == "$signed"
         return function_signed(expr.name) if function_signed is not None else False
     if isinstance(expr, WidthCast):
-        return expr_signed(expr.operand, signed_of, function_signed)
+        return expr_signed(expr.operand, signed_of, function_signed, signed_memories)
     return False
 
 
@@ -558,6 +563,16 @@ _PURE_SYSTEM_FUNCTIONS = frozenset(
         "$right",
     }
 )
+
+
+def signed_memory_names(module: object) -> frozenset[str]:
+    """Names of *module*'s signed memories (`reg signed [7:0] m [0:3]`,
+    `byte m [0:3]`): an element of one is signed -- unlike a bit or part
+    select, which is always unsigned. Every engine read `m[i]` as unsigned."""
+    decls = [*getattr(module, "ports", ()), *getattr(module, "nets", ()), *getattr(module, "variables", ())]
+    return frozenset(
+        d.name for d in decls if d.signed and len(getattr(d, "dimensions", ())) > getattr(d, "packed_dim_count", 0)
+    )
 
 
 def has_impure_call(node: object) -> bool:

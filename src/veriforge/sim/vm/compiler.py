@@ -56,7 +56,7 @@ from veriforge.model.statements import (
 )
 
 from ...semantics import const_int as _const_int
-from ...semantics import has_impure_call
+from ...semantics import has_impure_call, signed_memory_names
 from ..evaluator import evaluate_constant
 from ..readmem import BASE_ARG
 from ...model.functions import unranged_return_width
@@ -147,6 +147,7 @@ class Compiler:  # cm:8c1e4a
         "_memory_bases",
         "_param_env",
         "_signal_bases",
+        "_signed_memories",
         "_struct_signal_types",
         "_struct_type_map",
         "_task_map",
@@ -402,6 +403,7 @@ class Compiler:  # cm:8c1e4a
         self._function_map: dict[str, object] = {f.name: f for f in module.functions}
         self._task_map: dict[str, object] = {t.name: t for t in module.tasks}
         self._func_call_depth: int = 0
+        self._signed_memories = signed_memory_names(module)
         self._register_signals(module)
         self._compile_continuous_assigns(module)
         self._compile_always_blocks(module)
@@ -1638,7 +1640,7 @@ class Compiler:  # cm:8c1e4a
             # ones using streaming concatenation), so raising it is a
             # blanket memory/performance cost for all vm-fast users to fix
             # one narrow, avoidable-by-erroring construct -- the same
-            # "raise clearly instead" choice already made for the
+            # "raise clearly instead" choice once made for the
             # `slice_size > 64` case just below, and for the whole-memory-
             # ternary case elsewhere in this file (see its own comment).
             # (2026-10-09: no longer raises -- a combined width over that
@@ -1659,15 +1661,11 @@ class Compiler:  # cm:8c1e4a
             if slice_size <= 0:
                 raise ValueError(f"Streaming concatenation slice_size must be positive, got {slice_size}")
             if slice_size > 64:
-                # Would need multi-word chunk extraction in the Cython
-                # vm-fast interpreter's fixed-width word-array
-                # representation; `vm`/`reference` have no such limit
-                # (Value.stream_reverse is arbitrary-precision), but the
-                # bytecode is shared across `vm`/`vm-fast` and must behave
-                # identically on both.
-                raise NotImplementedError(
-                    f"Streaming concatenation slice_size > 64 is not supported (got {slice_size})"
-                )
+                # vm-fast's OP_STREAM_REVERSE extracts each chunk as one
+                # 64-bit word, so the design runs on the Python interpreter
+                # (`Value.stream_reverse` is arbitrary-precision). It used to
+                # raise NotImplementedError.
+                self.exceeds_fast_width = True
             program.append(instr(Op.STREAM_REVERSE, slice_size))
             if width:
                 program.append(instr(Op.SIGN_EXT if signed_override else Op.RESIZE, width, 0))
@@ -1687,6 +1685,11 @@ class Compiler:  # cm:8c1e4a
                 mid = self.mem_map[self._resolve_id_name(expr.target)]
                 self._compile_expr(expr.index, program)
                 program.append(instr(Op.LOAD_MEM, mid))
+                if width:
+                    # A word: the element's signedness (was always zero-extended).
+                    elem_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                    program.append(instr(Op.SIGN_EXT if elem_signed else Op.RESIZE, width, 0))
+                return
             else:
                 self._compile_expr(expr.target, program)
                 self._compile_expr(expr.index, program)
@@ -2852,6 +2855,13 @@ class Compiler:  # cm:8c1e4a
 
         elif etype is Literal:
             result = expr.signed
+
+        elif (
+            etype is BitSelect
+            and type(expr.target) is Identifier
+            and (self._resolve_id_name(expr.target) in getattr(self, "_signed_memories", ()))
+        ):
+            result = True  # a signed memory's element (not a bit select)
 
         elif etype in (BitSelect, RangeSelect, PartSelect):
             # Always unsigned (§5.5.1), regardless of the target's declared

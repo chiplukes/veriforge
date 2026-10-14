@@ -357,7 +357,14 @@ class _ProcessCompilerMixin:
                     if rhs_mid is not None:
                         rhs_elem_w, _depth = self._mem_info[rhs_mid]
                         mem_access = self._resolve_memory_element_access(assign.rhs)
-                        if (lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS) and mem_access is not None:
+                        # (This copy zero-extends; a signed memory's word
+                        # into a wider net takes the general sign-extending path.)
+                        sign_extends = rhs_elem_w < lhs_w and rhs_name in self._signed_memories
+                        if (
+                            (lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS)
+                            and mem_access is not None
+                            and not sign_extends
+                        ):
                             # (Bounds-checked: an out-of-range/x address reads
                             # the x spare slot; it read past the array.)
                             idx = mem_access[1]

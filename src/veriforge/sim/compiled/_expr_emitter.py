@@ -401,7 +401,14 @@ class _ExprEmitterMixin:
             mem_access = self._resolve_memory_element_access(expr)
             if mem_access is not None:
                 mid, idx, _name, _indices = mem_access
-                return f"c.mem_{mid}_val[({idx})]"
+                val = f"c.mem_{mid}_val[({idx})]"
+                elem_w = self._mem_info[mid][0]
+                # The element's signedness (a signed memory's word was always
+                # zero-extended), as for an Identifier.
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if width > elem_w and eff_signed:
+                    val = f"_sign_ext({val}, {elem_w})"
+                return val
             if isinstance(expr.target, Identifier):
                 tname = self._identifier_name(expr.target)
                 sid = self._signal_map.get(tname)
@@ -2649,11 +2656,8 @@ class _ExprEmitterMixin:
         """Resolve `expr.slice_size` to a compile-time int (default 1).
 
         Mirrors `sim/vm/compiler.py`'s identical resolution -- slice_size
-        must be a constant_expression per the grammar, and the wide path
-        below (via `_wide_emitter.py`'s scratch-buffer chunk copies) is
-        only exercised for slice_size <= 64, matching the `vm`/`vm-fast`
-        restriction (kept consistent across all engines even though a
-        pure-Python engine like `reference` has no such limit).
+        must be a constant_expression per the grammar. Any size works (the
+        wide path's chunk copies are multi-word).
         """
         slice_size = 1
         if expr.slice_size is not None:
@@ -3361,6 +3365,13 @@ class _ExprEmitterMixin:
 
         elif etype is Literal:
             result = expr.signed
+
+        elif (
+            etype is BitSelect
+            and isinstance(expr.target, Identifier)
+            and (self._identifier_name(expr.target) in getattr(self, "_signed_memories", ()))
+        ):
+            result = True  # a signed memory's element (not a bit select)
 
         elif etype in (BitSelect, RangeSelect, PartSelect):
             # Always unsigned (§5.5.1), regardless of the target's declared

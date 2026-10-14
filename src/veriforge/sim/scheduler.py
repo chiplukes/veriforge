@@ -352,6 +352,8 @@ class Scheduler:  # cm:9a7f2c
                     mem_data = [Value.x(elem_width) for _ in range(depth)]
                     self.ctx._memories[net.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(net.name)
+                    if net.signed:
+                        self.ctx._signal_signed[net.name] = True  # (its elements are signed)
                     continue
             if lsb != 0:
                 self.ctx._signal_bases[net.name] = lsb
@@ -381,6 +383,8 @@ class Scheduler:  # cm:9a7f2c
                     mem_data = [init for _ in range(depth)]
                     self.ctx._memories[var.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(var.name)
+                    if var.signed:
+                        self.ctx._signal_signed[var.name] = True  # (its elements are signed)
                     continue
             if lsb != 0:
                 self.ctx._signal_bases[var.name] = lsb
@@ -415,6 +419,8 @@ class Scheduler:  # cm:9a7f2c
                     mem_data = [Value.x(elem_width) for _ in range(depth)]
                     self.ctx._memories[port.name] = (mem_data, elem_width)
                     self.ctx._memory_names.add(port.name)
+                    if port.signed:
+                        self.ctx._signal_signed[port.name] = True  # (its elements are signed)
                     continue
             if getattr(port, "dimensions", None):
                 if lsb != 0:

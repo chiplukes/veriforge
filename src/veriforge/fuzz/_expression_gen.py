@@ -314,17 +314,14 @@ class ExpressionGenerator:
         if direction == ">>":
             return Concatenation(parts)
 
-        # A slice_size > 64 hits an explicit, intentional limitation in both
-        # the vm compiler and the compiled engine's wide emitter
-        # ("Streaming concatenation slice_size > 64 is not supported") --
-        # confirmed directly. Any declared parameter is only a candidate
-        # slice_size if its own constant VALUE happens to already fall in
-        # the legal range; most won't (params are generated with the same
+        # Any declared parameter whose constant VALUE is a legal slice_size
+        # is a candidate; most won't be (params are generated with the same
         # wide-edge-case-biased widths/values as everything else), so this
-        # is usually just a plain literal.
+        # is usually just a plain literal. (A slice_size above 64 used to be
+        # rejected by vm/compiled; it isn't since 2026-10-13.)
         # (By its value as declared: `parameter signed [1:0] p = 2'sd2` is
         # -2, an illegal slice size, which the engines read differently.)
-        safe_params = [p for p in self._ctx.parameters if p.value is not None and 1 <= _declared_value(p) <= 64]
+        safe_params = [p for p in self._ctx.parameters if p.value is not None and 1 <= _declared_value(p) <= 4096]
 
         slice_size: Expression | None
         roll = rng.random()
@@ -332,7 +329,7 @@ class ExpressionGenerator:
             # No slice_size -- bit-level stream, the common case.
             slice_size = None
         elif roll < 0.7 or not safe_params:
-            slice_size = Literal(rng.choice((1, 2, 4, 8)), width=32, base="d", signed=False)
+            slice_size = Literal(rng.choice((1, 2, 4, 8, 8, 65, 100)), width=32, base="d", signed=False)
         else:
             # A declared parameter is a valid constant-expression slice_size
             # (unlike a wire/reg, which IEEE 1800 disallows here).

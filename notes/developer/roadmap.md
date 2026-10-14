@@ -303,7 +303,10 @@ edits. Remaining fallback cases still re-emit the full module:
   mismatches; cross-engine comparison (reference vs vm/vm-fast/compiled)
   is unaffected and still runs for these modules.
 - **Streaming-concat slice_size > 64 rejected only by vm/compiled, not
-  reference/vm-fast** — `_streaming_concat` in the fuzzer's expression
+  reference/vm-fast — Fixed 2026-10-13** (limit lifted: compiled's wide
+  chunk copies were already multi-word; a vm design with one runs on the
+  Python interpreter; the generator now offers 65/100 and params up to
+  4096) — `_streaming_concat` in the fuzzer's expression
   generator (added alongside the streaming-concat fuzzing round above) hit
   this directly: a declared parameter used as slice_size can carry any
   value (params are generated with the same edge-case-biased widths as

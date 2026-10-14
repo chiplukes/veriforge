@@ -78,6 +78,7 @@ from veriforge.sim.compiled._stmt_emitters import _StmtEmittersMixin
 from veriforge.sim.compiled._wide_emitter import _WideEmitterMixin
 from veriforge.sim.value import Value
 from veriforge.semantics import range_width as _range_width
+from veriforge.semantics import signed_memory_names
 from veriforge.semantics import var_width as _var_width
 
 if TYPE_CHECKING:
@@ -234,6 +235,7 @@ class CythonCodegen(
         "_signal_names",
         "_signal_signed",
         "_signal_widths",
+        "_signed_memories",
         "_struct_signal_types",
         "_struct_type_map",
         "_task_map",
@@ -1703,6 +1705,7 @@ class CythonCodegen(
     def generate(self, module: Module, *, delta_limit: int = 10_000) -> str:
         """Generate a complete .pyx source string for *module*."""
         self._module = module
+        self._signed_memories = signed_memory_names(module)
         self._delta_limit = delta_limit
 
         # Check for unsupported constructs before codegen
@@ -1761,6 +1764,7 @@ class CythonCodegen(
         import hashlib
 
         self._module = module
+        self._signed_memories = signed_memory_names(module)
         self._delta_limit = delta_limit
 
         if module.instances:
@@ -1889,6 +1893,7 @@ class CythonCodegen(
         import os
 
         self._module = module
+        self._signed_memories = signed_memory_names(module)
         self._delta_limit = delta_limit
 
         if module.instances:

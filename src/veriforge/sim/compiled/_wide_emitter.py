@@ -3972,7 +3972,10 @@ class _WideEmitterMixin:
                     else:
                         lines.append(f"{pad}_sc{slot}_v[{wi}] = {v_expr}")
                         lines.append(f"{pad}_sc{slot}_m[{wi}] = {m_expr}")
-                if signed_override and elem_w < dst_width:
+                # (The element's signedness when not overridden: a signed
+                # memory's word was always zero-extended.)
+                elem_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if elem_signed and elem_w < dst_width:
                     lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(elem_w), indent))
                 return lines
             val_expr = self._emit_expr(expr, 1)
@@ -5340,12 +5343,6 @@ class _WideEmitterMixin:
         if et is StreamingConcatenation:
             slice_size = self._stream_reverse_slice_size(expr)
             total_w = sum(self._expr_width(p) for p in expr.parts)
-            if slice_size > 64:
-                # Matches the vm/vm-fast restriction (chunk extraction
-                # below is one wide_slice_extract call per chunk, each
-                # sized <= slice_size bits) -- kept consistent across
-                # engines even though `reference` has no such limit.
-                return None
             inner = Concatenation(parts=expr.parts)
             islot = self._alloc_scratch()
             ilines = self._emit_wide_expr_to_scratch(inner, islot, n_words, total_w, indent)

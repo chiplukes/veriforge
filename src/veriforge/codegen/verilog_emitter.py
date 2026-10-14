@@ -11,12 +11,15 @@ Phase 5: functions, tasks, generate constructs, specify blocks.
 
 from __future__ import annotations
 
+import copy
+import itertools
 import random
 import re
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..model.assignments import ContinuousAssign
 from ..model.base import Comment, VerilogNode
@@ -80,7 +83,7 @@ from ..model.statements import (
     WaitStatement,
     WhileLoop,
 )
-from ..model.variables import INTEGER_ATOM_WIDTHS, SIGNED_KINDS, Variable
+from ..model.variables import INTEGER_ATOM_WIDTHS, SIGNED_KINDS, Variable, VariableKind
 
 
 @dataclass
@@ -97,6 +100,13 @@ class EmitStyle:
     extra_parens: bool = False  # parenthesize every binary/ternary operand
     literal_rng: random.Random | None = None  # re-spell literals (base, `_`, case)
     positional_connections: bool = False  # instance ports/parameters by position (needs linked instances)
+    else_begin_if: bool = False  # `else begin if ... end` (else `else if`)
+    named_blocks: bool = False  # label every unnamed `begin` (`begin : vfbN`)
+    generate_region: bool = False  # wrap a module's generate constructs in `generate`/`endgenerate`
+    net_decl_assign: bool = False  # `wire w = e;` for a net's only `assign w = e;`
+    for_var_outside: bool = False  # `begin int i; for (i = 0; ...) ... end` (else `for (int i = 0; ...)`)
+    case_rng: random.Random | None = None  # merge equal-bodied case items, add unreachable values
+    _block_ids: Iterator[int] = field(default_factory=itertools.count, repr=False)
 
 
 _STYLE: ContextVar[EmitStyle | None] = ContextVar("verilog_emit_style", default=None)
@@ -237,7 +247,10 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
         body_items.append(_emit_typedef(td, indent))
 
     # Nets
+    folded = _net_decl_assigns(module) if _style().net_decl_assign else {}
     for n in module.nets:
+        if n.name in folded:
+            continue  # (declared where its assign was)
         if emit_comments:
             body_items.extend(_emit_leading_comments(n, indent))
         body_items.extend(_emit_attributes(n, indent))
@@ -264,7 +277,11 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
         body_items.append(item)
 
     # Continuous assigns
+    folded_ids = {id(ca): net for net, ca in folded.values()}
     for ca in module.continuous_assigns:
+        if id(ca) in folded_ids:
+            body_items.append(_emit_net(folded_ids[id(ca)], indent, ca.rhs))
+            continue
         if emit_comments:
             body_items.extend(_emit_leading_comments(ca, indent))
         item = _emit_continuous_assign(ca, indent)
@@ -314,11 +331,17 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
         body_items.append(_emit_task_decl(tk, indent, indent))
 
     # Generate constructs
+    region = _style().generate_region and module.generate_blocks
+    if region:
+        body_items.append("")
+        body_items.append(f"{indent}generate")
     for gb in module.generate_blocks:
         if emit_comments:
             body_items.extend(_emit_leading_comments(gb, indent))
         body_items.append("")  # blank line before generate
         body_items.append(_emit_generate_construct(gb, indent, indent))
+    if region:
+        body_items.append(f"{indent}endgenerate")
 
     # Specify blocks
     for sb in module.specify_blocks:
@@ -627,6 +650,9 @@ def _emit_port(port: Port) -> str:
         # `byte`/`int`/...: fixed width, signed unless `unsigned`.
         if not port.signed:
             parts.append("unsigned")
+    elif port.data_type == "time":
+        if port.signed:
+            parts.append("signed")  # (`time`: 64 bits, unsigned by default; no range)
     else:
         if port.signed:
             parts.append("signed")
@@ -639,8 +665,34 @@ def _emit_port(port: Port) -> str:
     return " ".join(parts)
 
 
-def _emit_net(net: Net, indent: str) -> str:
-    """Emit a net declaration."""
+def _net_decl_assigns(module: Module) -> dict[str, tuple[Net, ContinuousAssign]]:
+    """The nets declared with a declaration assignment instead of their
+    `assign w = e;` (`EmitStyle.net_decl_assign`): the net's only continuous
+    assign, whose RHS reads only names declared before it -- the declaration
+    goes where the assign was, after the other declarations (Icarus rejects
+    a declaration assignment reading a later-declared reg)."""
+    nets = {n.name: n for n in module.nets if not n.dimensions and n.initial_value is None}
+    counts = Counter(ca.lhs.name for ca in module.continuous_assigns if isinstance(ca.lhs, Identifier))
+    candidates = {
+        ca.lhs.name
+        for ca in module.continuous_assigns
+        if isinstance(ca.lhs, Identifier) and not ca.lhs.hierarchy and ca.lhs.name in nets and counts[ca.lhs.name] == 1
+    }
+    declared = {p.name for p in module.ports} | {p.name for p in module.parameters}
+    declared |= {v.name for v in module.variables} | {n.name for n in module.nets if n.name not in candidates}
+    folded: dict[str, tuple[Net, ContinuousAssign]] = {}
+    for ca in module.continuous_assigns:
+        if not isinstance(ca.lhs, Identifier) or ca.lhs.name not in candidates:
+            continue
+        ids = [node for node in ca.rhs.walk() if isinstance(node, Identifier)]
+        if all(not i.hierarchy and i.name in declared for i in ids):
+            folded[ca.lhs.name] = (nets[ca.lhs.name], ca)
+            declared.add(ca.lhs.name)
+    return folded
+
+
+def _emit_net(net: Net, indent: str, assign_rhs: Expression | None = None) -> str:
+    """Emit a net declaration (with *assign_rhs* as a declaration assignment)."""
     parts = [f"{indent}{net.kind.value}"]
     if net.signed:
         parts.append("signed")
@@ -650,7 +702,10 @@ def _emit_net(net: Net, indent: str) -> str:
     if net.dimensions:
         for dim in net.dimensions:
             parts.append(_emit_range(dim))
-    if net.initial_value and not net.dimensions:
+    if assign_rhs is not None:
+        parts.append("=")
+        parts.append(emit_expression(assign_rhs))
+    elif net.initial_value and not net.dimensions:
         # Array/memory nets can't take an inline initializer in Verilog --
         # only scalar/vector nets can. Any runtime default for an array is
         # established elsewhere (e.g. synchronous reset logic); silently
@@ -1068,8 +1123,9 @@ def _emit_seq_block(stmt: SeqBlock, indent: str, current_indent: str, prefix: st
     lines: list[str] = []
 
     header = f"{prefix}begin"
-    if stmt.name:
-        header += f" : {stmt.name}"
+    name = stmt.name or (f"vfb{next(_style()._block_ids)}" if _style().named_blocks else None)
+    if name:
+        header += f" : {name}"
     lines.append(header)
 
     for local_var in stmt.local_vars:
@@ -1132,7 +1188,10 @@ def _emit_if_statement(stmt: IfStatement, indent: str, current_indent: str, pref
             lines.append(_emit_statement(stmt.then_body, indent, inner_indent))
 
     if stmt.else_body:
-        if isinstance(stmt.else_body, IfStatement):
+        if isinstance(stmt.else_body, IfStatement) and _style().else_begin_if:
+            lines.append(f"{current_indent}else")
+            lines.append(_emit_statement(SeqBlock([stmt.else_body]), indent, current_indent))
+        elif isinstance(stmt.else_body, IfStatement):
             # else if chain
             lines.append(f"{current_indent}else " + _emit_statement_inline(stmt.else_body, indent, current_indent))
         elif isinstance(stmt.else_body, SeqBlock):
@@ -1151,11 +1210,39 @@ def _emit_case_statement(stmt: CaseStatement, indent: str, current_indent: str, 
     inner_indent = current_indent + indent
 
     lines.append(f"{prefix}{stmt.case_type} ({emit_expression(stmt.expression)})")
-    for item in stmt.items:
+    case_rng = _style().case_rng
+    items = _respell_case_items(stmt.items, case_rng) if case_rng is not None else stmt.items
+    for item in items:
         lines.append(_emit_case_item(item, indent, inner_indent))
     lines.append(f"{current_indent}endcase")
 
     return "\n".join(lines)
+
+
+def _respell_case_items(items: list[CaseItem], rng: random.Random) -> list[CaseItem]:
+    """Equivalent case items (`EmitStyle.case_rng`): merge adjacent items
+    with the same body, and add an earlier item's value to a later item
+    (where it can never match: the earlier item matches first)."""
+    out: list[CaseItem] = []
+    earlier: list[Expression] = []
+    with emit_style(EmitStyle()):
+        bodies = [_emit_statement(item.body, "  ", "") if item.body else "" for item in items]
+    prev_body = None
+    for item, body in zip(items, bodies):
+        if item.is_default:
+            out.append(item)
+            prev_body = None
+            continue
+        values = list(item.values)
+        if earlier and rng.random() < 0.4:
+            values.insert(rng.randint(0, len(values)), rng.choice(earlier))
+        if prev_body == body and rng.random() < 0.8:
+            out[-1] = CaseItem(out[-1].values + values, item.body)
+        else:
+            out.append(CaseItem(values, item.body))
+        prev_body = body
+        earlier.extend(item.values)
+    return out
 
 
 def _emit_case_item(item: CaseItem, indent: str, current_indent: str) -> str:
@@ -1178,6 +1265,13 @@ def _emit_case_item(item: CaseItem, indent: str, current_indent: str) -> str:
 
 def _emit_for_loop(stmt: ForLoop, indent: str, current_indent: str, prefix: str) -> str:
     """Emit for loop."""
+    if stmt.declares_var and _style().for_var_outside and isinstance(stmt.init.lhs, Identifier):
+        # (A block-local variable, not the enclosing scope's: the loop's
+        # own variable may shadow one there.)
+        loop = copy.copy(stmt)
+        loop.declares_var = False
+        var = Variable(stmt.init.lhs.name, VariableKind.INT, signed=stmt.signed_var)
+        return _emit_seq_block(SeqBlock([loop], local_vars=[var]), indent, current_indent, prefix)
     init = f"{emit_expression(stmt.init.lhs)} = {emit_expression(stmt.init.rhs)}"
     if stmt.declares_var:
         # `for (int i = ...)`: the loop's own variable. It used to be dropped,

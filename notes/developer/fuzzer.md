@@ -77,8 +77,12 @@ favoring simpler shapes:
 | **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array, >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
 
 Separately, `tests/test_fuzz/test_syntax_variants.py` re-emits fuzz designs
-with an `EmitStyle` (old-style ports, `@*`, `,` sensitivity lists, redundant
-parentheses, re-spelled literals) and checks the parser reads them the same.
+with an `EmitStyle` and checks the parser reads them the same. Old-style
+ports, `@*`, `,` sensitivity lists, redundant parentheses and a
+`generate`/`endgenerate` region must re-emit identically. Re-spelled literals,
+positional instance connections, `else begin if`, named blocks, net
+declaration assignments, a block-local `for` variable and re-grouped case
+items change the model, so those must simulate the same.
 
 Each module gets random signal widths (biased toward edge cases: 1, 8, 16,
 32, 63, 64, 65, 80, 127, 128), random signedness, random types (each

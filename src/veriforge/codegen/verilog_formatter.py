@@ -853,6 +853,9 @@ class VerilogFormatter:
             # `byte`/`int`/...: fixed width, signed unless `unsigned`.
             if not port.signed:
                 parts.append("unsigned")
+        elif port.data_type == "time":
+            if port.signed:
+                parts.append("signed")  # (`time`: 64 bits, unsigned by default; no range)
         else:
             if port.signed:
                 parts.append("signed")

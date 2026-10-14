@@ -1140,6 +1140,14 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 else:
                     _mem_data, elem_w = ctx._memories[target_name]
                     result = Value.x(elem_w)
+                if width and result.width < width:
+                    # The element's own signedness (a signed memory's word is
+                    # signed; it was always zero-extended).
+                    elem_signed = (
+                        signed_override if signed_override is not None else ctx._signal_signed.get(target_name, False)
+                    )
+                    return result.sign_extend(width) if elem_signed else result.resize(width)
+                return result
             else:
                 target = self.eval(expr.target, ctx)
                 index = self.eval(expr.index, ctx)
@@ -1841,6 +1849,14 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[Expression, boo
         return result
 
     # -- BitSelect / RangeSelect / PartSelect: always unsigned (§5.5.1) ---
+    # -- except a memory word select, which is the element (its signedness)
+    if etype is BitSelect and type(expr.target) is Identifier:
+        name = _identifier_name(expr.target)
+        if name in ctx._memory_names:
+            result = ctx._signal_signed.get(name, False)
+            if cache is not None:
+                cache[expr] = result
+            return result
     if etype in (BitSelect, RangeSelect, PartSelect):
         if cache is not None:
             cache[expr] = False

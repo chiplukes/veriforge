@@ -15,7 +15,7 @@ from ..model.package import ImportDecl
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
 from ..model.sv_types import EnumMember, EnumType, StructField, StructType, TypedefDecl, UnionType
-from ..model.variables import Variable, VariableKind
+from ..model.variables import INTEGER_ATOM_WIDTHS, Variable, VariableKind
 from ._tree_utils import _collect_text, _loc_from_tree
 
 _DIMENSION_RANGE_EXPR_COUNT = 2
@@ -851,6 +851,10 @@ def _extract_net_decl_assignment(
     return name, expr
 
 
+_PORT_ATOM_TOKENS = frozenset({"KW_BYTE", "KW_SHORTINT", "KW_INT", "KW_LONGINT", "KW_INTEGER", "KW_TIME"})
+_PORT_ATOM_WIDTHS = {**INTEGER_ATOM_WIDTHS, "time": 64}
+
+
 def _extract_port_declaration(  # noqa: PLR0912
     tree: Tree,
     source_file: str | None,
@@ -880,15 +884,20 @@ def _extract_port_declaration(  # noqa: PLR0912
             port_items: list[tuple[str, list[Range], Expression | None]] = []
             loc = _loc_from_tree(child, source_file)
 
+            explicit_unsigned = False
             for item in child.children:
                 if isinstance(item, Token):
                     if item.type == "KW_REG":
                         data_type = "reg"
                     elif item.type == "KW_SIGNED":
                         signed = True
+                    elif item.type == "KW_UNSIGNED":
+                        explicit_unsigned = True
+                    elif item.type in _PORT_ATOM_TOKENS:
+                        data_type = str(item)
                     elif item.type in ("PORT_IDENTIFIER", "NET_IDENTIFIER"):
                         port_items.append((str(item), [], None))
-                    elif item.type == "IDENTIFIER":
+                    elif item.type in ("IDENTIFIER", "PORT_TYPE_IDENTIFIER"):
                         data_type = str(item)
                 elif isinstance(item, Tree):
                     if item.data == "net_type":
@@ -916,6 +925,14 @@ def _extract_port_declaration(  # noqa: PLR0912
 
             width = packed_ranges[-1] if packed_ranges else None
             extra_packed_dims = packed_ranges[:-1] if len(packed_ranges) > 1 else []
+            atom_width = _PORT_ATOM_WIDTHS.get(data_type or "")
+            if atom_width is not None:
+                # `input byte a`: 8 bits, signed unless `unsigned` (`time`:
+                # unsigned). It had no width -- every engine read 1 bit,
+                # mostly 0 -- and `output integer y` lost its type entirely.
+                if width is None:
+                    width = Range(Literal(atom_width - 1, width=32), Literal(0, width=32))
+                signed = signed or (data_type != "time" and not explicit_unsigned)
 
             for name, dims, default_value in port_items:
                 # See the identical borrow-one-dim-for-addressing comment

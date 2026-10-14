@@ -114,19 +114,6 @@ engine: `real r = 3.25;` stores the integer `325`. `$display`'s `%e`/`%f`/
 argument's *integer* value, which covers `$time`-style use. Real support
 needs a real-valued representation alongside `Value` in all four engines.
 
-### `byte unsigned` / `shortint unsigned` / `longint unsigned` don't parse
-
-**Status**: Open grammar gap (found 2026-10-09). `int unsigned` parses; the
-other integer atom types reject `unsigned`. Their default signedness
-(signed) is handled.
-
-### 2-state memories start at x
-
-**Status**: Open (found 2026-10-09). 2-state scalars and vectors (`int`,
-`bit [7:0]`, ...) start at 0 and drop x/z on assignment on every engine
-(`sim/sv_functions.py:lower_two_state`), but a 2-state *memory*
-(`byte m [0:3]`) still starts at x.
-
 ### Multi-dimensional array sub-array access not supported
 
 **Status**: Not supported, fails loudly (2026-10-12). `m[0] = m[1]` on
@@ -136,6 +123,12 @@ doesn't support array slices either ("sorry: ... not yet supported").
 Elements (`m[i][j]`), `$readmem` into rebased memories, hierarchical
 references and the Python API (`sim.read("m[4]")`, VCD labels) all use declared
 addresses (fixed 2026-10-12).
+
+### Streaming concatenation as an assignment target
+
+**Status**: Open feature gap (found 2026-10-13). `{<<8{e}} = a;` (IEEE 1800
+11.4.14.3, unpacking) doesn't parse; streaming concatenation is supported
+as an expression only. Icarus rejects the construct entirely.
 
 ## Reference notes (not defects)
 
@@ -257,6 +250,16 @@ IEEE 1800 requires; veriforge does the same (2026-10-10,
 `tests/test_sim/test_integer_atom_types.py`). Not a veriforge bug -- do
 not replicate.
 
+### Icarus: bit/part selects of a signed memory word are signed
+
+For `reg signed [7:0] m [0:1]`, Icarus prints `m[0][7:4]` (and `m[0][7]`)
+of `-2` with `%0d` as `-1`, though the same select of a signed *vector*
+prints 15. IEEE 1800 5.5.1 makes every bit/part select unsigned; Verilator
+prints 15, and so does veriforge (2026-10-13,
+`tests/test_sim/test_signed_memories_and_atom_ports.py`). The memory word
+itself (`m[0]`) is signed on all three. Not a veriforge bug -- do not
+replicate.
+
 ### Icarus: real formats of signed expressions, leading x/X
 
 Two Icarus `$display` quirks the fuzzer works around (veriforge follows
@@ -364,6 +367,9 @@ result of chunking from the LSB end instead, landing the incomplete chunk
 at the MSB end pre-reversal. The evenly-divisible case (`{<<4{...}}` on the
 identical 8-bit operand) gives `00101101` in both -- isolating the gap
 specifically to the ragged case, not streaming concatenation in general.
+(2026-10-13: Verilator also gets `{<<100{n}}` of an 8-bit `n` wrong -- one
+chunk, so the identity -- and an `always @*` assigning `{<<66{a[197:0]}}`,
+an evenly-divided wide stream; both hand-checked against the same rule.)
 
 Since fuzzed slice sizes rarely divide the fuzzed operand width evenly, the
 fuzzer's `--verilator` cross-check skips the whole module whenever any

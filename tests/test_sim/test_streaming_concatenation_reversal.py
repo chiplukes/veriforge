@@ -28,10 +28,9 @@ survives to each engine:
   ``Concatenation`` assembly uses (sim/compiled/_wide_emitter.py).
 
 ``slice_size`` must be a compile-time constant (parameter or numeric
-literal) on every engine; `vm`/`vm-fast`/`compiled` additionally restrict
-it to <= 64 (a chunk itself never spans more than one 64-bit word in
-their fixed-width scratch representations) -- `reference` has no such
-limit, since `Value` is arbitrary-precision.
+literal) on every engine. Any size works (2026-10-13: `vm` and `compiled`
+used to reject a slice_size above 64; a vm design with one now runs on the
+Python interpreter, since vm-fast extracts each chunk as one word).
 """
 
 from __future__ import annotations
@@ -379,3 +378,38 @@ class TestStreamingConcatenationVmFastWideCapacity:
             sim.settle()
             results.append(sim.read("o"))
         assert results[1] == results[0]
+
+
+class TestStreamingConcatenationWideSlices:
+    """slice_size > 64 (expected values from the chunking rule above;
+    Verilator gets `{<<100{n}}` of an 8-bit `n` wrong)."""
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_slice_size_over_64(self, engine):
+        mod = _parse("""
+            module t;
+              reg [199:0] a; reg [7:0] n;
+              wire [199:0] b = {<<100{a}};
+              wire [139:0] d = {<<70{a[139:0]}};
+              wire [7:0] e = {<<100{n}};
+              wire [255:0] f = {<<128{a, {<<8{n}}, 48'h0}};
+              reg [199:0] g;
+              always @* g = {<<66{a[197:0]}};
+              initial begin
+                a = {8'hab, 64'h0123456789abcdef, 64'hfedcba9876543210, 64'h1111222233334444}; n = 8'h1e;
+                #1 $display("%h %h %h %h %h", b, d, e, f, g);
+              end
+            endmodule
+        """)
+        a = 0xAB_0123456789ABCDEF_FEDCBA9876543210_1111222233334444
+        expected = [
+            _stream_reverse(a, 200, 100),
+            _stream_reverse(a & ((1 << 140) - 1), 140, 70),
+            0x1E,
+            _stream_reverse((a << 56) | (0x1E << 48), 256, 128),
+            _stream_reverse(a & ((1 << 198) - 1), 198, 66),
+        ]
+        sim = Simulator(mod, engine=engine)
+        sim.run(max_time=10)
+        widths = (200, 140, 8, 256, 200)
+        assert sim.display_output == [" ".join(f"{v:0{(w + 3) // 4}x}" for v, w in zip(expected, widths))]

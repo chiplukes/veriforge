@@ -453,8 +453,9 @@ parameter_type: KW_INTEGER _signing? | KW_REAL | KW_REALTIME | KW_TIME
 // EXAMPLE: inout wire signed [7:0] data
 // SUPPORT: YES
 inout_declaration: KW_INOUT net_type? KW_SIGNED? range* list_of_port_identifiers
+    | KW_INOUT net_type? _port_atom_type _signing? list_of_port_identifiers
     | KW_INOUT scoped_identifier dimension* list_of_port_identifiers
-    | KW_INOUT IDENTIFIER dimension* list_of_port_identifiers
+    | KW_INOUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
 // BNF: input_declaration ::= input [ net_type ] [ signed ] [ range ]
 //     list_of_port_identifiers
 // PRIORITY: HIGH
@@ -462,8 +463,9 @@ inout_declaration: KW_INOUT net_type? KW_SIGNED? range* list_of_port_identifiers
 // EXAMPLE: input wire signed [7:0] data
 // SUPPORT: YES
 input_declaration: KW_INPUT net_type? KW_SIGNED? range* list_of_port_identifiers
+    | KW_INPUT net_type? _port_atom_type _signing? list_of_port_identifiers
     | KW_INPUT scoped_identifier dimension* list_of_port_identifiers
-    | KW_INPUT IDENTIFIER dimension* list_of_port_identifiers
+    | KW_INPUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
 // BNF: output_declaration ::=
 //     output [ net_type ] [ signed ] [ range ]
 //     list_of_port_identifiers
@@ -479,9 +481,15 @@ input_declaration: KW_INPUT net_type? KW_SIGNED? range* list_of_port_identifiers
 // SUPPORT: YES
 output_declaration: KW_OUTPUT net_type? KW_SIGNED? range* list_of_port_identifiers
 | KW_OUTPUT KW_REG KW_SIGNED? range* list_of_variable_port_identifiers
-| KW_OUTPUT output_variable_type list_of_variable_port_identifiers
+| KW_OUTPUT net_type? _port_atom_type _signing? list_of_variable_port_identifiers
 | KW_OUTPUT scoped_identifier dimension* list_of_port_identifiers
-| KW_OUTPUT IDENTIFIER dimension* list_of_port_identifiers
+| KW_OUTPUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
+
+// Integer atom types (and `time`) on a module port: `input byte unsigned a`
+// didn't parse, and `input byte a` only parsed with `byte` as a type name.
+_port_atom_type: KW_BYTE | KW_SHORTINT | KW_INT | KW_LONGINT | KW_INTEGER | KW_TIME
+// A user type name on a port -- never an integer atom keyword.
+PORT_TYPE_IDENTIFIER: /(?!(?:byte|shortint|int|longint|integer|time|signed|unsigned)(?![a-zA-Z0-9_$]))[a-zA-Z_][a-zA-Z0-9_$]*/
 
 // SECTION: A.2.1.3 Type declarations
 // BNF: event_declaration ::= event list_of_event_identifiers ;
