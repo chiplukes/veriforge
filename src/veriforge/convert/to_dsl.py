@@ -829,6 +829,14 @@ def _emit_port(lines: list[str], port: Port, v: str) -> None:
     # as a bare, typeless `output [7:0] y` -- `output_reg` has no net_type
     # kwarg since a `reg`/`logic`-data_type port can't also carry one.
     net_type_str = f', net_type="{port.net_type}"' if port.net_type else ""
+    if port.data_type in _PORT_ATOM_TYPES:
+        # (`output int y`: its own width; signed unless `unsigned`. It used
+        # to become a plain ranged port -- 4-state, so x where `int` is 0.)
+        width_str = ""
+        extras = extras.replace(", signed=True", "")
+        if port.signed != (port.data_type != "time"):
+            extras += f", signed={port.signed}"
+        net_type_str += f', kind="{port.data_type}"'
 
     if port.direction == PortDirection.INPUT:
         lines.append(f'{name} = {v}.input("{name}"{width_str}{extras}{net_type_str})')
@@ -909,6 +917,7 @@ def _emit_variable(lines: list[str], var: Variable, v: str) -> None:
     lines.append(f'{name} = {v}.reg("{name}"{width_str}{extras})')
 
 
+_PORT_ATOM_TYPES = frozenset({"byte", "shortint", "int", "longint", "integer", "time"})
 _ATOM_KINDS = frozenset(
     {VariableKind.INT, VariableKind.INTEGER, VariableKind.BYTE, VariableKind.SHORTINT, VariableKind.LONGINT}
 )

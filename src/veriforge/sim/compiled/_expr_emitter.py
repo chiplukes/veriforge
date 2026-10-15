@@ -820,8 +820,15 @@ class _ExprEmitterMixin:
             f_signed_override = (
                 None if isinstance(expr.false_expr, BinaryOp) and expr.false_expr.op in ("+", "-", "*") else own_signed
             )
-            true_expr = self._emit_expr(expr.true_expr, width, t_signed_override)
-            false_expr = self._emit_expr(expr.false_expr, width, f_signed_override)
+            # The branches are context-determined (IEEE 5.4.1): evaluated at
+            # the wider of `width` and both branches (`width_mask` below cuts
+            # the result) -- `c ? ~r >> 30 : 40'd0` into 16 bits shifts a
+            # 40-bit `~r` (it shifted a 16-bit one).
+            bw = max(width, tw, fw)
+            if bw > _WORD_BITS:
+                bw = width
+            true_expr = self._emit_expr(expr.true_expr, bw, t_signed_override)
+            false_expr = self._emit_expr(expr.false_expr, bw, f_signed_override)
             cond_mask = self._emit_mask_expr(expr.condition, cond_w)
             # `cond`/`cond_mask` (the latter just above) are only ever
             # consumed downstream (`cond_known1`/`cond_mask_zero`, below)
@@ -883,7 +890,9 @@ class _ExprEmitterMixin:
             # left every bit but bit 0 spuriously looking definite instead
             # of x.
             def _mask_needs_outer_width(branch: Expression) -> bool:
-                if isinstance(branch, BinaryOp) and branch.op in ("+", "-", "*", "/", "%"):
+                # (`**` and the shifts too: `o7[0] ** 2'd3` of an x `o7`
+                # is x in all 16 bits, not just bit 0.)
+                if isinstance(branch, BinaryOp) and branch.op in _CONTEXT_ARITH_OPS:
                     return True
                 # `cond ? 64'd1 : 'bx` -- an unsized x/z literal x-extends
                 # to the context width (Value.is_unsized_xz_literal).
@@ -891,8 +900,8 @@ class _ExprEmitterMixin:
                     return True
                 return bool(isinstance(branch, UnaryOp) and branch.op in ("~", "-"))
 
-            true_mask_w = width if _mask_needs_outer_width(expr.true_expr) else tw
-            false_mask_w = width if _mask_needs_outer_width(expr.false_expr) else fw
+            true_mask_w = bw if _mask_needs_outer_width(expr.true_expr) else tw
+            false_mask_w = bw if _mask_needs_outer_width(expr.false_expr) else fw
             # `_emit_mask_expr` DOES accept `signed_override` (as of the
             # August 2026 correction to its own FunctionCall/$signed
             # handling) -- pass the same `t_signed_override`/
@@ -929,9 +938,9 @@ class _ExprEmitterMixin:
             # the ambiguity was silently dropped from the newly-filled
             # upper bits.
             if own_signed:
-                if width > tw:
+                if bw > tw:
                     true_mask = f"_sign_ext({true_mask}, {tw})"
-                if width > fw:
+                if bw > fw:
                     false_mask = f"_sign_ext({false_mask}, {fw})"
             width_mask = f"wmask({width})"
         if true_expr is None or false_expr is None or cond_mask is None or true_mask is None or false_mask is None:
@@ -2135,6 +2144,11 @@ class _ExprEmitterMixin:
             # (LLONG_MIN / -1).
             neg = f"<long long>(-<unsigned long long>({left}))" if expr.op == "/" else "0"
             core = f"(0 if ({right}) == 0 else ({neg} if ({right}) == -1 else (({left}) {c_op} ({right}))))"
+        elif expr.op in ("+", "-", "*"):
+            # (A C operand: Cython folds `(73) * (2147483647)` as Python
+            # ints, and a result past 32 bits became a Python object --
+            # "Converting to Python object not allowed without gil".)
+            core = f"((<long long>({left})) {c_op} ({right}))"
         else:
             core = f"(({left}) {c_op} ({right}))"
         if expr.op == "^":
@@ -4141,7 +4155,14 @@ class _ExprEmitterMixin:
             mem_access = self._resolve_memory_element_access(expr)
             if mem_access is not None:
                 mid, idx, _name, _indices = mem_access
-                return f"c.mem_{mid}_mask[({idx})]"
+                mask = f"c.mem_{mid}_mask[({idx})]"
+                # A signed word's x sign bit extends like its value (mirrors
+                # `_emit_expr`): the widened bits were read as 0, not x.
+                elem_w = self._mem_info[mid][0]
+                eff_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if width > elem_w and eff_signed:
+                    mask = f"_sign_ext({mask}, {elem_w})"
+                return mask
             if isinstance(expr.target, Identifier):
                 tname = self._identifier_name(expr.target)
                 sid = self._signal_map.get(tname)

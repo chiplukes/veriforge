@@ -41,7 +41,7 @@ from ..model.assignments import ContinuousAssign
 from ..model.generate import GenerateBlock, GenerateFor
 from ..model.nets import Net, NetKind
 from ..model.ports import Port, PortDirection
-from ..model.variables import Variable, VariableKind
+from ..model.variables import INTEGER_ATOM_WIDTHS, Variable, VariableKind
 
 from ._expression_gen import ExpressionGenerator
 from ._runner_marks import DISPLAY_MARK
@@ -118,8 +118,12 @@ class ModuleGenerator:
         Pre-seeded random instance — ensures reproducibility.
     """
 
-    def __init__(self, rng: random.Random, *, memory_in_range: bool = False) -> None:
+    def __init__(self, rng: random.Random, *, memory_in_range: bool = False, x_literals: bool = True) -> None:
         self._rng = rng
+        # False: no x literal anywhere -- for a 2-state oracle (Verilator),
+        # which reads a design's x constant as an arbitrary value; a 2-state
+        # variable or port then turns the reference's x into a "defined" 0.
+        self._x_literals = x_literals
         # MEMORY strategy: every index in range, for an oracle whose
         # out-of-range accesses are implementation-defined (Verilator wraps
         # an out-of-range write onto a valid word).
@@ -162,7 +166,7 @@ class ModuleGenerator:
             Strategy.MEMORY: self._gen_memory,
         }
 
-        expr_gen = ExpressionGenerator(ctx)
+        expr_gen = ExpressionGenerator(ctx, x_literals=self._x_literals)
         stmt_gen = StatementGenerator(ctx, expr_gen)
 
         # Strategy fills the context with signals and body items
@@ -204,7 +208,7 @@ class ModuleGenerator:
 
         for port in mod.ports:
             if port.direction == PortDirection.OUTPUT:
-                if port.name in assign_outputs and port.name not in always_outputs:
+                if port.name in assign_outputs and port.name not in always_outputs and port.data_type == "reg":
                     port.data_type = None
 
         # Similarly for internal nets/variables: signals written only by
@@ -442,6 +446,13 @@ class ModuleGenerator:
         for k in range(rng.randint(1, 2)):
             width = rng.choice((1, 3, 8, 13, 64, 65, 100))
             lsb = rng.choice((0, 0, 0, 4, -2))
+            # Signed words, and 2-state integer-atom arrays (`byte m [..]`,
+            # signed unless `unsigned`): a signed memory's words read as
+            # unsigned on every engine, unnoticed (fixed 2026-10-13).
+            atom = rng.choice(("byte", "shortint", "int")) if rng.random() < 0.2 else None
+            if atom is not None:
+                width, lsb = INTEGER_ATOM_WIDTHS[atom], 0
+            signed = rng.random() < (0.8 if atom else 0.35)
             dims: list[tuple[int, int]] = []
             n_dims = rng.choice((1, 1, 2))
             for _ in range(n_dims):
@@ -456,7 +467,10 @@ class ModuleGenerator:
                 bounds = (low, low + size - 1) if rng.random() < 0.6 else (low + size - 1, low)
                 ranges.append(Range(_int_literal(bounds[0]), _int_literal(bounds[1])))
             packed = Range(_int_literal(lsb + width - 1), _int_literal(lsb)) if width > 1 or lsb else None
-            ctx.memories.append(Variable(name, VariableKind.REG, width=packed, dimensions=ranges))
+            if atom is not None:
+                ctx.memories.append(Variable(name, VariableKind(atom), signed=signed, dimensions=ranges))
+            else:
+                ctx.memories.append(Variable(name, VariableKind.REG, width=packed, signed=signed, dimensions=ranges))
 
             def element(dims=dims, name=name, *, selected: bool = False, wide_ok: bool = True) -> Expression:
                 # Icarus quirks avoided (known_issues.md): with several
@@ -483,7 +497,9 @@ class ModuleGenerator:
                     target = BitSelect(target, _int_literal(lsb + rng.randrange(width)))
                 writes.append(NonblockingAssign(target, rhs))
             for _ in range(rng.randint(1, 3)):
-                part = width > 2 and rng.random() < 0.3
+                # (Not of a signed word: Icarus makes the select signed --
+                # known_issues.md.)
+                part = width > 2 and not signed and rng.random() < 0.3
                 # (No wide index in a continuous-assign read: Icarus doesn't
                 # truncate one there, unlike procedurally and Verilator.)
                 read = element(selected=part, wide_ok=False)
@@ -569,6 +585,7 @@ class ModuleGenerator:
                     "nmem",
                     NetKind.WIRE,
                     width=packed,
+                    signed=rng.random() < 0.3,
                     dimensions=[Range(_int_literal(bounds[0]), _int_literal(bounds[1]))],
                 )
             )
@@ -783,7 +800,7 @@ class ModuleGenerator:
                 local_sigs.append(Signal(f"l{k + 1}", 32, True, "reg", var_kind="integer"))
             else:
                 local_sigs.append(Signal(f"l{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "reg"))
-        texpr = ExpressionGenerator(tctx)
+        texpr = ExpressionGenerator(tctx, x_literals=self._x_literals)
         body: list[Statement] = []
         for sig in local_sigs:
             body.append(BlockingAssign(sig.as_identifier(), texpr.expr(rng, depth=rng.randint(1, 3))))
@@ -813,7 +830,7 @@ class ModuleGenerator:
             else:
                 sig = Signal(f"l{k + 1}", rng.choice(_FUNC_WIDTHS), rng.choice([True, False]), "reg")
             local_sigs.append(sig)
-        fexpr = ExpressionGenerator(fctx)
+        fexpr = ExpressionGenerator(fctx, x_literals=self._x_literals)
         body: list[Statement] = []
         for sig in local_sigs:
             body.append(

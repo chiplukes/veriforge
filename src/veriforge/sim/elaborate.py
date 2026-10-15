@@ -788,6 +788,21 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
             # happened to recover via a different X-convergence path
             # through the surrounding feedback logic, masking the gap).
             port_initial_value = port.default_value if port.direction != PortDirection.INPUT else None
+            if port.data_type in _TWO_STATE_PORT_TYPES:
+                # (`input byte a`: a 2-state variable -- as a plain net it
+                # kept the x/z driven into it and started at x.)
+                flat.variables.append(
+                    Variable(
+                        f"{prefix}.{port.name}",
+                        VariableKind(port.data_type),
+                        width=port.width,
+                        signed=port.signed,
+                        dimensions=port.dimensions,
+                        packed_dim_count=port.packed_dim_count,
+                        initial_value=port_initial_value,
+                    )
+                )
+                continue
             flat.nets.append(
                 Net(
                     f"{prefix}.{port.name}",
@@ -799,6 +814,9 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                     initial_value=port_initial_value,
                 )
             )
+
+
+_TWO_STATE_PORT_TYPES = frozenset({"bit", "byte", "shortint", "int", "longint"})
 
 
 def _pre_apply_param_overrides(flat: Module, inst: Instance, sub: Module) -> Module:

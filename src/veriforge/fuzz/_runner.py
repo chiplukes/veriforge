@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -223,7 +223,7 @@ class FuzzRunner:
     def _run_one(self) -> None:
         """Generate, simulate, and cross-check one module."""
         rng = random.Random(self.seed)  # noqa: S311
-        gen = ModuleGenerator(rng, memory_in_range=self.memory_in_range)
+        gen = ModuleGenerator(rng, memory_in_range=self.memory_in_range, x_literals=self.x_stimulus)
 
         design = gen.generate_design(self.strategy)
         top = design.get_module("t")
@@ -343,7 +343,7 @@ class FuzzRunner:
         if self._verilator and not has_streaming_concat:
             try:
                 verilator_res = self._simulate_verilator(verilog, vectors, top)
-                diffs = self._compare_verilator(oracle, verilator_res, vectors)
+                diffs = self._compare_verilator(oracle, verilator_res, vectors, skip=_two_state_outputs(top))
                 if diffs:
                     result.mismatches.extend(diffs)
                     self.mismatches_by_engine["verilator"] = self.mismatches_by_engine.get("verilator", 0) + 1
@@ -715,6 +715,8 @@ class FuzzRunner:
         oracle: list[dict[str, Value]],
         got: list[dict[str, Value]],
         vectors: list[dict[str, Value]],
+        *,
+        skip: Collection[str] = (),
     ) -> list[str]:
         """Compare Verilator's *got* values against the reference *oracle*.
 
@@ -729,10 +731,17 @@ class FuzzRunner:
         not per-vector, so a vector's other, fully-defined outputs still get
         checked even when one output is ambiguous. Only `.val` is compared
         (never `.mask`) for the surviving pairs.
+
+        *skip*: outputs not compared at all -- a 2-state output port
+        (`output int y`) reads an x as 0, so an x the oracle computed (from
+        an uninitialized reg, say; Verilator starts it at 0) no longer looks
+        ambiguous there.
         """
         diffs: list[str] = []
         for vi, (exp_vec, got_vec) in enumerate(zip(oracle, got, strict=True)):
             for sig in sorted(exp_vec):
+                if sig in skip:
+                    continue
                 exp = exp_vec.get(sig)
                 got_val = got_vec.get(sig)
                 if exp is None or got_val is None:
@@ -853,6 +862,13 @@ class FuzzRunner:
                     bits.append("1" if (value.val >> i) & 1 else "0")
             return f"{w}'b{''.join(bits)}"
         return f"{w}'d{value.val}"
+
+
+def _two_state_outputs(mod: Module) -> set[str]:
+    """*mod*'s 2-state output ports (`output int y`): see `_compare_verilator`."""
+    from ..sim.sv_functions import is_two_state  # noqa: PLC0415
+
+    return {p.name for p in mod.output_ports() if is_two_state(p)}
 
 
 def _self_reading_comb_outputs(mod: Module) -> set[str]:

@@ -46,7 +46,7 @@ uv run -m veriforge.fuzz [--seed N] [--max MODULES] [--hours H]
 | `--verilator` | off | Enable Verilator cross-check (opt-in: ~8-10x slower per module than Icarus). |
 | `--engines` | all available | Veriforge engines to test: `reference`, `vm`, `vm-fast`, `compiled`. |
 | `--strategy` | weighted mix | Generate only this strategy (e.g. `memory`, `with_tasks`). |
-| `--no-x` | off | No x on stimulus inputs (the same random draws, so seeds still reproduce). |
+| `--no-x` | off | No x on stimulus inputs or in generated literals (the same random draws, so seeds still reproduce). Use it with `--verilator`: a 2-state variable or port turns an x literal into a "defined" 0 that Verilator, reading the literal as an arbitrary value, can't match. |
 | `--in-range` | off | `memory` strategy: every memory index in range. |
 
 `--verilator --no-x --in-range --strategy memory` makes Verilator a usable
@@ -74,7 +74,7 @@ favoring simpler shapes:
 | **hierarchical** | Flat child module + parent module + an `Instance` connecting them |
 | **with_functions** | User functions (calling earlier ones) used in expressions |
 | **with_tasks** | Tasks with output ports plus an impure function, clocked |
-| **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array, >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
+| **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges, signed words, `byte`/`shortint`/`int` arrays) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array, >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
 
 Separately, `tests/test_fuzz/test_syntax_variants.py` re-emits fuzz designs
 with an `EmitStyle` and checks the parser reads them the same. Old-style
@@ -88,7 +88,9 @@ Each module gets random signal widths (biased toward edge cases: 1, 8, 16,
 32, 63, 64, 65, 80, 127, 128), random signedness, random types (each
 input/output/wire/reg has an independent ~35% chance of being declared
 `logic` instead of `wire`/`reg` -- see "Verilator Cross-Check" below for why
-this needed its own oracle), 0-3 declared parameters (same edge-case-biased
+this needed its own oracle; ~12% of unconstrained ports are integer-atom
+typed instead -- `input byte a`, `output time t`, `int unsigned` --
+since 2026-10-14), 0-3 declared parameters (same edge-case-biased
 widths/values), random expression trees (arithmetic, bitwise, logical,
 relational, reduction, ternary, concat, streaming concat `{<<{...}}` /
 `{<<N{...}}`, replicate, `$signed`/`$unsigned`), and random statement shapes

@@ -140,6 +140,20 @@ def _to_lit(value: object) -> Literal:
     raise TypeError(f"Cannot convert {type(value).__name__} to Literal")
 
 
+_PORT_KIND_WIDTHS = {"byte": 8, "shortint": 16, "int": 32, "longint": 64, "integer": 32, "time": 64}
+
+
+def _port_kind_width(kind: str | None, width: int | Expr, signed: bool | None) -> tuple[int | Expr, bool]:
+    """A port's (width, signed) for an optional integer-atom *kind*."""
+    if kind is None:
+        return width, bool(signed)
+    if kind not in _PORT_KIND_WIDTHS:
+        raise ValueError(f"Unknown port kind {kind!r}; expected one of {', '.join(_PORT_KIND_WIDTHS)}")
+    if width not in (1, _PORT_KIND_WIDTHS[kind]):
+        raise ValueError(f"A {kind} port is {_PORT_KIND_WIDTHS[kind]} bits; don't pass width={width!r}")
+    return _PORT_KIND_WIDTHS[kind], (kind != "time") if signed is None else signed
+
+
 def _make_range(width: object) -> Range | None:
     """Convert a width specification to a Range [width-1:0], or None for scalar."""
     if width is None:
@@ -1173,15 +1187,29 @@ class Module:  # cm:2b9e4c
         name: str,
         width: int | Expr = 1,
         *,
-        signed: bool = False,
+        signed: bool | None = None,
         init: int | Expr | None = None,
         net_type: str | None = None,
+        kind: str | None = None,
     ) -> Signal:
-        """Declare an input port."""
+        """Declare an input port.
+
+        ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
+        ``time``) declares an integer-atom-typed port (``input int x``):
+        the type's own width, signed unless ``signed=False`` (``time``:
+        unsigned unless ``signed=True``).
+        """
+        width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
         port = Port(
-            name, PortDirection.INPUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+            name,
+            PortDirection.INPUT,
+            net_type=net_type,
+            data_type=kind,
+            width=range_obj,
+            signed=signed,
+            default_value=default_expr,
         )
         self._flush_pending(port)
         self._ports.append(port)
@@ -1192,15 +1220,29 @@ class Module:  # cm:2b9e4c
         name: str,
         width: int | Expr = 1,
         *,
-        signed: bool = False,
+        signed: bool | None = None,
         init: int | Expr | None = None,
         net_type: str | None = None,
+        kind: str | None = None,
     ) -> Signal:
-        """Declare an output port (wire)."""
+        """Declare an output port (wire).
+
+        ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
+        ``time``) declares an integer-atom-typed port (``output int x``):
+        the type's own width, signed unless ``signed=False`` (``time``:
+        unsigned unless ``signed=True``).
+        """
+        width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
         port = Port(
-            name, PortDirection.OUTPUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+            name,
+            PortDirection.OUTPUT,
+            net_type=net_type,
+            data_type=kind,
+            width=range_obj,
+            signed=signed,
+            default_value=default_expr,
         )
         self._flush_pending(port)
         self._ports.append(port)
@@ -1238,15 +1280,29 @@ class Module:  # cm:2b9e4c
         name: str,
         width: int | Expr = 1,
         *,
-        signed: bool = False,
+        signed: bool | None = None,
         init: int | Expr | None = None,
         net_type: str | None = None,
+        kind: str | None = None,
     ) -> Signal:
-        """Declare an inout port."""
+        """Declare an inout port.
+
+        ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
+        ``time``) declares an integer-atom-typed port (``inout int x``):
+        the type's own width, signed unless ``signed=False`` (``time``:
+        unsigned unless ``signed=True``).
+        """
+        width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
         port = Port(
-            name, PortDirection.INOUT, net_type=net_type, width=range_obj, signed=signed, default_value=default_expr
+            name,
+            PortDirection.INOUT,
+            net_type=net_type,
+            data_type=kind,
+            width=range_obj,
+            signed=signed,
+            default_value=default_expr,
         )
         self._flush_pending(port)
         self._ports.append(port)

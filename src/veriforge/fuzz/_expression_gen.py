@@ -94,8 +94,10 @@ class ExpressionGenerator:
     _REDUCTION_OPS = _REDUCTION_OPS
     _NODE_KINDS = _NODE_KINDS
 
-    def __init__(self, ctx: SignalContext) -> None:
+    def __init__(self, ctx: SignalContext, *, x_literals: bool = True) -> None:
         self._ctx = ctx
+        # False: an x bit of a literal becomes 0 (the same random draws).
+        self._x_literals = x_literals
         # > 0 while generating operands of a concatenation/replication/
         # streaming concat: an unsized literal is illegal there (IEEE 5.1.14).
         self._in_concat = 0
@@ -164,6 +166,8 @@ class ExpressionGenerator:
         # x but never z: z shares x's encoding in veriforge (known_issues.md),
         # so a z literal only ever produced that known difference.
         bits = "".join(rng.choice("01x") if rng.random() < 0.4 else rng.choice("01") for _ in range(w))
+        if not self._x_literals:
+            bits = bits.replace("x", "0")
         return Literal(bits, width=w, base="b", signed=False, is_x="x" in bits, original_text=f"{w}'b{bits}")
 
     def literal(self, rng: random.Random, *, width: int | None = None) -> Literal:

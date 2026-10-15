@@ -20,6 +20,10 @@ _NAME_POOL = [chr(ord("a") + i) for i in range(26)]  # a-z
 # Integer atom types and their widths; see `Signal.var_kind`.
 _INTEGER_KINDS = {"integer": 32, "int": 32, "byte": 8, "shortint": 16, "longint": 64}
 _INTEGER_VAR_PROBABILITY = 0.25
+# Module ports of an integer atom type (`input byte a`, `output time t`):
+# added 2026-10-14 -- they simulated as 0 on every engine, unnoticed.
+_PORT_ATOM_KINDS = {**_INTEGER_KINDS, "time": 64}
+_PORT_ATOM_PROBABILITY = 0.12
 
 # Fraction of inputs/outputs/wires/regs generated with SystemVerilog's
 # `logic` type instead of `wire`/`reg` (see `Signal.use_logic`).
@@ -44,8 +48,8 @@ class Signal:
     # An integer atom type (`integer`/`int`/`byte`/`shortint`/`longint`)
     # instead of a ranged `reg`/`logic` -- `width` is then the type's own,
     # and `signed` its (default-signed, or `int unsigned`) signedness.
-    # Variables only (regs). Added 2026-10-09: `integer` arithmetic was
-    # unsigned on every engine and nothing generated it.
+    # Variables (regs) and ports (also `time`). Added 2026-10-09: `integer`
+    # arithmetic was unsigned on every engine and nothing generated it.
     var_kind: str | None = None
 
     def as_identifier(self) -> Identifier:
@@ -55,6 +59,9 @@ class Signal:
         return Range(Literal(self.width - 1), Literal(0))
 
     def as_port(self, direction: PortDirection) -> Port:
+        if self.var_kind is not None:
+            # (The range is the type's own: kept for width lookups, not emitted.)
+            return Port(self.name, direction, width=self.as_range(), signed=self.signed, data_type=self.var_kind)
         if self.use_logic:
             net_type, data_type = "logic", None
         else:
@@ -85,6 +92,17 @@ class Signal:
             signed=self.signed,
             default_value=Literal(self.value or 0, width=self.width, base="d", signed=self.signed),
         )
+
+
+def _atom_port_signal(rng: random.Random, name: str, kind: str) -> Signal:
+    """An integer-atom-typed port: signed by default (`time`: unsigned),
+    sometimes the other way (no `integer unsigned`: Icarus prints it as
+    signed)."""
+    var_kind = rng.choice(list(_PORT_ATOM_KINDS))
+    signed = var_kind != "time"
+    if var_kind != "integer" and rng.random() < 0.25:
+        signed = not signed
+    return Signal(name=name, width=_PORT_ATOM_KINDS[var_kind], signed=signed, kind=kind, var_kind=var_kind)
 
 
 class SignalContext:
@@ -147,6 +165,10 @@ class SignalContext:
         return rng.randint(1, 128)
 
     def add_input(self, rng: random.Random, *, width: int | None = None, signed: bool | None = None) -> Signal:
+        if width is None and signed is None and rng.random() < _PORT_ATOM_PROBABILITY:
+            s = _atom_port_signal(rng, self._next_name("i"), "input")
+            self._inputs.append(s)
+            return s
         s = Signal(
             name=self._next_name("i"),
             width=width if width is not None else self.pick_width(rng),
@@ -158,6 +180,10 @@ class SignalContext:
         return s
 
     def add_output(self, rng: random.Random, *, width: int | None = None, signed: bool | None = None) -> Signal:
+        if width is None and signed is None and rng.random() < _PORT_ATOM_PROBABILITY:
+            s = _atom_port_signal(rng, self._next_name("o"), "output")
+            self._outputs.append(s)
+            return s
         s = Signal(
             name=self._next_name("o"),
             width=width if width is not None else self.pick_width(rng),
@@ -182,9 +208,8 @@ class SignalContext:
     def add_reg(self, rng: random.Random, *, width: int | None = None, signed: bool | None = None) -> Signal:
         if width is None and signed is None and rng.random() < _INTEGER_VAR_PROBABILITY:
             var_kind = rng.choice(list(_INTEGER_KINDS))
-            # Only `int` gets the `unsigned` variant: the grammar doesn't
-            # accept it on the other atom types yet (known_issues.md).
-            int_signed = not (var_kind == "int" and rng.random() < 0.25)
+            # (No `integer unsigned`: Icarus prints it as signed.)
+            int_signed = not (var_kind != "integer" and rng.random() < 0.25)
             s = Signal(
                 name=self._next_name("r"),
                 width=_INTEGER_KINDS[var_kind],

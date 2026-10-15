@@ -5167,6 +5167,13 @@ class _WideEmitterMixin:
             # subtraction forced `a2` to zero- instead of sign-extend,
             # even though IEEE governs `a2`'s OWN extension by its own
             # declared type here, independent of the ternary.
+            # The branches are context-determined (IEEE 5.4.1): evaluated at
+            # the wider of the destination and both branches, then cut to
+            # the destination -- `c ? ~r / 5 : 121'd0` into 16 bits divides
+            # 121-bit `~r` (it divided a 16-bit one).
+            ctx_w = max(dst_width, self._expr_width(expr.true_expr), self._expr_width(expr.false_expr))
+            if (ctx_w + 63) // 64 > n_words:
+                ctx_w = dst_width
             t_signed_override = (
                 None if isinstance(expr.true_expr, BinaryOp) and expr.true_expr.op in ("+", "-", "*") else own_signed
             )
@@ -5174,7 +5181,7 @@ class _WideEmitterMixin:
                 None if isinstance(expr.false_expr, BinaryOp) and expr.false_expr.op in ("+", "-", "*") else own_signed
             )
             tlines = self._emit_wide_expr_to_scratch(
-                expr.true_expr, tslot, n_words, dst_width, indent, signed_override=t_signed_override
+                expr.true_expr, tslot, n_words, ctx_w, indent, signed_override=t_signed_override
             )
             if tlines is None:
                 self._free_scratch(tslot, fslot)
@@ -5182,7 +5189,7 @@ class _WideEmitterMixin:
                     self._free_scratch(truth_slot, cond_slot)
                 return None
             flines = self._emit_wide_expr_to_scratch(
-                expr.false_expr, fslot, n_words, dst_width, indent, signed_override=f_signed_override
+                expr.false_expr, fslot, n_words, ctx_w, indent, signed_override=f_signed_override
             )
             if flines is None:
                 self._free_scratch(tslot, fslot)
@@ -5194,8 +5201,17 @@ class _WideEmitterMixin:
                 f"{pad}wide_mux(_sc{slot}_v, _sc{slot}_m,"
                 f" {cond_v_expr}, {cond_m_expr},"
                 f" _sc{tslot}_v, _sc{tslot}_m,"
-                f" _sc{fslot}_v, _sc{fslot}_m, {n_words}, {dst_width})"
+                f" _sc{fslot}_v, _sc{fslot}_m, {n_words}, {ctx_w})"
             )
+            if ctx_w > dst_width:
+                dst_n = (dst_width + 63) // 64
+                tail_bits = dst_width - (dst_n - 1) * 64
+                if tail_bits < _WORD_BITS:
+                    lines.append(f"{pad}_sc{slot}_v[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                    lines.append(f"{pad}_sc{slot}_m[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                for wi in range(dst_n, n_words):
+                    lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                    lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
             self._free_scratch(tslot, fslot)
             if truth_slot is not None:
                 self._free_scratch(truth_slot, cond_slot)

@@ -260,6 +260,22 @@ prints 15, and so does veriforge (2026-10-13,
 itself (`m[0]`) is signed on all three. Not a veriforge bug -- do not
 replicate.
 
+### Icarus: a negation divided at more than 64 bits is 0
+
+`wire [126:0] e = -{i1, i3} / one;` (any negated operand, `one` = 1) is 0
+on Icarus; at 64 bits (`wire [63:0]`) it's right. Verilator and veriforge
+give the 127-bit two's complement. Found 2026-10-14 replaying an old fuzz
+mismatch. Not a veriforge bug -- do not replicate.
+
+### Icarus: a reduction of an oversized unsized literal
+
+Icarus sizes the unsized literal `4294967295` to 33 bits (so `~&` of it is
+1, as veriforge has it), but then folds `$signed(~&4294967295)` to `1`
+instead of a 1-bit -1: assigned to 16 bits it gives `0001`, where
+`$signed(~&33'h0ffffffff)` gives `ffff` (veriforge: `ffff` for both).
+Verilator sizes the literal to 32 bits (`fuzzer.md`). Found 2026-10-14
+(fuzz seed 8071). Not a veriforge bug -- do not replicate.
+
 ### Icarus: real formats of signed expressions, leading x/X
 
 Two Icarus `$display` quirks the fuzzer works around (veriforge follows

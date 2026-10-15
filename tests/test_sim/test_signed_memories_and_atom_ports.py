@@ -7,6 +7,9 @@
 * A module port of an integer atom type (`input byte a`, `output integer y`,
   `input time t`) simulated as 0 on every engine, and `byte unsigned` /
   `shortint unsigned` didn't parse on a port.
+* A 2-state port (`input int a`, `output byte q`) kept x: a child's input
+  port read the x/z driven into it, a 2-state output started at x, and a
+  top-level drive of x stayed x (Icarus: 0).
 
 Expected values are from Icarus, except bit/part selects of a signed memory
 word: Icarus treats those as signed too, so `wm[0][99:96]` is Verilator's
@@ -19,6 +22,7 @@ import pytest
 
 from veriforge.codegen.verilog_emitter import emit_module
 from veriforge.sim.testbench import Simulator
+from veriforge.sim.value import Value
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
 
@@ -143,3 +147,61 @@ def test_atom_port_model_and_roundtrip(decl, data_type, signed, width):
     again = _design(out).modules[0].ports[0]
     assert (again.data_type, again.signed, again.width.msb.value + 1) == (data_type, signed, width)
     assert emit_module(_design(out).modules[0]) == out
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_signed_memory_word_x_sign_bit(engine):
+    source = """module t;
+  reg signed [2:0] m [1:4];
+  wire [15:0] a = m[3];
+  wire [15:0] b = m[1];
+  reg [15:0] d;
+  initial begin
+    m[1] = 3'b1x0; m[3] = 3'bx01;
+    d = m[3];
+    #1 $display("%b %b %b", a, b, d);
+  end
+endmodule
+"""
+    assert _display(source, engine) == ["xxxxxxxxxxxxxx01 11111111111111x0 xxxxxxxxxxxxxx01"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_two_state_child_ports(engine):
+    source = """module c(input byte a, input int unsigned b, input integer k, output int y, output shortint z, output byte q);
+  assign y = a + b;
+  always @(*) q = k[7:0];
+endmodule
+module t;
+  reg [7:0] x; reg [31:0] u; reg [31:0] kk;
+  int y; shortint z; byte q;
+  c u0(.a(x), .b(u), .k(kk), .y(y), .z(z), .q(q));
+  initial begin x = 8'bx000_0001; u = 32'hz; kk = 'x; #1 $display("%h %h %h %h", y, z, q, u0.a); end
+endmodule
+"""
+    assert _display(source, engine) == ["00000001 0000 00 01"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_two_state_top_ports(engine):
+    source = """module t(input byte a, input int unsigned b, input logic [7:0] l,
+         output int y, output shortint z, output byte q, output longint w);
+  assign y = a + b;
+  always @(*) q = l;
+endmodule
+"""
+    design = _design(source)
+    sim = Simulator(design.modules[0], engine=engine, design=design)
+    sim.drive("a", Value(1, width=8, mask=0x80))
+    sim.signal("b").value = Value(0, width=32, mask=0xFFFF_FFFF)
+    sim.drive("l", Value(0, width=8, mask=0xFF))
+    sim.run(max_time=1)
+    got = [sim.read(n) for n in ("a", "b", "y", "z", "q", "w")]
+    assert got == [
+        Value(1, width=8),
+        Value(0, width=32),
+        Value(1, width=32),
+        Value(0, width=16),
+        Value(0, width=8),
+        Value(0, width=64),
+    ]

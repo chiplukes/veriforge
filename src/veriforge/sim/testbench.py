@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from veriforge._recursion import ensure_deep_recursion
 from veriforge.model.design import Design, Module
+from veriforge.model.ports import PortDirection
 
 from .elaborate import (
     check_input_port_init,
@@ -27,7 +28,7 @@ from .elaborate import (
 from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases, lower_signed_indices
 from .scheduler import Scheduler
 from .display_format import lower_display_args
-from .sv_functions import lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
+from .sv_functions import is_two_state, lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
 from .value import Value
 
 _ELEMENT_NAME = re.compile(r"^(.+?)((?:\[-?\d+\])+)$")
@@ -49,12 +50,20 @@ class SignalHandle:  # cm:2e7d3b
     Provides read/write access to the simulation signal state.
     """
 
-    __slots__ = ("_name", "_sched", "_width")
+    __slots__ = ("_name", "_sched", "_two_state", "_width")
 
-    def __init__(self, name: str, sched: Scheduler | VMScheduler | CompiledScheduler, width: int = 1) -> None:
+    def __init__(
+        self,
+        name: str,
+        sched: Scheduler | VMScheduler | CompiledScheduler,
+        width: int = 1,
+        *,
+        two_state: bool = False,
+    ) -> None:
         self._name = name
         self._sched = sched
         self._width = width
+        self._two_state = two_state  # a 2-state input port: x/z bits drive as 0
 
     @property
     def name(self) -> str:
@@ -72,6 +81,8 @@ class SignalHandle:  # cm:2e7d3b
             new_val = Value(new_val, width=self._width)
         elif isinstance(new_val, str):
             new_val = Value.from_verilog(new_val)
+        if self._two_state and new_val.mask:
+            new_val = Value(new_val.val, width=new_val.width)
         self._sched.drive_signal(self._name, new_val)
 
     @property
@@ -164,6 +175,7 @@ class Simulator:  # cm:a5c8f4
         "_run_cycles_clock_ready",
         "_sched",
         "_signal_cache",
+        "_two_state_inputs",
     )
 
     def __init__(
@@ -219,6 +231,10 @@ class Simulator:  # cm:a5c8f4
         lower_display_args(module)  # before lower_width_casts: needs WidthCast signedness
         lower_width_casts(module)
         lower_two_state(module)
+        # A 2-state input port (`input int a`) reads x/z driven into it as 0.
+        self._two_state_inputs = frozenset(
+            p.name for p in module.ports if p.direction != PortDirection.OUTPUT and is_two_state(p)
+        )
         check_signed_declarations(module)
         check_input_port_init(module, design)
 
@@ -322,7 +338,7 @@ class Simulator:  # cm:a5c8f4
                 msg += f" Did you mean: {', '.join(close)}?"
             raise KeyError(msg)
         sig = self._sched.read_signal(name)
-        handle = SignalHandle(name, self._sched, width=sig.width)
+        handle = SignalHandle(name, self._sched, width=sig.width, two_state=name in self._two_state_inputs)
         self._signal_cache[name] = handle
         return handle
 
@@ -537,6 +553,8 @@ class Simulator:  # cm:a5c8f4
 
     def drive(self, name: str, value: Value | int) -> None:
         """Drive a signal by name (convenience method)."""
+        if name in self._two_state_inputs and isinstance(value, Value) and value.mask:
+            value = Value(value.val, width=value.width)
         self._sched.drive_signal(self._slot_name(name), value)
 
     @_reports_failures

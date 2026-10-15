@@ -122,7 +122,7 @@ def main() -> None:
     parser.add_argument(
         "--no-x",
         action="store_true",
-        help="No x on stimulus inputs (useful with --verilator, which is 2-state)",
+        help="No x on stimulus inputs or in generated literals (useful with --verilator, which is 2-state)",
     )
     parser.add_argument(
         "--engines",

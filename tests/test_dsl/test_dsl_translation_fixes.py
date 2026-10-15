@@ -244,3 +244,34 @@ def test_literal_without_source_text():
     wide = Literal(0xDEAD, width=16)
     assert _expr_to_python(wide) == 'lit("16\'hdead")'
     assert _expr_to_python(Literal(-5)) == "-5"
+
+
+def test_atom_typed_ports():
+    """An integer-atom-typed port (`output int y`) became a plain ranged
+    port in the DSL -- 4-state, so x where `int` reads 0. The builder takes
+    `kind=` now (found 2026-10-14 when the fuzzer started generating them)."""
+    text = (
+        "module t(input byte unsigned a, input int b, output int y, output time t,\n"
+        "         output time signed u, output longint unsigned w, inout integer z);\n"
+        "  assign y = a;\nendmodule\n"
+    )
+    out = _round_trip(text)
+    for decl in (
+        "input byte unsigned a",
+        "input int b",
+        "output int y",
+        "output time t",
+        "output time signed u",
+        "output longint unsigned w",
+        "inout integer z",
+    ):
+        assert decl in out, (decl, out)
+    m = Module("k")
+    m.input("a", kind="shortint")
+    m.output("q", kind="byte", signed=False)
+    built = emit_module(m.build())
+    assert "input shortint a" in built and "output byte unsigned q" in built
+    with pytest.raises(ValueError, match="16 bits"):
+        m.input("bad", width=8, kind="shortint")
+    with pytest.raises(ValueError, match="Unknown port kind"):
+        m.input("bad2", kind="real")

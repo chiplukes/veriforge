@@ -405,6 +405,11 @@ def lower_two_state(module: Module) -> Module:
         elif not _is_two_state_call(var.initial_value):
             var.initial_value = FunctionCall(name=TWO_STATE_CALL, arguments=[var.initial_value], is_system=True)
 
+    # (A 2-state output port too: `output int y` read x until written.)
+    for port in module.ports:
+        if port.name in module_two_state and port.direction != PortDirection.INPUT and port.default_value is None:
+            port.default_value = Literal(0, base="d", signed=False, original_text="0")
+
     def rewrite(root: object, names: set[str]) -> None:
         for node in iter_nodes(root, set()):
             if isinstance(node, (BlockingAssign, NonblockingAssign, ContinuousAssign)):

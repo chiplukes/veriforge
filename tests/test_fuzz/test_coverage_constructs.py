@@ -50,3 +50,19 @@ def test_with_tasks_strategy_simulates():
         top = next(m for m in design.modules if m.name == "t")
         assert top.tasks
         Simulator(top, engine="reference", design=design).run(max_time=0)
+
+
+def test_atom_ports_and_signed_memories_appear():
+    """Added 2026-10-14: atom-typed module ports simulated as 0 and signed
+    memory words read as unsigned on every engine, and nothing generated
+    either. The ports keep their type through a round trip."""
+    import re  # noqa: PLC0415
+
+    text = "\n".join(_sources(120))
+    ports = re.findall(r"(?:input|output) (byte|shortint|int|longint|integer|time)\b", text)
+    assert {"byte", "int", "time"} <= set(ports)
+    memory = "\n".join(_sources(80, Strategy.MEMORY))
+    assert re.search(r"reg signed \[[^\]]*\] mem\d", memory)
+    assert re.search(r"\b(byte|shortint|int)( unsigned)? mem\d", memory)
+    for src in _sources(10):
+        assert emit_design(tree_to_design(verilog_parser(start="source_text").build_tree(src))) == src
