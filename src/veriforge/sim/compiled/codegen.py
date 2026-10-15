@@ -197,6 +197,7 @@ class CythonCodegen(
     __slots__ = (
         "_body_tainted_sids",
         "_call_guards",
+        "_combo_ext",
         "_combo_processes",
         "_const_conts",
         "_delta_limit",
@@ -259,6 +260,9 @@ class CythonCodegen(
         # sensitivity, e.g. `assign x = 1'b0;`).
         self._const_conts: set[int] = set()
         self._combo_processes: list[tuple[set[int], object]] = []
+        # Per combinational process: the sids it reads and writes that another
+        # process writes too (see `_compile_always_blocks`).
+        self._combo_ext: list[frozenset[int]] = []
         self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
         self._module: Module | None = None
         self._initial_lines: list[str] = []

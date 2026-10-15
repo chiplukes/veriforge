@@ -648,7 +648,10 @@ class ModuleGenerator:
         # and Verilator read it as unsigned -- an unusable oracle; see
         # test_memory_base_and_multidim.py for signed indices.)
         offset = low + rng.choice((0, 0, -1, 1))
-        if offset == 0:
+        if offset == 0 and low >= 0:
+            # (A bare narrow slice indexing a dimension with negative
+            # indices: Icarus reads `3'd7` as -1 there -- known_issues.md.
+            # `+ 0` makes it a 32-bit index.)
             return part
         return BinaryOp("+", part, _int_literal(offset))
 

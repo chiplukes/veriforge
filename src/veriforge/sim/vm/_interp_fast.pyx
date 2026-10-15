@@ -513,6 +513,9 @@ cdef struct DeltaCtx:
     char      *seq_fired
     # Working buffers
     char      *is_changed
+    int       *own_pid        # [sig_count] the combinational proc whose own write alone changed it this delta, else -1
+    int        proc_count
+    int        all_combos_first  # trigger every combinational proc in the first delta (a bootstrap)
     char      *is_work        # current-pass CA input sigs (zeroed between passes)
     int       *changed_buf
     int        changed_cap     # current allocated capacity of changed_buf (grows via realloc)
@@ -4469,11 +4472,19 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
 
         # ── Collect triggered procs ──
         triggered_count = 0
+        if delta == 1 and dc.all_combos_first:
+            for pid in range(dc.proc_count):
+                if dc.proc_is_combo[pid] and not dc.trig_flag[pid]:
+                    dc.trig_flag[pid] = 1
+                    dc.triggered_buf[triggered_count] = pid
+                    triggered_count += 1
         for c in range(changed_count):
             sid = dc.changed_buf[c]
             for j in range(dc.sens_offset[sid], dc.sens_offset[sid + 1]):
                 pid = dc.sens_procs[j]
-                if dc.proc_is_combo[pid] and not dc.trig_flag[pid]:
+                # (Not a combinational proc's own change: IEEE 1364-2005
+                # 9.7.5 -- it isn't waiting at @* while it runs.)
+                if dc.proc_is_combo[pid] and not dc.trig_flag[pid] and dc.own_pid[sid] != pid:
                     dc.trig_flag[pid] = 1
                     dc.triggered_buf[triggered_count] = pid
                     triggered_count += 1
@@ -4512,6 +4523,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
         # Clear old changed set
         for i in range(changed_count):
             dc.is_changed[dc.changed_buf[i]] = 0
+            dc.own_pid[dc.changed_buf[i]] = -1
         changed_count = 0
 
         # ── Execute all triggered procs ──
@@ -4559,15 +4571,19 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 p_changed_count[0] = 0
                 return status
 
-            # Merge blocking-assign dirty into changed
+            # Merge blocking-assign dirty into changed (attributed to this
+            # proc unless another one changed the signal this delta too)
             for j in range(dirty_room):
                 sid = dc.dirty_buf[j]
                 if not dc.is_changed[sid]:
                     dc.is_changed[sid] = 1
+                    dc.own_pid[sid] = pid
                     status = _changed_buf_push(dc, sid, &changed_count)
                     if status != 0:
                         p_changed_count[0] = 0
                         return status
+                elif dc.own_pid[sid] != pid:
+                    dc.own_pid[sid] = -1
 
         # ── Apply NBAs ──
         for i in range(total_nba_count):
@@ -4584,6 +4600,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
             if dc.sig_val[sid] != new_v or dc.sig_mask[sid] != new_m:
                 dc.sig_val[sid] = new_v
                 dc.sig_mask[sid] = new_m
+                dc.own_pid[sid] = -1
                 if not dc.is_changed[sid]:
                     dc.is_changed[sid] = 1
                     status = _changed_buf_push(dc, sid, &changed_count)
@@ -4602,6 +4619,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                     if <long long>dc.wctx.sig_val[off + j] != new_v or <long long>dc.wctx.sig_mask[off + j] != new_m:
                         dc.wctx.sig_val[off + j]  = <unsigned long long>new_v
                         dc.wctx.sig_mask[off + j] = <unsigned long long>new_m
+                        dc.own_pid[sid] = -1
                         if not dc.is_changed[sid]:
                             dc.is_changed[sid] = 1
                             status = _changed_buf_push(dc, sid, &changed_count)
@@ -4640,6 +4658,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                     if p_old_v != p_new_v or p_old_m != p_new_m:
                         dc.wctx.sig_val[off + j]  = p_new_v
                         dc.wctx.sig_mask[off + j] = p_new_m
+                        dc.own_pid[sid] = -1
                         if not dc.is_changed[sid]:
                             dc.is_changed[sid] = 1
                             status = _changed_buf_push(dc, sid, &changed_count)
@@ -4658,6 +4677,8 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                 dc.mem_val[n_flat] = (dc.mem_val[n_flat] & ~dc.nba_mem_buf[i].wbits) | dc.nba_mem_buf[i].val
                 dc.mem_mask[n_flat] = (dc.mem_mask[n_flat] & ~dc.nba_mem_buf[i].wbits) | dc.nba_mem_buf[i].mask
                 # Mark memory marker signal as changed for combo re-eval
+                if marker_sid < dc.sig_count:
+                    dc.own_pid[marker_sid] = -1
                 if marker_sid < dc.sig_count and not dc.is_changed[marker_sid]:
                     dc.is_changed[marker_sid] = 1
                     status = _changed_buf_push(dc, marker_sid, &changed_count)
@@ -4675,6 +4696,7 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
     # Clean up flags
     for i in range(changed_count):
         dc.is_changed[dc.changed_buf[i]] = 0
+        dc.own_pid[dc.changed_buf[i]] = -1
     p_changed_count[0] = 0
     return finished
 
@@ -5084,6 +5106,7 @@ cdef class CyContext:
     cdef long long *snap_mask         # [sig_count]
     cdef char      *seq_fired         # [n_procs]
     cdef char      *is_changed        # [sig_count]
+    cdef int       *own_pid           # [sig_count], -1 between calls
     cdef char      *is_work           # [sig_count] current-pass CA input sigs
     cdef int       *changed_buf       # [changed_cap] -- grows via realloc past sig_count;
                                        # see _changed_buf_push's docstring for why sig_count
@@ -5174,6 +5197,7 @@ cdef class CyContext:
         self.snap_mask = NULL
         self.seq_fired = NULL
         self.is_changed = NULL
+        self.own_pid = NULL
         self.is_work = NULL
         self.changed_buf = NULL
         self.changed_cap = 0
@@ -5269,6 +5293,8 @@ cdef class CyContext:
         free(self.snap_mask)
         free(self.seq_fired)
         free(self.is_changed)
+        free(self.own_pid)
+        self.own_pid = NULL
         free(self.is_work)
         free(self.changed_buf)
         free(self.trig_flag)
@@ -5950,6 +5976,8 @@ cdef class CyContext:
         self.trig_flag    = <char *>malloc(self.n_procs * sizeof(char))
         self.triggered_buf = <int *>malloc(self.n_procs * sizeof(int))
         self.is_changed   = <char *>malloc(self.sig_count * sizeof(char))
+        free(self.own_pid)
+        self.own_pid      = <int *>malloc(self.sig_count * sizeof(int))
         self.is_work      = <char *>malloc(self.sig_count * sizeof(char))
         # changed_buf starts at sig_count entries (the common case: each
         # signal changes at most once per delta cycle) but is NOT actually
@@ -5965,6 +5993,7 @@ cdef class CyContext:
             self.trig_flag[i] = 0
         for i in range(self.sig_count):
             self.is_changed[i] = 0
+            self.own_pid[i] = -1
             self.is_work[i] = 0
 
         self._procs_setup = True
@@ -6043,6 +6072,9 @@ cdef class CyContext:
         dc.snap_mask = self.snap_mask
         dc.seq_fired = self.seq_fired
         dc.is_changed = self.is_changed
+        dc.own_pid = self.own_pid
+        dc.proc_count = self.n_procs
+        dc.all_combos_first = 0
         dc.is_work = self.is_work
         dc.changed_buf = self.changed_buf
         dc.changed_cap = self.changed_cap
@@ -6071,7 +6103,7 @@ cdef class CyContext:
         dc.wctx = self.wctx_c   # copied by value; nba_count/nba_part_count ptrs stay valid
 
 
-    def run_delta_loop(self, list changed_sids, int delta_limit):
+    def run_delta_loop(self, list changed_sids, int delta_limit, bint all_combos_first=False):
         """Run the full delta cycle loop in C.
 
         Args:
@@ -6089,6 +6121,7 @@ cdef class CyContext:
         cdef int *new_buf
 
         self._fill_delta_ctx(&dc, delta_limit)
+        dc.all_combos_first = all_combos_first
 
         # Populate the initial changed set. Grow changed_buf up front if the
         # caller handed us more entries than it currently holds -- mirrors

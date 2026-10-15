@@ -1879,6 +1879,7 @@ class _ProcessCompilerMixin:
         """
         from veriforge.model.behavioral import SensitivityType  # noqa: PLC0415
 
+        combo_self: list[set[int]] = []
         for block in module.always_blocks:
             if self._has_timing(block.body):
                 continue  # handled by reference executor fallback
@@ -1887,7 +1888,9 @@ class _ProcessCompilerMixin:
             edges: dict[int, str] = {}
             if block.sensitivity_type == SensitivityType.COMBINATIONAL:
                 self._collect_stmt_signals(block.body, sensitivity)
+                reads = set(sensitivity)
                 self._collect_stmt_writes_targets(block.body, sensitivity)
+                combo_self.append(reads - sensitivity)
             else:
                 for edge in block.sensitivity_list:
                     if isinstance(edge, SensitivityEdge) and isinstance(edge.signal, Identifier):
@@ -1909,3 +1912,41 @@ class _ProcessCompilerMixin:
             else:
                 # Sequential — @(posedge clk), @(negedge clk), etc.
                 self._seq_processes.append((edges, sensitivity, block.body))
+        self._combo_ext = self._combo_external_self_sids(module, combo_self)
+
+    def _combo_external_self_sids(self, module: Module, combo_self: list[set[int]]) -> list[frozenset[int]]:
+        """Per combinational process, the sids it reads and writes that some
+        other process (always/initial block, task) writes too.
+
+        A block's own writes are left out of its sensitivity (its own change
+        must not re-trigger it, IEEE 1364-2005 9.7.5), but another process's
+        change to one must: those get added back, and the delta loop tells
+        the two apart by who marked the sid dirty (`c.downer`). Usually
+        empty -- a temporary or loop variable has no other writer."""
+        wanted = set().union(*combo_self) if combo_self else set()
+        if not wanted:
+            return [frozenset() for _ in combo_self]
+
+        def written(stmt: object) -> set[int]:
+            remaining = set(wanted)
+            self._collect_stmt_writes_targets(stmt, remaining)
+            return wanted - remaining
+
+        writers: list[tuple[object, set[int]]] = []
+        for block in module.always_blocks:
+            writers.append((block.body, written(block.body)))
+        for ib in module.initial_blocks:
+            writers.append((ib.body, written(ib.body)))
+        for task in module.tasks:
+            if task.body is not None:
+                writers.append((task.body, written(task.body)))
+        result: list[frozenset[int]] = []
+        for (sens, body), own in zip(self._combo_processes, combo_self, strict=True):
+            others: set[int] = set()
+            for wbody, wsids in writers:
+                if wbody is not body:
+                    others |= wsids
+            ext = frozenset(own & others)
+            sens |= ext
+            result.append(ext)
+        return result

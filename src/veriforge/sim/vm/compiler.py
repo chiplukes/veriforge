@@ -103,7 +103,7 @@ class CompiledProcess:
         source_block:  Reference to original AST block (for debug/initial).
     """
 
-    __slots__ = ("edge_signals", "has_timing", "process_type", "program", "sensitivity", "source_block")
+    __slots__ = ("edge_signals", "has_timing", "process_type", "program", "self_sens", "sensitivity", "source_block")
 
     def __init__(
         self,
@@ -121,6 +121,9 @@ class CompiledProcess:
         self.edge_signals = edge_signals or {}
         self.source_block = source_block
         self.has_timing = has_timing
+        # A combinational block's sensitivity signals it also writes: its own
+        # change to one doesn't re-trigger it (IEEE 1364-2005 9.7.5).
+        self.self_sens: frozenset[int] = frozenset()
 
 
 # ── Compiler ─────────────────────────────────────────────────────────
@@ -891,6 +894,10 @@ class Compiler:  # cm:8c1e4a
                 source_block=block,
                 has_timing=has_timing,
             )
+            if ptype is ProcessType.COMBINATIONAL:
+                not_written = set(sensitivity)
+                self._collect_stmt_writes(block.body, not_written)  # (removes the written ids)
+                proc.self_sens = frozenset(sensitivity - not_written)
             self.processes.append(proc)
 
     def _compile_initial_blocks(self, module: Module) -> None:
@@ -3590,6 +3597,11 @@ class Compiler:  # cm:8c1e4a
             sid = self.signal_map.get(name)
             if sid is not None:
                 signals.discard(sid)
+            mid = self.mem_map.get(name)
+            if mid is not None:
+                # (A memory write: its marker. It used to stay, so a block
+                # writing a memory it reads re-triggered on its own write.)
+                signals.discard(self.mem_marker_sigs[mid])
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is not None:
                 if struct_info[0] == "signal":
@@ -3614,9 +3626,10 @@ class Compiler:  # cm:8c1e4a
         edges: dict[int, str] = {}
 
         if block.sensitivity_type == SensitivityType.COMBINATIONAL:
-            # @(*) — infer from all reads in the body
+            # @(*) -- every signal read in the body, including one it also
+            # writes (see `CompiledProcess.self_sens`); written signals used
+            # to be dropped, so another process's change to one was missed.
             self._collect_stmt_signals(block.body, signals)
-            self._collect_stmt_writes(block.body, signals)
             return signals, edges
 
         # Explicit sensitivity list

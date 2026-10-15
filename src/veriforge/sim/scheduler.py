@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import heapq
 from enum import Enum, auto
+from collections.abc import Collection
 from typing import TYPE_CHECKING
 
 from veriforge.model.assignments import ContinuousAssign
@@ -102,7 +103,7 @@ class AlwaysProcess(Process):
     For SEQUENTIAL: re-executes on clock edge.
     """
 
-    __slots__ = ("_coroutine", "block", "edge_signals", "has_timing", "sensitivity", "suspend_info")
+    __slots__ = ("_coroutine", "block", "edge_signals", "has_timing", "self_sens", "sensitivity", "suspend_info")
 
     def __init__(
         self,
@@ -119,6 +120,9 @@ class AlwaysProcess(Process):
         self.suspend_info: SuspendExecution | None = None
         self.has_timing = has_timing
         self._coroutine = None  # Lazily created generator for suspend/resume
+        # An `always @*` block's sensitivity signals it also writes: its own
+        # change to one doesn't re-trigger it (see `_run_active_region`).
+        self.self_sens: frozenset[str] = frozenset()
 
 
 class InitialProcess(Process):
@@ -217,6 +221,7 @@ class Scheduler:  # cm:9a7f2c
         "_initial_procs",
         "_last_run_signals",
         "_on_time_step",
+        "_own_changes",
         "_pending_drives",
         "_prev_signals",
         "_seq_edge_names",
@@ -286,6 +291,7 @@ class Scheduler:  # cm:9a7f2c
         # bootstrap (see settle()'s own comment for why this can't just
         # happen unconditionally in elaborate()/__init__).
         self._combo_bootstrapped = False
+        self._own_changes: dict[str, int] = {}  # see _run_active_region
 
         # Optional callback fired after each time step completes
         # (all delta cycles resolved).  Signature: callback(scheduler)
@@ -484,6 +490,9 @@ class Scheduler:  # cm:9a7f2c
             elif block.sensitivity_type == SensitivityType.COMBINATIONAL:
                 self._combo_procs.append(proc)
                 self._combo_proc_set.add(proc)
+                not_written = set(sens)
+                _collect_stmt_writes(block.body, not_written)  # (removes the written names)
+                proc.self_sens = frozenset(sens - not_written)
             else:
                 self._seq_procs.append(proc)
                 self._seq_edge_names.update(edges)
@@ -592,9 +601,13 @@ class Scheduler:  # cm:9a7f2c
             if not self._run_continuous_assigns():
                 break
 
-        # Bootstrap: evaluate combinational always blocks once at t=0
-        if self._combo_procs:
-            self._run_active_region(list(self._combo_procs))
+        # Bootstrap: evaluate combinational always blocks once at t=0 (on the
+        # first run()/settle() only -- they used to run again on every run()
+        # call, an extra activation each time, and their changes weren't
+        # propagated).
+        if not self._combo_bootstrapped:
+            self._combo_bootstrapped = True
+            self._bootstrap_combos()
 
         # Start the $dumpvars trace session, if an initial block requested one.
         start_dump(self, self.executor)
@@ -669,7 +682,7 @@ class Scheduler:  # cm:9a7f2c
         self._triggered_seq_procs = set()
 
         # Collect triggered processes (combo + sequential with edge detection)
-        triggered = self._collect_triggered(all_dirty)
+        triggered = self._collect_triggered(all_dirty, all_dirty)
 
         if triggered:
             # Run triggered processes and full delta cycle loop
@@ -686,7 +699,7 @@ class Scheduler:  # cm:9a7f2c
                         if not self._run_dirty_continuous_assigns(nba_dirty):
                             break
                 combined = active_dirty | nba_dirty
-                rerun = self._collect_triggered(combined)
+                rerun = self._collect_triggered(combined, nba_dirty)
                 if rerun or nba_changed:
                     active_dirty = self._run_active_region(rerun)
                 else:
@@ -751,7 +764,7 @@ class Scheduler:  # cm:9a7f2c
             # Re-evaluate triggered processes — only those sensitive to
             # signals that actually changed (IEEE 1364-2005 always @*).
             combined_dirty = active_dirty | nba_dirty
-            triggered = self._collect_triggered(combined_dirty)
+            triggered = self._collect_triggered(combined_dirty, nba_dirty)
             if triggered or nba_changed:
                 active_dirty = self._run_active_region(triggered)
             else:
@@ -806,8 +819,21 @@ class Scheduler:  # cm:9a7f2c
         # to build the TRUE dirty set (handles A=0; A=1 correctly).
         originals: dict[str, Value | None] = {}
         self.ctx._originals = originals
+        signals = self.ctx._signals
+        # IEEE 1364-2005 9.7.5: an `always @*` block isn't waiting at its event
+        # control while it runs, so its own change to a signal it reads
+        # doesn't re-trigger it. `own[name] = (proc id, value)`: a change
+        # only that process made this region (nothing else wrote the signal
+        # before it; a later writer leaves a different value object, checked
+        # below -- not detectable for a memory, two processes writing one
+        # memory being unusual). It used to re-run until its own writes
+        # settled (Icarus and compiled ran it once).
+        own: dict[str, tuple[int, Value | None]] = {}
 
         for proc in procs:
+            self_sens = proc.self_sens if type(proc) is AlwaysProcess else ()
+            if self_sens:
+                unwritten = [name for name in self_sens if name not in originals]
             try:
                 self._execute_process(proc)
             except StopExecution:
@@ -823,12 +849,19 @@ class Scheduler:  # cm:9a7f2c
                     proc.suspend_info = e
                 if e.delay is not None and e.delay > 0:
                     self.event_queue.schedule(self.time + e.delay, proc)
+            if self_sens:
+                # The first writer this region (memories included: a memory
+                # write records a placeholder original, its value lives
+                # elsewhere -- `None` here).
+                for name in unwritten:
+                    if name in originals:
+                        own[name] = (proc.id, signals.get(name))
 
         self.ctx._originals = None
+        self._own_changes = {name: pid for name, (pid, val) in own.items() if signals.get(name) is val}
 
         # Build dirty set: signals whose FINAL value differs from original.
         dirty: set[str] = set()
-        signals = self.ctx._signals
         for name, orig in originals.items():
             final = signals.get(name)
             if orig is None or final is None:
@@ -1176,7 +1209,7 @@ class Scheduler:  # cm:9a7f2c
             return result
         return None
 
-    def _collect_triggered(self, dirty: set[str]) -> list[Process]:
+    def _collect_triggered(self, dirty: set[str], others: Collection[str] = ()) -> list[Process]:
         """Collect processes that should run due to signal changes.
 
         - COMBINATIONAL always blocks are re-evaluated only when a signal
@@ -1187,6 +1220,13 @@ class Scheduler:  # cm:9a7f2c
           Each sequential process fires at most once per time step.
         """
         triggered: list[Process] = []
+        # A combinational block's own change (last active region) doesn't
+        # wake it -- unless something else (*others*: NBA updates) changed
+        # the signal too.
+        own = self._own_changes
+        self._own_changes = {}
+        if own and others:
+            own = {name: pid for name, pid in own.items() if name not in others}
         # Bucket lengths give a cheap upper bound on candidate count. For
         # dense activity, skip set construction and use the original scan.
         if 4 * sum(len(self._sig_to_procs.get(name, ())) for name in dirty) >= len(self._combo_procs):
@@ -1199,7 +1239,8 @@ class Scheduler:  # cm:9a7f2c
                 )
             combo_procs = sorted(combo_candidates, key=lambda proc: proc.id)
         for proc in combo_procs:
-            if proc.sensitivity & dirty:
+            hits = proc.sensitivity & dirty
+            if hits and (not own or any(own.get(name) != proc.id for name in hits)):
                 triggered.append(proc)
 
         # An edge from an earlier delta cycle can still fire a sequential block
@@ -1346,26 +1387,21 @@ class Scheduler:  # cm:9a7f2c
         # by `test_axi_lite_regs_typed_cross_engine[reference]`, which has
         # exactly this kind of inter-combo dependency and hung/timed out
         # under a single-pass bootstrap).
+        bootstrapped_now = False
         if not self._combo_bootstrapped:
             self._combo_bootstrapped = True
             if self._combo_procs:
-                active_dirty = self._run_active_region(list(self._combo_procs))
-                delta = 0
-                while active_dirty or self.executor.nba_queue:
-                    delta += 1
-                    if delta > self.delta_limit:
-                        raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded during settle() bootstrap")
-                    nba_dirty = self.executor.apply_nba(self.ctx)
-                    if nba_dirty:
-                        for _ in range(self.delta_limit):
-                            if not self._run_dirty_continuous_assigns(nba_dirty):
-                                break
-                    combined = active_dirty | nba_dirty
-                    rerun = self._collect_triggered(combined)
-                    if rerun or nba_dirty:
-                        active_dirty = self._run_active_region(rerun)
-                    else:
-                        active_dirty = set()
+                bootstrapped_now = True
+                # The drives' continuous-assign fan-out first, so the one
+                # bootstrap pass sees it; the drive pass below then wakes no
+                # combinational block (each just ran on current values -- it
+                # used to run again, a second activation for one change).
+                if self._pending_drives:
+                    pre_dirty = set(self._pending_drives)
+                    for _ in range(self.delta_limit):
+                        if not self._run_dirty_continuous_assigns(pre_dirty):
+                            break
+                self._bootstrap_combos("settle() bootstrap")
 
         if not self._pending_drives:
             return
@@ -1388,7 +1424,9 @@ class Scheduler:  # cm:9a7f2c
                 break
 
         # Collect and run triggered processes (combo + any edge-triggered seq)
-        triggered = self._collect_triggered(drive_dirty)
+        triggered = self._collect_triggered(drive_dirty, drive_dirty)
+        if bootstrapped_now:
+            triggered = [proc for proc in triggered if proc not in self._combo_proc_set]
         if triggered:
             active_dirty = self._run_active_region(triggered)
             # Propagate blocking-assign outputs (e.g. always_comb writing a
@@ -1409,7 +1447,7 @@ class Scheduler:  # cm:9a7f2c
                         if not self._run_dirty_continuous_assigns(nba_dirty):
                             break
                 combined = active_dirty | nba_dirty
-                rerun = self._collect_triggered(combined)
+                rerun = self._collect_triggered(combined, nba_dirty)
                 if rerun or nba_dirty:
                     active_dirty = self._run_active_region(rerun)
                     for _ in range(self.delta_limit):
@@ -1420,6 +1458,30 @@ class Scheduler:  # cm:9a7f2c
 
         # Update snapshot so the next run()/edge detection starts from settled state.
         self._last_run_signals = self._snapshot_signals()
+
+    def _bootstrap_combos(self, where: str = "bootstrap") -> None:
+        """Run every combinational always block once, then settle the result
+        through the ordinary trigger/NBA/delta loop (an inter-combo
+        dependency -- B reads A's output, B ran first -- re-runs B)."""
+        if not self._combo_procs:
+            return
+        active_dirty = self._run_active_region(list(self._combo_procs))
+        delta = 0
+        while active_dirty or self.executor.nba_queue:
+            delta += 1
+            if delta > self.delta_limit:
+                raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded during {where}")
+            nba_dirty = self.executor.apply_nba(self.ctx)
+            if nba_dirty:
+                for _ in range(self.delta_limit):
+                    if not self._run_dirty_continuous_assigns(nba_dirty):
+                        break
+            combined = active_dirty | nba_dirty
+            rerun = self._collect_triggered(combined, nba_dirty)
+            if rerun or nba_dirty:
+                active_dirty = self._run_active_region(rerun)
+            else:
+                active_dirty = set()
 
     def read_signal(self, name: str) -> Value:
         """Read a signal value."""
@@ -1733,9 +1795,11 @@ def _always_sensitivity(block: AlwaysBlock) -> tuple[set[str], dict[str, str]]:
     edges: dict[str, str] = {}
 
     if block.sensitivity_type == SensitivityType.COMBINATIONAL:
-        # @(*) — infer from all reads in the body
+        # @(*) -- every signal read in the body (IEEE 1364-2005 9.7.5),
+        # including one it also writes: another process changing that wakes
+        # it, its own change doesn't (see `_run_active_region`). Written
+        # signals used to be dropped from the set entirely.
         _collect_stmt_reads(block.body, signals)
-        _collect_stmt_writes(block.body, signals)
         return signals, edges
 
     # Explicit sensitivity list

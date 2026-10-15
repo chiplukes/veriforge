@@ -159,7 +159,7 @@ def _c_const_array_block(arrays: list[tuple[str, str, int]], ctypes: dict[str, s
     return lines
 
 
-def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
+def _gen_dirty_helpers(write_log: bool = False, owner: bool = False) -> list[str]:
     """The only code allowed to write ``SimCtx.dbit``/``dlist``/``dcount``
     and ``nba_bit``/``nba_list``/``nba_count``.
 
@@ -186,6 +186,10 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     holds every sid that call changed (not just the first write of each sid
     per iteration, which is all ``dlist`` records). Dedup by epoch bounds
     ``wlog`` at ``N_SIGS`` entries.
+
+    *owner*: also record in ``downer[sid]`` the combinational process
+    (``cur_proc``, a dispatch rank) that alone marked the sid this iteration,
+    or -1 (see `_combo_external_self_sids`).
     """
     log = (
         [
@@ -197,13 +201,17 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
         if write_log
         else []
     )
+    first = ["        c.downer[sid] = c.cur_proc"] if owner else []
+    again = ["    elif c.downer[sid] != c.cur_proc:", "        c.downer[sid] = -1"] if owner else []
     return [
         "cdef inline void mark_dirty_nosnap(SimCtx *c, int sid) noexcept nogil:",
         *log,
         "    if not c.dbit[sid]:",
         "        c.dbit[sid] = 1",
+        *first,
         "        c.dlist[c.dcount] = sid",
         "        c.dcount += 1",
+        *again,
         "",
         "cdef inline void mark_dirty(SimCtx *c, int sid) noexcept nogil:",
         # Snapshot-dirty: memory snapshots copy a memory only if its marker
@@ -212,8 +220,10 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
         *log,
         "    if not c.dbit[sid]:",
         "        c.dbit[sid] = 1",
+        *first,
         "        c.dlist[c.dcount] = sid",
         "        c.dcount += 1",
+        *again,
         "",
         "cdef inline void mark_nba(SimCtx *c, int sid) noexcept nogil:",
         "    if not c.nba_bit[sid]:",
@@ -224,14 +234,25 @@ def _gen_dirty_helpers(write_log: bool = False) -> list[str]:
     ]
 
 
-def _emit_sens_check_lines(sorted_sids: list[int], indent: str, also_dirty: bool = False) -> list[str]:
+def _emit_sens_check_lines(
+    sorted_sids: list[int], indent: str, also_dirty: bool = False, own: tuple[frozenset[int], int] | None = None
+) -> list[str]:
     """Return a Cython sensitivity check ending in an ``if`` body opener.
 
     A line-wrapped ``or`` expression is still one left-deep Cython AST. Split
     large sensitivity sets into separate shallow statements instead, while
     preserving short-circuit evaluation after a hit.
+
+    *own* ``(sids, rank)``: a hit on one of *sids* counts only if a process
+    other than the one at *rank* marked it (``towner``/``downer``).
     """
-    term = (lambda s: f"trigger[{s}] or c.dbit[{s}]") if also_dirty else (lambda s: f"trigger[{s}]")
+
+    def term(s: int) -> str:
+        if own is not None and s in own[0]:
+            r = own[1]
+            return f"(trigger[{s}] and towner[{s}] != {r}) or (c.dbit[{s}] and c.downer[{s}] != {r})"
+        return f"trigger[{s}] or c.dbit[{s}]" if also_dirty else f"trigger[{s}]"
+
     if len(sorted_sids) <= _MAX_INLINE_SENS:
         cond = " or ".join(term(s) for s in sorted_sids)
         return [f"{indent}if {cond}:"]
@@ -1256,6 +1277,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    int       dbit[N_SIGS]",
             "    int       dlist[N_SIGS]",
             "    int       dcount",
+            # (see _gen_dirty_helpers' owner)
+            *(["    int       downer[N_SIGS]", "    int       cur_proc"] if self._owner_tracking() else []),
             # Per sid: marked since the last memory snapshot (see
             # _mem_snap_memcpy_lines). Only memory-marker sids are consulted.
             "    unsigned char sdirty[N_SIGS]",
@@ -1372,7 +1395,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines: list[str] = []
         # Emitted first: every later helper (narrow templates, wide/memory
         # helpers) and every process body marks signals dirty through these.
-        lines.extend(_gen_dirty_helpers(write_log=self._delta_engine() == "queue"))
+        lines.extend(_gen_dirty_helpers(write_log=self._delta_engine() == "queue", owner=self._owner_tracking()))
         lines.extend(self._mem_snap_helper_lines())
         lines.extend(_gen_narrow_accessor_code())
         lines.extend(_gen_narrow_stage_code())
@@ -1961,8 +1984,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _delta_engine(self) -> str:
         """``"scan"`` or ``"queue"`` for this design (``auto`` resolved by
         process count). Both the delta loop and ``mark_dirty``'s write log
-        depend on it, so they must agree -- hence one place decides."""
+        depend on it, so they must agree -- hence one place decides. A design
+        needing owner tracking (`_owner_tracking`) always gets the scan
+        engine: only it tells a process's own writes apart."""
+        if self._owner_tracking():
+            return "scan"
         return resolve_delta_engine(len(self._processes) + len(self._combo_processes))
+
+    def _owner_tracking(self) -> bool:
+        """Whether some combinational process reads and writes a sid another
+        process writes too (`_combo_external_self_sids`)."""
+        return any(self._combo_ext)
 
     def _gen_delta_loop(self) -> str:
         tables = "\n".join(self._proc_table_lines())
@@ -2278,11 +2310,13 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         scales with total design size. Cheapest per executed process, so it
         wins on small designs and when most of a design is active."""
         ranked = self._delta_ranked_processes()
+        owner = self._owner_tracking()
         lines = [
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
             "    cdef int it, i, changed, _j, _k, _wchg, _stable, _any_interesting_dirty, _sens_hit",
             "    cdef long long _nbaw",
             f"    cdef int trigger[{max(self._n_sigs, 1)}]",
+            *([f"    cdef int towner[{max(self._n_sigs, 1)}]"] if owner else []),
             *self._delta_common_local_lines(),
             "",
             "    for it in range(DELTA_LIMIT):",
@@ -2291,6 +2325,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "        changed = 0",
             "        memcpy(trigger, c.dbit, N_SIGS * sizeof(int))",
             "        memset(c.dbit, 0, N_SIGS * sizeof(int))",
+            *(
+                [
+                    "        memcpy(towner, c.downer, N_SIGS * sizeof(int))",
+                    "        memset(c.downer, 0xFF, N_SIGS * sizeof(int))",  # (all -1)
+                ]
+                if owner
+                else []
+            ),
             "        c.dcount = 0",
             "        for i in range(N_SIGS):",
             "            changed |= trigger[i]",
@@ -2314,8 +2356,19 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # if an input was dirtied last iteration (trigger) or earlier this
         # iteration (dirty -- so a multi-hop chain in rank order settles in
         # one pass instead of one hop per iteration).
-        for call, sens, _pure in ranked:
-            if sens:
+        n_conts = len(ranked) - len(self._combo_processes)
+        for rank, (call, sens, _pure) in enumerate(ranked):
+            ext = self._combo_ext[rank - n_conts] if owner and rank >= n_conts else frozenset()
+            if sens and ext:
+                # Its own write to an `ext` sid (towner/downer == its rank)
+                # doesn't re-trigger it; another process's does.
+                lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True, own=(ext, rank)))
+                lines.append(f"            c.cur_proc = {rank}")
+                lines.append(f"            {call}")
+                lines.append("            c.cur_proc = -1")
+                lines.append("            if c.error_code != ERR_NONE:")
+                lines.append("                return it")
+            elif sens:
                 lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True))
                 lines.append(f"            {call}")
                 lines.append("            if c.error_code != ERR_NONE:")
@@ -2339,6 +2392,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "",
                 # Leave a clean slate for the next call.
                 "    memset(c.dbit, 0, N_SIGS * sizeof(int))",
+                *(["    memset(c.downer, 0xFF, N_SIGS * sizeof(int))"] if owner else []),
                 "    c.dcount = 0",
                 "    return it",
             ]
@@ -2673,6 +2727,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "        self.ctx.wcount = 0",
             "        self.ctx.snap_stale_mid = -1",
             "        self.ctx.wepoch = 1",
+            *(["        self.ctx.cur_proc = -1"] if self._owner_tracking() else []),
             "        for i in range(N_SIGS):",
             "            self.ctx.val[i] = 0",
             "            self.ctx.mask[i] = 0",
@@ -2680,6 +2735,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            self.ctx.wide_words[i] = 0",
             "            self.ctx.wide_offset[i] = 0",
             "            self.ctx.dbit[i] = 0",
+            *(["            self.ctx.downer[i] = -1"] if self._owner_tracking() else []),
             "            self.ctx.sdirty[i] = 1",
             "            self.ctx.wmark[i] = 0",
             "            self.ctx.nba_val[i] = 0",

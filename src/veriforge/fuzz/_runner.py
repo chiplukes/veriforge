@@ -494,11 +494,14 @@ class FuzzRunner:
                 continue
             if engine == "iverilog" and sig in getattr(self, "_self_reading_comb", ()) and sig_mismatches[0][0] == 0:
                 # First evaluation of a combinational block that reads a
-                # signal it writes later: whether it re-runs after its own
-                # write is simulator-dependent (known_issues.md, "self-
-                # referential combinational reads"). Later vectors too when
-                # the difference starts there: a variable the block only
-                # assigns on some paths keeps the first evaluation's value.
+                # signal it writes later: every engine runs it once more at
+                # start-up than Icarus does (known_issues.md, "All engines
+                # run combinational blocks once at t=0"), so the value it
+                # reads is one activation newer. (Whether it re-runs on its
+                # own write is no longer a difference: neither does, IEEE
+                # 9.7.5.) Later vectors too when the difference starts
+                # there: a variable the block only assigns on some paths
+                # keeps the first evaluation's value.
                 self.icarus_artifacts_filtered += len(sig_mismatches)
                 continue
             for vi, exp, got_val in sig_mismatches:

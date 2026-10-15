@@ -237,164 +237,31 @@ operating on signal names and string edge tags.
 `_always_sensitivity(block)` in `scheduler.py` determines what an always
 block reacts to:
 
-```python
-def _always_sensitivity(block: AlwaysBlock) -> tuple[set[str], dict[str, str]]:
-    """Determine sensitivity set and edge types for an always block.
+The real implementation (`_always_sensitivity` in `scheduler.py`) delegates
+to `_collect_stmt_reads`. The set is every signal read in the body --
+including one the block also writes (IEEE 1364-2005 9.7.5).
 
-    Returns (signal_names, edge_dict) where edge_dict maps
-    name → "posedge"/"negedge". For @(*), reads AND writes in the body
-    are both added to the sensitivity set.
-    """
-```
+**A block's own writes don't re-trigger it** (since 2026-10-14, all four
+engines): the block isn't waiting at `@*` while it runs, so its own change
+to a signal it reads doesn't wake it, but another process's change does.
+Each engine attributes changes per process:
 
-- **`@(*)`** (combinational): `signal_names` is every signal read or
-  written in the body; `edge_dict` is empty (level-sensitive).
-- **Explicit sensitivity list** (`@(posedge clk, negedge rst_n)`): each
-  `SensitivityEdge` contributes its signal name to `signal_names`, and
-  `"posedge"`/`"negedge"` entries additionally populate `edge_dict`.
+- reference: `AlwaysProcess.self_sens` (read-and-written signals);
+  `_run_active_region` records a change only that process made
+  (`_own_changes`), and `_collect_triggered` skips it -- unless an NBA
+  update changed the signal too.
+- vm/vm-fast: the same in `VMScheduler._run_process_list`/`_collect_triggered`;
+  the Cython delta loop keeps a per-signal owner (`DeltaCtx.own_pid`).
+- compiled: a block's written signals stay out of its sensitivity, except
+  ones another process also writes (`_combo_external_self_sids`), which a
+  per-signal owner (`SimCtx.downer`, scan engine) tells apart.
 
-The scheduler re-fires a process when a signal in its sensitivity set
-changes; for entries in `edge_dict` it additionally checks the transition
-direction against the signal's previous value before triggering. `#delay`/
-`@(event)` waits inside `initial` blocks use the same `edge_dict` shape
-(built in `_exec_event_control`) via a `(process, edge_dict)` waiting-list
-entry, checked by `_event_edge_fired()`.
-
-### Clock Generator
-
-```python
-class Clock:
-    """Built-in clock generator utility.
-
-    Works via pre-scheduled toggle events in the event queue,
-    not via async coroutines.
-
-    Usage:
-        sim.fork(Clock(sim.signal("clk"), period=10))
-        sim.fork(Clock(sim.signal("clk"), period=10, duty=0.3))
-    """
-
-    def __init__(self, signal: SignalHandle, *, period: int,
-                 duty: float = 0.5):
-        self.signal = signal
-        self.high_time = max(1, int(period * duty))
-        self.low_time = max(1, period - self.high_time)
-```
-
-### Testbench Patterns
-
-```python
-from veriforge.project import parse_file
-from veriforge.sim import Simulator, Clock
-
-# Parse and build model
-design = parse_file("counter.v")
-module = design.get_module("counter")
-
-# Create simulator
-sim = Simulator(module)
-
-# Fork the clock before calling run()
-sim.fork(Clock(sim.signal("clk"), period=10))
-
-# Define test — synchronous callback, not async
-def test_counter(sim):
-    # Drive reset high
-    sim.drive("rst", 1)
-
-    # Advance time explicitly (max_time is keyword-only)
-    sim.run_step(max_time=25)
-
-    # Drive reset low
-    sim.drive("rst", 0)
-
-    # Run more time and check results
-    sim.run_step(max_time=100)
-    assert sim.read("count") == Value(5, width=8)
-
-# Run (schedules pre-forked clocks, calls test_fn, then runs scheduler to max_time)
-sim.run(test_counter, max_time=200)
-```
-
----
-
-## How Combinational Logic Works
-
-An always block classified as `COMBINATIONAL` re-evaluates whenever
-any of its input signals change. The simulator handles this through
-sensitivity tracking and delta cycles.
-
-### Example: Combinational Adder
-
-Given this Verilog:
-```verilog
-module adder(
-    input  [7:0] a, b,
-    output [8:0] sum
-);
-    assign sum = a + b;
-endmodule
-```
-
-The model has a `ContinuousAssign` with `lhs = Identifier("sum")` and
-`rhs = BinaryOp("+", Identifier("a"), Identifier("b"))`. The simulator:
-
-1. Registers this assign as sensitive to signals `a` and `b`
-2. Whenever `a` or `b` changes, evaluates the RHS expression tree
-3. Drives the result onto `sum`
-4. If `sum` changed, propagates to anything sensitive to `sum`
-
-### Example: Combinational Mux (always block)
-
-```verilog
-module mux4(
-    input  [1:0] sel,
-    input  [7:0] a, b, c, d,
-    output reg [7:0] y
-);
-    always @(*) begin
-        case (sel)
-            2'd0: y = a;
-            2'd1: y = b;
-            2'd2: y = c;
-            2'd3: y = d;
-        endcase
-    end
-endmodule
-```
-
-The `AlwaysBlock` has `sensitivity_type = COMBINATIONAL`. The simulator:
-
-1. Builds a sensitivity set: `{sel, a, b, c, d}` (all signals read in body)
-2. Whenever any of these change, executes the statement tree:
-   - Evaluates `sel` → gets Value
-   - Matches against case items (plain int compare when no x/z)
-   - Executes the matched `BlockingAssign`: sets `y` immediately
-3. If `y` changed, triggers anything sensitive to `y`
-
-### Sensitivity Inference for `@(*)`
-
-For `@(*)` (wildcard sensitivity), the simulator must determine which
-signals the block reads. This is done by walking the statement tree
-and collecting all `Identifier` nodes used in read contexts:
-
-```python
-def _always_sensitivity(block: AlwaysBlock) -> tuple[set[str], dict[str, str]]:
-    """Determine sensitivity set and edge types for an always block.
-
-    Returns (signal_names, edge_dict) where edge_dict maps
-    name → "posedge"/"negedge". For @(*), reads AND writes in the body
-    are both added to the sensitivity set.
-    """
-```
-
-The real implementation (in `scheduler.py`) is module-level, not a method,
-and delegates to `_collect_stmt_reads`/`_collect_stmt_writes` helpers rather
-than a single `walk()` + `_is_lhs_target()` pass. It's also not restricted
-to reads: for `@(*)` both reads *and* writes in the body are added to the
-sensitivity set (a write-only signal in a combinational block can still be
-a legitimate re-trigger source, e.g. through a downstream continuous
-assign).
+Each combinational block runs once at start-up (first `run()`/`settle()`),
+and its changes then propagate event by event. Before, written signals
+were dropped from the set (another process's change was missed), vm/vm-fast
+re-ran every block to a fixpoint at start-up, reference re-ran every block
+on every `run()` call, and a first `settle()` ran a block twice (bootstrap,
+then the drive it read). `tests/test_sim/test_comb_self_trigger.py`.
 
 In the **reference engine**, signal lookup is still a string-keyed dict
 lookup — `ctx._signals.get(name)` in `evaluator.py`'s hot Identifier-eval

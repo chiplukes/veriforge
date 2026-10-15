@@ -13,6 +13,7 @@ Implements the same IEEE 1364-2005 scheduling regions:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import TYPE_CHECKING
 
 from veriforge.model.base import VerilogNode
@@ -128,6 +129,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "_monitor_active",
         "_monitor_prev_vals",
         "_on_time_step",
+        "_own_changes",
         "_pending_drives",
         "_prev_sig_mask",
         "_prev_sig_val",
@@ -225,6 +227,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # Guard: run settle()'s one-time combinational-always bootstrap
         # (see settle()'s own comment) only once.
         self._combo_bootstrapped: bool = False
+        self._own_changes: dict[int, int] = {}  # see _run_process_list
 
     # ── Elaboration ──────────────────────────────────────────────
 
@@ -668,6 +671,13 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if self.ensure_bootstrapped():
             return
 
+        # Drives since the last run(): through the ordinary trigger/delta loop
+        # (they used to reach combinational blocks only because every run()
+        # re-ran all of them). Before the first one, the bootstrap below sees
+        # them -- as in reference, not as edges.
+        if self._combo_bootstrapped and self._pending_drives:
+            self.settle()
+
         # Bootstrap / re-bootstrap: execute all continuous assigns until stable.
         # This must run on every run() call so that external drive() changes
         # propagate through combinational logic.
@@ -686,34 +696,14 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             if cur == snap and not (self.interpreter and self.interpreter.dirty):
                 break
 
-        # Execute combinational always blocks
-        if self._combo_procs:
-            self._run_process_list(self._combo_procs)
-
-        # Re-run continuous assigns after combos to propagate changes
-        for _ in range(self.delta_limit):
-            if self._cy_ctx is not None:
-                snap = self._cy_ctx.snapshot_signals()
-            else:
-                snap = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
-            if self.interpreter:
-                self.interpreter.dirty.clear()
-            self._run_continuous_assigns()
-            # Save CA dirty set before _run_process_list clears it.  CAs that
-            # update memory arrays (e.g. lrotc_stage depends on bitcnt_partial_q)
-            # mark memory-marker signals dirty even when no wire signal changes.
-            # Without saving this, the convergence check below would see an
-            # empty dirty set and exit one iteration too early, leaving downstream
-            # combo procs (butterfly_mask, invbutterfly_result) with stale X values.
-            ca_dirty = set(self.interpreter.dirty) if self.interpreter else set()
-            if self._combo_procs:
-                self._run_process_list(self._combo_procs)
-            if self._cy_ctx is not None:
-                cur = self._cy_ctx.snapshot_signals()
-            else:
-                cur = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
-            if cur == snap and not (self.interpreter and self.interpreter.dirty) and not ca_dirty:
-                break
+        # Combinational always blocks: once, on the first run()/settle() (they
+        # used to re-run, with every continuous assign, to a fixpoint on every
+        # run() call -- a block reading its own output re-ran on its own
+        # change).
+        if not self._combo_bootstrapped:
+            self._combo_bootstrapped = True
+            self._bootstrap_combos()
+            self._pending_drives.clear()
 
         # Activate any $monitor registered in initial blocks (snapshot after bootstrap)
         self._check_monitor_activation()
@@ -910,6 +900,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 changed.update(self.interpreter.dirty)
 
                 # Delta cycle loop
+                nba_dirty: set[int] = set(changed)  # (event/drive changes: not a process's own)
                 delta = 0
                 while True:
                     delta += 1
@@ -917,7 +908,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                         raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded at t={self.time}")
 
                     # Collect triggered based on actual signal changes
-                    triggered = self._collect_triggered(changed)
+                    triggered = self._collect_triggered(changed, nba_dirty)
                     if not triggered:
                         break
 
@@ -1016,13 +1007,14 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self._propagate_continuous(changed)
             changed.update(self.interpreter.dirty)
 
+            nba_dirty: set[int] = set(changed)  # (event/drive changes: not a process's own)
             delta = 0
             while True:
                 delta += 1
                 if delta > self.delta_limit:
                     raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded at t={self.time}")
 
-                triggered = self._collect_triggered(changed)
+                triggered = self._collect_triggered(changed, nba_dirty)
                 if not triggered:
                     break
 
@@ -1423,10 +1415,78 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 except StopSimulation:
                     pass
 
+    def _bootstrap_combos(self) -> None:
+        """Run every combinational always block once, then settle the result:
+        an inter-combo dependency (B reads A's output, B ran first) re-runs
+        B. Combinational processes only -- no edge checks yet."""
+        if not self._combo_procs:
+            return
+        interp = self.interpreter
+        self._run_process_list(self._combo_procs)
+        changed = set(interp.dirty)
+        changed |= self._apply_nbas()
+        for _ in range(self.delta_limit):
+            if not changed:
+                break
+            interp.dirty.clear()
+            self._propagate_continuous(changed)
+            changed |= interp.dirty
+            triggered = self._collect_triggered(changed, combo_only=True)
+            if not triggered:
+                break
+            self._run_process_list(triggered)
+            changed = set(interp.dirty)
+            nba_dirty = self._apply_nbas()
+            if nba_dirty:
+                self._own_changes = {sid: pid for sid, pid in self._own_changes.items() if sid not in nba_dirty}
+            changed |= nba_dirty
+        else:
+            raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded during combinational bootstrap")
+        interp.dirty.clear()
+
     def _run_process_list(self, procs: list[CompiledProcess]) -> None:
         """Execute a list of compiled processes. A ``$finish`` in one of them
         sets ``_finish_requested``: the rest still run, the time step
-        completes, and the simulation then stops -- as in Icarus."""
+        completes, and the simulation then stops -- as in Icarus.
+
+        Records in ``_own_changes`` each signal only one combinational
+        process changed among those it reads (IEEE 1364-2005 9.7.5: that
+        change doesn't re-trigger it; see `_collect_triggered`). Such a
+        process runs on its own, the rest in order-preserving batches."""
+        interp = self.interpreter
+        interp.dirty.clear()
+        self._own_changes = {}
+        if not any(p.self_sens for p in procs):
+            self._run_process_batch(procs)
+            return
+        own: dict[int, int] = {}
+        changed: set[int] = set()
+        batch: list[CompiledProcess] = []
+        for proc in [*procs, None]:
+            if proc is not None and not proc.self_sens:
+                batch.append(proc)
+                continue
+            if batch:
+                self._run_process_batch(batch)
+                for sid in interp.dirty:
+                    own.pop(sid, None)
+                changed |= interp.dirty
+                batch = []
+            if proc is None:
+                break
+            self._run_process_batch([proc])
+            for sid in interp.dirty:
+                if sid in proc.self_sens and sid not in changed:
+                    own[sid] = id(proc)
+                else:
+                    own.pop(sid, None)
+            changed |= interp.dirty
+        interp.dirty.clear()
+        interp.dirty.update(changed)
+        self._own_changes = own
+
+    def _run_process_batch(self, procs: list[CompiledProcess]) -> None:
+        """Execute *procs*; ``interpreter.dirty`` is the signals they changed."""
         interp = self.interpreter
         interp.dirty.clear()
 
@@ -1594,14 +1654,22 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         return changed
 
-    def _collect_triggered(self, changed: set[int]) -> list[CompiledProcess]:
+    def _collect_triggered(
+        self, changed: set[int], others: Collection[int] = (), *, combo_only: bool = False
+    ) -> list[CompiledProcess]:
         """Collect processes that should re-execute due to signal changes.
 
         Only includes combinational processes whose sensitivity set
         intersects the actually-changed signals, and sequential processes
-        whose edge conditions fired.
+        whose edge conditions fired. A combinational process's own change
+        (`_run_process_list`) doesn't wake it unless something else
+        (*others*: NBA updates, drives) changed the signal too.
         """
         triggered: list[CompiledProcess] = []
+        own = self._own_changes
+        self._own_changes = {}
+        if own and others:
+            own = {sid: pid for sid, pid in own.items() if sid not in others}
 
         # Combinational: use inverted index for O(|changed|) lookup
         seen: set[int] = set()
@@ -1609,11 +1677,15 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         for sid in changed:
             procs = sig_to_combo.get(sid)
             if procs is not None:
+                owner = own.get(sid)
                 for p in procs:
                     pid = id(p)
-                    if pid not in seen:
+                    if pid not in seen and pid != owner:
                         seen.add(pid)
                         triggered.append(p)
+
+        if combo_only:
+            return triggered
 
         # Check sequential processes for edge triggers
         for proc in self._seq_procs:
@@ -1852,27 +1924,11 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # hit a stale/undersized `_prev_sig_val` and raised IndexError
         # (found via `test_axi_lite_regs_typed_cross_engine[vm-fast]`,
         # which also needed the inter-combo convergence above).
-        if not self._combo_bootstrapped:
-            self._combo_bootstrapped = True
-            if self._combo_procs:
-                for _ in range(self.delta_limit):
-                    if self._cy_ctx is not None:
-                        snap = self._cy_ctx.snapshot_signals()
-                    else:
-                        snap = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
-                    if self.interpreter:
-                        self.interpreter.dirty.clear()
-                    self._run_continuous_assigns()
-                    ca_dirty = bool(self.interpreter and self.interpreter.dirty)
-                    self._run_process_list(self._combo_procs)
-                    if self._cy_ctx is not None:
-                        cur = self._cy_ctx.snapshot_signals()
-                    else:
-                        cur = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
-                    if cur == snap and not (self.interpreter and self.interpreter.dirty) and not ca_dirty:
-                        break
-                if self.interpreter:
-                    self.interpreter.dirty.clear()
+        bootstrap = not self._combo_bootstrapped and bool(self._combo_procs)
+        self._combo_bootstrapped = True
+        if bootstrap and not self._pending_drives:
+            self._bootstrap_combos()
+            return
 
         if not self._pending_drives:
             return
@@ -1882,9 +1938,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # See the identical drain in `_run_event_loop` -- same reasoning.
         changed |= self._drain_interpreter_nba_queues()
 
+        # (With the bootstrap: every combinational block runs once, in the
+        # drives' first delta -- not once for the bootstrap and again for a
+        # drive it reads.)
         if self._cy_ctx is not None and self._cy_ctx._procs_setup:
             try:
-                self._cy_ctx.run_delta_loop(list(changed), self.delta_limit)
+                self._cy_ctx.run_delta_loop(list(changed), self.delta_limit, all_combos_first=bootstrap)
             except _CyStop:
                 self._batch_stopped = True
                 self._drain_cy_display()
@@ -1897,12 +1956,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             if self.interpreter:
                 changed.update(self.interpreter.dirty)
 
+            nba_dirty: set[int] = set(changed)  # (event/drive changes: not a process's own)
             delta = 0
             while True:
                 delta += 1
                 if delta > self.delta_limit:
                     raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded during settle()")
-                triggered = self._collect_triggered(changed)
+                triggered = self._collect_triggered(changed, nba_dirty)
+                if bootstrap:
+                    bootstrap = False
+                    triggered = [*self._combo_procs, *(p for p in triggered if p not in self._combo_procs)]
                 if not triggered:
                     break
                 self._run_process_list(triggered)
