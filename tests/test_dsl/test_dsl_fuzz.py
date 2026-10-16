@@ -30,6 +30,7 @@ from veriforge.convert.to_dsl import module_to_dsl
 from veriforge.dsl import Module, lnot
 from veriforge.fuzz._module_gen import ModuleGenerator
 from veriforge.fuzz._runner import FuzzRunner
+from veriforge.model.expressions import Identifier
 from veriforge.sim.testbench import Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -160,6 +161,9 @@ def test_dsl_control_flow(seed, via_to_dsl):
     tree, text = _cf_text(seed, via_to_dsl)
     design = tree_to_design(verilog_parser(start="source_text").build_tree(text))
     sim = Simulator(design.modules[0], engine="reference", design=design)
+    # (An `always @*` reading no input never runs -- IEEE, as on Icarus.)
+    reads = {n.name for ab in design.modules[0].always_blocks for n in ab.body.walk() if isinstance(n, Identifier)}
+    runs = bool(reads & {*_INS, "s"})
     for bits in itertools.product((0, 1), repeat=4):
         for sv in range(4):
             env = dict(zip(_INS, bits, strict=True))
@@ -170,6 +174,9 @@ def test_dsl_control_flow(seed, via_to_dsl):
             st = {"x": 0}
             _run(tree, env, st)
             got = sim.read("x")
+            if not runs:
+                assert got.is_x, f"inputs {env}: expected x, got {got}\n{text}"
+                continue
             assert not got.is_x and int(got) == st["x"], f"inputs {env}: expected {st['x']}, got {got}\n{text}"
 
 

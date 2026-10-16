@@ -256,12 +256,17 @@ Each engine attributes changes per process:
   ones another process also writes (`_combo_external_self_sids`), which a
   per-signal owner (`SimCtx.downer`, scan engine) tells apart.
 
-Each combinational block runs once at start-up (first `run()`/`settle()`),
-and its changes then propagate event by event. Before, written signals
-were dropped from the set (another process's change was missed), vm/vm-fast
-re-ran every block to a fixpoint at start-up, reference re-ran every block
-on every `run()` call, and a first `settle()` ran a block twice (bootstrap,
-then the drive it read). `tests/test_sim/test_comb_self_trigger.py`.
+At start-up (the first `run()`/`settle()`) only `always_comb` and
+`always_latch` blocks run, once (IEEE 1800-2017 9.2.2.2.2); an `always @*`
+waits for its first change, as on Icarus (since 2026-10-16; it used to run
+at start-up too). Continuous assigns and declaration initializers settle
+silently before time 0; drives, initial-block writes and process writes
+are events -- an initial block's `clk = 0` is a negedge from x on every
+engine. Before, written signals were dropped from the set (another
+process's change was missed), vm/vm-fast re-ran every block to a fixpoint
+at start-up, reference re-ran every block on every `run()` call, and a
+first `settle()` ran a block twice (bootstrap, then the drive it read).
+`tests/test_sim/test_comb_self_trigger.py`.
 
 In the **reference engine**, signal lookup is still a string-keyed dict
 lookup — `ctx._signals.get(name)` in `evaluator.py`'s hot Identifier-eval

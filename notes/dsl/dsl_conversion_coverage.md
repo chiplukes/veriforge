@@ -32,6 +32,8 @@ until called, and a call is itself `unsupported(...)`.
 | Common system tasks | Converts `$display`, `$write`, `$monitor`, `$finish`, `$stop`, `$readmemh`, and `$readmemb`. |
 | Common system functions | Converts `$time`, `$clog2`, `$signed`, and `$unsigned` to explicit DSL helpers. |
 | Size casts | `N'(x)` becomes `cast(N, x)`. |
+| Streaming concatenation | `{<<N{a, b}}` becomes `stream_left(a, b, slice_size=N)`, `{>>{a, b}}` `stream_right(a, b)`, as values and as assignment targets (2026-10-16). |
+| Concatenation and part-select targets | Become `m.assign_b(cat(p, q), x)` / `m.assign_nb(y.part_select(i, 2), x)`: `cat(p, q) @= x`, which the converter used to write, is a Python SyntaxError. |
 | Packages and interfaces | Has dedicated package/interface conversion paths. |
 
 ## Expression gaps
@@ -43,7 +45,7 @@ until called, and a call is itself `unsupported(...)`.
 | Case equality: `===`, `!==` | Converted via explicit `case_eq(...)` / `case_ne(...)` helpers | Keep helper-based lowering so four-state intent stays explicit in generated DSL. |
 | Reduction NAND/NOR/XNOR: `~&`, `~|`, `~^` | `reduce_nand/nor/xnor(...)` (1-bit; `~reduce_or(x)` is a context-widened NOT, which is what it used to emit) | — |
 | Common system functions: `$time`, `$clog2`, `$signed`, `$unsigned` | Converted via explicit `sim_time()`, `clog2(...)`, `signed(...)`, and `unsigned(...)` helpers | Extend this explicit-helper pattern only for stable, common builtins. |
-| Streaming concatenation, user function calls, other system functions, other operators | `unsupported("...")` | Add by usage frequency. |
+| User function calls, other system functions, other operators | `unsupported("...")` | Add by usage frequency. |
 | Unrecognized expression nodes | `unsupported("<type> expression")` | Add targeted tests before adding conversions. |
 
 ## Statement gaps

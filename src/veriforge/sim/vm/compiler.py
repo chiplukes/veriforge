@@ -3530,6 +3530,12 @@ class Compiler:  # cm:8c1e4a
                 self._walk_expr_signals(arg, signals)
             return
 
+        if isinstance(stmt, TaskEnable):
+            # (Its arguments -- `always @* tk(a, r, q);` had no sensitivity.)
+            for arg in stmt.arguments:
+                self._walk_expr_signals(arg, signals)
+            return
+
         if isinstance(stmt, (DelayControl, EventControl)):
             if hasattr(stmt, "body") and stmt.body:
                 self._collect_stmt_signals(stmt.body, signals)
@@ -3553,6 +3559,14 @@ class Compiler:  # cm:8c1e4a
 
         if isinstance(stmt, (BlockingAssign, NonblockingAssign)):
             self._remove_lhs_targets(stmt.lhs, signals)
+            return
+
+        if isinstance(stmt, TaskEnable):
+            # (An lvalue argument may be an output; an input one the task
+            # never writes, so counting it changes nothing.)
+            for arg in stmt.arguments:
+                if isinstance(arg, (Identifier, BitSelect, RangeSelect, Concatenation)):
+                    self._remove_lhs_targets(arg, signals)
             return
 
         if isinstance(stmt, IfStatement):

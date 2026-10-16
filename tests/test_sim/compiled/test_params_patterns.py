@@ -21,8 +21,10 @@ class TestParameterResolutionRegression:
             sim.fork(clk)
             sim.drive("state", Value(0, width=2))  # start at IDLE
 
-            # Run 3 full clock cycles (period=10 each, so 30 time units)
-            sim.run(max_time=30)
+            # 3 posedges: the clock rises at t=0, 10, 20. (The model's
+            # sensitivity edge had its arguments swapped, so the FSM never
+            # ran and the test passed with `state` stuck at 0.)
+            sim.run(max_time=29)
             state_final = int(sim.read("state"))
 
             # After 3 cycles: IDLE→RUNNING→DONE→IDLE, should be back to 0

@@ -1277,6 +1277,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    int       dbit[N_SIGS]",
             "    int       dlist[N_SIGS]",
             "    int       dcount",
+            "    int       boot  # (request_boot(): see _delta_start_ranks)",
             # (see _gen_dirty_helpers' owner)
             *(["    int       downer[N_SIGS]", "    int       cur_proc"] if self._owner_tracking() else []),
             # Per sid: marked since the last memory snapshot (see
@@ -2042,6 +2043,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         }
         return lines + _c_const_array_block(arrays, ctypes)
 
+    def _delta_start_ranks(self, ranked: list[tuple[str, set[int], bool]]) -> list[int]:
+        """Ranks that run in the first delta iteration of a boot (the first
+        run()/settle(), or a delta loop with nothing dirty): every continuous
+        assign, and the `always_comb`/`always_latch` blocks -- not an `always
+        @*`, which waits for its first change (it used to run too)."""
+        n_conts = len(ranked) - len(self._combo_processes)
+        return [r for r in range(len(ranked)) if r < n_conts or self._combo_start[r - n_conts]]
+
     def _delta_ranked_processes(self) -> list[tuple[str, set[int], bool]]:
         """``(call, sens, pure)`` per rank, in dispatch order: continuous
         assigns in dependency (topological) order, then combinational always
@@ -2124,13 +2133,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # = 1->0, x->0, 1->x (masks used to be ignored: 0->x and x->0
             # never fired).
             "                _qnx = c.mask[_qs] & 1",
-            # At t=0 the old value-only rule (a clock's initialization: a
-            # forked Python Clock's first rise is a posedge, its first fall
-            # from x is not -- as on reference/vm); afterwards x counts.
+            # (x counts at t=0 too: `initial clk = 0;` is a negedge from x, as
+            # on reference/vm. A t=0 value-only rule here was there for a
+            # forked Python Clock's first fall from x -- not an edge since the
+            # first run()'s snapshot is taken after drives.)
             "                _qox = sm[_qs] & 1",
-            "                if c.sim_time == 0:",
-            "                    _qnx = 0",
-            "                    _qox = 0",
             "                if DL_SEQ_EDGE_POS[_qe]:",
             "                    _hit = (not _qnx and (c.val[_qs] & 1) == 1 and (_qox or (sv[_qs] & 1) == 0))"
             " or (_qnx and not _qox and (sv[_qs] & 1) == 0)",
@@ -2283,7 +2290,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         owner = self._owner_tracking()
         lines = [
             "cdef int delta_loop(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
-            "    cdef int it, i, changed, _j, _k, _wchg, _stable, _any_interesting_dirty, _sens_hit",
+            "    cdef int it, i, changed, _j, _k, _wchg, _stable, _any_interesting_dirty, _sens_hit, _bootit",
             "    cdef long long _nbaw",
             f"    cdef int trigger[{max(self._n_sigs, 1)}]",
             *([f"    cdef int towner[{max(self._n_sigs, 1)}]"] if owner else []),
@@ -2310,9 +2317,10 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "",
             # On the very first iteration, if nothing was externally dirtied
             # we still need to run all assigns once (bootstrap).
-            "        if it == 0 and not changed:",
-            "            for i in range(N_SIGS):",
-            "                trigger[i] = 1",
+            "        _bootit = 0",
+            "        if it == 0 and (c.boot or not changed):",
+            "            _bootit = 1",
+            "            c.boot = 0",
             "            changed = 1",
             "",
             "        if not changed:",
@@ -2327,9 +2335,29 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # iteration (dirty -- so a multi-hop chain in rank order settles in
         # one pass instead of one hop per iteration).
         n_conts = len(ranked) - len(self._combo_processes)
+        start_ranks = set(self._delta_start_ranks(ranked))
         for rank, (call, sens, _pure) in enumerate(ranked):
             ext = self._combo_ext[rank - n_conts] if owner and rank >= n_conts else frozenset()
-            if sens and ext:
+            if sens and rank in start_ranks:
+                # (A boot runs it regardless of its inputs -- see
+                # `_delta_start_ranks`.)
+                lines.append("        if _bootit:")
+                lines.append(f"            {call}")
+                lines.append("            if c.error_code != ERR_NONE:")
+                lines.append("                return it")
+                lines.append("        else:")
+                if ext:
+                    check = _emit_sens_check_lines(sorted(sens), "            ", also_dirty=True, own=(ext, rank))
+                    lines.extend(check)
+                    lines.append(f"                c.cur_proc = {rank}")
+                    lines.append(f"                {call}")
+                    lines.append("                c.cur_proc = -1")
+                else:
+                    lines.extend(_emit_sens_check_lines(sorted(sens), "            ", also_dirty=True))
+                    lines.append(f"                {call}")
+                lines.append("                if c.error_code != ERR_NONE:")
+                lines.append("                    return it")
+            elif sens and ext:
                 # Its own write to an `ext` sid (towner/downer == its rank)
                 # doesn't re-trigger it; another process's does.
                 lines.extend(_emit_sens_check_lines(sorted(sens), "        ", also_dirty=True, own=(ext, rank)))
@@ -2343,10 +2371,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 lines.append(f"            {call}")
                 lines.append("            if c.error_code != ERR_NONE:")
                 lines.append("                return it")
-            else:
+            elif rank in start_ranks:
                 lines.append(f"        {call}")
                 lines.append("        if c.error_code != ERR_NONE:")
                 lines.append("            return it")
+            # (else: an `always @*` reading nothing never runs -- it used to
+            # run every iteration.)
         # Early exit: if this iteration's dispatch left no dirty flag on any
         # sid anything could ever react to, no further iteration can do
         # anything -- stop now. A genuine combinational loop keeps some
@@ -2386,12 +2416,13 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         n = max(self._n_sigs, 1)
         readers: list[set[int]] = [set() for _ in range(n)]
         always: list[int] = []
+        start_ranks = set(self._delta_start_ranks(ranked))
         for rank, (_call, sens, _pure) in enumerate(ranked):
             if sens:
                 for s in sens:
                     readers[s].add(rank)
-            else:
-                always.append(rank)
+            elif rank in start_ranks:
+                always.append(rank)  # (an `always @*` reading nothing never runs)
         off = [0]
         flat: list[int] = []
         for rs in readers:
@@ -2415,6 +2446,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             _c_const_array("int", "DL_IREADER_OFF", ioff),
             _c_const_array("int", "DL_IREADER_RANK", iflat),
             _c_const_array("int", "DL_ALWAYS_RANK", always),
+            _c_const_array("int", "DL_START_RANK", self._delta_start_ranks(ranked)),
             _c_const_array("unsigned char", "DL_IS_INTERESTING", is_int),
             _c_const_array("unsigned char", "DL_PURE", [1 if pure else 0 for _c, _s, pure in ranked]),
         ]
@@ -2472,7 +2504,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         ranked = self._delta_ranked_processes()
         n_ranks = len(ranked)
         n_words = max((n_ranks + 63) // 64, 1)
-        n_always = sum(1 for _call, sens, _pure in ranked if not sens)
+        start_ranks = set(self._delta_start_ranks(ranked))
+        n_always = sum(1 for rank, (_call, sens, _pure) in enumerate(ranked) if not sens and rank in start_ranks)
         any_pure = any(pure for _call, _sens, pure in ranked)
         set_bit = "_pend[_p >> 6] |= (<unsigned long long>1) << (_p & 63)"
         set_next_bit = "_pnext[_p >> 6] |= (<unsigned long long>1) << (_p & 63)"
@@ -2527,8 +2560,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # Cold start: nothing dirty on the very first iteration -> every
             # process is pending (same as the scan engine's trigger-everything).
             "        _bootstrap = 0",
-            "        if it == 0 and not changed:",
+            "        if it == 0 and (c.boot or not changed):",
             "            _bootstrap = 1",
+            "            c.boot = 0",
             "            changed = 1",
             "        if not changed:",
             "            break",
@@ -2543,14 +2577,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "",
                     f"        _pmin = {n_ranks}",
                     "        _pmax = -1",
-                    "        if _bootstrap:",
-                    f"            for _p in range({n_ranks}):",
-                    f"                {set_bit}",
-                    "            _pmin = 0",
-                    f"            _pmax = {n_ranks - 1}",
                     # Iteration 0: no process has run yet in this call, so every
-                    # reader of every externally dirtied sid must run.
-                    "        elif it == 0:",
+                    # reader of every externally dirtied sid must run -- and on
+                    # a boot, every start rank (`_delta_start_ranks`).
+                    "        if it == 0:",
+                    "            if _bootstrap:",
+                    f"                for _k in range({len(self._delta_start_ranks(ranked))}):",
+                    "                    _p = DL_START_RANK[_k]",
+                    f"                    {set_bit}",
+                    "                    if _p < _pmin:",
+                    "                        _pmin = _p",
+                    "                    if _p > _pmax:",
+                    "                        _pmax = _p",
                     "            for _k in range(_tcount):",
                     *seed_readers("                ", "_tlist[_k]"),
                     "        else:",
@@ -2697,6 +2735,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "        self.ctx.wcount = 0",
             "        self.ctx.snap_stale_mid = -1",
             "        self.ctx.wepoch = 1",
+            "        self.ctx.boot = 0",
             *(["        self.ctx.cur_proc = -1"] if self._owner_tracking() else []),
             "        for i in range(N_SIGS):",
             "            self.ctx.val[i] = 0",
@@ -2788,7 +2827,15 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         if self._n_mems > 0:
             lines.append("        self.ctx.nba_mem_range_count = 0")
 
-        # Native initial block execution (no timing)
+        # Native initial block execution (no timing): a method the scheduler
+        # calls at the first run() (`ensure_bootstrapped`), after the t=0
+        # snapshot -- in __init__, they ran before any snapshot (their t=0
+        # edges were missed) and in a settle()-only flow, where reference and
+        # vm don't run initial blocks at all.
+        lines.append("")
+        lines.append("    cpdef void run_initials(self):")
+        if not self._initial_lines:
+            lines.append("        pass")
         if self._initial_lines:
             lines.append("        # Initial block values")
             # Use a pointer alias so _emit_stmt's c.val[...] syntax works
@@ -2891,6 +2938,32 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ]
         )
 
+        lines.extend(
+            [
+                "",
+                "    cpdef void request_boot(self):",
+                "        self.ctx.boot = 1",
+                "",
+                # Before time 0 (as reference/vm do at elaboration): the
+                # continuous assigns' initial values aren't events, so a
+                # reader's first change is a later one (an `always @*` used
+                # to run on them at the first boot).
+                "    cpdef void settle_conts_silently(self):",
+                *(
+                    [
+                        "        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid",
+                        *self._cont_settle_fixpoint_lines("        "),
+                    ]
+                    if self._processes
+                    else []
+                ),
+                # (Called right after construction: the declaration
+                # initializers' marks go too -- not events either.)
+                "        while self.ctx.dcount > 0:",
+                "            self.ctx.dcount -= 1",
+                "            self.ctx.dbit[self.ctx.dlist[self.ctx.dcount]] = 0",
+            ]
+        )
         lines.extend(
             [
                 "",

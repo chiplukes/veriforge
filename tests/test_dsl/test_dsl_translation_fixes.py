@@ -8,7 +8,18 @@ import pytest
 from veriforge.codegen.verilog_emitter import emit_module
 from veriforge.codegen.verilog_formatter import format_module
 from veriforge.convert.to_dsl import _expr_to_python, module_to_dsl
-from veriforge.dsl import Module, cast, cat, lit, reduce_nand, reduce_nor, reduce_xnor, unsupported
+from veriforge.dsl import (
+    Module,
+    cast,
+    cat,
+    lit,
+    reduce_nand,
+    reduce_nor,
+    reduce_xnor,
+    stream_left,
+    stream_right,
+    unsupported,
+)
 from veriforge.model.expressions import Literal
 from veriforge.sim.testbench import Simulator
 from veriforge.transforms.tree_to_model import tree_to_design
@@ -55,7 +66,7 @@ def test_for_loop_keeps_its_own_variable_declaration(decl, emit):
     # outer `i` (or an undeclared one).
     text = f"""module t(output reg [7:0] y);
   integer i;
-  always @* begin
+  always_comb begin  // (runs at time 0; an `always @*` reading nothing never runs)
     i = 100;
     y = 0;
     for ({decl} i = 0; i < 3; i = i + 1) y = y + 1;
@@ -228,7 +239,6 @@ endmodule
         "always @* for (integer i = 0; i < 2; i = i + 1) y = y + 1;",
         "always @* begin y = 0; while (y < 3) y = y + 1; end",
         "task tk; y = 1; endtask\n  always @* tk;",
-        "always @* y = {<<{a}};",
     ],
 )
 def test_unsupported_constructs_raise_instead_of_running_wrong(body):
@@ -275,3 +285,70 @@ def test_atom_typed_ports():
         m.input("bad", width=8, kind="shortint")
     with pytest.raises(ValueError, match="Unknown port kind"):
         m.input("bad2", kind="real")
+
+
+def test_streaming_concatenation():
+    """`{<<{...}}` converted to `unsupported(...)`, and `{>>{...}}` to
+    `cat(...)` -- the same value, but as an assignment target `{>>{a, b}} =
+    x` takes x's left-most bits where `{a, b} = x` takes its right-most. The
+    DSL has `stream_left`/`stream_right` now (2026-10-16)."""
+    text = """module t(input [11:0] a, output [11:0] y, output [11:0] z, output reg [3:0] p, output reg [3:0] q,
+         output reg [3:0] r, output reg [1:0] s);
+  assign y = {<<{a}};
+  assign z = {<<4{a[3:0], a[11:4]}};
+  always @* begin
+    {<<{p, q}} = a;
+    {>>{r, s}} = a;
+  end
+endmodule
+"""
+    code = module_to_dsl(_parse(text).modules[0])
+    assert "unsupported" not in code, code
+    for call in (
+        "stream_left(a)",
+        "stream_left(a[3:0], a[11:4], slice_size=4)",
+        "m.assign_b(stream_left(p, q), a)",
+        "m.assign_b(stream_right(r, s), a)",
+    ):
+        assert call in code, (call, code)
+    out = _round_trip(text)
+    assert emit_module(_parse(text).modules[0]) == out
+    # (Verilator, but p and q: a source wider than the target is consumed
+    # from its left end, which Verilator doesn't do -- known_issues.md)
+    expected = [["12'b001111001011", "12'b001111011100", "4'b1100", "4'b1011", "4'b1101", "2'b00"]]
+    assert _outputs(text, [{"a": 0b110100111100}], ["y", "z", "p", "q", "r", "s"]) == expected
+    assert _outputs(out, [{"a": 0b110100111100}], ["y", "z", "p", "q", "r", "s"]) == expected
+
+
+def test_streaming_concatenation_builder():
+    m = Module("k")
+    a = m.input("a", width=8)
+    b = m.input("b", width=4)
+    y = m.output("y", width=12)
+    hi = m.output_reg("hi", width=4)
+    m.assign(y, stream_left(a, b, slice_size=4))
+    with m.comb():
+        m.assign_b(stream_right(hi), a)
+    out = emit_module(m.build())
+    assert "assign y = {<<4{a, b}};" in out and "{>>{hi}} = a;" in out, out
+    with pytest.raises(ValueError, match="at least one"):
+        stream_left()
+    with pytest.raises(ValueError, match="positive"):
+        stream_left(a, slice_size=0)
+    with pytest.raises(TypeError, match="no width"):
+        stream_right(a, 3)
+
+
+def test_concatenation_and_part_select_targets():
+    """`{p, q} = a;` converted to `cat(p, q) @= a` and `y[i +: 2] <= a;` to
+    `y.part_select(i, 2) <<= a` -- both a SyntaxError (Python can't
+    augment-assign a call). They go through `m.assign_b`/`m.assign_nb` now."""
+    text = """module t(input [3:0] a, input [1:0] i, input clk, output reg [1:0] p, q, output reg [7:0] y);
+  always @* {p, q} = a;
+  always @(posedge clk) y[i*2 +: 2] <= a[1:0];
+endmodule
+"""
+    code = module_to_dsl(_parse(text).modules[0])
+    assert "m.assign_b(cat(p, q), a)" in code and "m.assign_nb(y.part_select(" in code, code
+    out = _round_trip(text)
+    assert emit_module(_parse(text).modules[0]) == out

@@ -63,15 +63,30 @@ engine: `real r = 3.25;` stores the integer `325`. `$display`'s `%e`/`%f`/
 argument's *integer* value, which covers `$time`-style use. Real support
 needs a real-valued representation alongside `Value` in all four engines.
 
-### Multi-dimensional array sub-array access not supported
+### Multi-dimensional array sub-array access: only assignments supported
 
-**Status**: Not supported, fails loudly (2026-10-12). `m[0] = m[1]` on
-`reg m [0:1][0:2]` (an SV array slice) raises `NotImplementedError` from
-`sim/ascending.py:flatten_unpacked_arrays`; it used to simulate wrongly. Icarus
-doesn't support array slices either ("sorry: ... not yet supported").
-Elements (`m[i][j]`), `$readmem` into rebased memories, hierarchical
-references and the Python API (`sim.read("m[4]")`, VCD labels) all use declared
-addresses (fixed 2026-10-12).
+**Status**: Partly supported (2026-10-16). An assignment between sub-arrays
+(`m[0] = m[1]` on `reg m [0:1][0:2]`, an SV array slice), or between one and
+a whole one-dimensional array of the same shape, is expanded element by
+element (`sim/ascending.py:_expand_sub_array_assigns`). This covers blocking,
+nonblocking and continuous assignments, and elements pair left to right,
+as in Verilator. Any other use of a sub-array (`m[0] == m[1]`, a port
+connection, a function argument) still raises `NotImplementedError` from
+`flatten_unpacked_arrays`. Icarus doesn't support array slices ("sorry: ...
+not yet supported"). Elements (`m[i][j]`), `$readmem` into rebased memories,
+hierarchical references and the Python API (`sim.read("m[4]")`, VCD labels)
+all use declared addresses (fixed 2026-10-12).
+
+### A drive before the first settle(): an edge on reference/vm, not on compiled
+
+**Status**: Open cross-engine difference (found 2026-10-16; predates the
+start-up work). `drive("clk", 1); settle()` as the very first activity fires
+`always @(posedge clk)` on reference, vm and vm-fast (x -> 1 against the
+pre-drive state), not on compiled, which deliberately treats the first
+settle() as a bootstrap (the 2026-09-01 "bootstrap-settle false posedge"
+fix). A drive before the first run() is not an edge on any engine. Needs a
+decision on which rule all engines follow.
+`TestBootstrapSettleFalsePosedge` checks compiled only.
 
 ## Reference notes (not defects)
 
@@ -191,15 +206,29 @@ list. If nothing else external is read, the block never runs, so its
 outputs stay x. IEEE puts every identifier read in the statement into `@*`.
 Not a veriforge bug -- do not replicate.
 
-### All engines run combinational blocks once at t=0 (Icarus doesn't)
+### Start-up: which combinational blocks run at t=0 (aligned with Icarus 2026-10-16)
 
-Every veriforge engine runs each combinational `always @*` block (and each
-continuous assign) once at t=0, `always_comb`-style. Icarus runs an
-`always @*` block only on an input change. A block whose inputs never
-change, e.g. `o10 = -r9` with `r9` a 2-state `shortint` that stays at its
-initial 0, therefore stays x in Icarus. Strict 1364 `@*` semantics side
-with Icarus here; this is a deliberate choice, and the fuzzer sees it as an
-occasional "first activation" difference.
+Since 2026-10-16 every engine follows IEEE: an `always_comb`/`always_latch`
+block runs once at time 0 (IEEE 1800-2017 9.2.2.2.2); an `always @*` (or
+`always @(a or b)`) waits for its first change, as on Icarus -- it used to
+run at start-up too. What counts as a change: a drive, an initial block's
+write, any process's write. Not one: a declaration initializer (`reg a =
+1;`) or a continuous assign's value before time 0 (all engines settle those
+silently first). `always @* y = a;` with `reg a = 1;` therefore leaves y at
+x, as Icarus does. (`always_latch` also never ran before, on any engine: it
+had no inferred sensitivity.)
+
+One Icarus difference remains: Icarus does wake an `always @*` reading a
+*constant*-driven wire (`wire c = 1'b1;`) at t=0, though not one reading a
+wire driven from a declaration-initialized register (`wire b = a;`). The
+LRM doesn't order these; veriforge treats every continuous assign's t=0
+value the same (no event). Not a veriforge bug -- do not replicate.
+Icarus also leaves a wire's continuous assign unevaluated while all its
+operands are x, so `assign w = {59'b0, ~r ~^ i};` (r never written) only
+changes there when the vector-0 drive of `i` arrives, waking a reader;
+veriforge already settled w to `{59'b0, x}` before t=0 and the drive
+doesn't change it. The fuzzer makes every generated `always @*` read an
+input (`rhs | (i & 1'b0)`) so neither race shows up (fuzz 40030/41083/41295).
 
 ### Icarus: `signed_port | 1'b1` treated as signed
 

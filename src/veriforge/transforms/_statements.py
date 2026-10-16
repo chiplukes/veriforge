@@ -154,6 +154,7 @@ def _extract_always_comb_construct(
                     body=body,
                     sensitivity_list=[],
                     sensitivity_type=SensitivityType.COMBINATIONAL,
+                    keyword="always_comb",
                     loc=loc,
                 )
     return None
@@ -180,6 +181,7 @@ def _extract_always_ff_construct(
         body=body,
         sensitivity_list=sensitivity_list,
         sensitivity_type=SensitivityType.SEQUENTIAL,
+        keyword="always_ff",
         loc=loc,
     )
 
@@ -195,7 +197,15 @@ def _extract_always_latch_construct(
         if isinstance(child, Tree) and child.data == "statement":
             body = _extract_statement_from_tree(child, source_file, callbacks)
             if body:
-                return AlwaysBlock(body=body, sensitivity_list=[], sensitivity_type=SensitivityType.LATCH, loc=loc)
+                return AlwaysBlock(
+                    body=body,
+                    sensitivity_list=[],
+                    # (Combinational to every engine -- an inferred
+                    # sensitivity; as LATCH it had none, and never ran.)
+                    sensitivity_type=SensitivityType.COMBINATIONAL,
+                    keyword="always_latch",
+                    loc=loc,
+                )
     return None
 
 

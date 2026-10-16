@@ -3666,7 +3666,10 @@ hierarchical_block_identifier: hierarchical_identifier
 // SUPPORT: YES
 hierarchical_event_identifier: hierarchical_identifier
 // SUPPORT: YES
-hierarchical_function_identifier: hierarchical_identifier
+hierarchical_function_identifier: (IDENTIFIER ( "[" constant_expression "]" )? "." )* FUNCTION_NAME_IDENTIFIER
+// (Not `posedge`/`negedge`: `@(posedge (a & b))` parsed as a level-sensitive
+// call of a function named `posedge`, losing the edge.)
+FUNCTION_NAME_IDENTIFIER: /(?!(?:posedge|negedge)(?![a-zA-Z0-9_$]))[a-zA-Z_][a-zA-Z0-9_$]*/
 // BNF: hierarchical_identifier ::= { identifier [ [ constant_expression ] ] . } identifier
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES

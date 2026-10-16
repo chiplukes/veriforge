@@ -327,25 +327,29 @@ class TestBootstrapSettleFalsePosedge:
 
     def test_posedge_process_does_not_fire_on_first_settle_with_clock_starting_high(self):
         mod = _parse("""
-            module t (input clk, output reg [7:0] cnt);
-              initial cnt = 0;
+            module t (input clk, output reg [7:0] cnt = 0);
               always @(posedge clk)
                 cnt <= cnt + 1;
             endmodule
         """)
-        sim = Simulator(mod, engine="compiled")
-        # The clock's very first-ever drive sets it straight to 1 -- exactly
-        # what a "starts high" clock generator does before any stepping.
-        sim.drive("clk", Value(1, width=1))
-        sim.settle()
-        assert int(sim.read("cnt")) == 0, "posedge process must not fire on the bootstrap settle() call"
+        # (A declaration initializer: no engine runs initial blocks under a
+        # settle()-only flow -- compiled used to, at construction. Compiled
+        # only: reference/vm do count this first drive as a posedge --
+        # known_issues.md, "first settle()".)
+        for engine in ("compiled",):
+            sim = Simulator(mod, engine=engine)
+            # The clock's very first-ever drive sets it straight to 1 -- exactly
+            # what a "starts high" clock generator does before any stepping.
+            sim.drive("clk", Value(1, width=1))
+            sim.settle()
+            assert int(sim.read("cnt")) == 0, f"{engine}: posedge process must not fire on the bootstrap settle()"
 
-        # A real subsequent edge (1 -> 0 -> 1) must still fire normally.
-        sim.drive("clk", Value(0, width=1))
-        sim.settle()
-        sim.drive("clk", Value(1, width=1))
-        sim.settle()
-        assert int(sim.read("cnt")) == 1, "the real first posedge should still increment cnt exactly once"
+            # A real subsequent edge (1 -> 0 -> 1) must still fire normally.
+            sim.drive("clk", Value(0, width=1))
+            sim.settle()
+            sim.drive("clk", Value(1, width=1))
+            sim.settle()
+            assert int(sim.read("cnt")) == 1, f"{engine}: the real first posedge should increment cnt once"
 
     def test_skid_buffer_does_not_double_capture_first_beat(self):
         """End-to-end shape of the originally-reported symptom: a 1-deep
@@ -357,11 +361,10 @@ class TestBootstrapSettleFalsePosedge:
                 input clk,
                 input s_valid,
                 input [7:0] s_data,
-                output reg m_valid,
+                output reg m_valid = 0,
                 output reg [7:0] m_data,
                 input m_ready
             );
-                initial m_valid = 0;
                 always @(posedge clk)
                     if (!m_valid || m_ready) begin
                         m_valid <= s_valid;
@@ -369,13 +372,8 @@ class TestBootstrapSettleFalsePosedge:
                     end
             endmodule
         """)
-        # Only the compiled engine has the bootstrap-settle bug this guards
-        # against; other engines don't apply `initial` assignments via a
-        # bare drive()/settle() pair the way `compiled`'s mark_all_dirty()
-        # bootstrap does, so a fair cross-engine comparison isn't possible
-        # at this low a level -- see `test_axis_endpoints.py` /
-        # `test_bypass_survives_sustained_severe_output_backpressure`-style
-        # bench tests for the cross-engine end-to-end coverage instead.
+        # (A declaration initializer, not `initial m_valid = 0;`: no engine
+        # runs initial blocks under a settle()-only flow.)
         sim = Simulator(mod, engine="compiled")
         sim.drive("s_valid", Value(1, width=1))
         sim.drive("s_data", Value(0x42, width=8))

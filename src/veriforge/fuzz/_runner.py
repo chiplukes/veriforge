@@ -307,7 +307,6 @@ class FuzzRunner:
         if self._icarus and not has_streaming_concat:
             try:
                 icarus_res = self._simulate_icarus(verilog, vectors, top)
-                self._self_reading_comb = _self_reading_comb_outputs(top)
                 diffs = self._compare(oracle, icarus_res, "iverilog", vectors)
                 diffs += _compare_displays(
                     self._displays.get("reference", []), self._displays.get("iverilog", []), "iverilog"
@@ -497,18 +496,6 @@ class FuzzRunner:
             if engine == "iverilog" and _is_icarus_first_activation_artifact(sig_mismatches):
                 self.icarus_artifacts_filtered += len(sig_mismatches)
                 continue
-            if engine == "iverilog" and sig in getattr(self, "_self_reading_comb", ()) and sig_mismatches[0][0] == 0:
-                # First evaluation of a combinational block that reads a
-                # signal it writes later: every engine runs it once more at
-                # start-up than Icarus does (known_issues.md, "All engines
-                # run combinational blocks once at t=0"), so the value it
-                # reads is one activation newer. (Whether it re-runs on its
-                # own write is no longer a difference: neither does, IEEE
-                # 9.7.5.) Later vectors too when the difference starts
-                # there: a variable the block only assigns on some paths
-                # keeps the first evaluation's value.
-                self.icarus_artifacts_filtered += len(sig_mismatches)
-                continue
             for vi, exp, got_val in sig_mismatches:
                 diffs.append(f"[{engine}] vector {vi} signal {sig}: expected={_val_repr(exp)} got={_val_repr(got_val)}")
         return diffs
@@ -552,9 +539,9 @@ class FuzzRunner:
                 raise RuntimeError(f"iverilog: {exc.stderr.strip()}") from exc
             if "found no sensitivities so it will never trigger" in compiled.stderr:
                 # An `always @*` whose reads Icarus constant-folds away never
-                # runs there (IEEE 1364: `@*` with an empty list waits
-                # forever); veriforge runs it once at time 0, like
-                # `always_comb`. A known, intentional difference.
+                # runs there. veriforge doesn't constant-fold the sensitivity,
+                # so a parameter-only read still waits forever, but one
+                # reading `i & 1'b0` wakes on i. Not comparable.
                 raise _IcarusIncomparable(compiled.stderr.strip())
 
             try:
@@ -893,31 +880,6 @@ def _two_state_outputs(mod: Module) -> set[str]:
     from ..sim.sv_functions import is_two_state  # noqa: PLC0415
 
     return {p.name for p in mod.output_ports() if is_two_state(p)}
-
-
-def _self_reading_comb_outputs(mod: Module) -> set[str]:
-    """Signals written by an ``always @(*)`` block that also reads one of the
-    signals it writes (read-before-write within the block)."""
-    from ..model.behavioral import SensitivityType  # noqa: PLC0415
-    from ..model.expressions import Identifier  # noqa: PLC0415
-    from ..model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
-
-    out: set[str] = set()
-    for ab in mod.always_blocks:
-        if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
-            continue
-        written: set[str] = set()
-        lhs_ids: set[int] = set()
-        for node in ab.body.walk():
-            if isinstance(node, (BlockingAssign, NonblockingAssign)):
-                for ident in node.lhs.walk():
-                    if isinstance(ident, Identifier):
-                        written.add(ident.name)
-                        lhs_ids.add(id(ident))
-        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier) and id(n) not in lhs_ids}
-        if read & written:
-            out |= written
-    return out
 
 
 def _is_icarus_first_activation_artifact(mismatches: list[tuple[int, Value, Value]]) -> bool:

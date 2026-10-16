@@ -488,6 +488,17 @@ class Scheduler:  # cm:9a7f2c
                 # always #5 clk = ~clk — timing-controlled, no sensitivity
                 self._timing_procs.append(proc)
             elif block.sensitivity_type == SensitivityType.COMBINATIONAL:
+                # A flattened child's instance prefix (`u8` of `u8.w6`) isn't
+                # a signal; every write in that instance dirties it, which
+                # would wake the block without any of its inputs changing.
+                sens -= {
+                    name
+                    for name in sens
+                    if name not in self.ctx._signals
+                    and name not in self.ctx._memories
+                    and any(other.startswith(name + ".") for other in sens)
+                }
+                proc.sensitivity = sens
                 self._combo_procs.append(proc)
                 self._combo_proc_set.add(proc)
                 not_written = set(sens)
@@ -607,7 +618,15 @@ class Scheduler:  # cm:9a7f2c
         # propagated).
         if not self._combo_bootstrapped:
             self._combo_bootstrapped = True
-            self._bootstrap_combos()
+            # (Drives before this first run() wake the combinational blocks
+            # reading them -- not as edges, as before.)
+            drives = set(self._pending_drives)
+            self._pending_drives.clear()
+            if drives:
+                for _ in range(self.delta_limit):
+                    if not self._run_dirty_continuous_assigns(drives):
+                        break
+            self._bootstrap_combos(drives=drives)
 
         # Start the $dumpvars trace session, if an initial block requested one.
         start_dump(self, self.executor)
@@ -1388,6 +1407,7 @@ class Scheduler:  # cm:9a7f2c
         # exactly this kind of inter-combo dependency and hung/timed out
         # under a single-pass bootstrap).
         bootstrapped_now = False
+        boot_dirty: set[str] = set()
         if not self._combo_bootstrapped:
             self._combo_bootstrapped = True
             if self._combo_procs:
@@ -1401,12 +1421,13 @@ class Scheduler:  # cm:9a7f2c
                     for _ in range(self.delta_limit):
                         if not self._run_dirty_continuous_assigns(pre_dirty):
                             break
+                    boot_dirty = pre_dirty  # (for the drive pass: already propagated)
                 self._bootstrap_combos("settle() bootstrap")
 
         if not self._pending_drives:
             return
 
-        drive_dirty: set[str] = set(self._pending_drives)
+        drive_dirty: set[str] = set(self._pending_drives) | boot_dirty
         self._pending_drives.clear()
 
         # Use the pre-drive snapshot for edge detection so sequential blocks
@@ -1426,7 +1447,8 @@ class Scheduler:  # cm:9a7f2c
         # Collect and run triggered processes (combo + any edge-triggered seq)
         triggered = self._collect_triggered(drive_dirty, drive_dirty)
         if bootstrapped_now:
-            triggered = [proc for proc in triggered if proc not in self._combo_proc_set]
+            started = set(self._start_procs())
+            triggered = [proc for proc in triggered if proc not in started]
         if triggered:
             active_dirty = self._run_active_region(triggered)
             # Propagate blocking-assign outputs (e.g. always_comb writing a
@@ -1459,13 +1481,26 @@ class Scheduler:  # cm:9a7f2c
         # Update snapshot so the next run()/edge detection starts from settled state.
         self._last_run_signals = self._snapshot_signals()
 
-    def _bootstrap_combos(self, where: str = "bootstrap") -> None:
-        """Run every combinational always block once, then settle the result
-        through the ordinary trigger/NBA/delta loop (an inter-combo
-        dependency -- B reads A's output, B ran first -- re-runs B)."""
-        if not self._combo_procs:
-            return
-        active_dirty = self._run_active_region(list(self._combo_procs))
+    def _bootstrap_combos(self, where: str = "bootstrap", drives: Collection[str] = ()) -> None:
+        """Run every `always_comb`/`always_latch` block once (IEEE 1800-2017
+        9.2.2.2.2), then settle the result through the ordinary
+        trigger/NBA/delta loop (an inter-combo dependency -- B reads A's
+        output, B ran first -- re-runs B). An `always @*` waits for its first
+        change (IEEE 1364-2005 9.7.5, as in Icarus); it used to run too.
+        *drives*: signals driven before this, whose readers run too (no edge
+        detection: the drives were made before time 0's snapshot)."""
+        start = self._start_procs()
+        active_dirty = self._run_active_region(start) if start else set()
+        if drives:
+            self._prev_signals = self._snapshot_signals()
+            started = set(start)
+            woken = [
+                p
+                for p in self._collect_triggered(set(drives), drives)
+                if p in self._combo_proc_set and p not in started
+            ]
+            if woken:
+                active_dirty |= self._run_active_region(woken)
         delta = 0
         while active_dirty or self.executor.nba_queue:
             delta += 1
@@ -1482,6 +1517,11 @@ class Scheduler:  # cm:9a7f2c
                 active_dirty = self._run_active_region(rerun)
             else:
                 active_dirty = set()
+
+    def _start_procs(self) -> list[AlwaysProcess]:
+        """The combinational blocks that run once at time 0: `always_comb`
+        and `always_latch` (see `_bootstrap_combos`)."""
+        return [p for p in self._combo_procs if p.block.keyword in ("always_comb", "always_latch")]
 
     def read_signal(self, name: str) -> Value:
         """Read a signal value."""

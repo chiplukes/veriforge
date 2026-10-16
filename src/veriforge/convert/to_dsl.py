@@ -45,6 +45,7 @@ from ..model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    StreamingConcatenation,
     WidthCast,
 )
 from ..model.instances import Instance
@@ -319,7 +320,14 @@ def _expr_to_python(expr: Expression) -> str:  # noqa: PLR0911, PLR0912, PLR0915
     # --- Concatenation ---
     if isinstance(expr, Concatenation):
         parts = ", ".join(_expr_to_python(p) for p in expr.parts)
-        return f"cat({parts})"
+        # (`{>>{a, b}}`: the same value as `{a, b}`, but not the same target)
+        return f"stream_right({parts})" if expr.from_streaming else f"cat({parts})"
+
+    if isinstance(expr, StreamingConcatenation):
+        parts = ", ".join(_expr_to_python(p) for p in expr.parts)
+        if expr.slice_size is None:
+            return f"stream_left({parts})"
+        return f"stream_left({parts}, slice_size={_expr_to_python(expr.slice_size)})"
 
     # --- Replication ---
     if isinstance(expr, Replication):
@@ -407,16 +415,17 @@ def _stmt_to_lines(stmt: Statement, depth: int = 0, mv: str = "m") -> list[str]:
         return lines
 
     # --- NonblockingAssign (NBA): lhs <= rhs → lhs <<= rhs ---
-    if isinstance(stmt, NonblockingAssign):
-        lhs = _expr_to_python(stmt.lhs)
-        rhs = _expr_to_python(stmt.rhs)
-        return [f"{pfx}{lhs} <<= {rhs}"]
-
     # --- BlockingAssign: lhs = rhs → lhs @= rhs ---
-    if isinstance(stmt, BlockingAssign):
+    # A target Python can't augment-assign -- `cat(a, b)`, `x.part_select(..)`
+    # (a call: a SyntaxError, which the generated code used to be) -- goes
+    # through `m.assign_nb`/`m.assign_b` instead.
+    if isinstance(stmt, (NonblockingAssign, BlockingAssign)):
         lhs = _expr_to_python(stmt.lhs)
         rhs = _expr_to_python(stmt.rhs)
-        return [f"{pfx}{lhs} @= {rhs}"]
+        nba = isinstance(stmt, NonblockingAssign)
+        if isinstance(stmt.lhs, (Identifier, BitSelect, RangeSelect)):
+            return [f"{pfx}{lhs} {'<<=' if nba else '@='} {rhs}"]
+        return [f"{pfx}{mv}.{'assign_nb' if nba else 'assign_b'}({lhs}, {rhs})"]
 
     # --- IfStatement ---
     if isinstance(stmt, IfStatement):
@@ -744,7 +753,7 @@ def _collect_imports(module: Module) -> str:  # noqa: PLR0912
         if isinstance(node, TernaryOp):
             helpers.add("mux")
         elif isinstance(node, Concatenation):
-            helpers.add("cat")
+            helpers.add("stream_right" if node.from_streaming else "cat")
         elif isinstance(node, Replication):
             helpers.add("rep")
         elif isinstance(node, BinaryOp):

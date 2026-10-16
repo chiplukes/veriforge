@@ -565,10 +565,11 @@ class VerilogFormatter:
     # -- Always / Initial ---------------------------------------------------
 
     def _always_block(self, ab: AlwaysBlock, ci: str) -> str:
-        control = f"{ci}always"
+        keyword = getattr(ab, "keyword", "always")
+        control = f"{ci}{keyword}"
         if ab.sensitivity_list:
             control += f" @({self._sensitivity_list(ab.sensitivity_list)})"
-        elif ab.sensitivity_type == SensitivityType.COMBINATIONAL:
+        elif ab.sensitivity_type == SensitivityType.COMBINATIONAL and keyword == "always":
             control += " @(*)"
         return self._controlled_body(control, ab.body, ci)
 

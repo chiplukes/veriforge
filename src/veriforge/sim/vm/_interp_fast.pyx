@@ -486,6 +486,7 @@ cdef struct DeltaCtx:
     int       *sens_procs
     # Process type flags
     char      *proc_is_combo
+    char      *proc_starts    # [n_procs] a combinational proc run at time 0 (always_comb/always_latch)
     char      *proc_is_seq
     # Continuous assigns
     int       *cont_indices
@@ -4481,8 +4482,9 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
         # ── Collect triggered procs ──
         triggered_count = 0
         if delta == 1 and dc.all_combos_first:
+            # (The ones that run at time 0: always_comb/always_latch.)
             for pid in range(dc.proc_count):
-                if dc.proc_is_combo[pid] and not dc.trig_flag[pid]:
+                if dc.proc_starts[pid] and not dc.trig_flag[pid]:
                     dc.trig_flag[pid] = 1
                     dc.triggered_buf[triggered_count] = pid
                     triggered_count += 1
@@ -4504,8 +4506,13 @@ cdef int _run_delta_loop_core(DeltaCtx *dc, int *p_changed_count) noexcept nogil
                         esid = dc.edge_sigs[i]
                         old_bit = <int>(dc.snap_val[esid] & 1)
                         old_x = 1 if (dc.snap_mask[esid] & 1) else 0
-                        new_bit = <int>(dc.sig_val[esid] & 1)
-                        new_x = 1 if (dc.sig_mask[esid] & 1) else 0
+                        if dc.wctx.sig_offset != NULL and dc.wctx.sig_offset[esid] >= 0:
+                            # (A wide signal: its word 0 -- see take_snapshot.)
+                            new_bit = <int>(dc.wctx.sig_val[dc.wctx.sig_offset[esid]] & 1)
+                            new_x = 1 if (dc.wctx.sig_mask[dc.wctx.sig_offset[esid]] & 1) else 0
+                        else:
+                            new_bit = <int>(dc.sig_val[esid] & 1)
+                            new_x = 1 if (dc.sig_mask[esid] & 1) else 0
                         # 0->x / 1->x count too (IEEE 1364 9.7.2).
                         if etype == 0:   # posedge
                             if (not new_x and new_bit == 1 and (old_x or old_bit == 0)) or (new_x and not old_x and old_bit == 0):
@@ -5086,6 +5093,7 @@ cdef class CyContext:
 
     # ── Delta-loop data (populated by setup_processes) ───────
     cdef char      *proc_is_combo
+    cdef char      *proc_starts
     cdef char      *proc_is_seq
     cdef int       *sens_offset       # [sig_count + 1] CSR offsets
     cdef int       *sens_procs        # [total_entries] proc indices
@@ -5177,6 +5185,7 @@ cdef class CyContext:
         self.dirty_buf = NULL
         self.dirty_mark = NULL
         self.proc_is_combo = NULL
+        self.proc_starts = NULL
         self.proc_is_seq = NULL
         self.sens_offset = NULL
         self.sens_procs = NULL
@@ -5278,6 +5287,7 @@ cdef class CyContext:
         # The pointers are NULL until allocated, so this also releases a
         # partially constructed process table if setup raises.
         free(self.proc_is_combo)
+        free(self.proc_starts)
         free(self.proc_is_seq)
         free(self.sens_offset)
         free(self.sens_procs)
@@ -5873,10 +5883,13 @@ cdef class CyContext:
         # ── Process type flags ──
         self.proc_is_combo = <char *>malloc(self.n_procs * sizeof(char))
         self.proc_is_seq   = <char *>malloc(self.n_procs * sizeof(char))
+        self.proc_starts   = <char *>malloc(self.n_procs * sizeof(char))
         for i in range(self.n_procs):
             pt = <int>proc_types[i]
-            self.proc_is_combo[i] = 1 if pt == 1 else 0
+            # (4: a combinational proc that also runs once at time 0.)
+            self.proc_is_combo[i] = 1 if pt == 1 or pt == 4 else 0
             self.proc_is_seq[i]   = 1 if pt == 2 else 0
+            self.proc_starts[i]   = 1 if pt == 4 else 0
 
         # ── Sensitivity CSR: sig → proc indices ──
         total = 0
@@ -5978,6 +5991,10 @@ cdef class CyContext:
         for i in range(self.sig_count):
             self.snap_val[i]  = self.sig_val[i]
             self.snap_mask[i] = self.sig_mask[i]
+            # (A wide signal: its word 0 -- see take_snapshot.)
+            if self.wctx_c.sig_offset != NULL and self.wctx_c.sig_offset[i] >= 0:
+                self.snap_val[i]  = <long long>self.wctx_c.sig_val[self.wctx_c.sig_offset[i]]
+                self.snap_mask[i] = <long long>self.wctx_c.sig_mask[self.wctx_c.sig_offset[i]]
 
         # ── Working buffers ──
         self.seq_fired    = <char *>malloc(self.n_procs * sizeof(char))
@@ -6031,10 +6048,17 @@ cdef class CyContext:
 
     def take_snapshot(self):
         """Copy current signal values to snapshot arrays for edge detection."""
-        cdef int i
+        cdef int i, off
         for i in range(self.sig_count):
             self.snap_val[i]  = self.sig_val[i]
             self.snap_mask[i] = self.sig_mask[i]
+            # (A wide signal's word 0, where its edge bit lives -- its narrow
+            # slot isn't kept, so a posedge of one never fired.)
+            if self.wctx_c.sig_offset != NULL:
+                off = self.wctx_c.sig_offset[i]
+                if off >= 0:
+                    self.snap_val[i]  = <long long>self.wctx_c.sig_val[off]
+                    self.snap_mask[i] = <long long>self.wctx_c.sig_mask[off]
 
     def reset_seq_fired(self):
         """Reset per-timestep sequential-process fired flags."""
@@ -6058,6 +6082,7 @@ cdef class CyContext:
         dc.sens_offset = self.sens_offset
         dc.sens_procs = self.sens_procs
         dc.proc_is_combo = self.proc_is_combo
+        dc.proc_starts = self.proc_starts
         dc.proc_is_seq = self.proc_is_seq
         dc.cont_indices = self.cont_indices
         dc.cont_count = self.cont_count
@@ -6248,6 +6273,13 @@ cdef class CyContext:
                                 sid = self.batch_edge_sids[k]
                                 dc.snap_val[sid] = dc.sig_val[sid]
                                 dc.snap_mask[sid] = dc.sig_mask[sid]
+                        if dc.wctx.sig_offset != NULL:
+                            # (A wide edge signal: its word 0 -- see take_snapshot.)
+                            for k in range(self.batch_edge_sig_count):
+                                sid = self.batch_edge_sids[k]
+                                if dc.wctx.sig_offset[sid] >= 0:
+                                    dc.snap_val[sid] = <long long>dc.wctx.sig_val[dc.wctx.sig_offset[sid]]
+                                    dc.snap_mask[sid] = <long long>dc.wctx.sig_mask[dc.wctx.sig_offset[sid]]
                         if self.batch_edge_proc_count * 4 >= self.n_procs:
                             memset(dc.seq_fired, 0, self.n_procs * sizeof(char))
                         else:

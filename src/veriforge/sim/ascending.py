@@ -34,7 +34,7 @@ from veriforge.model.expressions import (
 )
 from veriforge.semantics import const_int
 
-from .sv_functions import _rewrite
+from .sv_functions import _rewrite, iter_nodes
 
 if TYPE_CHECKING:
     from veriforge.model.design import Module
@@ -348,6 +348,110 @@ def _flat_index(indices: list[Expression], sizes: list[int]) -> Expression:
     return TernaryOp(guard, flat_expr, _index_literal(total))
 
 
+def _array_dims(decls: list, env: dict[str, int]) -> dict[str, list[tuple[int, int]]]:
+    """name -> (left, right) of every unpacked dimension, for arrays whose
+    dimensions are all constant."""
+    out: dict[str, list[tuple[int, int]]] = {}
+    for decl in decls:
+        unpacked = list(decl.dimensions)[getattr(decl, "packed_dim_count", 0) :]
+        dims: list[tuple[int, int]] = []
+        for dim in unpacked:
+            left, right = const_int(dim.msb, env), const_int(dim.lsb, env)
+            if left is None or right is None:
+                dims = []
+                break
+            dims.append((left, right))
+        if dims:
+            out[decl.name] = dims
+    return out
+
+
+def _array_operand(expr: Expression, dims: dict[str, list[tuple[int, int]]]) -> tuple[str, int] | None:
+    """(name, number of indices) when *expr* denotes a whole array or a
+    sub-array (``m``, ``m[i]`` of ``m [0:1][0:2]``), else None."""
+    if isinstance(expr, Identifier):
+        name, count = _name(expr), 0
+    elif isinstance(expr, BitSelect):
+        name, indices = _chain(expr)
+        count = len(indices)
+    else:
+        return None
+    if name is None or name not in dims or count >= len(dims[name]):
+        return None
+    return name, count
+
+
+def _expand_sub_array_assigns(module: Module, decls: list, shapes: dict[str, list[int]], env: dict[str, int]) -> None:
+    """Rewrite each assignment between sub-arrays (``m[0] = m[1];`` on ``reg
+    m [0:1][0:2]``, an SV array slice; also with a whole one-dimensional
+    array of the same shape on either side) as one assignment per element,
+    in place: a procedural one becomes a ``begin ... end`` of them, a
+    continuous one several continuous assigns. Elements pair up left to
+    right, as IEEE 1800 7.6 has it (``[0:2]`` to ``[2:0]`` copies element 0
+    into element 2). Other sub-array uses still raise in the caller."""
+    import copy  # noqa: PLC0415
+
+    from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
+    from veriforge.model.statements import BlockingAssign, NonblockingAssign, SeqBlock  # noqa: PLC0415
+
+    from .sv_functions import _replace_statements  # noqa: PLC0415
+
+    dims = _array_dims(decls, env)
+
+    def element_pairs(lhs: Expression, rhs: Expression) -> list[tuple[Expression, Expression]] | None:
+        left, right = _array_operand(lhs, dims), _array_operand(rhs, dims)
+        if left is None or right is None:
+            return None
+        # Only a sub-array of a multi-dimensional array needs this; whole
+        # array to whole array is already supported.
+        if not any(count and name in shapes for name, count in (left, right)):
+            return None
+        ldims, rdims = dims[left[0]][left[1] :], dims[right[0]][right[1] :]
+        sizes = [abs(a - b) + 1 for a, b in ldims]
+        if sizes != [abs(a - b) + 1 for a, b in rdims]:
+            raise ValueError(f"array assignment between differently shaped arrays: {lhs!r} = {rhs!r}")
+        pairs: list[tuple[Expression, Expression]] = []
+        positions: list[list[int]] = [[]]
+        for n in sizes:
+            positions = [[*p, k] for p in positions for k in range(n)]
+        for position in positions:
+            sides: list[Expression] = []
+            for base, side_dims in ((lhs, ldims), (rhs, rdims)):
+                node = copy.deepcopy(base)
+                for k, (first, last) in zip(position, side_dims, strict=True):
+                    node = BitSelect(node, _index_literal(first + k if first <= last else first - k), loc=base.loc)
+                sides.append(node)
+            pairs.append((sides[0], sides[1]))
+        return pairs
+
+    replacements: dict[int, object] = {}
+    roots: list[object] = [*module.always_blocks, *module.initial_blocks, *module.functions, *module.tasks]
+    seen: set[int] = set()
+    for root in roots:
+        for node in iter_nodes(root, seen):
+            if isinstance(node, (BlockingAssign, NonblockingAssign)):
+                pairs = element_pairs(node.lhs, node.rhs)
+                if pairs is not None:
+                    replacements[id(node)] = SeqBlock(
+                        [type(node)(lhs, rhs, loc=node.loc) for lhs, rhs in pairs], loc=node.loc
+                    )
+    if replacements:
+        seen = set()
+        for root in roots:
+            _replace_statements(root, replacements, seen)
+    assigns: list[ContinuousAssign] = []
+    for assign in module.continuous_assigns:
+        pairs = element_pairs(assign.lhs, assign.rhs)
+        if pairs is None:
+            assigns.append(assign)
+            continue
+        for lhs, rhs in pairs:
+            each = copy.copy(assign)
+            each.lhs, each.rhs = lhs, rhs
+            assigns.append(each)
+    module.continuous_assigns[:] = assigns
+
+
 def flatten_unpacked_arrays(module: Module, record: dict[str, list[int]] | None = None) -> Module:
     """Rewrite multi-dimensional unpacked arrays (``reg [7:0] m [0:1][0:2]``)
     as one-dimensional ones (``m [0:5]``, row-major), in place, every
@@ -381,6 +485,7 @@ def flatten_unpacked_arrays(module: Module, record: dict[str, list[int]] | None 
             shapes[decl.name] = sizes
     if not shapes:
         return module
+    _expand_sub_array_assigns(module, decls, shapes, env)
 
     # Count chain nodes per level: a sub-array access leaves a level-0 node
     # without a matching full-depth one.

@@ -41,6 +41,7 @@ from ..model.expressions import (
     Range,
     RangeSelect,
     Replication,
+    StreamingConcatenation,
     StringLiteral,
     TernaryOp,
     UnaryOp,
@@ -2266,6 +2267,39 @@ def cat(*args: Signal | Expr | int | list | tuple) -> Expr:
     exprs = [_to_expr_node(a) for a in flat]
     builder = _find_builder(flat)
     return Expr(builder, Concatenation(exprs))
+
+
+def _stream_parts(args: tuple, where: str) -> tuple[list, Module | None]:
+    flat: list = []
+    for a in args:
+        flat.extend(a if isinstance(a, (list, tuple)) else [a])
+    if not flat:
+        raise ValueError(f"{where} requires at least one argument")
+    for a in flat:
+        _check_sized(a, where)
+    return [_to_expr_node(a) for a in flat], _find_builder(flat)
+
+
+def stream_left(*args: Signal | Expr | list | tuple, slice_size: int | Signal | Expr | None = None) -> Expr:
+    """Left streaming concatenation ``{<<{a, b}}`` / ``{<<N{a, b}}`` (IEEE
+    1800 11.4.14): the concatenation with its *slice_size*-bit slices
+    (default 1, i.e. its bits) in reverse order. Also an assignment target:
+    ``m.assign_b(stream_left(a, b), x)`` unpacks *x* reversed (the left-most bits of
+    a wider *x*; a narrower one is an error)."""
+    parts, builder = _stream_parts(args, "stream_left()")
+    if isinstance(slice_size, int) and not isinstance(slice_size, bool) and slice_size <= 0:
+        raise ValueError(f"stream_left(): the slice size must be positive, got {slice_size}")
+    size = None if slice_size is None else _to_expr_node(slice_size)
+    return Expr(builder, StreamingConcatenation(parts, size))
+
+
+def stream_right(*args: Signal | Expr | list | tuple) -> Expr:
+    """Right streaming concatenation ``{>>{a, b}}``: as a value the same as
+    ``cat(a, b)``; as an assignment target (``m.assign_b(stream_right(a, b), x)``) it
+    takes the *left-most* bits of a wider *x*, where ``cat`` takes the
+    right-most (a narrower one is an error)."""
+    parts, builder = _stream_parts(args, "stream_right()")
+    return Expr(builder, Concatenation(parts, from_streaming=True))
 
 
 def _check_sized(a: object, where: str) -> None:

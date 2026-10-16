@@ -2235,19 +2235,24 @@ class TestPhase7Runtime:
             sim.step()
 
     def test_initial_while_loop_compiled(self):
-        """Untimed initial while loop runs natively during compiled construction."""
+        """Untimed initial while loop runs natively at the first run() (it ran
+        at construction, before any t=0 snapshot -- reference and vm don't
+        run initial blocks until then)."""
         sim = Simulator(_make_initial_while_counter(), engine="compiled")
+        sim.run(max_time=0)
         assert sim.read("count") == 3
 
     def test_initial_while_loop_limit_raises(self, compiler):
-        """Infinite initial while loop raises during compiled simulator construction."""
+        """Infinite initial while loop raises when the initial blocks run
+        (`run_initials()`, at the first run(); it used to be construction)."""
         mod = _make_initial_infinite_while()
         cg = CythonCodegen()
         pyx = cg.generate(mod)
         compiled_mod = compiler.compile_pyx(pyx, "compiled_initial_infinite_while")
 
+        sim = compiled_mod.CompiledSim()
         with pytest.raises(RuntimeError, match=r"While loop exceeded 100000 iterations"):
-            compiled_mod.CompiledSim()
+            sim.run_initials()
 
     def test_forever_loop_finish(self, compiler):
         """Forever loop can terminate through $finish in compiled runtime."""
@@ -2276,14 +2281,16 @@ class TestPhase7Runtime:
             sim.step()
 
     def test_initial_forever_loop_limit_raises(self, compiler):
-        """Infinite initial forever loop raises during compiled simulator construction."""
+        """Infinite initial forever loop raises when the initial blocks run
+        (`run_initials()`, at the first run(); it used to be construction)."""
         mod = _make_initial_infinite_forever()
         cg = CythonCodegen()
         pyx = cg.generate(mod)
         compiled_mod = compiler.compile_pyx(pyx, "compiled_initial_infinite_forever")
 
+        sim = compiled_mod.CompiledSim()
         with pytest.raises(RuntimeError, match=r"Forever loop exceeded 100000 iterations"):
-            compiled_mod.CompiledSim()
+            sim.run_initials()
 
     def test_multidim_memory_access(self, compiler):
         """Compiled runtime handles flattened two-dimensional unpacked memories."""
@@ -2292,6 +2299,7 @@ class TestPhase7Runtime:
         pyx = cg.generate(mod)
         compiled_mod = compiler.compile_pyx(pyx, "compiled_multidim_memory_probe")
         sim = compiled_mod.CompiledSim()
+        sim.run_initials()
         sid_row = cg.signal_map["row"]
         sid_col = cg.signal_map["col"]
         sid_y = cg.signal_map["y"]
@@ -2338,9 +2346,11 @@ class TestPhase7Runtime:
         assert (out_val & 0xFF) == 0
 
     def test_native_initial_compiled(self):
-        """Simple initial block values are in compiled __init__, not fallback."""
+        """Simple initial blocks run natively (`run_initials()`, at the first
+        run()), not through the reference fallback."""
         mod = _make_native_initial()
         sim = Simulator(mod, engine="compiled")
+        sim.run(max_time=0)
         assert sim.read("count") == 42
         assert sim.read("flag") == 1
 

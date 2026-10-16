@@ -27511,6 +27511,7 @@ def _make_wide_mem_zero_combo(width: int) -> Module:
         AlwaysBlock(
             BlockingAssign(BitSelect(Identifier("mem"), mem_index), Literal(0, width=width)),
             sensitivity_type=SensitivityType.COMBINATIONAL,
+            keyword="always_comb",  # (runs at time 0; an `always @*` waits for a change)
         ),
     ]
     return mod
@@ -28706,7 +28707,7 @@ def _make_fsm_with_params():
     m.always_blocks = [
         AlwaysBlock(
             sensitivity_type=SensitivityType.SEQUENTIAL,
-            sensitivity_list=[SensitivityEdge(Identifier("clk"), "posedge")],
+            sensitivity_list=[SensitivityEdge("posedge", Identifier("clk"))],
             body=CaseStatement(
                 "case",
                 Identifier("state"),
@@ -28939,6 +28940,7 @@ def _make_infinite_while() -> Module:
                 ),
             ),
             sensitivity_type=SensitivityType.COMBINATIONAL,
+            keyword="always_comb",  # (runs at time 0; an `always @*` waits for a change)
         )
     ]
     return mod
@@ -28995,6 +28997,7 @@ def _make_infinite_forever() -> Module:
                 )
             ),
             sensitivity_type=SensitivityType.COMBINATIONAL,
+            keyword="always_comb",  # (runs at time 0; an `always @*` waits for a change)
         )
     ]
     return mod

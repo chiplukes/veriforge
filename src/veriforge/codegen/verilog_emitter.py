@@ -1029,14 +1029,17 @@ def _emit_literal(lit: Literal) -> str:  # noqa: PLR0911
 
 def _emit_always_block(ab: AlwaysBlock, indent: str, current_indent: str) -> str:
     """Emit an always block with sensitivity list."""
-    result = f"{current_indent}always "
+    keyword = getattr(ab, "keyword", "always")
+    result = f"{current_indent}{keyword} "
 
     # Sensitivity list
     if ab.sensitivity_list:
         result += "@(" + _emit_sensitivity_list(ab.sensitivity_list) + ") "
-    elif ab.sensitivity_type == SensitivityType.COMBINATIONAL:
+    elif ab.sensitivity_type == SensitivityType.COMBINATIONAL and keyword == "always":
         result += "@(*) " if _style().star_paren else "@* "
-    # else: no sensitivity (bare always begin...end)
+    # else: no sensitivity (`always_comb`/`always_latch`, or a bare
+    # `always begin ... end`). (An `always_latch` used to come out as a bare
+    # `always`, which never waits.)
 
     # Body
     result += _emit_statement_inline(ab.body, indent, current_indent)

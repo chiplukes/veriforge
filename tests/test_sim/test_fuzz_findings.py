@@ -213,7 +213,10 @@ module c (input [3:0] i5, output reg [30:0] o7);
   end
 endmodule
 """
-_DIRTY_LOOP_EXPECTED = ["9", "10", "11"]
+# (x first, as on Icarus: `always @*` waits for its first change, and the
+# port's t=0 value from a declaration initializer isn't one -- it used to
+# run at start-up and give 9.)
+_DIRTY_LOOP_EXPECTED = ["x", "10", "11"]
 
 # a wide intermediate built from function locals: compiled didn't emit its
 # wide helpers (the pre-scan saw the locals before renaming) -- build error

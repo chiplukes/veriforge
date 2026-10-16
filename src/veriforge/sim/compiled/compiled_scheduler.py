@@ -134,10 +134,19 @@ def _codegen_infra_hash() -> str:
     for p in sorted([*compiled_dir.glob("*.py"), *(compiled_dir / "templates").glob("*.pxi")]):
         h.update(p.name.encode("utf-8"))
         h.update(p.read_bytes())
-    # Hash elaborate.py — captures flattening/struct env changes
-    elaborate_path = compiled_dir.parent / "elaborate.py"
-    if elaborate_path.exists():
-        h.update(elaborate_path.read_bytes())
+    # Every other source file of the package: the parser, transforms and
+    # lowering passes (`sim/sv_functions.py`, ...) shape the module compiled
+    # here, and a design read from files is keyed by their content alone --
+    # only elaborate.py used to be included, so a lowering change reused a
+    # module compiled from the old lowering.
+    package_dir = compiled_dir.parent.parent
+    for p in sorted(package_dir.rglob("*.py")):
+        if compiled_dir in p.parents:
+            continue  # (hashed above)
+        h.update(str(p.relative_to(package_dir)).encode("utf-8"))
+        h.update(p.read_bytes())
+    for p in sorted(package_dir.rglob("*.lark")):
+        h.update(p.read_bytes())
     h.update(_CACHE_VERSION.encode("utf-8"))
     h.update(_cython_version().encode("utf-8"))
     h.update(_platform_tag().encode("utf-8"))
@@ -435,6 +444,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                 if mod is not None:
                     log.info("Codegen cache hit for %s (hash %s)", module.name, elab_hash)
                     self._sim = mod.CompiledSim()
+                    self._sim.settle_conts_silently()  # (before time 0, as reference/vm)
                     self._signal_map = cached["signal_map"]
                     self._sig_widths = cached["sig_widths"]
                     self._sig_signed = cached["sig_signed"]
@@ -467,6 +477,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
                 ) from exc
 
         self._sim = mod.CompiledSim()
+        self._sim.settle_conts_silently()  # (before time 0, as reference/vm)
         self._signal_map = dict(self._codegen.signal_map)
         self._sig_widths = list(self._codegen.signal_widths)
         self._sig_signed = list(self._codegen.signal_signed)
@@ -768,7 +779,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         first_settle = not self._combo_bootstrapped
         if first_settle:
             self._combo_bootstrapped = True
-            self._sim.mark_all_dirty()
+            self._sim.request_boot()
             # Force a FRESH, unconditional snapshot here, overriding whatever
             # `_has_drive_snapshot` currently says. Without this, the clock's
             # own `_snap_v`/`_snap_m` slot can still hold its stale
@@ -985,8 +996,19 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         """
         if self._bootstrapped:
             return False
+        # The t=0 snapshot: after any drive() before this (not an edge, as in
+        # reference and vm -- a forked Clock's first fall from x included),
+        # before the initial blocks (whose changes are: `initial clk = 0;` is
+        # a negedge from x; they used to run at construction, before any
+        # snapshot). Then what they wrote, for clocked blocks' right-hand
+        # sides (`refresh_data_snapshot` keeps the edge signals' snapshot).
+        self._sim.snapshot()
+        self._has_drive_snapshot = True
+        self._sim.run_initials()  # (the natively compiled ones, first)
         if self._execute_initial_blocks():
             return True
+        if hasattr(self._sim, "refresh_data_snapshot"):
+            self._sim.refresh_data_snapshot()
         self._schedule_always_with_timing()
         self._bootstrapped = True
         return False
@@ -995,6 +1017,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         """Run the full event loop to completion."""
         self._stopped = False
 
+        # (The t=0 snapshot: see ensure_bootstrapped.)
         if self.ensure_bootstrapped():
             return
 
@@ -1014,7 +1037,9 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             # initial all-x when w2 itself stayed x (no change to propagate).
             # Edges compare against the snapshot, so this fires none.
             self._combo_bootstrapped = True
-            self._sim.mark_all_dirty()
+            # (Only continuous assigns and always_comb/always_latch run
+            # regardless; an `always @*` waits for its first change.)
+            self._sim.request_boot()
         self._sim.step()
         self._drain_compiled_output()
         if self._sim.is_finished():
@@ -1209,6 +1234,15 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         # any always block sensitive to it) AND that downstream port wiring
         # (e.g. DUT rst port driven by bench rst reg via a cont_assign) is
         # current before the first posedge snapshot inside batch_run.
+        # (The first activity: the initial blocks and the t=0 snapshot --
+        # simple initial blocks used to run at construction -- then the
+        # start-up boot, as in run().)
+        if self.ensure_bootstrapped():
+            return 0
+        if not self._combo_bootstrapped:
+            self._combo_bootstrapped = True
+            self._sim.request_boot()
+            self._has_drive_snapshot = True
         if self._has_drive_snapshot:
             self._sim.step()
             self._drain_compiled_output()

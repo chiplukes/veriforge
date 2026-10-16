@@ -1898,17 +1898,17 @@ class _ProcessCompilerMixin:
                         if sid is not None:
                             sensitivity.add(sid)
                             if edge.edge in ("posedge", "negedge"):
-                                if self._signal_widths[sid] > _WORD_BITS:
-                                    raise NotImplementedError(
-                                        f"{edge.edge} on wide signal '{edge.signal.name}' "
-                                        f"({self._signal_widths[sid]} bits) is not supported "
-                                        f"in the compiled engine"
-                                    )
+                                # (An edge is on bit 0 only (IEEE 1364-2005
+                                # 9.7.2), which a wide signal's scalar slot
+                                # mirrors. It used to raise for one wider than
+                                # 64 bits.)
                                 edges[sid] = edge.edge
             # Defer body compilation to text-generation time so the IR for all
             # always blocks is never held in memory simultaneously.
             if block.sensitivity_type == SensitivityType.COMBINATIONAL:
                 self._combo_processes.append((sensitivity, block.body))
+                # (Runs once at time 0: always_comb/always_latch, not always @*.)
+                self._combo_start.append(getattr(block, "keyword", "always") in ("always_comb", "always_latch"))
             else:
                 # Sequential — @(posedge clk), @(negedge clk), etc.
                 self._seq_processes.append((edges, sensitivity, block.body))

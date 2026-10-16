@@ -175,11 +175,12 @@ endmodule
 
 
 def test_sub_array_access_raises():
-    # `m[0] = m[1]` of `m [0:1][0:2]` used to run, reading bit j of word i
-    # everywhere; Icarus doesn't support array slices either.
+    # A sub-array (`m[1]` of `m [0:1][0:2]`) used to run, reading bit j of
+    # word i everywhere. Assigning one is supported now
+    # (test_sub_array_assign.py); comparing them isn't.
     source = """module t;
-  reg [7:0] m [0:1][0:2];
-  initial begin m[1][2] = 8'h12; m[0] = m[1]; end
+  reg [7:0] m [0:1][0:2]; reg e;
+  initial begin m[1][2] = 8'h12; e = m[0] == m[1]; end
 endmodule
 """
     design = tree_to_design(verilog_parser(start="source_text").build_tree(source))

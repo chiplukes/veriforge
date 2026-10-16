@@ -6,6 +6,7 @@ Split mechanically from tests/test_sim/test_compiled.py (work plan item 2.5).
 from __future__ import annotations
 
 from ._shared import *  # noqa: F401,F403
+from ..engines import ENGINES
 
 
 class TestWideUnifiedPhase0Codegen:
@@ -987,7 +988,7 @@ class TestWideLogicalOps:
 
 
 class TestWideEdgeDetection:
-    """Compiled engine rejects posedge/negedge on signals wider than 64 bits."""
+    """posedge/negedge on signals wider than 64 bits."""
 
     @staticmethod
     def _make_wide_posedge_module(sig_width: int) -> Module:
@@ -1011,24 +1012,33 @@ class TestWideEdgeDetection:
         return mod
 
     @pytest.mark.parametrize("sig_width", [65, 129])
-    def test_posedge_wide_signal_raises(self, sig_width):
-        """Compiled engine raises NotImplementedError for posedge on a wide signal."""
-        with pytest.raises(NotImplementedError, match="posedge.*wide_clk"):
-            Simulator(self._make_wide_posedge_module(sig_width), engine="compiled")
-
-    @pytest.mark.parametrize("sig_width", [65, 129])
-    def test_negedge_wide_signal_raises(self, sig_width):
-        """Compiled engine raises NotImplementedError for negedge on a wide signal."""
-        mod = self._make_wide_posedge_module(sig_width)
-        mod.always_blocks[0].sensitivity_list[0] = SensitivityEdge("negedge", Identifier("wide_clk"))
-        with pytest.raises(NotImplementedError, match="negedge.*wide_clk"):
-            Simulator(mod, engine="compiled")
-
-    @pytest.mark.parametrize("sig_width", [65, 129])
-    @pytest.mark.parametrize("engine", ["vm", "vm-fast"])
-    def test_posedge_wide_signal_ok_in_vm(self, sig_width, engine):
-        """VM engines do not raise for posedge on a wide signal (no compiled restriction)."""
-        Simulator(self._make_wide_posedge_module(sig_width), engine=engine)
+    @pytest.mark.parametrize("edge", ["posedge", "negedge"])
+    def test_wide_signal_edges_cross_engine(self, sig_width, edge):
+        """An edge on a signal wider than 64 bits is on bit 0 (IEEE 1364-2005
+        9.7.2): compiled raised NotImplementedError, vm-fast never fired one
+        (its narrow slot isn't kept for a wide signal). High bits alone don't
+        count."""
+        results = {}
+        for engine in ENGINES:
+            mod = self._make_wide_posedge_module(sig_width)
+            mod.always_blocks[0].sensitivity_list[0] = SensitivityEdge(edge, Identifier("wide_clk"))
+            mod.always_blocks[0].body = BlockingAssign(
+                Identifier("q"), BinaryOp("+", Identifier("q"), Literal(1, width=1))
+            )
+            mod.variables[0] = Variable("q", VariableKind.REG, width=_w(4))
+            mod.ports[1] = Port("q", PortDirection.OUTPUT, width=_w(4))
+            sim = Simulator(mod, engine=engine)
+            sim.drive("wide_clk", Value(0, width=sig_width))
+            sim.drive("q", Value(0, width=4))
+            sim.run(max_time=0)
+            seen = []
+            for value in (1, 1 << (sig_width - 1), 0, 1 | (1 << 64), 0):
+                sim.drive("wide_clk", Value(value, width=sig_width))
+                sim.run(max_time=0)
+                seen.append(int(sim.read("q").val))
+            results[engine] = seen
+        expected = [1, 1, 1, 2, 2] if edge == "posedge" else [0, 1, 1, 1, 2]
+        assert results == {engine: expected for engine in ENGINES}
 
 
 class TestSignedWideShiftNarrow:

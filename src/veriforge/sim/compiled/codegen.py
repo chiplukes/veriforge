@@ -199,6 +199,7 @@ class CythonCodegen(
         "_call_guards",
         "_combo_ext",
         "_combo_processes",
+        "_combo_start",
         "_const_conts",
         "_delta_limit",
         "_dynamic_max_wide_words",
@@ -261,6 +262,7 @@ class CythonCodegen(
         # sensitivity, e.g. `assign x = 1'b0;`).
         self._const_conts: set[int] = set()
         self._combo_processes: list[tuple[set[int], object]] = []
+        self._combo_start: list[bool] = []  # parallel: runs once at time 0
         # Per combinational process: the sids it reads and writes that another
         # process writes too (see `_compile_always_blocks`).
         self._combo_ext: list[frozenset[int]] = []

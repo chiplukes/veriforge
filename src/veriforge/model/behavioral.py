@@ -23,7 +23,7 @@ class SensitivityType(Enum):
 class AlwaysBlock(VerilogNode):  # cm:2f7d5e
     """An always block: always @(...) statement"""
 
-    __slots__ = ("body", "sensitivity_list", "sensitivity_type")
+    __slots__ = ("body", "keyword", "sensitivity_list", "sensitivity_type")
 
     def __init__(
         self,
@@ -31,12 +31,17 @@ class AlwaysBlock(VerilogNode):  # cm:2f7d5e
         *,
         sensitivity_list: list[SensitivityEdge] | None = None,
         sensitivity_type: SensitivityType = SensitivityType.UNKNOWN,
+        keyword: str = "always",
         loc: SourceLocation | None = None,
     ):
         super().__init__(loc=loc)
         self.body = body
         self.sensitivity_list = sensitivity_list or []
         self.sensitivity_type = sensitivity_type
+        # "always", "always_comb", "always_ff" or "always_latch": an
+        # `always_comb`/`always_latch` runs once at time 0, an `always @*`
+        # waits for its first change (IEEE 1800-2017 9.2.2.2.2).
+        self.keyword = keyword
 
     def __repr__(self) -> str:
         stype = self.sensitivity_type.name.lower()
@@ -51,6 +56,8 @@ class AlwaysBlock(VerilogNode):  # cm:2f7d5e
         d = super().to_dict()
         d["type"] = "AlwaysBlock"
         d["sensitivity_type"] = self.sensitivity_type.name.lower()
+        if self.keyword != "always":
+            d["keyword"] = self.keyword
         if self.sensitivity_list:
             d["sensitivity_list"] = [e.to_dict() for e in self.sensitivity_list]
         d["body"] = self.body.to_dict()

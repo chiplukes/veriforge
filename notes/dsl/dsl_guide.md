@@ -422,6 +422,7 @@ from veriforge.dsl import reduce_and, reduce_or, reduce_xor
 from veriforge.dsl import ashl, ashr, case_eq, case_ne
 from veriforge.dsl import clog2, signed, unsigned, sim_time
 from veriforge.dsl import reduce_nand, reduce_nor, reduce_xnor, lit, cast
+from veriforge.dsl import stream_left, stream_right
 
 cat(a, b, c)        # Concatenation: {a, b, c}
 cat([a, b, c])       # Lists/tuples are flattened — same as above
@@ -433,6 +434,13 @@ lit("8'hff")         # A Verilog literal, verbatim: size, base, signedness, x/z
 lit("4'b10x1")
 cast(4, a)           # Size cast:     4'(a)
 mux(sel, t, f)       # Ternary:       sel ? t : f
+stream_left(a, b)    # Streaming:     {<<{a, b}}  (bits reversed)
+stream_left(a, b, slice_size=8)  #    {<<8{a, b}} (bytes reversed)
+stream_right(a, b)   # Streaming:     {>>{a, b}}  (as a value, same as cat)
+# As assignment targets they unpack, taking the *left* end of a wider source
+# (cat() takes the right end): m.assign_b(stream_left(a, b), x),
+# m.assign_nb(...), m.assign(...). Python can't augment-assign a call, so
+# `cat(a, b) @= x` doesn't parse: use m.assign_b(cat(a, b), x).
 
 land(a, b)           # Logical AND:   a && b
 lor(a, b)            # Logical OR:    a || b

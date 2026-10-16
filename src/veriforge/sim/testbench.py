@@ -30,6 +30,7 @@ from .scheduler import Scheduler
 from .display_format import lower_display_args
 from .sv_functions import (
     is_two_state,
+    lower_event_expressions,
     lower_streaming_targets,
     lower_sv_functions,
     lower_two_state,
@@ -223,6 +224,7 @@ class Simulator:  # cm:a5c8f4
         expand_array_concat_operands(module)
         lower_sv_functions(module)
         lower_streaming_targets(module)  # (before lower_width_casts: makes casts)
+        lower_event_expressions(module)
         # Indices first: a wide one cut to its low 32 bits, a narrow signed one
         # sign-extended (flattening's per-dimension range check used to see the
         # untruncated value and drop a valid write).

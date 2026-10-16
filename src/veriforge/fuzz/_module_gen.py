@@ -1184,26 +1184,19 @@ def _collect_assigned_signals(stmt: Statement) -> set[str]:
 
 
 def _ensure_comb_blocks_read_a_signal(ctx: SignalContext) -> None:
-    """Make every ``always @(*)`` block read at least one signal it doesn't
-    itself write and that can ever change. One that reads only constants or
-    undriven regs (common since literal operands were added) never executes
-    in Icarus -- IEEE 1364's `@*` with
-    an empty implicit list waits forever -- while veriforge runs it once at
-    time 0 like `always_comb`, an intentional difference not worth fuzzing.
-    The patch `rhs | (input & 1'b0)` leaves the value unchanged."""
+    """Make every ``always @(*)`` block read an input. An `@*` block waits
+    for its first change (IEEE 1800 9.2.2.2.2; only `always_comb` runs at
+    time 0), and whether a continuous assign's time-0 value counts as one is
+    a race: Icarus wakes the block on it, veriforge doesn't (known_issues.md,
+    "Start-up activation"). So a block whose only changing reads are wires
+    that settle at time 0 -- a constant `assign w = 2'b10;`, or a wire whose
+    value the vector-0 drive doesn't change -- would differ by design. An
+    input always changes at vector 0 (from x), waking it everywhere. The
+    patch `rhs | (input & 1'b0)` leaves the value unchanged."""
     inputs = [s for s in ctx.inputs if s.name != "clk"]
     if not inputs:
         return
-    # Signals that can ever change: inputs, and anything some block or
-    # continuous assign drives (reading only an undriven reg or a parameter
-    # never re-triggers the block in Icarus either, so its t=0 run is the
-    # only one -- which Icarus doesn't do).
     live = {s.name for s in inputs}
-    for ab in ctx.always_blocks:
-        live |= _collect_assigned_signals(ab.body)
-    for ca in ctx.continuous_assigns:
-        if isinstance(ca.lhs, Identifier):
-            live.add(ca.lhs.name)
     for ab in ctx.always_blocks:
         if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
             continue

@@ -23495,11 +23495,6 @@ class TestWideSignalExternalIO:
         for eng in ["vm", "compiled"]:
             assert results[eng] == ref, f"{eng}: {results[eng]} != {ref}"
 
-    @pytest.mark.xfail(
-        reason="posedge on wide (>64-bit) signals is not supported in the compiled engine",
-        raises=NotImplementedError,
-        strict=True,
-    )
     @pytest.mark.parametrize(
         ("width", "edge_value"),
         [

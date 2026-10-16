@@ -87,6 +87,57 @@ def lower_sv_functions(module: Module) -> Module:
     return module
 
 
+def lower_event_expressions(module: Module) -> Module:
+    """Give each event-control entry on an expression other than a plain
+    signal (`@(posedge w[0])`, `@(negedge (a & b))`, `@(m[2] or b)`) a
+    generated net, in place: `assign __vf_ev{k} = expr;`, the entry then
+    naming the net. 1 bit for an edge (IEEE 1364-2005 9.7.2: an edge is on
+    the expression's LSB), the expression's width for a level entry. Every
+    engine used to ignore such an entry -- the block never ran.
+    """
+    from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
+    from veriforge.model.nets import Net, NetKind  # noqa: PLC0415
+    from veriforge.model.statements import SensitivityEdge  # noqa: PLC0415
+
+    from .elaborate import _build_param_env  # noqa: PLC0415
+
+    entries = [
+        node
+        for node in iter_nodes(module, set())
+        if isinstance(node, SensitivityEdge)
+        and isinstance(node.signal, Expression)
+        and not isinstance(node.signal, Identifier)
+    ]
+    if not entries:
+        return module
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    decls = _declarations(module, env)
+
+    def width_of(name: str) -> int:
+        d = decls.get(name)
+        return d[2] if d is not None else 1
+
+    def operand_width(expr: Expression) -> int:
+        # (A memory element `m[i]` is a word, not a bit select.)
+        base, depth = expr, 0
+        while isinstance(base, BitSelect):
+            base, depth = base.target, depth + 1
+        if isinstance(base, Identifier):
+            d = decls.get(base.name)
+            if d is not None and d[1] and depth == d[1]:
+                return d[2]
+        return expr_width(expr, width_of, env)
+
+    for k, entry in enumerate(entries):
+        name = f"__vf_ev{k}"
+        width = 1 if entry.edge in ("posedge", "negedge") else max(1, operand_width(entry.signal))
+        rng = Range(Literal(width - 1, width=32), Literal(0, width=32)) if width > 1 else None
+        module.nets.append(Net(name, NetKind.WIRE, width=rng))
+        module.continuous_assigns.append(ContinuousAssign(Identifier(name), entry.signal))
+        entry.signal = Identifier(name)
+    return module
+
+
 def lower_streaming_targets(module: Module) -> Module:
     """Rewrite each assignment to a streaming concatenation (unpacking,
     IEEE 1800-2017 11.4.14.3), in place, as an assignment to the plain

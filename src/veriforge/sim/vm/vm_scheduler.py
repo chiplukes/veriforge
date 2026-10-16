@@ -125,12 +125,14 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         "_event_started",
         "_finish_requested",
         "_initial_coroutines",
+        "_initial_dirty",
         "_initial_procs",
         "_monitor_active",
         "_monitor_prev_vals",
         "_on_time_step",
         "_own_changes",
         "_pending_drives",
+        "_pre_initial",
         "_prev_sig_mask",
         "_prev_sig_val",
         "_proc_idx",
@@ -182,6 +184,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         self._prev_sig_mask: list[int] = []
         self._triggered_seq: set[int] = set()
         self._pending_drives: set[int] = set()
+        self._pre_initial: tuple[list[int], list[int]] | None = None  # see _fire_initial_edges
+        self._initial_dirty: set[int] = set()
 
         # Optional callback fired after each time step completes
         self._on_time_step: Callable[[VMScheduler], None] | None = None
@@ -414,7 +418,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 if p.process_type == ProcessType.CONTINUOUS:
                     proc_types.append(0)
                 elif p.process_type == ProcessType.COMBINATIONAL:
-                    proc_types.append(1)
+                    proc_types.append(4 if _runs_at_start(p) else 1)
                 elif p.process_type == ProcessType.SEQUENTIAL:
                     proc_types.append(2)
                 else:
@@ -633,6 +637,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
     def ensure_bootstrapped(self) -> bool:
         """Execute initial blocks and register timed processes once; report a stop."""
         if not self._bootstrapped:
+            # (The state before them, for the edges they make -- see
+            # `_fire_initial_edges`.)
+            if self._cy_ctx is not None:
+                self._pre_initial = self._cy_ctx.snapshot_signals()
+            else:
+                self._pre_initial = (list(self.compiler.sig_val), list(self.compiler.sig_mask))
             # Execute initial blocks at t=0 BEFORE combo/continuous evaluation
             # so that memory arrays and signals are properly initialized.
             for proc in self._initial_procs:
@@ -646,6 +656,10 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                     self._batch_stopped = True
                     return True
 
+            # (What they changed that a snapshot doesn't show: memory writes,
+            # as their marker signals -- see `_fire_initial_edges`.)
+            if self._pre_initial is not None and self.interpreter is not None:
+                self._initial_dirty = set(self.interpreter.dirty)
             # Schedule always blocks with timing controls as reference coroutines.
             # These cannot be compiled to bytecode (e.g. "always #5 clk=~clk;").
             for proc in self.compiler.processes:
@@ -702,8 +716,14 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # change).
         if not self._combo_bootstrapped:
             self._combo_bootstrapped = True
-            self._bootstrap_combos()
+            # (Drives before this first run() wake the combinational blocks
+            # reading them -- not as edges, as before.)
+            drives = set(self._pending_drives)
             self._pending_drives.clear()
+            self._bootstrap_combos(drives)
+
+        if self._pre_initial is not None:
+            self._fire_initial_edges()
 
         # Activate any $monitor registered in initial blocks (snapshot after bootstrap)
         self._check_monitor_activation()
@@ -1415,23 +1435,77 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 except StopSimulation:
                     pass
 
-    def _bootstrap_combos(self) -> None:
-        """Run every combinational always block once, then settle the result:
-        an inter-combo dependency (B reads A's output, B ran first) re-runs
-        B. Combinational processes only -- no edge checks yet."""
-        if not self._combo_procs:
+    def _fire_initial_edges(self) -> None:
+        """Run what the initial blocks' t=0 changes trigger -- the
+        edge-triggered blocks whose edge they made (`initial clk = 0;` is a
+        negedge from x) and the combinational ones reading what they changed
+        -- then settle the result. The initial blocks run before the first
+        time step's snapshot, so these used to be missed (reference and Icarus
+        run them)."""
+        prev = self._pre_initial
+        self._pre_initial = None
+        if prev is None:
             return
         interp = self.interpreter
-        self._run_process_list(self._combo_procs)
-        changed = set(interp.dirty)
-        changed |= self._apply_nbas()
+        if self._cy_ctx is not None:
+            cur_v, cur_m = self._cy_ctx.snapshot_signals()
+        else:
+            cur_v, cur_m = self.compiler.sig_val, self.compiler.sig_mask
+        changed = {sid for sid in range(len(prev[0])) if prev[0][sid] != cur_v[sid] or prev[1][sid] != cur_m[sid]}
+        changed |= self._initial_dirty
+        self._initial_dirty = set()
+        if not changed:
+            return
+        self._prev_sig_val, self._prev_sig_mask = list(prev[0]), list(prev[1])
+        self._triggered_seq = set()
+        nba_dirty: set[int] = set(changed)  # (not a process's own changes)
+        for _ in range(self.delta_limit):
+            interp.dirty.clear()
+            self._propagate_continuous(changed)
+            changed |= interp.dirty
+            triggered = self._collect_triggered(changed, nba_dirty)
+            if not triggered:
+                break
+            self._run_process_list(triggered)
+            nba_dirty = self._apply_nbas()
+            changed = set(interp.dirty) | nba_dirty
+            if not changed:
+                break
+        else:
+            raise RuntimeError(f"Delta cycle limit ({self.delta_limit}) exceeded at t={self.time}")
+        interp.dirty.clear()
+
+    def _bootstrap_combos(self, drives: Collection[int] = ()) -> None:
+        """Run every `always_comb`/`always_latch` block once (IEEE 1800-2017
+        9.2.2.2.2; an `always @*` waits for its first change -- it used to
+        run too), then settle the result: an inter-combo dependency (B reads
+        A's output, B ran first) re-runs B. Combinational processes only --
+        no edge checks yet. *drives*: signals driven before this, whose
+        readers run too."""
+        start = [p for p in self._combo_procs if _runs_at_start(p)]
+        interp = self.interpreter
+        changed: set[int] = set()
+        if start:
+            self._run_process_list(start)
+            changed = set(interp.dirty)
+            changed |= self._apply_nbas()
+        driven = set(drives)
+        changed |= driven
+        first = True
         for _ in range(self.delta_limit):
             if not changed:
                 break
             interp.dirty.clear()
             self._propagate_continuous(changed)
             changed |= interp.dirty
-            triggered = self._collect_triggered(changed, combo_only=True)
+            if first:
+                driven |= interp.dirty  # (the drives' continuous fan-out)
+            triggered = self._collect_triggered(changed, driven if first else (), combo_only=True)
+            if first and start:
+                # (A start block just ran on the drives' values.)
+                started = set(map(id, start))
+                triggered = [p for p in triggered if id(p) not in started or not (p.sensitivity & changed) <= driven]
+            first = False
             if not triggered:
                 break
             self._run_process_list(triggered)
@@ -1965,7 +2039,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
                 triggered = self._collect_triggered(changed, nba_dirty)
                 if bootstrap:
                     bootstrap = False
-                    triggered = [*self._combo_procs, *(p for p in triggered if p not in self._combo_procs)]
+                    start = [p for p in self._combo_procs if _runs_at_start(p)]
+                    triggered = [*start, *(p for p in triggered if p not in start)]
                 if not triggered:
                     break
                 self._run_process_list(triggered)
@@ -2150,3 +2225,9 @@ class _VMSignalDict(SignalDictBase):
         else:
             self._compiler.sig_val[sid] = val
             self._compiler.sig_mask[sid] = mask
+
+
+def _runs_at_start(proc: CompiledProcess) -> bool:
+    """A combinational block that runs once at time 0: `always_comb` or
+    `always_latch` (an `always @*` waits for its first change)."""
+    return getattr(proc.source_block, "keyword", "always") in ("always_comb", "always_latch")

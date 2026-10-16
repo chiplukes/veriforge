@@ -3509,6 +3509,12 @@ class _StmtEmittersMixin:
                 self._walk_signals(arg, sigs)
             return
 
+        if stype is TaskEnable:
+            # (Its arguments -- `always @* tk(a, r, q);` had no sensitivity.)
+            for arg in stmt.arguments:
+                self._walk_signals(arg, sigs)
+            return
+
     def _collect_lhs_read_signals(self, lhs: Expression, sigs: set[int]) -> None:
         """Collect signal IDs read while evaluating an LHS selector expression."""
         etype = type(lhs)
@@ -3550,6 +3556,13 @@ class _StmtEmittersMixin:
 
         if stype is BlockingAssign or stype is NonblockingAssign:
             self._remove_lhs_targets(stmt.lhs, sigs)
+            return
+
+        if stype is TaskEnable:
+            # (An lvalue argument may be an output -- see _collect_stmt_signals.)
+            for arg in stmt.arguments:
+                if isinstance(arg, (Identifier, BitSelect, RangeSelect, Concatenation)):
+                    self._remove_lhs_targets(arg, sigs)
             return
 
         if stype is IfStatement:
