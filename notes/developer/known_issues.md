@@ -28,30 +28,6 @@ even when few values change. For now, run without VCD or pass a small
 validated against the real Windows design and was left out pending a
 focused VCD performance pass.
 
-### `vm`/`vm-fast`: loop-bearing combinational block behind a child instance doesn't re-fire on a second settle()
-
-**Status**: Open, root-caused but not fixed. `reference`/`compiled` unaffected
-(`vm` unaffected in the cases checked so far; only `vm-fast` confirmed).
-**Found**: August 2026, during a 2-hour confidence-building fuzzing round
-(seed 5000, `--verilator`).
-
-An `always @(*)` block containing a `for`/`while` loop, instantiated one
-level inside a child module, reads a stale (frozen at its first-ever
-activation) value forever after, once its only input arrives via a
-cross-instance continuous assign and a SECOND `settle()` follows a changed
-top-level drive. Minimal repro and full analysis in `notes/developer/roadmap.md`
-("Long confidence-building fuzzing round" -- root-caused, not fixed entry).
-
-### Self-referential combinational reads (resolved 2026-10-14)
-
-`always @(*) begin o5 = o6; ... o6 = ~something; end` (reading a signal
-before the block's own write to it) used to give different answers on
-reference, vm/vm-fast and compiled. All four now follow IEEE 1364-2005
-9.7.5 as Icarus does: the block's own change doesn't re-trigger it, another
-process's does (`notes/simulation/simulation_model.md`, "Sensitivity
-Inference"). Verilator still differs here (it settles combinational logic
-to a fixed point) -- not a veriforge bug.
-
 ### Compiled engine: wide (>64-bit) signal posedge/negedge not supported
 
 **Status**: Open, by design (not attempted) — fails loudly, not silently.
@@ -103,6 +79,20 @@ These are deliberate design decisions or investigated-and-closed
 non-bugs, kept here because they're the kind of thing a future
 investigation could easily mistake for a live defect and waste time
 re-deriving.
+
+### Self-referential combinational reads (resolved 2026-10-14)
+
+`always @(*) begin o5 = o6; ... o6 = ~something; end` (reading a signal
+before the block's own write to it) used to give different answers on
+reference, vm/vm-fast and compiled. All four now follow IEEE 1364-2005
+9.7.5 as Icarus does: the block's own change doesn't re-trigger it, another
+process's does (`notes/simulation/simulation_model.md`, "Sensitivity
+Inference"). Verilator still differs here (it settles combinational logic
+to a fixed point) -- not a veriforge bug. (The vm-fast "loop-bearing
+combinational block behind a child instance doesn't re-fire on a second
+settle()" defect, open since August, no longer reproduces after the same
+rework: `test_loop_block_behind_child_instance_refires`.)
+
 
 ### Streaming concatenation as an assignment target: Verilator and a wider source
 

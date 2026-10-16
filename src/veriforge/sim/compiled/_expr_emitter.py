@@ -392,6 +392,9 @@ class _ExprEmitterMixin:
             return self._emit_concat(expr, width)
 
         if etype is StreamingConcatenation:
+            hoisted = self._hoist_stream_reverse(expr)
+            if hoisted is not None:
+                return hoisted[0]
             return self._emit_expr(self._stream_reverse_synthetic(expr), width, signed_override)
 
         if etype is Replication:
@@ -2685,6 +2688,59 @@ class _ExprEmitterMixin:
             raise ValueError(f"Streaming concatenation slice_size must be positive, got {slice_size}")
         return slice_size
 
+    def _hoist_stream_reverse(self, expr: StreamingConcatenation) -> tuple[str, str] | None:
+        """`{<<n{...}}` (at most 64 bits) evaluated once ahead of the
+        statement: the operands' value and mask into hoisted temporaries,
+        then one shift-and-mask term per chunk of those. Returns the
+        (value, mask) names; None outside a hoisting scope.
+
+        `_stream_reverse_synthetic` re-emits the whole operand expression in
+        each chunk's range select, so a nested `{<<{ {<<4{ {<<{a, b}} }} }}`
+        multiplied it per level -- a three-line module generated C the
+        compiler ran for over ten minutes on."""
+        if self._et_pending is None:
+            return None
+        cached_v = self._et_node_vals.get(id(expr))
+        cached_m = self._et_node_masks.get(id(expr))
+        if cached_v is not None and cached_m is not None:
+            return cached_v, cached_m
+        total_w = sum(self._expr_width(p) for p in expr.parts)
+        if total_w > _WORD_BITS:
+            return None
+        inner = Concatenation(parts=expr.parts)
+        self._stream_keepalive.append(inner)  # (the emitters' caches are keyed by id())
+        inner_v = self._emit_expr(inner, total_w)
+        inner_m = self._emit_mask_expr(inner, total_w)
+        slice_size = self._stream_reverse_slice_size(expr)
+        n = self._et_count
+        self._et_count += 1
+        self._et_pending.append(
+            f"cdef unsigned long long _et{n}_iv = <unsigned long long>({inner_v}) & wmask({total_w})"
+        )
+        self._et_pending.append(
+            f"cdef unsigned long long _et{n}_im = <unsigned long long>({inner_m}) & wmask({total_w})"
+        )
+
+        def reversed_bits(src: str) -> str:
+            # Chunks from the MSB end (the last, at the LSB end, possibly
+            # short), placed in reverse order: the first found lands lowest.
+            terms: list[str] = []
+            pos, out_pos = total_w, 0
+            while pos > 0:
+                lo = max(0, pos - slice_size)
+                cw = pos - lo
+                term = f"((({src} >> {lo}) & <unsigned long long>{(1 << cw) - 1:#x})"
+                terms.append(f"{term} << {out_pos})" if out_pos else f"{term})")
+                out_pos += cw
+                pos = lo
+            return "<long long>(" + " | ".join(terms) + ")"
+
+        self._et_pending.append(f"cdef long long _et{n}_v = {reversed_bits(f'_et{n}_iv')}")
+        self._et_pending.append(f"cdef long long _et{n}_m = {reversed_bits(f'_et{n}_im')}")
+        self._et_node_vals[id(expr)] = f"_et{n}_v"
+        self._et_node_masks[id(expr)] = f"_et{n}_m"
+        return f"_et{n}_v", f"_et{n}_m"
+
     def _stream_reverse_synthetic(self, expr: StreamingConcatenation) -> Concatenation:
         """Desugar `{<<slice_size{...}}` into a plain `Concatenation` of
         `RangeSelect`s over a synthetic inner `Concatenation(parts=expr.parts)`
@@ -4157,6 +4213,9 @@ class _ExprEmitterMixin:
             return mask_str
 
         if etype is StreamingConcatenation:
+            hoisted = self._hoist_stream_reverse(expr)
+            if hoisted is not None:
+                return hoisted[1]
             return self._emit_mask_expr(self._stream_reverse_synthetic(expr), width, signed_override)
 
         if etype is Concatenation:

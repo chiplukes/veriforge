@@ -825,7 +825,9 @@ edits. Remaining fallback cases still re-emit the full module:
     a targeted sweep of 3000 fresh `HIERARCHICAL`-strategy modules (seeds
     3000-5999) found zero self-referential assigns after the fix, versus
     a nonzero rate before it.
-  - **Root-caused, not fixed: `vm`/`vm-fast` — a combinational `always
+  - **No longer reproduces (2026-10-15, after the IEEE `always @*`
+    trigger rework; `test_loop_block_behind_child_instance_refires`) --
+    was: root-caused, not fixed: `vm`/`vm-fast` — a combinational `always
     @(*)` block containing a `for`/`while` loop, wrapped one level inside
     a child instance, does not re-fire on a SECOND `settle()` after only
     the parent's plain (non-memory) input changes -- `vm-fast` reads a

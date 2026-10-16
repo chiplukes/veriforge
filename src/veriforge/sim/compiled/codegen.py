@@ -237,6 +237,7 @@ class CythonCodegen(
         "_signal_signed",
         "_signal_widths",
         "_signed_memories",
+        "_stream_keepalive",
         "_struct_signal_types",
         "_struct_type_map",
         "_task_map",
@@ -263,6 +264,7 @@ class CythonCodegen(
         # Per combinational process: the sids it reads and writes that another
         # process writes too (see `_compile_always_blocks`).
         self._combo_ext: list[frozenset[int]] = []
+        self._stream_keepalive: list[object] = []  # (see _hoist_stream_reverse)
         self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
         self._module: Module | None = None
         self._initial_lines: list[str] = []

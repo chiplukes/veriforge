@@ -105,3 +105,41 @@ endmodule
     sim = _sim(source, engine)
     sim.run(max_time=10)
     assert sim.display_output == ["0fffffffffffffffffffffffe 000000000000000002"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_loop_block_behind_child_instance_refires(engine):
+    """A loop-containing `always @*` inside a child instance, its input
+    arriving through the port connection: vm-fast used to keep the value of
+    its first activation on later settle() calls (fuzz mismatch_06451,
+    August 2026); no longer reproduces since the 2026-10-14 trigger rework."""
+    source = """module c (input [31:0] i2, output logic [79:0] o6);
+    reg [7:0] wc1;
+    logic [7:0] wc2;
+    logic [79:0] w4;
+    always @(*) begin
+        wc1 = 0;
+        while (wc1 < 5) begin
+            wc2 = 0;
+            while (wc2 < 3) begin
+                w4 = !(|i2[31:23]);
+                wc2 = wc2 + 1;
+            end
+            wc1 = wc1 + 1;
+        end
+        o6 = {wc2, wc1, i2 ? w4 : wc1};
+    end
+endmodule
+module t (input [31:0] i2, output [89:0] o7);
+    wire [79:0] w4;
+    assign o7 = w4;
+    c u6 (.i2(i2), .o6(w4));
+endmodule
+"""
+    sim = _sim(source, engine)
+    got = []
+    for value in (0, 12345, 0xFFFF_FFFF, 7):
+        sim.drive("i2", Value(value, width=32))
+        sim.settle()
+        got.append(sim.read("o7").val)
+    assert got == [5, 1, 0, 1]

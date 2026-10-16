@@ -413,3 +413,30 @@ class TestStreamingConcatenationWideSlices:
         sim.run(max_time=10)
         widths = (200, 140, 8, 256, 200)
         assert sim.display_output == [" ".join(f"{v:0{(w + 3) // 4}x}" for v, w in zip(expected, widths))]
+
+
+class TestNestedStreamingConcatenation:
+    """Nested `{<<...}` expressions: compiled emitted each chunk's operand
+    expression again, so nesting multiplied the generated code -- this
+    module's C build ran for over ten minutes (2026-10-15). Each level is
+    now computed once into hoisted temporaries."""
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_nested(self, engine):
+        mod = _parse("""
+            module t(input [31:0] a, input [15:0] b, output [47:0] y, output [47:0] z, output [63:0] w);
+              assign y = {<<{ {<<4{ {<<{a, b}} }} }};
+              assign z = {<<3{ {<<{a[20:0] ^ b, b}} }};
+              assign w = {<<{ {<<{ {<<{a, a}} }} }};
+            endmodule
+        """)
+        sim = Simulator(mod, engine=engine)
+        sim.drive("a", Value(0x12345678, width=32))
+        sim.drive("b", Value(0xBEEF, width=16))
+        sim.settle()
+        ab = (0x12345678 << 16) | 0xBEEF
+        assert int(sim.read("y").val) == _bit_reverse(_stream_reverse(_bit_reverse(ab, 48), 48, 4), 48)
+        assert int(sim.read("z").val) == _stream_reverse(
+            _bit_reverse(((0x12345678 & 0x1FFFFF ^ 0xBEEF) << 16) | 0xBEEF, 37), 37, 3
+        )
+        assert int(sim.read("w").val) == _bit_reverse(0x1234567812345678, 64)
