@@ -89,3 +89,19 @@ endmodule
     sim.drive("b", Value(0xFF, width=8))
     sim.settle()
     assert (sim.read("y"), sim.read("z")) == (Value(0x3C, width=8), Value(0x3D, width=8))
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_task_call_arguments_are_sensitivity(engine):
+    """`always @* tk(a, r, q);` -- reference inferred no sensitivity from a
+    task call and never re-ran it (all x)."""
+    source = """module t;
+  reg [99:0] a, r; reg [70:0] q;
+  task tk(input [99:0] x, output [99:0] y, output [70:0] z); begin y = x ^ {100{1'b1}}; z = x[70:0] + 1; end endtask
+  always @* tk(a, r, q);
+  initial begin a = {4'hf, 96'h1}; #1 $display("%h %h", r, q); end
+endmodule
+"""
+    sim = _sim(source, engine)
+    sim.run(max_time=10)
+    assert sim.display_output == ["0fffffffffffffffffffffffe 000000000000000002"]

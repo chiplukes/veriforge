@@ -929,6 +929,10 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         return f"{cond_str} ? {true_str} : {false_str}"
     if isinstance(expr, Concatenation):
         parts = ", ".join(emit_expression(p) for p in expr.parts)
+        if expr.from_streaming:
+            # (`{>>{a, b}}` as written: as an assignment target it isn't
+            # `{a, b}`, which aligns a wider source differently.)
+            return "{>>{" + parts + "}}"
         return "{" + parts + "}"
     if isinstance(expr, WidthCast):
         return f"{emit_expression(expr.width)}'({emit_expression(expr.operand)})"

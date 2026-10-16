@@ -1475,47 +1475,12 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ret_sid = self._signal_map[ret_name]
             ret_w = self._signal_widths[ret_sid]
 
-            # The generated `_user_func_XXX` call boundary below is
-            # hardcoded to a single native `long long` per argument/
-            # return -- there is no multi-word representation anywhere
-            # in this ABI (the signature, the port-binding writes
-            # (`c.val[sid] = arg_i_v & wmask(w)`, a single scalar write
-            # regardless of the port's real width), and the return
-            # statement (`return c.val[ret_sid] & wmask(ret_w)`) are ALL
-            # single-word). A port or return wider than 64 bits is
-            # therefore unconditionally unrepresentable through this
-            # boundary -- not merely a routing gap the way the other
-            # "wide value in narrow context" bugs fixed this wave were
-            # (those were cases where CORRECT wide storage/computation
-            # already existed elsewhere and just wasn't being reached;
-            # here there is no wide storage for a function argument/
-            # return to reach AT ALL). Confirmed against Icarus (cross-
-            # engine, both a 64-bit and a 128-bit destination) for a
-            # function with a 71-bit port: silently wrong on compiled
-            # regardless of the calling context's own width, since the
-            # port's OWN storage can only ever hold 64 bits. Properly
-            # supporting this would mean redesigning the call ABI for
-            # multi-word argument/return passing -- deliberately out of
-            # scope here; fail loudly at compile time instead of
-            # silently corrupting the port/return value.
-            for port in func.ports:
-                sid = self._signal_map[f"{prefix}.{port.name}"]
-                w = self._signal_widths[sid]
-                if w > _WORD_BITS:
-                    raise NotImplementedError(
-                        f"Compiled engine: user-defined function '{func.name}' has a port "
-                        f"'{port.name}' ({w} bits) wider than {_WORD_BITS} bits, not yet "
-                        f"supported for function arguments. Use engine='vm' or "
-                        f"engine='reference' for this design, or narrow the port."
-                    )
-            if ret_w > _WORD_BITS:
-                raise NotImplementedError(
-                    f"Compiled engine: user-defined function '{func.name}' has a return "
-                    f"width of {ret_w} bits, wider than {_WORD_BITS} bits, not yet "
-                    f"supported for function return values. Use engine='vm' or "
-                    f"engine='reference' for this design, or narrow the return width."
-                )
-
+            # A port or return wider than 64 bits: the caller stores a wide
+            # argument straight into the port's wide storage before the call
+            # (`_bind_wide_func_arg`), and reads a wide return from the return
+            # signal's (`_hoist_user_func_call`); the `long long` arguments
+            # and return value carry only narrow ones (and the low word).
+            # Both used to raise NotImplementedError.
             # Build parameter list. Each argument passes its VALUE and its
             # x/z MASK as a separate pair (`arg_{i}_v`, `arg_{i}_m}`) --
             # a single `long long` return/argument has no room for both,
@@ -1542,12 +1507,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # Initialize return value to 0
             parts.append(f"    c.val[{ret_sid}] = 0")
             parts.append(f"    c.mask[{ret_sid}] = 0")
+            for wi in range((ret_w + 63) // 64 if ret_w > _WORD_BITS else 0):
+                parts.append(f"    c.wide_val[c.wide_offset[{ret_sid}] + {wi}] = 0")
+                parts.append(f"    c.wide_mask[c.wide_offset[{ret_sid}] + {wi}] = 0")
 
             # Store args to local port signals
             for i, port in enumerate(func.ports):
                 local_name = f"{prefix}.{port.name}"
                 sid = self._signal_map[local_name]
                 w = self._signal_widths[sid]
+                if w > _WORD_BITS:
+                    continue  # (bound by the caller)
                 parts.append(f"    c.val[{sid}] = arg_{i}_v & wmask({w})")
                 parts.append(f"    c.mask[{sid}] = arg_{i}_m & wmask({w})")
 

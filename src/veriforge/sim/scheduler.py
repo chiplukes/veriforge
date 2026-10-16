@@ -1891,6 +1891,15 @@ def _collect_stmt_reads(stmt, reads: set[str]) -> None:  # noqa: PLR0911, PLR091
             _walk_expr_reads(arg, reads)
         return
 
+    from veriforge.model.statements import TaskEnable  # noqa: PLC0415
+
+    if isinstance(stmt, TaskEnable):
+        # (The arguments -- `always @* tk(a, r, q);` used to have no
+        # sensitivity at all, and never re-ran.)
+        for arg in stmt.arguments:
+            _walk_expr_reads(arg, reads)
+        return
+
 
 def _collect_lhs_index_reads(lhs: Expression, reads: set[str]) -> None:
     """Collect signal reads from LHS index expressions (not the target itself)."""
@@ -1922,6 +1931,16 @@ def _collect_stmt_writes(stmt, reads: set[str]) -> None:  # noqa: PLR0911
         SeqBlock,
         WhileLoop,
     )
+
+    from veriforge.model.statements import TaskEnable  # noqa: PLC0415
+
+    if isinstance(stmt, TaskEnable):
+        # An argument that can be an output (an lvalue): an input one the
+        # task never writes, so treating it as written changes nothing.
+        for arg in stmt.arguments:
+            if isinstance(arg, (Identifier, BitSelect, RangeSelect, Concatenation)):
+                reads.difference_update(_lhs_base_names(arg))
+        return
 
     if isinstance(stmt, (BlockingAssign, NonblockingAssign)):
         reads.difference_update(_lhs_base_names(stmt.lhs))

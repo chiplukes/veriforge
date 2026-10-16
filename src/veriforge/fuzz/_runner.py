@@ -24,7 +24,8 @@ from pathlib import Path
 import signal
 
 from ..model.design import Design, Module
-from ..model.expressions import StreamingConcatenation
+from ..model.assignments import ContinuousAssign
+from ..model.expressions import Concatenation, StreamingConcatenation
 from ..sim.testbench import Simulator
 from ..sim.value import Value
 from ..codegen.verilog_emitter import emit_design, emit_expression
@@ -35,10 +36,7 @@ from ._signal_context import SignalContext
 
 # Messages of documented engine limitations that raise instead of computing
 # a wrong value (see notes/developer/known_issues.md).
-_KNOWN_LIMITATIONS = (
-    "exceeds vm-fast's fixed wide-value capacity",
-    "wider than 64 bits, not yet supported for function arguments",
-)
+_KNOWN_LIMITATIONS = ("exceeds vm-fast's fixed wide-value capacity",)
 
 
 from ._runner_marks import DISPLAY_MARK  # noqa: E402
@@ -298,7 +296,14 @@ class FuzzRunner:
         # itself needs this carve-out, and cross-engine comparison
         # (reference vs vm/vm-fast/compiled, still run above) remains fully
         # active for it regardless.
-        has_streaming_concat = any(any(m.find(StreamingConcatenation)) for m in design.modules)
+        # (A streaming-concatenation assignment target -- `{>>{a, b}} <= e`
+        # too -- Icarus rejects as well; Verilator agrees with veriforge on
+        # it, so only a streaming *expression* skips Verilator below.)
+        stream_targets = _streaming_targets(design)
+        has_streaming_expr = any(
+            id(node) not in stream_targets for m in design.modules for node in m.find(StreamingConcatenation)
+        )
+        has_streaming_concat = has_streaming_expr or bool(stream_targets)
         if self._icarus and not has_streaming_concat:
             try:
                 icarus_res = self._simulate_icarus(verilog, vectors, top)
@@ -340,7 +345,7 @@ class FuzzRunner:
         # rarely divide the fuzzed operand width evenly, this needs the same
         # coarse whole-module skip Icarus already gets rather than a
         # per-expression static-width check.
-        if self._verilator and not has_streaming_concat:
+        if self._verilator and not has_streaming_expr:
             try:
                 verilator_res = self._simulate_verilator(verilog, vectors, top)
                 diffs = self._compare_verilator(oracle, verilator_res, vectors, skip=_two_state_outputs(top))
@@ -865,6 +870,22 @@ class FuzzRunner:
                     bits.append("1" if (value.val >> i) & 1 else "0")
             return f"{w}'b{''.join(bits)}"
         return f"{w}'d{value.val}"
+
+
+def _streaming_targets(design: Design) -> set[int]:
+    """ids of the streaming-concatenation assignment targets in *design*."""
+    from ..model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
+
+    return {
+        id(node.lhs)
+        for m in design.modules
+        for node in m.walk()
+        if isinstance(node, (BlockingAssign, NonblockingAssign, ContinuousAssign))
+        and (
+            isinstance(node.lhs, StreamingConcatenation)
+            or (isinstance(node.lhs, Concatenation) and node.lhs.from_streaming)
+        )
+    }
 
 
 def _two_state_outputs(mod: Module) -> set[str]:

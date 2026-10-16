@@ -70,6 +70,12 @@ def _extract_net_assignment(
 
 def _build_net_lvalue(tree: Tree, source_file: str | None, callbacks: _LvalueCallbacks) -> Expression:
     """Build an Expression from a net_lvalue subtree."""
+    stream = [child for child in tree.children if isinstance(child, Tree) and child.data == "streaming_concatenation"]
+    if stream:
+        # A streaming-concatenation target (`{<<8{a, b}} = s`; `{>>{a, b}}`
+        # is a `Concatenation` with `from_streaming`), lowered by
+        # `sim/sv_functions.py:lower_streaming_targets`.
+        return callbacks.build_expression(stream[0], source_file)
     net_lvalue_children = [child for child in tree.children if isinstance(child, Tree) and child.data == "net_lvalue"]
     if net_lvalue_children:
         parts = [_build_net_lvalue(child, source_file, callbacks) for child in net_lvalue_children]
@@ -105,6 +111,12 @@ def _build_net_lvalue(tree: Tree, source_file: str | None, callbacks: _LvalueCal
 
 def _build_variable_lvalue(tree: Tree, source_file: str | None, callbacks: _LvalueCallbacks) -> Expression:
     """Build an Expression from a variable_lvalue subtree."""
+    stream = [child for child in tree.children if isinstance(child, Tree) and child.data == "streaming_concatenation"]
+    if stream:
+        # A streaming-concatenation target (`{<<8{a, b}} = s`; `{>>{a, b}}`
+        # is a `Concatenation` with `from_streaming`), lowered by
+        # `sim/sv_functions.py:lower_streaming_targets`.
+        return callbacks.build_expression(stream[0], source_file)
     lvalue_children = [child for child in tree.children if isinstance(child, Tree) and child.data == "variable_lvalue"]
     if lvalue_children:
         parts = [_build_variable_lvalue(child, source_file, callbacks) for child in lvalue_children]

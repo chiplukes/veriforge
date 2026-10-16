@@ -3120,9 +3120,25 @@ class _ExprEmitterMixin:
         call_expr = self._emit_user_func_call_expr(func, call)
         n = self._et_count
         self._et_count += 1
+        # A return wider than 64 bits: each word copied out right after the
+        # call, into `_et{n}_w{i}_v`/`_m` (a later call of the same function
+        # in this statement overwrites the return signal).
+        ret_words = (self._signal_widths[ret_sid] + 63) // 64 if self._signal_widths[ret_sid] > _WORD_BITS else 0
+        copy = [
+            line
+            for i in range(ret_words)
+            for line in (
+                f"_et{n}_w{i}_v = c.wide_val[c.wide_offset[{ret_sid}] + {i}]",
+                f"_et{n}_w{i}_m = c.wide_mask[c.wide_offset[{ret_sid}] + {i}]",
+            )
+        ]
+        for i in range(ret_words):
+            self._et_pending.append(f"cdef unsigned long long _et{n}_w{i}_v = 0")
+            self._et_pending.append(f"cdef unsigned long long _et{n}_w{i}_m = 0")
         if guard is None:
             self._et_pending.append(f"cdef long long _et{n}_v = {call_expr}")
             self._et_pending.append(f"cdef long long _et{n}_m = c.mask[{ret_sid}]")
+            self._et_pending.extend(copy)
         else:
             # In an operand that's only evaluated under *guard* (an untaken
             # branch must not run the function's side effects).
@@ -3131,9 +3147,42 @@ class _ExprEmitterMixin:
             self._et_pending.append(f"if {guard}:")
             self._et_pending.append(f"    _et{n}_v = {call_expr}")
             self._et_pending.append(f"    _et{n}_m = c.mask[{ret_sid}]")
+            self._et_pending.extend(f"    {line}" for line in copy)
         self._et_node_vals[id(call)] = f"_et{n}_v"
         self._et_node_masks[id(call)] = f"_et{n}_m"
         return f"_et{n}_v", f"_et{n}_m"
+
+    def _bind_wide_func_arg(self, func, port, arg: Expression, width: int) -> None:
+        """Store *arg* into the >64-bit function port *port*'s storage via
+        hoisted lines (see `_emit_user_func_call_expr`)."""
+        if self._et_pending is None:
+            raise NotImplementedError(
+                f"Compiled engine: a call to function '{func.name}' (port '{port.name}', {width} bits) "
+                f"in a context with no statement to evaluate the argument in. Use engine='vm' or "
+                f"engine='reference' for this design."
+            )
+        sid = self._signal_map[f"__func_{func.name}.{port.name}"]
+        n_words = max(1, (max(width, self._expr_max_internal_width(arg)) + 63) // 64)
+        self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
+        slot = self._alloc_scratch()
+        lines = self._emit_wide_expr_to_scratch(arg, slot, n_words, width, 0)
+        if lines is None:
+            self._free_scratch(slot)
+            raise NotImplementedError(
+                f"Compiled engine: argument for function '{func.name}' port '{port.name}' "
+                f"({width} bits) not supported. Use engine='vm' or engine='reference'."
+            )
+        self._needs_wide_helpers = True
+        self._et_pending.extend(lines)
+        for i in range((width + 63) // 64):
+            tail = f" & _word_mask64({width - i * 64})" if width - i * 64 < _WORD_BITS else ""
+            self._et_pending.append(
+                f"c.wide_val[c.wide_offset[{sid}] + {i}] = _sc{slot}_v[{i}] & ~_sc{slot}_m[{i}]{tail}"
+            )
+            self._et_pending.append(f"c.wide_mask[c.wide_offset[{sid}] + {i}] = _sc{slot}_m[{i}]{tail}")
+        self._et_pending.append(f"c.val[{sid}] = <long long>c.wide_val[c.wide_offset[{sid}]]")
+        self._et_pending.append(f"c.mask[{sid}] = <long long>c.wide_mask[c.wide_offset[{sid}]]")
+        self._free_scratch(slot)
 
     def _call_guard_expr(self, call: FunctionCall) -> str | None:
         """The condition under which *call* is evaluated, as a Cython
@@ -3216,7 +3265,15 @@ class _ExprEmitterMixin:
         """
         port_widths = [_range_width(port.width, self._param_env) for port in func.ports]
         args: list[str] = []
-        for a, w in zip(call.arguments, port_widths, strict=False):
+        for port, a, w in zip(func.ports, call.arguments, port_widths, strict=False):
+            if w > _WORD_BITS:
+                # A port wider than 64 bits: computed into the port's own
+                # wide storage ahead of the call (hoisted lines, right before
+                # this call's own); the function doesn't bind it. It used to
+                # raise NotImplementedError.
+                self._bind_wide_func_arg(func, port, a, w)
+                args.extend(("0", "0"))
+                continue
             wide = self._emit_wide_arg_to_value(a, w)
             if wide is not None:
                 args.append(wide[0])

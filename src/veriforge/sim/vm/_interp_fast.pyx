@@ -2487,13 +2487,17 @@ cdef int _execute_core(
                             if wi - wrd_off - 1 >= 0:
                                 concat_rv[wi] |= wv[sp * WIDE_WORDS + wi - wrd_off - 1] >> (64 - bit_off)
                                 concat_rm[wi] |= wm[sp * WIDE_WORDS + wi - wrd_off - 1] >> (64 - bit_off)
-                    # Mask top word
+                    # Mask top word, and zero every word above it: bits
+                    # shifted past the width landed there (`{34'd0, k << 64}`
+                    # of a 120-bit k carried them into the concatenation).
                     wsp = (w - 1) >> 6
                     if wsp < WIDE_WORDS:
                         bit_in_word = w & 63
                         if bit_in_word > 0:
                             wtmp = (1ULL << bit_in_word) - 1
                             concat_rv[wsp] &= wtmp; concat_rm[wsp] &= wtmp
+                        for wi in range(wsp + 1, WIDE_WORDS):
+                            concat_rv[wi] = 0; concat_rm[wi] = 0
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = concat_rv[wi]
                         wm[sp * WIDE_WORDS + wi] = concat_rm[wi]
@@ -2669,13 +2673,17 @@ cdef int _execute_core(
                             if wi - wrd_off - 1 >= 0:
                                 concat_rv[wi] |= wv[sp * WIDE_WORDS + wi - wrd_off - 1] >> (64 - bit_off)
                                 concat_rm[wi] |= wm[sp * WIDE_WORDS + wi - wrd_off - 1] >> (64 - bit_off)
-                    # Mask top word
+                    # Mask top word, and zero every word above it: bits
+                    # shifted past the width landed there (`{34'd0, k << 64}`
+                    # of a 120-bit k carried them into the concatenation).
                     wsp = (w - 1) >> 6
                     if wsp < WIDE_WORDS:
                         bit_in_word = w & 63
                         if bit_in_word > 0:
                             wtmp = (1ULL << bit_in_word) - 1
                             concat_rv[wsp] &= wtmp; concat_rm[wsp] &= wtmp
+                        for wi in range(wsp + 1, WIDE_WORDS):
+                            concat_rv[wi] = 0; concat_rm[wi] = 0
                     for wi in range(WIDE_WORDS):
                         wv[sp * WIDE_WORDS + wi] = concat_rv[wi]
                         wm[sp * WIDE_WORDS + wi] = concat_rm[wi]

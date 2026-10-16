@@ -28,7 +28,14 @@ from .elaborate import (
 from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases, lower_signed_indices
 from .scheduler import Scheduler
 from .display_format import lower_display_args
-from .sv_functions import is_two_state, lower_sv_functions, lower_two_state, lower_width_casts, materialize_task_locals
+from .sv_functions import (
+    is_two_state,
+    lower_streaming_targets,
+    lower_sv_functions,
+    lower_two_state,
+    lower_width_casts,
+    materialize_task_locals,
+)
 from .value import Value
 
 _ELEMENT_NAME = re.compile(r"^(.+?)((?:\[-?\d+\])+)$")
@@ -215,6 +222,7 @@ class Simulator:  # cm:a5c8f4
         materialize_task_locals(module)
         expand_array_concat_operands(module)
         lower_sv_functions(module)
+        lower_streaming_targets(module)  # (before lower_width_casts: makes casts)
         # Indices first: a wide one cut to its low 32 bits, a narrow signed one
         # sign-extended (flattening's per-dimension range check used to see the
         # untruncated value and drop a valid write).

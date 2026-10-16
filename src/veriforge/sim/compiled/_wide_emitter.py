@@ -5582,6 +5582,36 @@ class _WideEmitterMixin:
                     mask_expr = f"c.mask[{ret_sid}]"
                 ret_w = self._signal_widths[ret_sid]
                 src_signed = signed_override if signed_override is not None else self._expr_signed(expr)
+                if ret_w > _WORD_BITS:
+                    # A wide return: its words (copied right after a hoisted
+                    # call -- see `_hoist_user_func_call` -- else read from the
+                    # return signal just after the call here).
+                    ret_words = (ret_w + 63) // 64
+                    if hoisted is not None:
+                        base = call_expr[: -len("_v")]
+                        lines = []
+                        for wi in range(n_words):
+                            src_v = f"{base}_w{wi}_v" if wi < ret_words else "0"
+                            src_m = f"{base}_w{wi}_m" if wi < ret_words else "0"
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = {src_v}")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = {src_m}")
+                    else:
+                        lines = [
+                            f"{pad}{call_expr}",
+                            f"{pad}wide_load_signal(c, {ret_sid}, _sc{slot}_v, _sc{slot}_m, {n_words})",
+                        ]
+                    if dst_width > ret_w and src_signed:
+                        lines.extend(self._wide_sign_extend_to_dst_lines(slot, dst_width, n_words, str(ret_w), indent))
+                    elif dst_width < ret_w:
+                        dst_n = (dst_width + 63) // 64
+                        tail_bits = dst_width - (dst_n - 1) * 64
+                        if tail_bits < _WORD_BITS:
+                            lines.append(f"{pad}_sc{slot}_v[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                            lines.append(f"{pad}_sc{slot}_m[{dst_n - 1}] &= _word_mask64({tail_bits})")
+                        for wi in range(dst_n, n_words):
+                            lines.append(f"{pad}_sc{slot}_v[{wi}] = 0")
+                            lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+                    return lines
                 lines = [
                     f"{pad}_sc{slot}_v[0] = ({call_expr}) & wmask({ret_w})",
                     f"{pad}_sc{slot}_m[0] = ({mask_expr}) & wmask({ret_w})",

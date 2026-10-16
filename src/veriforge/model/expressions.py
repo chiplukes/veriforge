@@ -225,6 +225,9 @@ class StreamingConcatenation(Expression):
     concatenation and is desugared straight to `Concatenation` at
     AST-build time (see `_build_streaming_concatenation` in
     `transforms/_expressions.py`); this node only ever represents `<<`.
+    As an assignment target (unpacking) both forms are kept -- `>>` as a
+    `Concatenation` with `from_streaming` -- and lowered before simulation
+    (`sim/sv_functions.py:lower_streaming_targets`).
     """
 
     __slots__ = ("parts", "slice_size")

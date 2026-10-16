@@ -2888,7 +2888,8 @@ slice_size: constant_expression
 // SUPPORT: `>>` (with or without a slice_size) is equivalent to plain
 // concatenation -- slice size never reorders anything for `>>`, it only
 // matters for streaming *assignment* into a differently-chunked unpacked-
-// array target, which is not supported -- see `_expressions.py`'s
+// array target, which is not supported (a streaming concatenation as an
+// assignment target of plain variables is: see variable_lvalue) -- see `_expressions.py`'s
 // `_build_streaming_concatenation` for how `>>` is lowered straight to
 // plain `Concatenation`, and how `<<` (genuine bit/chunk-level reversal)
 // builds a `StreamingConcatenation` node instead.
@@ -3215,6 +3216,7 @@ primary: number
 // SUPPORT: YES
 net_lvalue: hierarchical_net_identifier ( ( "[" constant_expression "]" )* "[" constant_range_expression "]")?
     | "{" net_lvalue ( "," net_lvalue )* "}"
+    | streaming_concatenation
 // BNF: variable_lvalue ::=
 //     hierarchical_variable_identifier [ { [ expression ] } [ range_expression ] ]
 //     | { variable_lvalue { , variable_lvalue } }
@@ -3225,6 +3227,7 @@ net_lvalue: hierarchical_net_identifier ( ( "[" constant_expression "]" )* "[" c
 // SUPPORT: YES
 variable_lvalue: hierarchical_variable_identifier ( ( "[" expression "]" )* "[" range_expression "]" )?
     | "{" variable_lvalue ( "," variable_lvalue )* "}"
+    | streaming_concatenation  // SV 11.4.14.3 unpacking: `{<<8{a, b}} = s;`
 
 // SECTION:A.8.6 Operators
 // Naming operators so they end up as terminals in the tree

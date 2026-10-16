@@ -70,3 +70,21 @@ endmodule
     sim.drive("i5", 0b11111)
     sim.settle()
     assert [int(sim.read(n).val) for n in ("a", "b", "c")] == [0x80000048, 0x1_0000_0003, 0xEE6B27FD]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_wide_shift_left_drops_bits_past_its_width(engine):
+    """vm-fast's wide `<<` masked only the top word of the result's width,
+    so `{34'd0, k << 64}` (k 120 bits) carried k's shifted-out high bits
+    into the concatenation (fuzz seed 26050)."""
+    source = """module t;
+  reg [51:0] i7;
+  wire [153:0] c1 = {{2{i7[23:7]}}, 120'd514807271207555964258565164011671173 << 64};
+  wire [153:0] c5 = {34'd0, 120'd514807271207555964258565164011671173 <<< 64};
+  initial begin i7 = 0; #1 $display("%h %h", c1, c5); end
+endmodule
+"""
+    design = tree_to_design(verilog_parser(start="source_text").build_tree(source))
+    sim = Simulator(design.modules[0], engine=engine, design=design)
+    sim.run(max_time=10)
+    assert sim.display_output == ["000000000c4904410a4ce850000000000000000 000000000c4904410a4ce850000000000000000"]

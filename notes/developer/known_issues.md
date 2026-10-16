@@ -66,38 +66,16 @@ attempted — no design encountered so far has needed edge detection on a
 signal that wide (clocks and resets are essentially always narrow); pick
 this up only if a real design needs it.
 
-### Compiled engine: wide (>64-bit) user-defined function port/return not supported
+### Compiled engine: a wide (>64-bit) function argument outside a statement
 
-**Status**: Open, by design (not attempted) — fails loudly, not silently.
-**Found**: August 2026, while root-causing an unrelated wide-function-call
-codegen gap (see the archive's ternary/codegen-family entry for the full
-discovery story).
-
-User-defined functions with a wide (>64-bit) port or return type raise
-`NotImplementedError` at codegen time
-(`test_compiled_function_wide_port_raises`) rather than being silently
-truncated. The generated `_user_func_XXX` call ABI is hardcoded to a
-single native `long long` per argument/return at three points (the C
-function signature, the port-binding write, and the return statement);
-supporting a wide port/return would need a genuine multi-word call-ABI
-redesign (pointer/array-based argument and return-value passing across
-the narrow value emitter, narrow mask emitter, and wide emitter), not a
-routing fix. A wide *argument expression* passed to a narrow port already
-works correctly — this is specifically about the port/return declaration
-itself. `reference`/`vm`/`vm-fast` are unaffected (Python `int` throughout,
-no such limit). Confirmed out of scope with the user when found; not
-attempted. No design encountered so far has actually needed it — scope as
-its own work-plan item if one ever does.
-
-Since 2026-10-09 this also covers SystemVerilog size casts *to* more than
-64 bits (`100'(x)`): every engine lowers `N'(e)` to a generated N-bit
-identity function (`sim/sv_functions.py:lower_width_casts`). Casts to 64
-bits or fewer work on compiled, including from a wide operand.
-
-For the full per-operation wide-signal coverage picture (everything else
-is ✅, backed by real cross-engine tests), see
-`notes/simulation/wide_signal_coverage.md` and
-`notes/plans/architecture_review_2026-07.md`.
+**Status**: Narrow remaining limit (2026-10-15). Function ports and returns
+wider than 64 bits (and so `N'(e)` casts to more than 64 bits, which every
+engine lowers to an N-bit function) work on compiled since 2026-10-15: a
+wide argument is stored into the port's own storage just before the call
+(hoisted, `_bind_wide_func_arg`), a wide return read from the return
+signal's (`_hoist_user_func_call`). A call in a context with no statement to
+hoist into raises `NotImplementedError` ("no statement to evaluate the
+argument in") instead -- none known; `test_function_wide_port_and_return`.
 
 ### No `real` / `realtime` type
 
@@ -119,18 +97,31 @@ Elements (`m[i][j]`), `$readmem` into rebased memories, hierarchical
 references and the Python API (`sim.read("m[4]")`, VCD labels) all use declared
 addresses (fixed 2026-10-12).
 
-### Streaming concatenation as an assignment target
-
-**Status**: Open feature gap (found 2026-10-13). `{<<8{e}} = a;` (IEEE 1800
-11.4.14.3, unpacking) doesn't parse; streaming concatenation is supported
-as an expression only. Icarus rejects the construct entirely.
-
 ## Reference notes (not defects)
 
 These are deliberate design decisions or investigated-and-closed
 non-bugs, kept here because they're the kind of thing a future
 investigation could easily mistake for a live defect and waste time
 re-deriving.
+
+### Streaming concatenation as an assignment target: Verilator and a wider source
+
+**Status**: Supported since 2026-10-15 (`{<<8{a, b}} = s;`, `{>>{a, b}} <=
+s;`, `assign {<<4{x, y}} = s;`; `sim/sv_functions.py:lower_streaming_targets`,
+`tests/test_sim/test_streaming_concatenation_unpack.py`). It used to be a
+parse error. One oracle difference: a source wider than the targets is
+consumed from its left end (IEEE 1800-2017 11.4.14.3 -- the LRM's `{>>{a, b,
+c}} = 100'b11111` gives `c = 1`), so `{<<8{a, b}} = 24'hABCDEF` gives a = cd,
+b = ab; Verilator streams the whole source first and keeps its left end (ef,
+cd). Same widths agree, ragged slices included. A narrower source is an
+error (`ValueError`), as in the LRM. Not a veriforge bug -- do not
+replicate Verilator here.
+
+Also, in one fuzz design (seed 26133), Verilator unpacked `{<<65{r5, r6}}
+<= 57'(...)` (54 + 3 bits) differently from `{<<57{...}}`, `{<<64{...}}`,
+`{<<100{...}}` and the plain `{r5, r6} <=` -- all the identity for a 57-bit
+stream, which veriforge and Verilator agree on for the others. A Verilator
+bug with a 65-bit slice; the fuzzer's streaming targets don't use 65.
 
 ### x and z share one representation (3-state, not 4-state)
 

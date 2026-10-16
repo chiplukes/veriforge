@@ -338,46 +338,49 @@ endmodule
         assert got == ref_val, f"engine={engine} got={got!r} expected={ref_val!r}"
 
 
-def test_compiled_function_wide_port_raises() -> None:
-    """The compiled engine's `_user_func_XXX` call ABI is hardcoded to a
-    single native `long long` per argument/return, at three separate
-    points (the generated C signature, the port-binding write inside the
-    function body, and the return statement) -- there is no multi-word
-    representation anywhere in it, unlike every other "wide value in
-    narrow context" bug fixed this wave (those were routing gaps around
-    already-correct wide storage/computation; here there is no wide
-    storage for a function argument/return to reach at all). A function
-    port or return wider than 64 bits is therefore unconditionally
-    unrepresentable, regardless of the calling context's own width.
-    Rather than silently corrupt the value (confirmed against Icarus:
-    `compiled` previously gave a wrong result where reference/vm/vm-fast
-    agreed), the compiled engine now fails loudly at codegen time.
-    """
-    source_wide_port = """
-module t(a);
+@pytest.mark.parametrize("engine", ENGINES)
+def test_function_wide_port_and_return(engine: str) -> None:
+    """A function port or return wider than 64 bits. The compiled engine
+    used to raise NotImplementedError: its `_user_func_XXX` call boundary
+    carries one `long long` per argument and return value. A wide argument
+    is now stored into the port's own wide storage ahead of the call, and a
+    wide return is read from the return signal's (2026-10-15). Expected
+    values from Icarus."""
+    source = """
+module t(a, b, n);
     input [70:0] a;
+    input [7:0] b;
+    input [3:0] n;
     function [7:0] fn_narrow(input [70:0] p);
-        begin
-            fn_narrow = p[7:0];
-        end
+        fn_narrow = p[70:63] ^ p[7:0];
     endfunction
-    wire [7:0] y = fn_narrow(a);
-endmodule
-"""
-    source_wide_ret = """
-module t(a);
-    input [7:0] a;
     function [70:0] fn_wide_ret(input [7:0] p);
-        begin
-            fn_wide_ret = p;
-        end
+        fn_wide_ret = {p, 63'd0} | p;
     endfunction
-    wire [70:0] y = fn_wide_ret(a);
+    function [99:0] fn_both(input [70:0] p, input [3:0] k);
+        fn_both = {p, 29'd0} + k;
+    endfunction
+    wire [7:0] y1 = fn_narrow(a);
+    wire [70:0] y2 = fn_wide_ret(b);
+    wire [99:0] y3 = fn_both(a, n) ^ fn_both(~a, 4'd1);
+    wire [99:0] y4 = 100'(n) << 90;
+    wire y5 = fn_both(a, n) == fn_both(a, n);
 endmodule
 """
-    for source in (source_wide_port, source_wide_ret):
-        with pytest.raises(NotImplementedError, match="wider than 64 bits"):
-            td._sim_for(source, "compiled")
+    sim = td._sim_for(source, engine)
+    sim.drive("a", td.Value((0x5A << 63) | 0x3C, width=71))
+    sim.drive("b", td.Value(0xA5, width=8))
+    sim.drive("n", td.Value(0b1001, width=4))
+    sim.settle()
+    assert [sim.read(s) for s in ("y1", "y2", "y3", "y4", "y5")] == [
+        td.Value(0x66, width=8),
+        td.Value((0xA5 << 63) | 0xA5, width=71),
+        td.Value(
+            ((((0x5A << 63) | 0x3C) << 29) + 9) ^ (((~((0x5A << 63) | 0x3C) & ((1 << 71) - 1)) << 29) + 1), width=100
+        ),
+        td.Value(9 << 90, width=100),
+        td.Value(1, width=1),
+    ]
 
 
 def _assert_all_engines_agree(source: str, drives: dict) -> None:

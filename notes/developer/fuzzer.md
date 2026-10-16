@@ -46,7 +46,7 @@ uv run -m veriforge.fuzz [--seed N] [--max MODULES] [--hours H]
 | `--verilator` | off | Enable Verilator cross-check (opt-in: ~8-10x slower per module than Icarus). |
 | `--engines` | all available | Veriforge engines to test: `reference`, `vm`, `vm-fast`, `compiled`. |
 | `--strategy` | weighted mix | Generate only this strategy (e.g. `memory`, `with_tasks`). |
-| `--no-x` | off | No x on stimulus inputs or in generated literals (the same random draws, so seeds still reproduce). Use it with `--verilator`: a 2-state variable or port turns an x literal into a "defined" 0 that Verilator, reading the literal as an arbitrary value, can't match. |
+| `--no-x` | off | No x anywhere: not on stimulus inputs, not in generated literals, and registers (and always-driven output ports) start at 0 (the same random draws, so seeds still reproduce). Use it with `--verilator`, which is 2-state: a 2-state variable or port turns an x -- from a literal, or an uninitialized register Verilator starts at 0 -- into a "defined" value Verilator can't match. |
 | `--in-range` | off | `memory` strategy: every memory index in range. |
 
 `--verilator --no-x --in-range --strategy memory` makes Verilator a usable
@@ -66,7 +66,7 @@ favoring simpler shapes:
 | Strategy | Description |
 |----------|-------------|
 | **feedforward** | Inputs → continuous assigns → outputs |
-| **registered** | Inputs → regs → combinational outputs, clocked |
+| **registered** | Inputs → regs → combinational outputs, clocked; sometimes two register updates as one streaming-concatenation target (`{<<n{ra, rb}} <= T'(e)`, checked by Verilator -- Icarus rejects it) |
 | **multi_always** | Multiple `always @*` blocks sharing internal wires/regs |
 | **clocked_sequential** | Single `always @(posedge clk)` with nonblocking assigns |
 | **nested_blocks** | Deeply nested `begin/end` with local variables |

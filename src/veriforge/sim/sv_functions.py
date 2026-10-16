@@ -24,17 +24,21 @@ from veriforge.model.base import VerilogNode
 from veriforge.model.expressions import (
     BinaryOp,
     BitSelect,
+    Concatenation,
     Expression,
     FunctionCall,
     Identifier,
     Literal,
     Range,
+    RangeSelect,
+    StreamingConcatenation,
     UnaryOp,
     WidthCast,
 )
 from veriforge.model.functions import FunctionDecl, TaskDecl
 from veriforge.model.ports import Port, PortDirection
 from veriforge.model.statements import BlockingAssign
+from veriforge.model.variables import INTEGER_ATOM_WIDTHS
 from veriforge.semantics import const_int, expr_signed, expr_width
 
 if TYPE_CHECKING:
@@ -81,6 +85,160 @@ def lower_sv_functions(module: Module) -> Module:
 
     _rewrite(module, lower, set())
     return module
+
+
+def lower_streaming_targets(module: Module) -> Module:
+    """Rewrite each assignment to a streaming concatenation (unpacking,
+    IEEE 1800-2017 11.4.14.3), in place, as an assignment to the plain
+    concatenation of its targets:
+
+    - ``{>>{a, b}} = s``: ``{a, b} = s``.
+    - ``{<<n{a, b}} = s``: ``begin tmp = s; {a, b} = {tmp[n-1:0],
+      tmp[2n-1:n], ...}; end`` -- *s* cut into n-bit slices from its LSB
+      end, in reverse order: the inverse of ``{<<n{...}}`` as an expression,
+      which slices from the MSB end. (Nesting that expression instead made
+      compiled's generated C exponentially large.) A continuous assign gets
+      a temporary net and two assigns.
+
+    A source wider than the targets is consumed from its left (most
+    significant) end, ``s >> (W - T)`` (the LRM's ``{>>{a, b, c}} =
+    100'b11111`` gives ``c = 1``); a narrower one is an error. (Verilator
+    instead streams all of a wider source for ``<<`` and keeps its left end
+    -- known_issues.md.) This used to be a parse error.
+    """
+    from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
+    from veriforge.model.nets import Net, NetKind  # noqa: PLC0415
+    from veriforge.model.statements import NonblockingAssign, SeqBlock, Statement  # noqa: PLC0415
+    from veriforge.model.variables import Variable, VariableKind  # noqa: PLC0415
+
+    from .elaborate import _build_param_env  # noqa: PLC0415
+
+    def is_target(node: object) -> bool:
+        return isinstance(node, (BlockingAssign, NonblockingAssign, ContinuousAssign)) and (
+            isinstance(node.lhs, StreamingConcatenation)
+            or (isinstance(node.lhs, Concatenation) and node.lhs.from_streaming)
+        )
+
+    all_targets = [
+        node
+        for node in iter_nodes(module, set())
+        if isinstance(node, (BlockingAssign, NonblockingAssign, ContinuousAssign)) and is_target(node)
+    ]
+    if not all_targets:
+        return module
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    module_decls = _declarations(module, env)
+    # (A task/function body: its own ports, locals and return variable.)
+    scoped: dict[int, dict] = {}
+    tfs: list[FunctionDecl | TaskDecl] = [*module.functions, *module.tasks]
+    for tf in tfs:
+        tf_decls = [*tf.ports, *tf.locals]
+        decls = {**module_decls, **_declarations(module, env, tf_decls)}
+        if isinstance(tf, FunctionDecl):
+            ret = tf.return_range
+            msb = const_int(ret.msb, env) if ret is not None else 0
+            lsb = const_int(ret.lsb, env) if ret is not None else 0
+            decls[tf.name] = ([], 0, abs(msb - lsb) + 1 if msb is not None and lsb is not None else 1)
+        for node in iter_nodes(tf.body, set()):
+            if is_target(node):
+                scoped[id(node)] = decls
+
+    def lit(value: int) -> Literal:
+        return Literal(value, width=32, original_text=f"32'd{value}")
+
+    replacements: dict[int, object] = {}
+    extra_assigns: list[ContinuousAssign] = []
+    for k, node in enumerate(all_targets):
+        decls = scoped.get(id(node), module_decls)
+
+        def width_of(name: str, decls: dict = decls) -> int:
+            d = decls.get(name)
+            return d[2] if d is not None else 1
+
+        def operand_width(expr: Expression, decls: dict = decls, width_of=width_of) -> int:
+            # (A memory element `m[i]` is a word, not a bit select.)
+            base, depth = expr, 0
+            while isinstance(base, BitSelect):
+                base, depth = base.target, depth + 1
+            if isinstance(base, Identifier):
+                d = decls.get(base.name)
+                if d is not None and d[1] and depth == d[1]:
+                    return d[2]
+            return expr_width(expr, width_of, env)
+
+        lhs = node.lhs
+        assert isinstance(lhs, (StreamingConcatenation, Concatenation))  # (is_target)  # noqa: S101
+        parts = list(lhs.parts)
+        t = sum(operand_width(part) for part in parts)
+        w = operand_width(node.rhs)
+        if w < t:
+            raise ValueError(
+                f"Streaming concatenation target needs {t} bits but the source has only {w} (IEEE 1800-2017 11.4.14.3)"
+            )
+        src: Expression = node.rhs if w == t else BinaryOp(">>", node.rhs, lit(w - t))
+        target = Concatenation(parts=parts, loc=lhs.loc)
+        if not isinstance(lhs, StreamingConcatenation):
+            node.lhs, node.rhs = target, src  # (`>>`)
+            continue
+        n = const_int(lhs.slice_size, env) if lhs.slice_size is not None else 1
+        if n is None or n <= 0:
+            raise ValueError(f"Streaming concatenation slice size must be a positive constant: {lhs.slice_size!r}")
+        if isinstance(src, Identifier) and w == t and not src.hierarchy:
+            tmp = src.name
+        else:
+            tmp = f"__vf_stream{k}"
+        slices: list[Expression] = []
+        lo = 0
+        while lo < t:
+            hi = min(lo + n, t) - 1
+            slices.append(RangeSelect(Identifier(tmp), lit(hi), lit(lo)))
+            lo = hi + 1
+        unpacked = Concatenation(parts=slices)
+        if tmp == getattr(src, "name", None):
+            node.lhs, node.rhs = target, unpacked
+            continue
+        tmp_range = Range(lit(t - 1), lit(0))
+        if isinstance(node, ContinuousAssign):
+            module.nets.append(Net(tmp, NetKind.WIRE, width=tmp_range))
+            node.lhs, node.rhs = Identifier(tmp), src
+            extra_assigns.append(ContinuousAssign(target, unpacked, loc=node.loc))
+        else:
+            module.variables.append(Variable(tmp, VariableKind.REG, width=tmp_range))
+            second: Statement = (
+                NonblockingAssign(target, unpacked)
+                if isinstance(node, NonblockingAssign)
+                else BlockingAssign(target, unpacked)
+            )
+            replacements[id(node)] = SeqBlock(statements=[BlockingAssign(Identifier(tmp), src), second])
+    module.continuous_assigns.extend(extra_assigns)
+    if replacements:
+        _replace_statements(module, replacements, set())
+    return module
+
+
+def _replace_statements(obj: object, replacements: dict[int, object], seen: set[int]) -> None:
+    """In place: replace every node below *obj* whose id is a key of
+    *replacements* with its value."""
+    if id(obj) in seen:
+        return
+    seen.add(id(obj))
+    slots: list[str] = []
+    for klass in type(obj).__mro__:
+        slots.extend(s for s in getattr(klass, "__slots__", ()) if s not in _SKIP_SLOTS)
+    for slot in slots:
+        value = getattr(obj, slot, None)
+        if isinstance(value, VerilogNode):
+            if id(value) in replacements:
+                setattr(obj, slot, replacements[id(value)])
+            else:
+                _replace_statements(value, replacements, seen)
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                if isinstance(item, VerilogNode):
+                    if id(item) in replacements:
+                        value[i] = replacements[id(item)]
+                    else:
+                        _replace_statements(item, replacements, seen)
 
 
 def _mentions(module: Module) -> bool:
@@ -142,13 +300,24 @@ def _dims(width: Range | None, dimensions: list[Range], packed_count: int) -> li
     return [*dimensions[packed_count:], *dimensions[:packed_count], element]
 
 
-def _declarations(module: Module, env: dict[str, int]) -> dict[str, tuple[list[tuple[int, int]], int, int]]:
+def _declarations(
+    module: Module, env: dict[str, int], decls: list | None = None
+) -> dict[str, tuple[list[tuple[int, int]], int, int]]:
     """name -> (dims as (left, right) pairs, number of unpacked dims,
-    packed width)."""
+    packed width), for *module*'s declarations or *decls*."""
     out: dict[str, tuple[list[tuple[int, int]], int, int]] = {}
-    all_decls: list[Port | Net | Variable] = [*module.ports, *module.nets, *module.variables]
+    all_decls: list[Port | Net | Variable] = (
+        [*module.ports, *module.nets, *module.variables] if decls is None else decls
+    )
     for decl in all_decls:
-        dims = _dims(decl.width, list(decl.dimensions), decl.packed_dim_count)
+        width = decl.width
+        if width is None:
+            # (`byte b;`: the atom type's own width -- it read as 1 bit.)
+            kind = getattr(getattr(decl, "kind", None), "value", None) or getattr(decl, "data_type", None)
+            atom = {**INTEGER_ATOM_WIDTHS, "time": 64}.get(kind or "")
+            if atom is not None:
+                width = Range(Literal(atom - 1, width=32), Literal(0, width=32))
+        dims = _dims(width, list(decl.dimensions), decl.packed_dim_count)
         pairs = []
         for rng in dims:
             left, right = const_int(rng.msb, env), const_int(rng.lsb, env)

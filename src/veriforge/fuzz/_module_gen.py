@@ -229,6 +229,23 @@ class ModuleGenerator:
                 mod.variables.append(Variable(net.name, var_kind, width=net.width, signed=net.signed))
                 mod.nets.remove(net)
 
+        if not self._x_literals:
+            # No x anywhere (a 2-state oracle): registers start at 0 too.
+            # Verilator starts them at 0 where veriforge reads x, and a 2-state
+            # variable (`shortint r7 <= f(r5)`) turned that x into a "defined"
+            # value Verilator couldn't match.
+            zero = Literal(0, width=1, original_text="1'b0")
+            for var in mod.variables:
+                if var.initial_value is None and not var.dimensions:
+                    var.initial_value = zero
+            for port in mod.ports:
+                if (
+                    port.direction == PortDirection.OUTPUT
+                    and port.name in always_outputs
+                    and port.default_value is None
+                ):
+                    port.default_value = zero
+
         return mod
 
     def generate_design(self, strategy: Strategy | None = None) -> Design:
@@ -328,9 +345,27 @@ class ModuleGenerator:
 
         # Register update: always @(posedge clk) reg <= expr(inputs, regs)
         reg_assignments: list[Statement] = []
+        rhss: list[Expression] = []
         for reg in ctx.regs:
             rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4))
+            rhss.append(rhs)
             reg_assignments.append(NonblockingAssign(reg.as_identifier(), rhs))
+        if len(ctx.regs) >= 2 and self._rng.random() < 0.3:
+            # Two of them as one streaming-concatenation target (unpacking,
+            # supported since 2026-10-15): `{<<n{ra, rb}} <= T'(e)` -- a
+            # source exactly as wide as the targets (Verilator consumes a
+            # wider one differently, known_issues.md).
+            ra, rb = ctx.regs[0], ctx.regs[1]
+            total = ra.width + rb.width
+            source = WidthCast(Literal(total, width=32), rhss[0])
+            targets: list[Expression] = [ra.as_identifier(), rb.as_identifier()]
+            if self._rng.random() < 0.7:
+                # (No 65: Verilator unpacked one wrongly -- known_issues.md.)
+                size = self._rng.choice((1, 2, 3, 4, 8, 100))
+                lhs: Expression = StreamingConcatenation(targets, Literal(size, width=32, base="d", signed=False))
+            else:
+                lhs = Concatenation(targets, from_streaming=True)
+            reg_assignments[:2] = [NonblockingAssign(lhs, source)]
 
         ab = AlwaysBlock(
             stmt_gen._seq_block_from_stmts(self._rng, reg_assignments),
