@@ -13,7 +13,16 @@ Design for speed:
 
 from __future__ import annotations
 
-from ..display_format import SIGNED_FLAG, format_real, format_value
+from ..reals import real_op
+from ..display_format import (
+    REAL_ALT_FLAG,
+    REAL_FLAG,
+    SIGNED_FLAG,
+    format_real,
+    format_string,
+    format_value,
+    left_justify,
+)
 from .. import readmem
 from ..value import Value, _mask_for_width, _verilog_pow
 from .opcodes import Op
@@ -48,7 +57,11 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
     result: list[str] = []
     arg_idx = 0
     i = 0
+    pending_lj = -1  # `%-...`: where the left-justified field starts
     while i < len(fmt):
+        if pending_lj >= 0:
+            result[pending_lj:] = [left_justify("".join(result[pending_lj:]))]
+            pending_lj = -1
         ch = fmt[i]
         if ch == "%":
             i += 1
@@ -56,6 +69,16 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
                 break
             signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
             if signed:
+                i += 1
+                if i >= len(fmt):
+                    break
+            real = {REAL_FLAG: 1, REAL_ALT_FLAG: 2}.get(fmt[i], 0)  # (a lowered real)
+            if real:
+                i += 1
+                if i >= len(fmt):
+                    break
+            left = fmt[i] == "-"
+            if left:
                 i += 1
                 if i >= len(fmt):
                     break
@@ -70,6 +93,9 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
             while i < len(fmt) and fmt[i].isdigit():
                 width = width * 10 + int(fmt[i])
                 i += 1
+            if left:
+                pending_lj = len(result)
+                zero_pad = zero_pad and not width  # (`%-05d` pads with spaces)
             precision = None  # %<w>.<p>f
             if i < len(fmt) and fmt[i] == ".":
                 i += 1
@@ -106,23 +132,14 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
                 if spec in "dhxob":
                     result.append(format_value(v, spec, width, zero_pad, signed))
                 elif spec in "efg":
-                    result.append(format_real(v, spec, width, precision, zero_pad, signed))
+                    result.append(format_real(v, spec, width, precision, zero_pad, signed, real))
                 elif spec == "c":
                     if v.is_defined:
                         result.append(chr(int(v) & 0xFF))
                     else:
                         result.append("?")
                 elif spec == "s":
-                    # String: interpret value bytes as ASCII
-                    if v.is_defined:
-                        n = int(v)
-                        chars = []
-                        while n:
-                            chars.append(chr(n & 0xFF))
-                            n >>= 8
-                        result.append("".join(reversed(chars)))
-                    else:
-                        result.append("")
+                    result.append(format_string(v, width, bool(width or zero_pad)))
                 else:
                     # Unknown spec, treat as literal
                     arg_idx -= 1
@@ -145,6 +162,8 @@ def _format_display(args: list, fmt_id: int, display_formats: list[str], sim_tim
         else:
             result.append(ch)
             i += 1
+    if pending_lj >= 0:
+        result[pending_lj:] = [left_justify("".join(result[pending_lj:]))]
     return "".join(result)
 
 
@@ -837,6 +856,13 @@ class Interpreter:  # cm:e3f1b4
                 combined_mask = a.mask | b.mask
                 match = ((a.val ^ b.val) & ~combined_mask) == 0
                 s_append(Value(1 if match else 0, width=1))
+                continue
+
+            if op == Op.FUNC_REAL1 or op == Op.FUNC_REAL2:  # noqa: PLR1714 -- (sim/reals.py)
+                b = s_pop() if op == Op.FUNC_REAL2 else None
+                a = s_pop()
+                val, w = real_op(arg1 & 0xFF, a.val, a.mask, a.width, b.val if b is not None else arg1 >> 8)
+                s_append(Value(val, width=w))
                 continue
 
             if op == Op.FUNC_RANDOM:

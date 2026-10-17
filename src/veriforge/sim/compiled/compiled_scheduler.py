@@ -353,6 +353,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         "delta_limit",
         "display_output",
         "memory_label",
+        "real_signals",
     )
 
     def __init__(self, *, compiler: CythonCompiler | None = None, delta_limit: int = 10_000) -> None:
@@ -390,6 +391,7 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
         # Simulator's slot -> declared-address name for memory elements, for traces.
         self.memory_label: Callable[[str], str] | None = None
+        self.real_signals: frozenset[str] = frozenset()  # (traces: sim/reals.py)
 
         # Track whether a snapshot has been taken before external drives
         self._has_drive_snapshot: bool = False

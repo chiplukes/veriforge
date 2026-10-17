@@ -239,6 +239,7 @@ class Scheduler:  # cm:9a7f2c
         "event_queue",
         "executor",
         "memory_label",
+        "real_signals",
         "time",
     )
 
@@ -299,6 +300,7 @@ class Scheduler:  # cm:9a7f2c
         self._trace_hub = None  # trace.TraceHub, created by the first trace session
         # Simulator's slot -> declared-address name for memory elements, for traces.
         self.memory_label: Callable[[str], str] | None = None
+        self.real_signals: frozenset[str] = frozenset()  # (traces: sim/reals.py)
         # $finish/$fatal ran this time step: complete the step, then stop
         # (see _run_active_region).
         self._finish_requested = False

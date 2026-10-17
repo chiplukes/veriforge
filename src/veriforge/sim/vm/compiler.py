@@ -1986,6 +1986,21 @@ class Compiler:  # cm:8c1e4a
             program.append(instr(Op.FUNC_RANDOM))
             return
 
+        if name == "$__vf_real" and len(call.arguments) == 3:  # (sim/reals.py)
+            from ..reals import ITOR_S, ITOR_U, RTOI, TRUNC  # noqa: PLC0415
+
+            op = int(call.arguments[0].value)  # type: ignore[attr-defined]
+            self._compile_expr(call.arguments[1], program)
+            if op in (ITOR_S, ITOR_U):
+                width = int(call.arguments[2].value)  # type: ignore[attr-defined]
+                program.append(instr(Op.FUNC_REAL1, op | width << 8))
+            elif op in (RTOI, TRUNC):
+                program.append(instr(Op.FUNC_REAL1, op, 0))
+            else:
+                self._compile_expr(call.arguments[2], program)
+                program.append(instr(Op.FUNC_REAL2, op, 0))
+            return
+
         if name == "$fopen":
             # $fopen(filename [, mode]) — filename/mode stored in fopen_tasks table
             if call.arguments:
@@ -2818,6 +2833,10 @@ class Compiler:  # cm:8c1e4a
             name = expr.name.lower()
             if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
                 return self._expr_width(expr.arguments[0])
+            if name == "$__vf_real" and expr.arguments:  # (sim/reals.py)
+                from ..reals import real_call_width  # noqa: PLC0415
+
+                return real_call_width(expr)
             # A user-defined function call's self-determined width is its
             # OWN declared return width, not the generic fallback below --
             # mirrors `_compile_user_function`'s own return-width

@@ -462,6 +462,9 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
         name = expr.name.lower()
         if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
             return expr_width(expr.arguments[0], width_of, env)
+        if name == "$__vf_real" and expr.arguments:  # (sim/reals.py)
+            op = expr.arguments[0]
+            return 1 if isinstance(op, Literal) and op.value in (7, 8, 9) else 64
         return 32
     if isinstance(expr, Mintypmax):
         return expr_width(expr.typ_val, width_of, env)

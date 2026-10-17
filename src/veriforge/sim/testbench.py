@@ -28,6 +28,7 @@ from .elaborate import (
 from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases, lower_signed_indices
 from .scheduler import Scheduler
 from .display_format import lower_display_args
+from .reals import from_bits, lower_reals, to_bits
 from .sv_functions import (
     is_two_state,
     lower_event_expressions,
@@ -180,6 +181,7 @@ class Simulator:  # cm:a5c8f4
         "_memory_shapes",
         "_module",
         "_pre_step_callbacks",
+        "_reals",
         "_run_cycles_clock_ready",
         "_sched",
         "_signal_cache",
@@ -222,6 +224,8 @@ class Simulator:  # cm:a5c8f4
         materialize_process_locals(module)
         materialize_task_locals(module)
         expand_array_concat_operands(module)
+        self._reals: set[str] = set()  # (real signals: `drive(name, 1.5)`, `read_real`)
+        lower_reals(module, self._reals)  # (first: every later pass sees only integral types)
         lower_sv_functions(module)
         lower_streaming_targets(module)  # (before lower_width_casts: makes casts)
         lower_event_expressions(module)
@@ -264,6 +268,7 @@ class Simulator:  # cm:a5c8f4
         else:
             raise ValueError(f"Unknown engine: {engine!r}. Use 'reference', 'vm', 'vm-fast', or 'compiled'.")
 
+        self._sched.real_signals = frozenset(self._reals)  # (VCD: `$var real`)
         # Traces label memory elements by declared address (see _slot_name).
         if self._memory_lows or self._memory_shapes:
             self._sched.memory_label = self._address_name
@@ -561,11 +566,22 @@ class Simulator:  # cm:a5c8f4
 
         return remove
 
-    def drive(self, name: str, value: Value | int) -> None:
-        """Drive a signal by name (convenience method)."""
+    def drive(self, name: str, value: Value | int | float) -> None:
+        """Drive a signal by name (convenience method). A ``real`` signal
+        takes a float (an int is its bit pattern, as for any 64-bit signal)."""
+        if isinstance(value, float):
+            if name.split("[", 1)[0] not in self._reals:
+                raise TypeError(f"drive({name!r}, {value!r}): only a real signal takes a float")
+            value = Value(to_bits(value), width=64)
         if name in self._two_state_inputs and isinstance(value, Value) and value.mask:
             value = Value(value.val, width=value.width)
         self._sched.drive_signal(self._slot_name(name), value)
+
+    def read_real(self, name: str) -> float:
+        """Read a ``real`` signal (or real memory element, ``m[2]``) as a float."""
+        if name.split("[", 1)[0] not in self._reals:
+            raise TypeError(f"read_real({name!r}): not a real signal")
+        return from_bits(self.read(name).val)
 
     @_reports_failures
     def settle(self) -> None:

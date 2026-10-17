@@ -12,36 +12,6 @@
 
 ## Open defects
 
-### Full-signal VCD tracing is very slow on large compiled designs
-
-**Status**: Open performance limitation; correctness unaffected.
-**Found**: September 2026, on the Windows `axis_col_correct` testbench.
-
-The test finishes with `--engine compiled` but appears to stall when
-`--vcd` is added. The flattened module has roughly 4,600 nets and 3,100
-variables, and default tracing also includes memory elements. The shared
-`VcdTraceSession` reads every traced signal and constructs a Python `Value`
-on every time step, so full traces scale with signal count times time steps
-even when few values change. For now, run without VCD or pass a small
-`vcd_signals` list to `Testbench.run()`. A raw value/mask callback gave a
-6.7x improvement in an isolated 7,700-signal benchmark, but it was not
-validated against the real Windows design and was left out pending a
-focused VCD performance pass.
-
-### Compiled engine: wide (>64-bit) signal posedge/negedge not supported
-
-**Status**: Open, by design (not attempted) — fails loudly, not silently.
-**Found**: May 2026.
-
-`always @(posedge clk)` / `@(negedge clk)` on a signal wider than 64 bits
-raises `NotImplementedError` in the compiled engine rather than being
-supported or silently truncated. Exercised by
-`TestWideSignalExternalIO::test_wide_posedge_signal_probe_cross_engine`
-(strict `xfail`). `reference`/`vm`/`vm-fast` are unaffected. Not scoped or
-attempted — no design encountered so far has needed edge detection on a
-signal that wide (clocks and resets are essentially always narrow); pick
-this up only if a real design needs it.
-
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 
 **Status**: Narrow remaining limit (2026-10-15). Function ports and returns
@@ -53,15 +23,41 @@ signal's (`_hoist_user_func_call`). A call in a context with no statement to
 hoist into raises `NotImplementedError` ("no statement to evaluate the
 argument in") instead -- none known; `test_function_wide_port_and_return`.
 
-### No `real` / `realtime` type
+### `real` / `realtime`: supported, with a few limits
 
-**Status**: Open feature gap (found 2026-10-09).
+**Status**: Supported since 2026-10-16 (`sim/reals.py`,
+`tests/test_sim/test_reals.py`, all four engines checked against Icarus and
+Verilator). A real is lowered to its IEEE 754 bit pattern in a `[63:0]`
+variable, and each operation to an internal `$__vf_real` call that every
+engine implements natively. This covers real variables, memories, ports
+(also across hierarchy), parameters, function returns, ports and locals,
+task ports, `$realtime`, `$itor`, `$rtoi`, `$realtobits`, `$bitstoreal`,
+`%e`/`%f`/`%g`, unformatted reals (`%#g`, as Icarus prints them), VCD (`$var
+real`), and `Simulator.drive(name, 1.5)` / `read_real(name)`. Before this,
+`real r = 3.25;` stored 325: the parser also dropped a real literal's `.`.
 
-`real` variables, real literals and real arithmetic are not modeled on any
-engine: `real r = 3.25;` stores the integer `325`. `$display`'s `%e`/`%f`/
-`%g` work (Icarus-exact, with width/precision) but always format the
-argument's *integer* value, which covers `$time`-style use. Real support
-needs a real-valued representation alongside `Value` in all four engines.
+Limits (each raises rather than running wrong):
+- an integral operand wider than 64 bits converted to real
+  (`NotImplementedError`);
+- `case` on a real expression (`NotImplementedError`);
+- a real parameter with a non-constant value;
+- a task output port whose argument differs in real-ness.
+
+Bit and part selects, bitwise and shift operators, reductions and
+concatenations of a real are errors, as in the LRM (`TypeError`). `wire real
+w;` doesn't parse. A real memory's elements start as x bits, not 0.0; any
+real operation and `%f` read them as 0.0, though. The DSL converter still
+writes `unsupported("real variable ...")`.
+
+Icarus differences, not replicated:
+- Icarus prints an unformatted `$realtime` argument as an integer (`3`);
+  veriforge prints it as the real it is (`3.00000`).
+- Icarus assigns a negative real that rounds to 0 (`-0.4`) to a vector
+  wider than 64 bits as garbage (`84'hfffff0000000000000000`). Verilator and
+  veriforge give 0. The fuzzer rounds reals only into outputs of at most 64
+  bits.
+- Icarus converts a partly-x signed value to real by its own rule (see "Icarus:
+  real formats of signed expressions" below).
 
 ### Multi-dimensional array sub-array access: only assignments supported
 
@@ -297,7 +293,10 @@ a value wider than 53 bits converts to a double one ulp off
 instead of `x` under `%o`/`%h`; and a partly-x *signed* value under
 `%e`/`%f`/`%g` keeps the bits below the lowest x and fills above with the
 sign bit if known-1 (`8'sb1000_00x1` -> -1.00; veriforge reads x bits as
-0, -127.00). Not veriforge bugs -- do not replicate.
+0, -127.00). Icarus converts such a value to a `real` the same way (`r =
+s;`), and `8'sb1111_110x` gives -0.0; the fuzzer guards a signed input
+feeding a real with `$isunknown(i) ? 0 : i`. Not veriforge bugs -- do not
+replicate.
 
 ### Icarus first-activation x-extension artifact (investigated, not a bug — do not replicate)
 

@@ -106,6 +106,8 @@ class EmitStyle:
     net_decl_assign: bool = False  # `wire w = e;` for a net's only `assign w = e;`
     for_var_outside: bool = False  # `begin int i; for (i = 0; ...) ... end` (else `for (int i = 0; ...)`)
     case_rng: random.Random | None = None  # merge equal-bodied case items, add unreachable values
+    split_case_items: bool = False  # `a: s; b: s;` for `a, b: s;` (before any case_rng merging)
+    genvar_outside: bool = False  # `genvar g; for (g = 0; ...)` (else `for (genvar g = 0; ...)`)
     _block_ids: Iterator[int] = field(default_factory=itertools.count, repr=False)
 
 
@@ -335,11 +337,15 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
     if region:
         body_items.append("")
         body_items.append(f"{indent}generate")
+    module_names = {p.name for p in module.ports} | {p.name for p in module.parameters}
+    module_names |= {n.name for n in module.nets} | {v.name for v in module.variables}
+    genvars = _GenvarScope(module.generate_blocks, module_names)
     for gb in module.generate_blocks:
         if emit_comments:
             body_items.extend(_emit_leading_comments(gb, indent))
         body_items.append("")  # blank line before generate
-        body_items.append(_emit_generate_construct(gb, indent, indent))
+        body_items.extend(genvars.declare(gb, indent))
+        body_items.append(_emit_generate_construct(gb, indent, indent, hoisted=genvars.hoisted))
     if region:
         body_items.append(f"{indent}endgenerate")
 
@@ -1218,7 +1224,17 @@ def _emit_case_statement(stmt: CaseStatement, indent: str, current_indent: str, 
 
     lines.append(f"{prefix}{stmt.case_type} ({emit_expression(stmt.expression)})")
     case_rng = _style().case_rng
-    items = _respell_case_items(stmt.items, case_rng) if case_rng is not None else stmt.items
+    items = stmt.items
+    if _style().split_case_items:
+        # (Order kept: an earlier value still matches first, and `default`
+        # stays where it was.)
+        items = [
+            split
+            for item in items
+            for split in ([item] if item.is_default else [CaseItem([value], item.body) for value in item.values])
+        ]
+    if case_rng is not None:
+        items = _respell_case_items(items, case_rng)
     for item in items:
         lines.append(_emit_case_item(item, indent, inner_indent))
     lines.append(f"{current_indent}endcase")
@@ -1484,16 +1500,43 @@ def _emit_tf_locals(local_vars: list[Variable], indent: str) -> list[str]:
 # ---- Generate construct emission ----
 
 
+class _GenvarScope:
+    """`EmitStyle.genvar_outside` for one scope's generate items: which
+    loops' `genvar` is declared before the loop (once per name per scope;
+    not where the name is already a signal of the scope)."""
+
+    def __init__(self, items: list, names: set[str]) -> None:
+        self.hoisted: set[int] = set()
+        self._declared = {name for item in items if isinstance(item, GenvarDecl) for name in item.names}
+        self._taken = names
+        self._on = _style().genvar_outside
+
+    def declare(self, item: object, current_indent: str) -> list[str]:
+        if not (self._on and isinstance(item, GenerateFor) and item.genvar_local):
+            return []
+        if item.genvar in self._taken:
+            return []
+        self.hoisted.add(id(item))
+        if item.genvar in self._declared:
+            return []
+        self._declared.add(item.genvar)
+        return [f"{current_indent}genvar {item.genvar};"]
+
+
 def _emit_generate_construct(
     gen: GenerateFor | GenerateIf | GenerateCase | GenvarDecl,
     indent: str,
     current_indent: str,
+    hoisted: set[int] | None = None,
 ) -> str:
-    """Dispatch to specific generate emitter."""
+    """Dispatch to specific generate emitter (*hoisted*: ids of loops whose
+    genvar was declared before them, `EmitStyle.genvar_outside`)."""
     if isinstance(gen, GenvarDecl):
         return _emit_genvar_decl(gen, current_indent)
     elif isinstance(gen, GenerateFor):
-        return _emit_generate_for(gen, indent, current_indent)
+        return _emit_generate_for(
+            gen, indent, current_indent, local=gen.genvar_local and id(gen) not in (hoisted or ())
+        )
     elif isinstance(gen, GenerateIf):
         return _emit_generate_if(gen, indent, current_indent)
     elif isinstance(gen, GenerateCase):
@@ -1506,14 +1549,15 @@ def _emit_genvar_decl(gv: GenvarDecl, current_indent: str) -> str:
     return f"{current_indent}genvar {', '.join(gv.names)};"
 
 
-def _emit_generate_for(gen: GenerateFor, indent: str, current_indent: str) -> str:
-    """Emit a generate-for loop.
+def _emit_generate_for(gen: GenerateFor, indent: str, current_indent: str, *, local: bool | None = None) -> str:
+    """Emit a generate-for loop (*local*: declare the genvar in the loop
+    header; default `gen.genvar_local`).
 
     Examples:
         for (i = 0; i < N; i = i + 1) begin : gen_block
         for (genvar i = 0; i < N; i++) begin : gen_block
     """
-    genvar_prefix = "genvar " if gen.genvar_local else ""
+    genvar_prefix = "genvar " if (gen.genvar_local if local is None else local) else ""
     init = f"{genvar_prefix}{gen.genvar} = {emit_expression(gen.init_value)}"
     cond = emit_expression(gen.condition)
 
@@ -1608,8 +1652,21 @@ def _emit_generate_block(block: GenerateBlock, indent: str, current_indent: str)
         if block.name:
             header += f" : {block.name}"
         lines = [header]
+        names = {item.name for item in block.items if isinstance(item, (Net, Variable, Parameter))}
+        genvars = _GenvarScope(block.items, names)
+        folded = _block_net_decl_assigns(block) if _style().net_decl_assign else {}
+        folded_assigns = {id(ca) for ca in folded.values()}
         for item in block.items:
-            lines.append(_emit_generate_block_item(item, indent, inner_indent))
+            if id(item) in folded_assigns:
+                continue  # (declared with the net)
+            if id(item) in folded:
+                lines.append(_emit_net(item, inner_indent, folded[id(item)].rhs))  # type: ignore[arg-type]
+                continue
+            lines.extend(genvars.declare(item, inner_indent))
+            if isinstance(item, GenerateFor):
+                lines.append(_emit_generate_construct(item, indent, inner_indent, hoisted=genvars.hoisted))
+            else:
+                lines.append(_emit_generate_block_item(item, indent, inner_indent))
         lines.append(f"{current_indent}end")
         return "\n".join(lines)
     elif block.items:
@@ -1617,6 +1674,44 @@ def _emit_generate_block(block: GenerateBlock, indent: str, current_indent: str)
         return _emit_generate_block_item(block.items[0], indent, inner_indent)
     else:
         return f"{current_indent};"
+
+
+def _block_net_decl_assigns(block: GenerateBlock) -> dict[int, ContinuousAssign]:
+    """`EmitStyle.net_decl_assign` inside a generate block: id of a net ->
+    its only continuous assign (none in nested constructs either), folded
+    into the net's declaration where the assign reads no block-local name
+    declared after the net."""
+    items = block.items
+    writes: Counter[str] = Counter()
+    for node in block.walk():
+        if isinstance(node, ContinuousAssign):
+            for ident in node.lhs.walk():
+                if isinstance(ident, Identifier):
+                    writes[ident.name] += 1
+    local = {item.name for item in items if isinstance(item, (Net, Variable, Parameter))}
+    assigns = {
+        ca.lhs.name: ca
+        for ca in items
+        if isinstance(ca, ContinuousAssign) and isinstance(ca.lhs, Identifier) and not ca.lhs.hierarchy
+    }
+    folded: dict[int, ContinuousAssign] = {}
+    declared: set[str] = set()
+    for item in items:
+        if not isinstance(item, (Net, Variable, Parameter)):
+            continue
+        ca = assigns.get(item.name)
+        if (
+            isinstance(item, Net)
+            and ca is not None
+            and not item.dimensions
+            and item.initial_value is None
+            and writes[item.name] == 1
+        ):
+            reads = {node.name for node in ca.rhs.walk() if isinstance(node, Identifier)}
+            if all(name in declared or name not in local for name in reads):
+                folded[id(item)] = ca
+        declared.add(item.name)
+    return folded
 
 
 def _emit_generate_block_item(item: VerilogNode, indent: str, current_indent: str) -> str:  # noqa: PLR0911

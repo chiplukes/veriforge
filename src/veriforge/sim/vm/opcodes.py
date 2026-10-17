@@ -149,6 +149,10 @@ class Op(IntEnum):  # cm:5b3d7f
     # ── 2-state conversion (assignment to `int`/`bit`/...) ───────────────
     CLEAR_MASK = auto()  # TOS x/z bits -> 0: (CLEAR_MASK, 0, 0)
 
+    # ── Reals (`$__vf_real(op, a, b)`, sim/reals.py) ──────────────────
+    FUNC_REAL1 = auto()  # (FUNC_REAL1, op | b << 8, 0): [a] -> [op(a, b)] (itor: b = a's width; rtoi/trunc)
+    FUNC_REAL2 = auto()  # (FUNC_REAL2, op, 0): [a, b] -> [op(a, b)]
+
 
 # ── Instruction constructor helpers ──────────────────────────────────
 
@@ -172,6 +176,7 @@ _STACK_EFFECT: dict[int, tuple[int, int]] = {
             Op.SIGN_EXT,
             Op.STREAM_REVERSE,
             Op.CLEAR_MASK,
+            Op.FUNC_REAL1,
             Op.BIT_NOT,
             Op.LOG_NOT,
             Op.NEG,
@@ -198,6 +203,7 @@ _STACK_EFFECT: dict[int, tuple[int, int]] = {
             Op.POW,
             Op.SDIV,
             Op.SMOD,
+            Op.FUNC_REAL2,
             Op.SPOW,
             Op.BIT_AND,
             Op.BIT_OR,

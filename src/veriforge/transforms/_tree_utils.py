@@ -33,14 +33,22 @@ def _collect_real_number_text(tree: Tree) -> str:
     drops the ``e``/``E`` character. This function inserts it back.
     """
     parts: list[str] = []
+    numbers = 0
+    seen_exp = False
     for child in tree.children:
         if isinstance(child, Token):
             parts.append(str(child))
         elif isinstance(child, Tree):
             if child.data == "exp":
                 parts.append("e")
+                seen_exp = True
             elif child.data == "sign":
                 parts.append(_collect_text(child))
             else:
+                # The second number before the exponent is the fraction:
+                # the anonymous "." was dropped too (`3.25` read as 325).
+                numbers += 1
+                if numbers == 2 and not seen_exp:  # noqa: PLR2004
+                    parts.append(".")
                 parts.append(_collect_text(child))
     return "".join(parts)

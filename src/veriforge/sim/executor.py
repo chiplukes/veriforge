@@ -52,7 +52,15 @@ from .evaluator import (
     _resolve_struct_write_target,
     _write_whole_memory,
 )
-from .display_format import SIGNED_FLAG, format_real, format_value
+from .display_format import (
+    REAL_ALT_FLAG,
+    REAL_FLAG,
+    SIGNED_FLAG,
+    format_real,
+    format_string,
+    format_value,
+    left_justify,
+)
 from .severity import severity_display
 from . import readmem
 from .value import Value
@@ -1309,7 +1317,11 @@ class StatementExecutor:  # cm:c2f9a1
         result: list[str] = []
         arg_idx = 0
         i = 0
+        pending_lj = -1  # `%-...`: where the left-justified field starts
         while i < len(fmt):
+            if pending_lj >= 0:
+                result[pending_lj:] = [left_justify("".join(result[pending_lj:]))]
+                pending_lj = -1
             ch = fmt[i]
             if ch == "%":
                 i += 1
@@ -1317,6 +1329,16 @@ class StatementExecutor:  # cm:c2f9a1
                     break
                 signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
                 if signed:
+                    i += 1
+                    if i >= len(fmt):
+                        break
+                real = {REAL_FLAG: 1, REAL_ALT_FLAG: 2}.get(fmt[i], 0)  # (a lowered real)
+                if real:
+                    i += 1
+                    if i >= len(fmt):
+                        break
+                left = fmt[i] == "-"
+                if left:
                     i += 1
                     if i >= len(fmt):
                         break
@@ -1331,6 +1353,9 @@ class StatementExecutor:  # cm:c2f9a1
                 while i < len(fmt) and fmt[i].isdigit():
                     width = width * 10 + int(fmt[i])
                     i += 1
+                if left:
+                    pending_lj = len(result)
+                    zero_pad = zero_pad and not width  # (`%-05d` pads with spaces)
                 precision = None  # %<w>.<p>f
                 if i < len(fmt) and fmt[i] == ".":
                     i += 1
@@ -1368,19 +1393,11 @@ class StatementExecutor:  # cm:c2f9a1
                     if spec in "dhxob":
                         result.append(format_value(v, spec, width, zero_pad, signed))
                     elif spec in "efg":
-                        result.append(format_real(v, spec, width, precision, zero_pad, signed))
+                        result.append(format_real(v, spec, width, precision, zero_pad, signed, real))
                     elif spec == "c":
                         result.append(chr(int(v) & 0xFF) if v.is_defined else "?")
                     elif spec == "s":
-                        if v.is_defined:
-                            n = int(v)
-                            chars = []
-                            while n:
-                                chars.append(chr(n & 0xFF))
-                                n >>= 8
-                            result.append("".join(reversed(chars)))
-                        else:
-                            result.append("")
+                        result.append(format_string(v, width, bool(width or zero_pad)))
                     else:
                         arg_idx -= 1
                         result.append("%" + spec)
@@ -1402,6 +1419,8 @@ class StatementExecutor:  # cm:c2f9a1
             else:
                 result.append(ch)
                 i += 1
+        if pending_lj >= 0:
+            result[pending_lj:] = [left_justify("".join(result[pending_lj:]))]
         return "".join(result)
 
     def _exec_readmem(self, task: SystemTaskCall, ctx: EvalContext, *, is_hex: bool) -> None:

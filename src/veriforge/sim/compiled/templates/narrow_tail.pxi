@@ -155,6 +155,21 @@ cdef inline void _out_char(SimCtx *c, char ch) noexcept nogil:
         c.out_buf[c.out_count] = ch
         c.out_count += 1
 
+cdef inline void _out_left_justify(SimCtx *c, int start) noexcept nogil:
+    # `%-...` (sim/display_format.py left_justify): move the field's leading
+    # padding, written since *start*, to its end.
+    cdef int n = c.out_count - start
+    cdef int k = 0
+    cdef int i
+    while k < n and c.out_buf[start + k] == 32:
+        k += 1
+    if k == 0 or k == n:
+        return
+    for i in range(n - k):
+        c.out_buf[start + i] = c.out_buf[start + k + i]
+    for i in range(n - k, n):
+        c.out_buf[start + i] = 32
+
 cdef inline void _out_newline(SimCtx *c) noexcept nogil:
     _out_char(c, 10)  # newline
 
@@ -323,6 +338,27 @@ cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long 
     cdef int i, n, nw, neg = 0
     cdef double x = 0.0
     cdef char buf[400]
+    cdef unsigned long long bits
+    if sgn >= 2:
+        # A lowered real's bit pattern (sim/display_format.py REAL_FLAG;
+        # 3: REAL_ALT_FLAG, C's alternate form `%#g`).
+        bits = v[0] & ~m[0]
+        memcpy(&x, &bits, 8)
+        if prec < 0:
+            prec = 6
+        if sgn == 3:
+            n = snprintf(buf, 400, "%0#*.*g" if zp and fw else "%#*.*g", fw, prec, x)
+        elif spec == 101:  # 'e'
+            n = snprintf(buf, 400, "%0*.*e" if zp and fw else "%*.*e", fw, prec, x)
+        elif spec == 103:  # 'g'
+            n = snprintf(buf, 400, "%0*.*g" if zp and fw else "%*.*g", fw, prec, x)
+        else:
+            n = snprintf(buf, 400, "%0*.*f" if zp and fw else "%*.*f", fw, prec, x)
+        if n > 399:
+            n = 399
+        for i in range(n):
+            _out_char(c, buf[i])
+        return
     if w <= 0:
         w = 1
     nw = (w + 63) >> 6
@@ -362,6 +398,45 @@ cdef void _out_real(SimCtx *c, const unsigned long long *v, const unsigned long 
         n = 399
     for i in range(n):
         _out_char(c, buf[i])
+
+# ``%s`` of a (val, mask) word array (sim/display_format.py's format_string):
+# every byte MSB first, a zero or x byte as a space; with a field width
+# (*sized*) the leading spaces go and the rest is right-justified.
+cdef void _out_str(SimCtx *c, const unsigned long long *v, const unsigned long long *m,
+                   int w, int fw, int sized) noexcept nogil:
+    cdef int nb, k, b, mb, start, n
+    if w <= 0:
+        w = 1
+    nb = (w + 7) >> 3
+    start = c.out_count
+    for k in range(nb - 1, -1, -1):
+        b = <int>((v[k >> 3] >> ((k & 7) * 8)) & 0xFF)
+        mb = <int>((m[k >> 3] >> ((k & 7) * 8)) & 0xFF)
+        _out_char(c, 32 if (b == 0 or mb) else <char>b)
+    if not sized:
+        return
+    n = c.out_count - start
+    k = 0
+    while k < n and c.out_buf[start + k] == 32:
+        k += 1
+    for b in range(n - k):
+        c.out_buf[start + b] = c.out_buf[start + k + b]
+    n = n - k  # (the content's length)
+    c.out_count = start + n
+    if fw <= n:
+        return
+    for b in range(fw - n):  # (grow the buffer first: _out_char may move it)
+        _out_char(c, 32)
+    if c.out_count != start + fw:
+        return  # (out of memory)
+    for b in range(n - 1, -1, -1):
+        c.out_buf[start + fw - n + b] = c.out_buf[start + b]
+    for b in range(fw - n):
+        c.out_buf[start + b] = 32
+
+cdef inline void _out_str1(SimCtx *c, unsigned long long v, unsigned long long m,
+                           int w, int fw, int sized) noexcept nogil:
+    _out_str(c, &v, &m, w, fw, sized)
 
 cdef inline void _out_real1(SimCtx *c, unsigned long long v, unsigned long long m,
                             int w, int spec, int fw, int prec, int zp, int sgn) noexcept nogil:

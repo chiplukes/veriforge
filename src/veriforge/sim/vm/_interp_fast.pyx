@@ -114,6 +114,10 @@ DEF OP_SPOW           = 84
 
 DEF OP_STREAM_REVERSE = 85
 DEF OP_CLEAR_MASK     = 86
+DEF OP_FUNC_REAL1     = 87
+DEF OP_FUNC_REAL2     = 88
+
+include "../compiled/templates/real_ops.pxi"
 
 DEF STACK_MAX         = 256
 DEF NBA_MAX           = 1024
@@ -1299,6 +1303,23 @@ cdef int _execute_core(
                     stack[sp - 1].val   = 0
                     stack[sp - 1].mask  = 0
                 stack[sp - 1].width = arg1
+            continue
+
+        if op == OP_FUNC_REAL1 or op == OP_FUNC_REAL2:
+            # `$__vf_real(op, a, b)` (sim/reals.py; real_ops.pxi). Reals and
+            # their integer operands are at most 64 bits (narrow).
+            if op == OP_FUNC_REAL2:
+                sp -= 1
+                wtmp = <unsigned long long>stack[sp].val
+            else:
+                wtmp = <unsigned long long>(arg1 >> 8)
+            a = stack[sp - 1]
+            stack[sp - 1].val = <long long>_vf_real_op(
+                arg1 & 0xFF, <unsigned long long>a.val, <unsigned long long>a.mask, a.width, wtmp
+            )
+            stack[sp - 1].mask = 0
+            stack[sp - 1].width = 1 if 7 <= (arg1 & 0xFF) <= 9 else 64
+            wflag[sp - 1] = 0
             continue
 
         if op == OP_CLEAR_MASK:
@@ -5132,6 +5153,12 @@ cdef class CyContext:
     cdef int       *triggered_buf     # [n_procs]
     cdef public bint _procs_setup
 
+    # VCD/trace change detection (trace_set / trace_poll; sim/trace.py)
+    cdef int       *tr_sids
+    cdef long long *tr_last_v
+    cdef long long *tr_last_m
+    cdef int        tr_n
+
     # Memory arrays
     cdef long long *mem_val
     cdef long long *mem_mask
@@ -5168,6 +5195,10 @@ cdef class CyContext:
     cdef bint       _allocated
 
     def __cinit__(self):
+        self.tr_sids = NULL
+        self.tr_last_v = NULL
+        self.tr_last_m = NULL
+        self.tr_n = 0
         self.sig_val = NULL
         self.sig_mask = NULL
         self.sig_width = NULL
@@ -5268,6 +5299,9 @@ cdef class CyContext:
         self._wide_allocated = False
 
     def __dealloc__(self):
+        free(self.tr_sids)
+        free(self.tr_last_v)
+        free(self.tr_last_m)
         if self._allocated:
             free(self.sig_val)
             free(self.sig_mask)
@@ -5806,6 +5840,67 @@ cdef class CyContext:
 
     def set_time(self, long long t):
         self.sim_time = t
+
+    # ── Trace change detection (sim/trace.py TraceHub) ─────────────
+
+    def trace_set(self, list sids):
+        """Trace these signals: `trace_poll` reports which changed since the
+        last poll (the current values are the baseline). Like the compiled
+        engine's CompiledSim.trace_poll; it replaces reading every traced
+        signal from Python each time step. Returns the positions in *sids*
+        of the signals it can't trace (kept in the wide word pool), which
+        trace_poll's indices then skip: its `k` indexes the accepted ones."""
+        cdef int k, j, n
+        cdef list accepted = []
+        cdef list rejected = []
+        for j in range(len(sids)):
+            if self._wide_allocated and self.wide_sig_offset[<int>sids[j]] >= 0:
+                rejected.append(j)
+            else:
+                accepted.append(sids[j])
+        sids = accepted
+        n = len(sids)
+        free(self.tr_sids)
+        free(self.tr_last_v)
+        free(self.tr_last_m)
+        self.tr_sids = NULL
+        self.tr_last_v = NULL
+        self.tr_last_m = NULL
+        self.tr_n = 0
+        if n == 0:
+            return rejected
+        self.tr_sids = <int *>malloc(n * sizeof(int))
+        self.tr_last_v = <long long *>malloc(n * sizeof(long long))
+        self.tr_last_m = <long long *>malloc(n * sizeof(long long))
+        if self.tr_sids == NULL or self.tr_last_v == NULL or self.tr_last_m == NULL:
+            raise MemoryError()
+        for k in range(n):
+            self.tr_sids[k] = sids[k]
+            self.tr_last_v[k] = self.sig_val[self.tr_sids[k]]
+            self.tr_last_m[k] = self.sig_mask[self.tr_sids[k]]
+        self.tr_n = n
+        return rejected
+
+    def trace_poll(self):
+        """``[(k, val, mask), ...]`` for each traced signal (index into the
+        `trace_set` list) that changed since the last poll, masked to the
+        signal's width (as `read_signal` + `Value` would give)."""
+        cdef int k, sid, w
+        cdef long long v, m
+        cdef unsigned long long wm
+        cdef list out = []
+        for k in range(self.tr_n):
+            sid = self.tr_sids[k]
+            v = self.sig_val[sid]
+            m = self.sig_mask[sid]
+            if v != self.tr_last_v[k] or m != self.tr_last_m[k]:
+                self.tr_last_v[k] = v
+                self.tr_last_m[k] = m
+                w = self.sig_width[sid]
+                wm = 0xFFFFFFFFFFFFFFFFULL if w >= 64 else ((1ULL << w) - 1 if w > 0 else 1ULL)
+                # (as Value(): val bits under the mask read 0)
+                out.append((k, <unsigned long long>v & wm & ~(<unsigned long long>m), <unsigned long long>m & wm))
+        return out
 
     # ── Snapshot / edge detection helpers ─────────────────────────
 

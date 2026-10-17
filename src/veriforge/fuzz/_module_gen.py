@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -47,6 +49,9 @@ from ._expression_gen import ExpressionGenerator
 from ._runner_marks import DISPLAY_MARK
 from ._signal_context import Signal, SignalContext
 from ._statement_gen import StatementGenerator
+
+
+_REAL_PROBABILITY = 0.2  # (feedforward designs with `real` variables)
 
 
 class Strategy(Enum):
@@ -320,6 +325,77 @@ class ModuleGenerator:
             assigns.append(ContinuousAssign(out.as_identifier(), rhs))
 
         ctx.continuous_assigns = assigns
+        if self._rng.random() < _REAL_PROBABILITY:
+            self._add_reals(ctx)
+
+    def _add_reals(self, ctx: SignalContext) -> None:
+        """`real` variables (sim/reals.py) computed in an `always @*` from
+        inputs and real literals, rounded into one output. Narrow inputs and
+        no division keep every value well inside a double and a 64-bit
+        integer, where Icarus, Verilator and the engines agree exactly."""
+        rng = self._rng
+        inputs = [s for s in ctx.inputs if s.name != "clk" and s.width <= 16]  # noqa: PLR2004
+        # (At most 64 bits: Icarus turns a negative real that rounds to 0
+        # into garbage in a wider vector -- known_issues.md.)
+        outputs = [s for s in ctx.outputs if s.width <= 64]  # noqa: PLR2004
+        if not inputs or not outputs:
+            return
+        names = [f"rv{k}" for k in range(rng.randint(1, 2))]
+
+        def real_literal() -> Literal:
+            value = rng.choice((0.5, 1.5, -2.25, 3.0, 0.125, 1000.0, -0.75, 2.5, 1e-3, 7.0))
+            return Literal(value, original_text=repr(value))
+
+        def input_operand() -> Expression:
+            sig = rng.choice(inputs)
+            if not sig.signed:
+                return sig.as_identifier()
+            # Icarus converts a partly-x *signed* value to real by its own
+            # rule (`8'sb1000_00x1` -> -1.0; IEEE and veriforge read x as 0:
+            # -127.0 -- known_issues.md), so a signed input goes through a
+            # guard: an x input reads 0 everywhere.
+            zero = Literal(0, width=sig.width, signed=True, base="d", original_text=f"{sig.width}'sd0")
+            return TernaryOp(FunctionCall("$isunknown", [sig.as_identifier()]), zero, sig.as_identifier())
+
+        def operand(earlier: list[str]) -> Expression:
+            kind = rng.random()
+            if kind < 0.45:  # noqa: PLR2004
+                return input_operand()
+            if kind < 0.75 or not earlier:  # noqa: PLR2004
+                return real_literal()
+            return Identifier(rng.choice(earlier))
+
+        def real_expr(earlier: list[str], depth: int) -> Expression:
+            if depth == 0:
+                return operand(earlier)
+            kind = rng.random()
+            if kind < 0.15:  # noqa: PLR2004
+                return UnaryOp("-", real_expr(earlier, depth - 1))
+            if kind < 0.3:  # noqa: PLR2004
+                cond = BinaryOp(rng.choice(("<", "<=", ">", ">=", "==", "!=")), operand(earlier), real_literal())
+                return TernaryOp(cond, real_expr(earlier, depth - 1), real_expr(earlier, depth - 1))
+            # (a product's other factor is a literal: values stay small)
+            op = rng.choice(("+", "-", "*", "+", "-"))
+            return BinaryOp(op, real_expr(earlier, depth - 1), real_literal() if op == "*" else operand(earlier))
+
+        stmts: list[Statement] = []
+        for k, name in enumerate(names):
+            ctx.memories.append(Variable(name, VariableKind.REAL))
+            rhs = real_expr(names[:k], rng.randint(1, 2))
+            if k == 0:
+                # (Reading an input: `_ensure_comb_blocks_read_a_signal`
+                # would patch in `| (i & 1'b0)`, illegal on a real.)
+                rhs = BinaryOp(rng.choice(("+", "-")), rhs, input_operand())
+            stmts.append(BlockingAssign(Identifier(name), rhs))
+        ctx.always_blocks.append(
+            AlwaysBlock(SeqBlock(stmts), sensitivity_list=[], sensitivity_type=SensitivityType.COMBINATIONAL)
+        )
+        out = rng.choice(outputs)
+        rhs = BinaryOp(rng.choice(("+", "-", "*")), Identifier(names[-1]), real_literal())
+        ctx.continuous_assigns = [
+            ca for ca in ctx.continuous_assigns if not (isinstance(ca.lhs, Identifier) and ca.lhs.name == out.name)
+        ]
+        ctx.continuous_assigns.append(ContinuousAssign(out.as_identifier(), rhs))
 
     # ------------------------------------------------------------------
     # Strategy: REGISTERED
@@ -625,14 +701,21 @@ class ModuleGenerator:
                 )
             )
             value = BinaryOp(rng.choice(("^", "+", "&")), expr_gen.expr(rng, depth=1), Identifier("g"))
+            items: list = [ContinuousAssign(BitSelect(Identifier("nmem"), Identifier("g")), value)]
+            if rng.random() < 0.5:
+                # Through a block-local wire of the element's width (the same
+                # value: the RHS is truncated to it either way).
+                items = [
+                    Net("gt", NetKind.WIRE, width=copy.deepcopy(packed)),
+                    ContinuousAssign(Identifier("gt"), value),
+                    ContinuousAssign(BitSelect(Identifier("nmem"), Identifier("g")), Identifier("gt")),
+                ]
             loop = GenerateFor(
                 "g",
                 _int_literal(low),
                 BinaryOp("<=", Identifier("g"), _int_literal(high)),
                 BinaryOp("+", Identifier("g"), _int_literal(1)),
-                GenerateBlock(
-                    name="gnm", items=[ContinuousAssign(BitSelect(Identifier("nmem"), Identifier("g")), value)]
-                ),
+                GenerateBlock(name="gnm", items=items),
                 genvar_local=True,
             )
             ctx.generate_blocks.append(loop)

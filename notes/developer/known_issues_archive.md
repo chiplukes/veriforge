@@ -4601,3 +4601,27 @@ the Cython extension built (1126 passed) and with
 fallback — which never touches this code — is correctly unaffected);
 full `-n 8` regression clean (see the session's own final report for the
 exact count).
+
+### Compiled engine: wide (>64-bit) signal posedge/negedge (fixed 2026-10-16)
+
+`always @(posedge w)` on a signal wider than 64 bits raised
+`NotImplementedError` on compiled and never fired on vm-fast (its edge
+snapshot didn't read the wide word store). Both now detect the edge on bit 0,
+as reference and vm do; `TestWideSignalExternalIO::test_wide_posedge_signal_probe_cross_engine`
+is no longer an xfail, and `tests/test_sim/test_startup_and_edges.py` covers
+it against Icarus.
+
+### Full-signal VCD tracing slow on large designs (resolved 2026-10-16)
+
+Reported in September 2026: a compiled run of the Windows `axis_col_correct`
+testbench (about 4,600 nets and 3,100 variables) appeared to stall with
+`--vcd`, because the trace session read every signal into a Python `Value`
+each time step. The October trace rework (notes/plans/vcd_enhancement.md)
+moved compiled change detection into C (`CompiledSim.trace_poll`). Re-measured
+on a synthetic 7,750-signal design (most signals changing every cycle, 2.3
+MB of VCD for 300 cycles): compiled 0.03 ms/cycle untraced, 0.18 traced.
+vm-fast still read every signal from Python (0.10 -> 6.2 ms/cycle traced);
+it now compares narrow signals in C too (`CyContext.trace_set`/`trace_poll`):
+0.45 ms/cycle. Wide signals and memory elements stay on the Python poller.
+Reference and vm add about 30% to their own (much slower) run time.
+`test_trace_vcd.py::test_vm_fast_uses_c_poll`.

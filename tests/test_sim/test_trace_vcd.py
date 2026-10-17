@@ -478,3 +478,15 @@ def test_trigger_expression_rejects_unknown_signal():
     sim = _cap_sim("reference")
     with pytest.raises(ValueError, match="nope"):
         attach_capture(sim, "unused.vcd", pre=10, trigger="nope && cnt == 1")
+
+
+def test_vm_fast_uses_c_poll():
+    # vm-fast compares narrow signals in C (CyContext.trace_poll, 2026-10-16:
+    # a 7,700-signal design ran ~60x slower traced, reading every signal into
+    # a Value per time step); wide signals and memory elements stay in Python.
+    sim = _sim("vm-fast")
+    with attach_vcd(sim, io.StringIO()) as session:
+        hub = sim._sched._trace_hub
+        assert hub._vm is not None and hub._c_index
+        assert hub._py is not None  # (`w`, 100 bits, and `mem[...]`)
+        assert len(hub._c_index) < len(session.signal_names)

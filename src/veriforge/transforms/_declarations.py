@@ -28,6 +28,8 @@ _PARAMETER_TYPE_TOKEN_KINDS = frozenset(
         "KW_INTEGER",
         "KW_LOGIC",
         "KW_LONGINT",
+        "KW_REAL",
+        "KW_REALTIME",
         "KW_REG",
         "KW_SHORTINT",
         "KW_TIME",

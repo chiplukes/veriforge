@@ -8,7 +8,8 @@ conventions, shared by every engine:
 - ``%d`` is right-justified to the widest decimal of the value's width
   (one column more when signed: ``-128``); ``%0d`` doesn't pad. An all-x
   value prints ``x``, a partly-x one ``X``. Signed arguments print negative.
-- An explicit field width only pads (spaces, or zeros with ``%0<w>``).
+- An explicit field width only pads (spaces, or zeros with ``%0<w>``);
+  ``%-<w>`` pads on the right instead (and ignores a zero flag).
 - An argument not consumed by a format string prints as ``%d``; every
   string-literal argument is itself a format string.
 
@@ -27,10 +28,11 @@ arguments; compiled ignored x bits entirely and truncated wide values to
 from __future__ import annotations
 
 import math
+import struct
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from veriforge.model.expressions import Expression, StringLiteral
+from veriforge.model.expressions import Expression, FunctionCall, StringLiteral
 from veriforge.model.functions import FunctionDecl, TaskDecl
 from veriforge.model.base import VerilogNode
 from veriforge.model.statements import ParBlock, SeqBlock, SystemTaskCall
@@ -48,6 +50,12 @@ if TYPE_CHECKING:
     from .value import Value
 
 SIGNED_FLAG = "\x1d"
+# The argument is a double's bit pattern (a lowered real, sim/reals.py):
+# `%e`/`%f`/`%g` print it as that double; REAL_ALT_FLAG in C's alternate
+# form (`%#g`, Icarus's format for an unformatted real: `3.25000`).
+REAL_FLAG = "\x1e"
+REAL_ALT_FLAG = "\x1f"
+_REAL_MARKER = "$__vf_rdisp"  # (sim/reals.py: DISPLAY_MARKER)
 # Specifiers that consume an argument (the engines' formatters agree).
 CONSUMING = frozenset("dhxobcstefg")
 _DISPLAY_TASKS = {"$display", "$write", "$monitor", "$strobe", "$info", "$warning", "$error", "$fatal"}
@@ -110,10 +118,17 @@ def format_real(  # noqa: PLR0913
     precision: int | None,
     zero_pad: bool,
     signed: bool,  # noqa: FBT001
+    real: int = 0,
 ) -> str:
-    """``%e``/``%f``/``%g`` of an integer argument, as C/Icarus print it (x/z
-    bits read as 0). There is no ``real`` type in this simulator yet, so
-    the argument is always the integer value."""
+    """``%e``/``%f``/``%g`` of an argument, as C/Icarus print it: an integer
+    (x/z bits read as 0), or with *real* a double's bit pattern (2: C's
+    alternate form, `%#g`)."""
+    pad = "0" if zero_pad and field_width else ""
+    if real:
+        x = struct.unpack("<d", struct.pack("<Q", v.val & ~v.mask & 0xFFFFFFFFFFFFFFFF))[0]
+        alt = "#" if real == 2 else ""  # noqa: PLR2004
+        text = format(x, f"{alt}{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
+        return _c_special(text, x)
     width = max(v.width, 1)
     # x/z bits read as 0 (as in Icarus: `8'bx0000001` prints 1.0)
     val = v.val & ~v.mask & ((1 << width) - 1)
@@ -121,10 +136,40 @@ def format_real(  # noqa: PLR0913
         val -= 1 << width
     pad = "0" if zero_pad and field_width else ""
     try:
-        real = float(val)
+        number = float(val)
     except OverflowError:  # beyond double range (> ~1024 bits): +/-inf
-        real = -math.inf if val < 0 else math.inf
-    return format(real, f"{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
+        number = -math.inf if val < 0 else math.inf
+    return format(number, f"{pad}{field_width or ''}.{6 if precision is None else precision}{spec}")
+
+
+def format_string(v: Value, field_width: int, sized: bool) -> str:  # noqa: FBT001
+    """``%s``: every byte of the value, MSB first, a zero (or x) byte as a
+    space (Icarus: `"ab"` in a 5-byte reg prints `   ab`); with a field
+    width (*sized*, `%0s` too) the leading spaces go and the rest is
+    right-justified to it."""
+    width = max(v.width, 1)
+    chars = []
+    for k in range((width + 7) // 8 - 1, -1, -1):
+        b = (v.val >> (8 * k)) & 0xFF
+        chars.append(" " if b == 0 or (v.mask >> (8 * k)) & 0xFF else chr(b))
+    text = "".join(chars)
+    return text.lstrip(" ").rjust(field_width) if sized else text
+
+
+def left_justify(text: str) -> str:
+    """``%-...``: the same text with its leading padding moved to the end
+    (Icarus: `%-5h` of 8'h5 is `05   `, `%-d` keeps the default width)."""
+    content = text.lstrip(" ")
+    return content.ljust(len(text))
+
+
+def _c_special(text: str, x: float) -> str:
+    """Python spells C's `inf`/`nan` the same, but zero-pads them
+    (`%010f` of inf: `0000000inf`); C pads with spaces."""
+    if math.isfinite(x):
+        return text
+    stripped = text.lstrip("0") or text
+    return stripped.rjust(len(text)) if stripped != text else text
 
 
 _SCOPE_ATTR = "__vf_scope"
@@ -268,6 +313,14 @@ def _canonical(args: list[Expression], signed_of, default_spec: str = "d") -> tu
         arg = args[i]
         i += 1
         if not isinstance(arg, StringLiteral):
+            if _is_real_marker(arg):
+                if default_spec == "d":
+                    data.append(arg.arguments[0])  # type: ignore[attr-defined]
+                    out.append(f"%{REAL_ALT_FLAG}g")
+                else:  # ($displayh of a real: its rounded value, unpadded)
+                    data.append(_rounded(arg))
+                    out.append(f"%0{default_spec}")
+                continue
             data.append(arg)
             flag = SIGNED_FLAG if default_spec == "d" and _signed(arg, signed_of) else ""
             out.append(f"%{flag}{default_spec}")
@@ -287,14 +340,28 @@ def _canonical(args: list[Expression], signed_of, default_spec: str = "d") -> tu
             k = j + 1
             if k < len(fmt) and fmt[k] == SIGNED_FLAG:
                 k += 1
-            while k < len(fmt) and (fmt[k].isdigit() or fmt[k] == "."):  # width[.precision]
+            while k < len(fmt) and (fmt[k].isdigit() or fmt[k] in ".-"):  # [-]width[.precision]
                 k += 1
             if k >= len(fmt):
                 out.append(fmt[j:])
                 break
             spec = fmt[k].lower()
             piece = fmt[j : k + 1]
-            if spec in CONSUMING and i < len(args):
+            if spec in CONSUMING and i < len(args) and _is_real_marker(args[i]):
+                consumed = args[i]
+                i += 1
+                body = piece[1:].replace(SIGNED_FLAG, "")
+                if spec in "efg":
+                    data.append(consumed.arguments[0])  # type: ignore[attr-defined]
+                    piece = f"%{REAL_FLAG}{body}"
+                else:
+                    # An integer specifier prints the rounded value, unpadded
+                    # unless a width is given (Icarus: `%d` of 3.25 is `3`).
+                    data.append(_rounded(consumed))
+                    flag = SIGNED_FLAG if spec == "d" else ""
+                    sized = any(ch.isdigit() for ch in body[:-1]) or spec not in "dhxob"
+                    piece = f"%{flag}{body}" if sized else f"%{flag}0{body}"
+            elif spec in CONSUMING and i < len(args):
                 consumed = args[i]
                 i += 1
                 data.append(consumed)
@@ -303,6 +370,17 @@ def _canonical(args: list[Expression], signed_of, default_spec: str = "d") -> tu
             out.append(piece)
             j = k + 1
     return StringLiteral(value="".join(out)), data
+
+
+def _is_real_marker(expr: Expression) -> bool:
+    return isinstance(expr, FunctionCall) and expr.name == _REAL_MARKER and len(expr.arguments) == 1
+
+
+def _rounded(marker: Expression) -> Expression:
+    """A marked real argument, rounded to a 64-bit signed integer."""
+    from .reals import RTOI, _call  # noqa: PLC0415
+
+    return FunctionCall("$signed", [_call(RTOI, marker.arguments[0])])  # type: ignore[attr-defined]
 
 
 def _signed(expr: Expression, signed_of) -> bool:

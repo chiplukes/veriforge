@@ -43,7 +43,7 @@ from veriforge.model.statements import (
     WaitStatement,
     WhileLoop,
 )
-from veriforge.sim.display_format import SIGNED_FLAG
+from veriforge.sim.display_format import REAL_ALT_FLAG, REAL_FLAG, SIGNED_FLAG
 from veriforge.sim.severity import severity_display
 from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
@@ -3277,6 +3277,12 @@ class _StmtEmittersMixin:
                 signed = fmt[i] == SIGNED_FLAG  # see sim/display_format.py
                 if signed:
                     i += 1
+                real = {REAL_FLAG: 2, REAL_ALT_FLAG: 3}.get(fmt[i], 0) if i < len(fmt) else 0
+                if real:
+                    i += 1
+                left = i < len(fmt) and fmt[i] == "-"  # (`%-...`: pad on the right)
+                if left:
+                    i += 1
                 # Parse optional '0' (zero-pad flag) and width
                 zero_pad = False
                 if i < len(fmt) and fmt[i] == "0":
@@ -3286,6 +3292,10 @@ class _StmtEmittersMixin:
                 while i < len(fmt) and fmt[i].isdigit():
                     width = width * 10 + int(fmt[i])
                     i += 1
+                if left:
+                    zero_pad = zero_pad and not width  # (`%-05d` pads with spaces)
+                    lines.append(f"{pad}c.lj_start = c.out_count")
+                    lj_at = len(lines)
                 precision = -1  # %<w>.<p>f
                 if i < len(fmt) and fmt[i] == ".":
                     i += 1
@@ -3308,10 +3318,12 @@ class _StmtEmittersMixin:
                     lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, signed, indent))
                     arg_idx += 1
                 elif spec in "efg" and arg_idx < len(args):
-                    lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, signed, indent, precision))
+                    # (`_out_real`'s sgn: 2/3 for a lowered real's bits)
+                    sgn = real or signed
+                    lines.extend(self._emit_format_arg(args[arg_idx], spec, width, zero_pad, sgn, indent, precision))
                     arg_idx += 1
                 elif spec == "s" and arg_idx < len(args):
-                    lines.extend(self._emit_string_output(args[arg_idx], indent))
+                    lines.extend(self._emit_string_output(args[arg_idx], indent, width, bool(width or zero_pad)))
                     arg_idx += 1
                 elif spec == "t":
                     # %t: the next argument (normally $time) as a time, 20
@@ -3332,6 +3344,8 @@ class _StmtEmittersMixin:
                     # Unknown spec ΓÇö output the '%' and the spec char
                     lines.append(f"{pad}_out_char(c, 37)  # '%'")
                     lines.append(f"{pad}_out_char(c, {ord(fmt[i - 1])})")
+                if left and len(lines) > lj_at:
+                    lines.append(f"{pad}_out_left_justify(c, c.lj_start)")
             else:
                 lines.append(f"{pad}_out_char(c, {ord(ch)})  # '{ch}'")
                 i += 1
@@ -3356,7 +3370,10 @@ class _StmtEmittersMixin:
         w = max(self._expr_width(arg), 1)
         if spec in "efg":
             fn = "_out_real"
-            tail = f"{w}, {ord(spec)}, {width}, {precision}, {1 if zero_pad else 0}, {1 if signed else 0})"
+            tail = f"{w}, {ord(spec)}, {width}, {precision}, {1 if zero_pad else 0}, {int(signed)})"
+        elif spec == "s":
+            fn = "_out_str"
+            tail = f"{w}, {width}, {int(signed)})"  # (`signed`: sized, from _emit_string_output)
         else:
             fn = "_out_fmt"
             tail = f"{w}, {ord(spec if spec != 'x' else 'h')}, {width}, {1 if zero_pad else 0}, {1 if signed else 0})"
@@ -3394,18 +3411,26 @@ class _StmtEmittersMixin:
             f"{pad}{fn}(c, <const unsigned long long *>_sc{slot}_v, <const unsigned long long *>_sc{slot}_m, {tail}",
         ]
 
-    def _emit_string_output(self, arg: Expression, indent: int) -> list[str]:
-        """Emit code to output an expression as a string (%s).
+    def _emit_string_output(self, arg: Expression, indent: int, width: int = 0, sized: bool = False) -> list[str]:  # noqa: FBT001, FBT002
+        """Emit code to output an expression as a string (%s, *width*:
+        its field width; see sim/display_format.py's format_string).
 
         Handles StringLiteral directly (char-by-char) and TernaryOp
-        with StringLiteral branches via if/else.  Falls back to decimal
-        integer output for other expression types.
+        with StringLiteral branches via if/else; any other expression
+        through ``_out_str`` (it used to print as a decimal integer).
         """
         pad = "    " * indent
         lines: list[str] = []
 
         if isinstance(arg, StringLiteral):
-            for ch in arg.value:
+            from veriforge.sim.display_format import format_string  # noqa: PLC0415
+            from veriforge.sim.value import Value  # noqa: PLC0415
+
+            raw = arg.value.encode("latin-1", "replace")
+            text = format_string(Value(int.from_bytes(raw, "big"), width=max(8 * len(raw), 8)), width, sized)
+            if not raw:
+                text = " ".rjust(width) if sized else ""
+            for ch in text:
                 lines.append(f"{pad}_out_char(c, {ord(ch)})")
             return lines
 
@@ -3415,18 +3440,14 @@ class _StmtEmittersMixin:
             cond_w = self._expr_width(arg.condition)
             cond_code = self._emit_expr(arg.condition, cond_w)
             lines.append(f"{pad}if {cond_code}:")
-            true_lines = self._emit_string_output(arg.true_expr, indent + 1)
+            true_lines = self._emit_string_output(arg.true_expr, indent + 1, width, sized)
             lines.extend(true_lines or [f"{'    ' * (indent + 1)}pass"])
             lines.append(f"{pad}else:")
-            false_lines = self._emit_string_output(arg.false_expr, indent + 1)
+            false_lines = self._emit_string_output(arg.false_expr, indent + 1, width, sized)
             lines.extend(false_lines or [f"{'    ' * (indent + 1)}pass"])
             return lines
 
-        # Fallback: emit as decimal integer
-        w = self._expr_width(arg)
-        expr_code = self._emit_expr(arg, w)
-        lines.append(f"{pad}_out_int_dec(c, {expr_code})")
-        return lines
+        return self._emit_format_arg(arg, "s", width, False, int(sized), indent)
 
     # ΓöÇΓöÇ Sensitivity collection from statements ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 

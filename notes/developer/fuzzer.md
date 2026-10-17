@@ -65,7 +65,7 @@ favoring simpler shapes:
 
 | Strategy | Description |
 |----------|-------------|
-| **feedforward** | Inputs → continuous assigns → outputs |
+| **feedforward** | Inputs → continuous assigns → outputs; 20% also compute `real` variables in an `always @*` (narrow inputs, real literals, `+ - *`, comparisons, `?:`, negation) and round one into an output (since 2026-10-16) |
 | **registered** | Inputs → regs → combinational outputs, clocked; sometimes two register updates as one streaming-concatenation target (`{<<n{ra, rb}} <= T'(e)`, checked by Verilator -- Icarus rejects it) |
 | **multi_always** | Multiple `always @*` blocks sharing internal wires/regs |
 | **clocked_sequential** | Single `always @(posedge clk)` with nonblocking assigns |
@@ -74,15 +74,19 @@ favoring simpler shapes:
 | **hierarchical** | Flat child module + parent module + an `Instance` connecting them |
 | **with_functions** | User functions (calling earlier ones) used in expressions |
 | **with_tasks** | Tasks with output ports plus an impure function, clocked |
-| **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges, signed words, `byte`/`shortint`/`int` arrays) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array, >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
+| **memory** | Memories (non-zero/negative bases, both directions, 2-D, >64-bit words, offset packed ranges, signed words, `byte`/`shortint`/`int` arrays) written on a clock and read by continuous assigns; memory copies, a task writing a word, a function reading one, a generate loop driving a net array (sometimes through a block-local wire), >32-bit indices. Avoids Icarus's out-of-range quirks (known_issues.md). |
 
 Separately, `tests/test_fuzz/test_syntax_variants.py` re-emits fuzz designs
 with an `EmitStyle` and checks the parser reads them the same. Old-style
 ports, `@*`, `,` sensitivity lists, redundant parentheses and a
 `generate`/`endgenerate` region must re-emit identically. Re-spelled literals,
 positional instance connections, `else begin if`, named blocks, net
-declaration assignments, a block-local `for` variable and re-grouped case
-items change the model, so those must simulate the same.
+declaration assignments (module level and in generate blocks), a block-local
+`for` variable, a `genvar` declared before its loop (`genvar g; for (g =
+0; ...)`, once per scope), and split (`a: s; b: s;`) or re-grouped case
+items change the model, so those must simulate the same. The test also runs
+memory-strategy seeds, whose generate loops (sometimes through a
+block-local wire) exercise the generate knobs.
 
 Each module gets random signal widths (biased toward edge cases: 1, 8, 16,
 32, 63, 64, 65, 80, 127, 128), random signedness, random types (each

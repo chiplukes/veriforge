@@ -788,9 +788,10 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
             # happened to recover via a different X-convergence path
             # through the surrounding feedback logic, masking the gap).
             port_initial_value = port.default_value if port.direction != PortDirection.INPUT else None
-            if port.data_type in _TWO_STATE_PORT_TYPES:
+            if port.data_type in _TWO_STATE_PORT_TYPES or port.data_type in ("real", "realtime"):
                 # (`input byte a`: a 2-state variable -- as a plain net it
-                # kept the x/z driven into it and started at x.)
+                # kept the x/z driven into it and started at x. `input real
+                # x` too: a 1-bit net, sim/reals.py needs the type.)
                 flat.variables.append(
                     Variable(
                         f"{prefix}.{port.name}",

@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 from datetime import datetime, timezone
 
+from .reals import from_bits
 from .value import Value
 
 
@@ -66,16 +67,20 @@ class VcdWriter:
         self._last_values: dict[str, str] = {}  # id → last dumped value string
         self._bin_fmts: dict[int, str] = {}  # width → format string cache
 
-    def add_signal(self, name: str, *, width: int = 1, scope: str = "top", vcd_name: str | None = None) -> None:
+    def add_signal(  # noqa: PLR0913
+        self, name: str, *, width: int = 1, scope: str = "top", vcd_name: str | None = None, real: bool = False
+    ) -> None:
         """Register a signal to be traced.
 
         *name* is the lookup key used by change() / dump_all().
         *vcd_name* is the name written to the VCD ``$var`` line;
-        defaults to *name* when not provided.
+        defaults to *name* when not provided. A *real* signal (a lowered
+        ``real``, sim/reals.py: its 64 bits are a double) is a ``$var real``
+        with ``r<value>`` changes.
         """
         self._id_counter += 1
         ident = _make_id(self._id_counter)
-        self._signals[name] = _VcdSignal(vcd_name if vcd_name is not None else name, width, ident, scope)
+        self._signals[name] = _VcdSignal(vcd_name if vcd_name is not None else name, width, ident, scope, real=real)
 
     def write_header(self) -> None:
         """Write the VCD header (must be called after all add_signal calls)."""
@@ -118,10 +123,7 @@ class VcdWriter:
         self._last_values[sig.ident] = val_str
         self._ensure_timestamp()
 
-        if sig.width == 1:
-            self._file.write(f"{val_str}{sig.ident}\n")
-        else:
-            self._file.write(f"b{val_str} {sig.ident}\n")
+        self._file.write(_line(sig, val_str))
 
     def dump_all(self, time: int, signals: dict[str, Value]) -> None:
         """Dump values for all registered signals at a given time."""
@@ -135,10 +137,7 @@ class VcdWriter:
             if self._last_values.get(sig.ident) == val_str:
                 continue
             self._last_values[sig.ident] = val_str
-            if sig.width == 1:
-                parts.append(f"{val_str}{sig.ident}\n")
-            else:
-                parts.append(f"b{val_str} {sig.ident}\n")
+            parts.append(_line(sig, val_str))
         if parts:
             parts.insert(0, f"#{time}\n")
             self._time_written = True
@@ -151,7 +150,9 @@ class VcdWriter:
         parts = [f"#{time}\n"]
         ap = parts.append
         for sig, val, mask in changes:
-            if sig.width == 1:
+            if sig.real:
+                ap(_real_line(sig, val, mask))
+            elif sig.width == 1:
                 ap(("x" if mask & 1 else "1" if val & 1 else "0") + sig.ident + "\n")
             elif mask == 0:
                 ap("b" + format(val, sig.fmt) + sig.tail)
@@ -174,7 +175,9 @@ class VcdWriter:
         ap = parts.append
         items = values if values is not None else [(sig, 0, (1 << sig.width) - 1) for sig in self._signals.values()]
         for sig, val, mask in items:
-            if sig.width == 1:
+            if sig.real:
+                ap(_real_line(sig, val, mask))
+            elif sig.width == 1:
                 ap(("x" if mask & 1 else "1" if val & 1 else "0") + sig.ident + "\n")
             else:
                 ap("b" + _raw_to_vcd(val, mask, sig.width) + sig.tail)
@@ -197,10 +200,7 @@ class VcdWriter:
             val = signals.get(name, Value.x(sig.width))
             val_str = _value_to_vcd(val, sig.width)
             self._last_values[sig.ident] = val_str
-            if sig.width == 1:
-                self._file.write(f"{val_str}{sig.ident}\n")
-            else:
-                self._file.write(f"b{val_str} {sig.ident}\n")
+            self._file.write(_line(sig, val_str))
         self._file.write("$end\n")
 
     def finalize(self) -> None:
@@ -225,9 +225,10 @@ class VcdWriter:
 class _VcdSignal:
     """Internal signal metadata for VCD output."""
 
-    __slots__ = ("fmt", "ident", "name", "scope", "tail", "width")
+    __slots__ = ("fmt", "ident", "name", "real", "scope", "tail", "width")
 
-    def __init__(self, name: str, width: int, ident: str, scope: str) -> None:
+    def __init__(self, name: str, width: int, ident: str, scope: str, *, real: bool = False) -> None:
+        self.real = real
         self.name = name
         self.width = width
         self.ident = ident
@@ -267,11 +268,26 @@ def _write_scopes(
             child = node[segment]
             f.write(f"$scope module {segment} $end\n")
             for sig in child.get("_sig", []):
-                f.write(f"$var wire {sig.width} {sig.ident} {sig.name} $end\n")
+                kind = "real" if sig.real else "wire"
+                f.write(f"$var {kind} {sig.width} {sig.ident} {sig.name} $end\n")
             _emit(child)
             f.write("$upscope $end\n")
 
     _emit(root)
+
+
+def _real_line(sig: _VcdSignal, val: int, mask: int) -> str:
+    """A real's change line: ``r<double> <id>``."""
+    return f"r{from_bits(val & ~mask)!r} {sig.ident}\n"  # (shortest round-trip spelling)
+
+
+def _line(sig: _VcdSignal, val_str: str) -> str:
+    """A change line from `_value_to_vcd`'s string."""
+    if sig.real:
+        return _real_line(sig, int(val_str.replace("x", "0"), 2), 0)
+    if sig.width == 1:
+        return f"{val_str}{sig.ident}\n"
+    return f"b{val_str} {sig.ident}\n"
 
 
 def _value_to_vcd(value: Value, width: int) -> str:

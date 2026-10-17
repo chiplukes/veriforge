@@ -182,9 +182,17 @@ def parse_vcd(text: str, *, strip_hierarchy: bool = True) -> VcdData:  # noqa: P
             continue
 
         # Real value change (r<value> <ident>)
-        m = re.match(r"^[rR]([\d.eE+-]+)\s+(\S+)$", line)
+        m = re.match(r"^[rR](\S+)\s+(\S+)$", line)
         if m:
-            # Skip real values for now
+            # (As `r` + the shortest round-trip spelling, so `r0.1` and
+            # `r0.10000000000000001` compare equal.)
+            ident = m.group(2)
+            if ident in data.signals:
+                try:
+                    val = "r" + repr(float(m.group(1)))
+                except ValueError:
+                    val = "r" + m.group(1).lower()
+                data.changes[data.signals[ident].name].append((current_time, val))
             continue
 
     return data

@@ -3101,6 +3101,20 @@ class _ExprEmitterMixin:
                 arg = self._emit_expr(call.arguments[0], 32)
                 return f"_clog2({arg})"
             return "0"
+        if name == "$__vf_real" and len(call.arguments) == 3:  # (sim/reals.py; templates/real_ops.pxi)
+            from veriforge.sim.reals import ITOR_S, ITOR_U, RTOI, TRUNC  # noqa: PLC0415
+
+            op = int(call.arguments[0].value)  # type: ignore[attr-defined]
+            a = call.arguments[1]
+            aw = self._expr_width(a)
+            av, am = self._emit_expr(a, aw), self._emit_mask_expr(a, aw)
+            if op in (ITOR_S, ITOR_U):
+                b = str(int(call.arguments[2].value))  # type: ignore[attr-defined]
+            elif op in (RTOI, TRUNC):
+                b = "0"
+            else:
+                b = f"<unsigned long long>({self._emit_expr(call.arguments[2], 64)})"
+            return f"<long long>_vf_real_op({op}, <unsigned long long>({av}), <unsigned long long>({am}), {aw}, {b})"
         # Simulation time (integer time units, like the other engines;
         # $realtime has no fractional part here either). These used to fall
         # through to the unsupported-function `0` below.
@@ -3461,6 +3475,10 @@ class _ExprEmitterMixin:
                 return self._expr_width(expr.arguments[0])
             if name in {"$time", "$realtime"}:
                 return 64
+            if name == "$__vf_real" and expr.arguments:  # (sim/reals.py)
+                from veriforge.sim.reals import real_call_width  # noqa: PLC0415
+
+                return real_call_width(expr)
             func = self._function_map.get(expr.name)
             if func is not None:
                 ret_sid = self._signal_map.get(f"__func_{func.name}.{func.name}")
@@ -4521,7 +4539,7 @@ class _ExprEmitterMixin:
             fname = expr.name.lower()
             if fname == "$__2state":
                 return "0"  # 2-state: never x/z (see _emit_func_call)
-            if fname in ("$bits", "$time", "$realtime", "$stime"):
+            if fname in ("$bits", "$time", "$realtime", "$stime", "$__vf_real"):
                 # Never x: `$bits(a)` of an x `a` used to fall to the
                 # argument-mask fallback below and print x.
                 return "0"

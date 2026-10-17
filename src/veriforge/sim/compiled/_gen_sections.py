@@ -1303,6 +1303,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "    unsigned long long conv_wide_mask[N_WIDE_WORDS]",
             "    long long sim_time",
             "    int       out_count",
+            "    int       lj_start",  # (`%-...`: _out_left_justify)
             "    int       finished",
             "    int       error_code",
         ]

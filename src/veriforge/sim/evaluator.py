@@ -1501,6 +1501,13 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
             return Value(random.getrandbits(32), width=32)
 
+        if name == "$__vf_real" and len(args) == 3:  # (sim/reals.py)
+            from .reals import real_op
+
+            a, b = args[1], args[2]
+            val, w = real_op(int(args[0].val), a.val, a.mask, a.width, b.val)
+            return Value(val, width=w)
+
         # User-defined function call
         if self._executor is not None:
             func = self._executor.lookup_function(call.name)
@@ -1782,6 +1789,10 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         name = expr.name.lower()
         if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
             return _expr_self_width(expr.arguments[0], ctx)
+        if name == "$__vf_real" and expr.arguments:  # (sim/reals.py)
+            from .reals import real_call_width
+
+            return real_call_width(expr)
         # A user-defined function call's self-determined width is its
         # OWN declared return width, not a hardcoded fallback -- the
         # fallback below is only for genuinely unresolvable calls (e.g.

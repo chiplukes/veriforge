@@ -8,7 +8,8 @@ again with an `EmitStyle` (old-style ports, `@*`, `,`-separated sensitivity
 lists, redundant parentheses, a `generate` region: parsed and re-emitted
 canonically it must match the canonical emission; plus re-spelled literals,
 positional instance connections, `else begin if`, named blocks, net
-declaration assignments, a block-local `for` variable and re-grouped case
+declaration assignments (also in generate blocks), a block-local `for`
+variable, a `genvar` declared before its loop, and split or re-grouped case
 items, which change the model: it must simulate the same).
 """
 
@@ -23,7 +24,7 @@ import pytest
 
 from veriforge.analysis.resolver import link_instances
 from veriforge.codegen.verilog_emitter import EmitStyle, emit_design, emit_style
-from veriforge.fuzz._module_gen import ModuleGenerator
+from veriforge.fuzz._module_gen import ModuleGenerator, Strategy
 from veriforge.fuzz._runner import FuzzRunner
 from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import verilog_parser
@@ -41,10 +42,14 @@ def runner(tmp_path_factory):
         )
 
 
-@pytest.mark.parametrize("seed", range(40))
-def test_syntax_variant(runner, seed):
+@pytest.mark.parametrize(
+    ("seed", "strategy"),
+    [*((seed, None) for seed in range(40)), *((seed, Strategy.MEMORY) for seed in range(12))],
+)
+def test_syntax_variant(runner, seed, strategy):
+    # (The memory strategy's generate loops: genvars, block-local wires.)
     rng = random.Random(seed)
-    design = ModuleGenerator(rng).generate_design(None)
+    design = ModuleGenerator(rng).generate_design(strategy)
     vectors = runner._gen_stimulus(design.get_module("t"), rng)
     canonical = emit_design(design)
     style = EmitStyle(
@@ -63,7 +68,9 @@ def test_syntax_variant(runner, seed):
     style.named_blocks = rng.random() < 0.5
     style.net_decl_assign = rng.random() < 0.6
     style.for_var_outside = rng.random() < 0.5
-    style.case_rng = random.Random(seed + 1)
+    style.case_rng = random.Random(seed + 1) if rng.random() < 0.7 else None
+    style.split_case_items = rng.random() < 0.5
+    style.genvar_outside = rng.random() < 0.6
     link_instances(design)  # (positional connections need the child's port order)
     with emit_style(style):
         respelled = emit_design(design)
@@ -98,6 +105,13 @@ _ALL_KNOBS = """module t(input clk, input [2:0] s, output reg [7:0] o, output [7
   assign w = n ^ lv1;
   for (genvar g = 0; g < 2; g = g + 1) begin : gb
     wire x = s[g];
+    wire y;
+    assign y = ~x;
+  end
+  for (genvar g = 0; g < 2; g = g + 1) begin : gc
+    for (genvar h = 0; h < 2; h = h + 1) begin : gi
+      wire z = gb[g].y ^ s[h];
+    end
   end
   always @(posedge clk) begin
     if (s == 3'd0)
@@ -108,7 +122,7 @@ _ALL_KNOBS = """module t(input clk, input [2:0] s, output reg [7:0] o, output [7
       case (s)
         3'd2: o <= 8'd20;
         3'd3: o <= 8'd20;
-        3'd4: o <= n;
+        3'd4, 3'd5: o <= n + gc[1].gi[0].z;
         default: begin
           o <= 0;
           for (int lv1 = 0; lv1 < 3; lv1 = lv1 + 1) o <= o + lv1 + gb[1].x;
@@ -134,8 +148,16 @@ def test_all_model_changing_knobs(runner):
     for text in ("endgenerate", "begin : vfb", "wire [7:0] n = ", "int lv1;", "3'd2, 3'd3:"):
         assert text in variant, (text, variant)
     assert re.search(r"else\n\s*begin : vfb\d+\n\s*if \(", variant), variant
+    split = EmitStyle(split_case_items=True, genvar_outside=True, net_decl_assign=True)
+    with emit_style(split):
+        split_variant = emit_design(design)
+    for text in ("3'd4: o <=", "3'd5: o <=", "genvar g;", "genvar h;", "for (g = 0;", "wire y = ~x;"):
+        assert text in split_variant, (text, split_variant)
+    assert split_variant.count("genvar g;") == 1, split_variant  # (once for both loops)
     canonical = emit_design(design)
     rng = random.Random(0)
     vectors = runner._gen_stimulus(design.get_module("t"), rng)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        assert runner._simulate(variant, "reference", vectors) == runner._simulate(canonical, "reference", vectors)
+        expected = runner._simulate(canonical, "reference", vectors)
+        assert runner._simulate(variant, "reference", vectors) == expected
+        assert runner._simulate(split_variant, "reference", vectors) == expected

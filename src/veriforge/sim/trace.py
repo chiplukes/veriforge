@@ -35,6 +35,12 @@ if TYPE_CHECKING:
 _MEM_ELEMENT_RE = re.compile(r"^(.*)\[(\d+)\]$")
 
 
+def _is_real(sched: object, name: str) -> bool:
+    """Whether trace signal *name* (`m[2]`: an element of `m`) is a lowered
+    ``real`` (sim/reals.py)."""
+    return name.split("[", 1)[0] in getattr(sched, "real_signals", ())
+
+
 def _split_hierarchy(name: str) -> tuple[str, str]:
     """Split a hierarchical signal name into (scope, leaf_name)."""
     if "." in name:
@@ -216,6 +222,7 @@ class TraceHub:
         self._direct: _TraceSink | None = None
         self._py: _PythonPoller | None = None
         self._sim = None
+        self._vm = None  # vm-fast's CyContext doing C-side detection, if any
         self._handle = register_time_step_callback(sched, self._on_time_step)
 
     @property
@@ -252,6 +259,8 @@ class TraceHub:
             self._handle.close()
             if self._sim is not None:
                 self._sim.trace_set([])
+            if self._vm is not None:
+                self._vm.trace_set([])
             if getattr(self._sched, "_trace_hub", None) is self:
                 self._sched._trace_hub = None
 
@@ -269,6 +278,35 @@ class TraceHub:
         codegen = getattr(sched, "_codegen", None)
         self._sim = None
         self._c_index = []
+        if self._vm is not None:
+            self._vm.trace_set([])
+        self._vm = None
+        cy = getattr(sched, "_cy_ctx", None)
+        compiler = getattr(sched, "compiler", None)
+        if cy is not None and compiler is not None and hasattr(cy, "trace_set"):
+            # vm-fast: narrow signals compared in C (it used to read every
+            # traced signal into a Value each time step: ~60x the run time
+            # of a 7,700-signal design); wide ones and memory elements here.
+            sids: list[int] = []
+            py_names_vm: list[str] = []
+            py_index_vm: list[int] = []
+            for i, name in enumerate(self._names):
+                sid = compiler.signal_map.get(name)
+                if sid is not None and compiler.sig_width[sid] <= 64:  # noqa: PLR2004
+                    sids.append(sid)
+                    self._c_index.append(i)
+                else:
+                    py_names_vm.append(name)
+                    py_index_vm.append(i)
+            # (Signals kept in vm-fast's wide word pool -- some narrow
+            # ones too -- go to the Python poller.)
+            for j in reversed(cy.trace_set(sids)):
+                i = self._c_index.pop(j)
+                py_names_vm.append(self._names[i])
+                py_index_vm.append(i)
+            self._vm = cy
+            self._py = _PythonPoller(sched, py_names_vm, py_index_vm) if py_names_vm else None
+            return
         if sim is None or signal_map is None or not hasattr(sim, "trace_set"):
             self._py = _PythonPoller(sched, self._names, list(range(len(self._names))))
             return
@@ -301,8 +339,14 @@ class TraceHub:
         if self._sim is not None:
             c_index = self._c_index
             out = [(c_index[i], v, m) for i, v, m in self._sim.trace_poll()]
+        elif self._vm is not None:
+            c_index = self._c_index
+            out = [(c_index[i], v, m) for i, v, m in self._vm.trace_poll()]
         if self._py is not None:
-            out.extend(self._py.poll())
+            more = self._py.poll()
+            if more:
+                # (Signal order within a time step, as one poller gives it.)
+                out = sorted(out + more) if out else more
         return out
 
     def dispatch(self, time: int, changes: list[tuple[int, int, int]]) -> None:
@@ -401,7 +445,13 @@ class VcdTraceSession(_TraceSink):
         for signal_name in self._signal_names:
             scope, leaf = _split_hierarchy(label(signal_name) if label is not None else signal_name)
             scope = root_scope if scope == "top" else f"{root_scope}.{scope}"
-            self._writer.add_signal(signal_name, width=initial[signal_name].width, scope=scope, vcd_name=leaf)
+            self._writer.add_signal(
+                signal_name,
+                width=initial[signal_name].width,
+                scope=scope,
+                vcd_name=leaf,
+                real=_is_real(sched, signal_name),
+            )
         self._writer.write_header()
         self._cur = [(initial[name].val, initial[name].mask) for name in self._signal_names]
         self._sigs = [self._writer.signal_info(name) for name in self._signal_names]
@@ -799,7 +849,7 @@ class CaptureSession(_TraceSink):
         for name, w in zip(self._vcd_names, self._widths, strict=False):
             scope, leaf = _split_hierarchy(label(name) if label is not None else name)
             scope = self._root if scope == "top" else f"{self._root}.{scope}"
-            writer.add_signal(name, width=w, scope=scope, vcd_name=leaf)
+            writer.add_signal(name, width=w, scope=scope, vcd_name=leaf, real=_is_real(self._sched, name))
         writer.write_header()
         writer.write_comment(f"capture {len(self.files)}: {reason} at {time}")
         self._sigs = [writer.signal_info(name) for name in self._vcd_names]
