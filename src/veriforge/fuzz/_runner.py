@@ -344,10 +344,14 @@ class FuzzRunner:
         # rarely divide the fuzzed operand width evenly, this needs the same
         # coarse whole-module skip Icarus already gets rather than a
         # per-expression static-width check.
-        if self._verilator and not has_streaming_expr:
+        # (And for an unsized decimal >= 2**31, which Verilator sizes to 32
+        # bits and sign-extends -- fuzzer.md: it otherwise accounts for
+        # most Verilator mismatches.)
+        if self._verilator and not has_streaming_expr and not _has_big_unsized_decimal(design):
             try:
                 verilator_res = self._simulate_verilator(verilog, vectors, top)
-                diffs = self._compare_verilator(oracle, verilator_res, vectors, skip=_two_state_outputs(top))
+                skip = _two_state_outputs(top) | _self_reading_comb_outputs(top)
+                diffs = self._compare_verilator(oracle, verilator_res, vectors, skip=skip)
                 if diffs:
                     result.mismatches.extend(diffs)
                     self.mismatches_by_engine["verilator"] = self.mismatches_by_engine.get("verilator", 0) + 1
@@ -434,7 +438,12 @@ class FuzzRunner:
         if has_clock:
             sim.drive("clk", Value(0, width=1))
 
-        sim.settle()
+        # (No settle() here: these and vector 0's drives are all starting
+        # values, settled once -- as in the Icarus testbench, which assigns
+        # 0 then vector 0 at time 0. A settle() between ran every block
+        # reading an input twice before vector 0's outputs, so a block
+        # reading its own earlier output saw one activation more than in
+        # Icarus: fuzz seed 83474.)
         results: list[dict[str, Value]] = []
 
         for vec in vectors:
@@ -532,6 +541,12 @@ class FuzzRunner:
                     text=True,
                 )
             except subprocess.CalledProcessError as exc:
+                if "may not have zero width" in exc.stderr:
+                    # `{3{~63'd5 ? f1(a) : {8'b101, a}}}`: a replication of a
+                    # `?:` with a constant condition and a function call in a
+                    # branch -- Icarus rejects it (fuzz seed 93720; with a
+                    # non-constant condition it compiles). An Icarus bug.
+                    raise _IcarusIncomparable(f"iverilog: {exc.stderr.strip()[:200]}") from exc
                 if exc.returncode < 0 or "assert" in exc.stderr or "Aborted" in exc.stderr:
                     # An internal Icarus crash (e.g. `expr_synth.cc: failed
                     # assertion`) is Icarus's bug, not a mismatch.
@@ -606,10 +621,18 @@ class FuzzRunner:
         lines.append("    initial begin")
         if has_clock:
             lines.append("        clk = 1'b0;")
-        for _vi, vec in enumerate(vectors):
+        for vi, vec in enumerate(vectors):
             for name in sorted(input_names):
                 if name == "clk":
                     continue
+                if vi == 0:
+                    # `_simulate` drives every input to 0 before vector 0
+                    # (a change from x, waking its readers, even when vector
+                    # 0 leaves an input x): mirrored here so an `always @*`
+                    # reading only all-x inputs runs at vector 0 in Icarus
+                    # too -- with a real, "ran with x" (x reads 0.0) and
+                    # "never ran" (0.0 start) differ (fuzz seed 82301).
+                    lines.append(f"        {name} = 0;")
                 val_repr = self._value_to_verilog(vec.get(name, Value(0)))
                 lines.append(f"        {name} = {val_repr};")
             if has_clock:
@@ -873,6 +896,51 @@ def _streaming_targets(design: Design) -> set[int]:
             or (isinstance(node.lhs, Concatenation) and node.lhs.from_streaming)
         )
     }
+
+
+def _has_big_unsized_decimal(design: Design) -> bool:
+    """Whether *design* has an unsized decimal literal >= 2**31
+    (`4294967295`): see the Verilator comparison in `_run_one`."""
+    from ..model.expressions import Literal  # noqa: PLC0415
+
+    return any(
+        isinstance(node, Literal)
+        and node.width is None
+        and isinstance(node.value, int)
+        and node.value >= 2**31
+        and (node.base in (None, "d"))
+        for module in design.modules
+        for node in module.walk()
+    )
+
+
+def _self_reading_comb_outputs(mod: Module) -> set[str]:
+    """Signals written by an ``always @(*)`` block that reads one of the
+    signals it writes (read before write within the block). Verilator
+    re-evaluates such a block until it settles; IEEE (and veriforge, and
+    Icarus) don't re-trigger a block on its own writes (known_issues.md,
+    "Self-referential combinational reads"), so the value read is the
+    previous activation's: not comparable with Verilator (fuzz seed 93087)."""
+    from ..model.behavioral import SensitivityType  # noqa: PLC0415
+    from ..model.expressions import Identifier  # noqa: PLC0415
+    from ..model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
+
+    out: set[str] = set()
+    for ab in mod.always_blocks:
+        if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
+            continue
+        written: set[str] = set()
+        lhs_ids: set[int] = set()
+        for node in ab.body.walk():
+            if isinstance(node, (BlockingAssign, NonblockingAssign)):
+                for ident in node.lhs.walk():
+                    if isinstance(ident, Identifier):
+                        written.add(ident.name)
+                        lhs_ids.add(id(ident))
+        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier) and id(n) not in lhs_ids}
+        if read & written:
+            out |= written
+    return out
 
 
 def _two_state_outputs(mod: Module) -> set[str]:

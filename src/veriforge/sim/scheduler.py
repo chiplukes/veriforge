@@ -1410,6 +1410,7 @@ class Scheduler:  # cm:9a7f2c
         # under a single-pass bootstrap).
         bootstrapped_now = False
         boot_dirty: set[str] = set()
+        starting = not self._combo_bootstrapped  # (nothing has run or settled yet)
         if not self._combo_bootstrapped:
             self._combo_bootstrapped = True
             if self._combo_procs:
@@ -1433,9 +1434,12 @@ class Scheduler:  # cm:9a7f2c
         self._pending_drives.clear()
 
         # Use the pre-drive snapshot for edge detection so sequential blocks
-        # fire correctly when a driven signal is a clock-like edge signal.
+        # fire correctly when a driven signal is a clock-like edge signal --
+        # except before anything has started: a drive then sets a starting
+        # value, not an edge (as before the first run(), and on compiled:
+        # `drive("clk", 1); settle()` used to fire `@(posedge clk)` here only).
         if self._settle_snapshot:
-            self._prev_signals = self._settle_snapshot
+            self._prev_signals = self._snapshot_signals() if starting else self._settle_snapshot
             self._settle_snapshot = {}
         self._edge_changed.clear()
         self._triggered_seq_procs = set()

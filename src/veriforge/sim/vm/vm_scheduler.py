@@ -1801,6 +1801,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     # ── Signal access (Scheduler-compatible API) ─────────────────
 
+    def _pending_drives_snapshot_now(self) -> None:
+        """Re-take `_snapshot_before_first_drive`'s edge baseline from the
+        current (post-drive) state."""
+        if self._cy_ctx is not None and self._cy_ctx._procs_setup:
+            self._cy_ctx.take_snapshot()
+            self._cy_ctx.reset_seq_fired()
+        else:
+            self._prev_sig_val = list(self.compiler.sig_val)
+            self._prev_sig_mask = list(self.compiler.sig_mask)
+
     def _snapshot_before_first_drive(self) -> None:
         """Snapshot pre-drive state for edge detection in settle(), exactly
         once per drive batch (i.e. once per `_pending_drives` refill).
@@ -2000,7 +2010,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # hit a stale/undersized `_prev_sig_val` and raised IndexError
         # (found via `test_axi_lite_regs_typed_cross_engine[vm-fast]`,
         # which also needed the inter-combo convergence above).
-        bootstrap = not self._combo_bootstrapped and bool(self._combo_procs)
+        starting = not self._combo_bootstrapped  # (nothing has run or settled yet)
+        bootstrap = starting and bool(self._combo_procs)
         self._combo_bootstrapped = True
         if bootstrap and not self._pending_drives:
             self._bootstrap_combos()
@@ -2008,6 +2019,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
         if not self._pending_drives:
             return
+        if starting:
+            # Before anything has started a drive sets a starting value, not
+            # an edge (as before the first run(), and on compiled): the
+            # edge baseline is the post-drive state. `drive("clk", 1);
+            # settle()` used to fire `@(posedge clk)` here only.
+            self._pending_drives_snapshot_now()
         changed = set(self._pending_drives)
         self._pending_drives.clear()
 

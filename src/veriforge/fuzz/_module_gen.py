@@ -328,16 +328,22 @@ class ModuleGenerator:
         if self._rng.random() < _REAL_PROBABILITY:
             self._add_reals(ctx)
 
-    def _add_reals(self, ctx: SignalContext) -> None:
+    def _add_reals(self, ctx: SignalContext, *, clocked: bool = False) -> None:  # noqa: PLR0915
         """`real` variables (sim/reals.py) computed in an `always @*` from
         inputs and real literals, rounded into one output. Narrow inputs and
         no division keep every value well inside a double and a 64-bit
-        integer, where Icarus, Verilator and the engines agree exactly."""
+        integer, where Icarus, Verilator and the engines agree exactly.
+
+        *clocked* (the clocked strategy): real registers updated on the
+        clock instead, a real function, a real memory, sometimes a
+        `$display` of reals, and a new output of their own."""
         rng = self._rng
         inputs = [s for s in ctx.inputs if s.name != "clk" and s.width <= 16]  # noqa: PLR2004
         # (At most 64 bits: Icarus turns a negative real that rounds to 0
         # into garbage in a wider vector -- known_issues.md.)
         outputs = [s for s in ctx.outputs if s.width <= 64]  # noqa: PLR2004
+        if clocked and inputs:
+            outputs = [ctx.add_output(rng, width=rng.choice((8, 16, 32, 64)), signed=rng.random() < 0.5)]
         if not inputs or not outputs:
             return
         names = [f"rv{k}" for k in range(rng.randint(1, 2))]
@@ -370,6 +376,10 @@ class ModuleGenerator:
                 return operand(earlier)
             kind = rng.random()
             if kind < 0.15:  # noqa: PLR2004
+                if clocked:
+                    # (`-x` of +0.0 is +0.0 in Icarus, -0.0 in IEEE 754: it
+                    # shows in a displayed real -- known_issues.md.)
+                    return BinaryOp("*", real_expr(earlier, depth - 1), Literal(-1.0, original_text="-1.0"))
                 return UnaryOp("-", real_expr(earlier, depth - 1))
             if kind < 0.3:  # noqa: PLR2004
                 cond = BinaryOp(rng.choice(("<", "<=", ">", ">=", "==", "!=")), operand(earlier), real_literal())
@@ -386,12 +396,57 @@ class ModuleGenerator:
                 # (Reading an input: `_ensure_comb_blocks_read_a_signal`
                 # would patch in `| (i & 1'b0)`, illegal on a real.)
                 rhs = BinaryOp(rng.choice(("+", "-")), rhs, input_operand())
-            stmts.append(BlockingAssign(Identifier(name), rhs))
-        ctx.always_blocks.append(
-            AlwaysBlock(SeqBlock(stmts), sensitivity_list=[], sensitivity_type=SensitivityType.COMBINATIONAL)
-        )
+            if clocked:
+                stmts.append(NonblockingAssign(Identifier(name), rhs))
+            else:
+                stmts.append(BlockingAssign(Identifier(name), rhs))
+        result: Expression = Identifier(names[-1])
+        if clocked:
+            if rng.random() < 0.5:  # noqa: PLR2004
+                # function real fr(input real a, input [7:0] k); fr = a * c + k; endfunction
+                body = BlockingAssign(
+                    Identifier("fr"),
+                    BinaryOp("+", BinaryOp("*", Identifier("a"), real_literal()), Identifier("k")),
+                )
+                ports = [
+                    Port("a", PortDirection.INPUT, data_type="real"),
+                    Port("k", PortDirection.INPUT, width=Range(Literal(7), Literal(0))),
+                ]
+                ctx.functions.append(FunctionDecl("fr", return_kind="real", ports=ports, body=SeqBlock([body])))
+                k_arg = rng.choice([s for s in inputs if not s.signed] or [None])
+                arg = k_arg.as_identifier() if k_arg is not None else Literal(3, width=8, original_text="8'd3")
+                result = BinaryOp("-", FunctionCall("fr", [result, arg]), real_literal())
+            if rng.random() < 0.5:  # noqa: PLR2004
+                # real rm [0:3]: written at an input's low bits, read back
+                ctx.memories.append(Variable("rm", VariableKind.REAL, dimensions=[Range(Literal(0), Literal(3))]))
+                index: Expression = RangeSelect(rng.choice(inputs).as_identifier(), Literal(1), Literal(0))
+                if min(s.width for s in inputs) < 2:  # noqa: PLR2004
+                    slot = rng.randint(0, 3)
+                    index = Literal(slot, width=2, original_text=f"2'd{slot}")
+                stmts.append(NonblockingAssign(BitSelect(Identifier("rm"), index), real_expr(names, 1)))
+                result = BinaryOp("+", result, BitSelect(Identifier("rm"), Literal(rng.randint(0, 3))))
+            # (Only when no other block displays: two blocks on the same edge
+            # run in an unspecified order -- Icarus's differs.)
+            displays = any(isinstance(node, SystemTaskCall) for ab in ctx.always_blocks for node in ab.body.walk())
+            if not displays and rng.random() < 0.4:  # noqa: PLR2004
+                # (No `%d`: Icarus prints a negative real that rounds to 0
+                # as `-0` -- known_issues.md.)
+                specs = [rng.choice(("%f", "%g", "%e", "%0.3f")) for _ in names]
+                text = " ".join([DISPLAY_MARK.strip(), *specs])
+                stmts.append(SystemTaskCall("$display", [StringLiteral(text), *(Identifier(n) for n in names)]))
+            ctx.always_blocks.append(
+                AlwaysBlock(
+                    SeqBlock(stmts),
+                    sensitivity_list=[SensitivityEdge("posedge", Identifier("clk"))],
+                    sensitivity_type=SensitivityType.SEQUENTIAL,
+                )
+            )
+        else:
+            ctx.always_blocks.append(
+                AlwaysBlock(SeqBlock(stmts), sensitivity_list=[], sensitivity_type=SensitivityType.COMBINATIONAL)
+            )
         out = rng.choice(outputs)
-        rhs = BinaryOp(rng.choice(("+", "-", "*")), Identifier(names[-1]), real_literal())
+        rhs = BinaryOp(rng.choice(("+", "-", "*")), result, real_literal())
         ctx.continuous_assigns = [
             ca for ca in ctx.continuous_assigns if not (isinstance(ca.lhs, Identifier) and ca.lhs.name == out.name)
         ]
@@ -529,6 +584,8 @@ class ModuleGenerator:
             sensitivity_type=SensitivityType.SEQUENTIAL,
         )
         ctx.always_blocks = [ab]
+        if self._rng.random() < _REAL_PROBABILITY:
+            self._add_reals(ctx, clocked=True)
 
     # ------------------------------------------------------------------
     # Strategy: NESTED_BLOCKS
@@ -1138,6 +1195,23 @@ class ModuleGenerator:
                 actual = WidthCast(Literal(port_w, width=32), actual)
             port_connections.append(PortConnection(port_name=port.name, expression=actual, is_named=True))
 
+        # One input connection is a plain parent input, which starts x and so
+        # changes at vector 0. Otherwise nothing in the child may ever
+        # change -- all connections constant, or `{...} != &{i5[12]}`,
+        # whose known bits always differ -- and its `always @*` blocks
+        # never run, except in Icarus, which wakes them on a time-0
+        # continuous assign (known_issues.md; fuzz seeds 90151, 94088).
+        parent_inputs = [sig for sig in ctx.inputs if sig.name != "clk"]
+        data_conns = [
+            (pc, port)
+            for pc, port in zip(port_connections, child.ports, strict=True)
+            if port.direction != PortDirection.OUTPUT and port.name != "clk"
+        ]
+        if data_conns and parent_inputs:
+            pc, port = self._rng.choice(data_conns)
+            port_w, _signed = _port_width_signed(port)
+            pc.expression = WidthCast(Literal(port_w, width=32), self._rng.choice(parent_inputs).as_identifier())
+
         inst = Instance(child.name, ctx._next_name("u"), port_connections=port_connections)
         ctx.instances.append(inst)
 
@@ -1274,24 +1348,27 @@ def _ensure_comb_blocks_read_a_signal(ctx: SignalContext) -> None:
     "Start-up activation"). So a block whose only changing reads are wires
     that settle at time 0 -- a constant `assign w = 2'b10;`, or a wire whose
     value the vector-0 drive doesn't change -- would differ by design. An
-    input always changes at vector 0 (from x), waking it everywhere. The
-    patch `rhs | (input & 1'b0)` leaves the value unchanged."""
+    input always changes at vector 0 (the harness drives 0 first), waking it
+    everywhere.
+
+    The read is a write of the inputs into a register nothing reads
+    (`vfd0 = ^{i1, i2};`), at the top of every such block. It used to be `rhs |
+    (i & 1'b0)`, which Icarus constant-folds out of the block's sensitivity
+    (known_issues.md, "always @* sensitivity drops identifiers in
+    constant-folded branches"): the block then never ran there (fuzz seed
+    83550). So can any input read the generator makes foldable, hence every
+    block gets one."""
     inputs = [s for s in ctx.inputs if s.name != "clk"]
     if not inputs:
         return
-    live = {s.name for s in inputs}
+    # (Every input, XOR-reduced: a hierarchical child's input can be tied to
+    # a constant expression, which never changes -- fuzz seed 93573.)
+    k = 0
     for ab in ctx.always_blocks:
         if ab.sensitivity_type != SensitivityType.COMBINATIONAL:
             continue
-        written = _collect_assigned_signals(ab.body)
-        read = {n.name for n in ab.body.walk() if isinstance(n, Identifier)} - written
-        if read & live:
-            continue
-        for node in ab.body.walk():
-            if isinstance(node, BlockingAssign):
-                node.rhs = BinaryOp(
-                    "|",
-                    node.rhs,
-                    BinaryOp("&", inputs[0].as_identifier(), Literal(0, width=1, base="b", original_text="1'b0")),
-                )
-                break
+        name = f"vfd{k}"
+        k += 1
+        ctx.memories.append(Variable(name, VariableKind.REG))
+        read = UnaryOp("^", Concatenation([s.as_identifier() for s in inputs]))
+        ab.body = SeqBlock([BlockingAssign(Identifier(name), read), ab.body])

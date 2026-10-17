@@ -1617,7 +1617,10 @@ class ExpressionEvaluator:  # cm:7e8b5d
             # of whatever was first assigned to it, unsigned).
             kind = getattr(local_var.kind, "value", "")
             local_ctx._signal_signed[local_var.name] = bool(local_var.signed)  # defaults by kind
-            if local_var.name not in local_signals and not local_var.dimensions:
+            # (Always a fresh one: a local shadows a same-named signal of the
+            # caller -- in a nested call, the calling function's own local
+            # `l2` used to be reused, with its width: fuzz seed 102448.)
+            if not local_var.dimensions:
                 local_width = _SIGNED_KIND_WIDTHS.get(kind, 64 if kind == "time" else 1)
                 if local_var.width is not None:
                     msb_v = self.eval(local_var.width.msb, ctx)

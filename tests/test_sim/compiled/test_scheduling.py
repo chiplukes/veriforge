@@ -333,10 +333,10 @@ class TestBootstrapSettleFalsePosedge:
             endmodule
         """)
         # (A declaration initializer: no engine runs initial blocks under a
-        # settle()-only flow -- compiled used to, at construction. Compiled
-        # only: reference/vm do count this first drive as a posedge --
-        # known_issues.md, "first settle()".)
-        for engine in ("compiled",):
+        # settle()-only flow -- compiled used to, at construction. Every
+        # engine since 2026-10-16: reference/vm counted this first drive as
+        # a posedge, as before nothing had started.)
+        for engine in ("reference", "vm", "vm-fast", "compiled"):
             sim = Simulator(mod, engine=engine)
             # The clock's very first-ever drive sets it straight to 1 -- exactly
             # what a "starts high" clock generator does before any stepping.

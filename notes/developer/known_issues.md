@@ -58,6 +58,13 @@ Icarus differences, not replicated:
   bits.
 - Icarus converts a partly-x signed value to real by its own rule (see "Icarus:
   real formats of signed expressions" below).
+- Icarus prints `%d` of a negative real that rounds to 0 (`-0.125`) as `-0`;
+  the LRM converts it to the integer 0 first, as veriforge does.
+- Icarus negates a real as `0.0 - x`: `-x` of +0.0 is +0.0 there (so the
+  literal `-0.0` is +0.0 too, `$realtobits(-0.0)` 0). IEEE 754 negation gives
+  -0.0, as in veriforge (`%e`: `-0.000000e+00`); a computed -0.0 (`0 * -0.75`)
+  prints the same in both. Only a displayed real shows the difference (fuzz
+  seed 101040).
 
 ### Multi-dimensional array sub-array access: only assignments supported
 
@@ -72,17 +79,6 @@ connection, a function argument) still raises `NotImplementedError` from
 not yet supported"). Elements (`m[i][j]`), `$readmem` into rebased memories,
 hierarchical references and the Python API (`sim.read("m[4]")`, VCD labels)
 all use declared addresses (fixed 2026-10-12).
-
-### A drive before the first settle(): an edge on reference/vm, not on compiled
-
-**Status**: Open cross-engine difference (found 2026-10-16; predates the
-start-up work). `drive("clk", 1); settle()` as the very first activity fires
-`always @(posedge clk)` on reference, vm and vm-fast (x -> 1 against the
-pre-drive state), not on compiled, which deliberately treats the first
-settle() as a bootstrap (the 2026-09-01 "bootstrap-settle false posedge"
-fix). A drive before the first run() is not an edge on any engine. Needs a
-decision on which rule all engines follow.
-`TestBootstrapSettleFalsePosedge` checks compiled only.
 
 ## Reference notes (not defects)
 
@@ -214,6 +210,15 @@ silently first). `always @* y = a;` with `reg a = 1;` therefore leaves y at
 x, as Icarus does. (`always_latch` also never ran before, on any engine: it
 had no inferred sensitivity.)
 
+A drive made from Python before anything has started (before the first
+`run()` or `settle()`) wakes the blocks that read it, but is not an edge:
+`drive("clk", 1); settle()` doesn't fire `@(posedge clk)`. It sets a starting
+value, as a declaration initializer does. Until 2026-10-16 reference, vm and
+vm-fast fired it on the first `settle()`, though not on the first `run()`;
+compiled never did (its 2026-09-01 fix for a clock that starts high
+double-capturing a skid buffer's first beat). After that, every drive is an
+event as usual.
+
 One Icarus difference remains: Icarus does wake an `always @*` reading a
 *constant*-driven wire (`wire c = 1'b1;`) at t=0, though not one reading a
 wire driven from a declaration-initialized register (`wire b = a;`). The
@@ -272,6 +277,15 @@ on Icarus; at 64 bits (`wire [63:0]`) it's right. Verilator and veriforge
 give the 127-bit two's complement. Found 2026-10-14 replaying an old fuzz
 mismatch. Not a veriforge bug -- do not replicate.
 
+### Icarus: a wide division as a continuous-assign `?:` condition
+
+`wire [63:0] o4 = i2 / (|i2[45:36] | 1'b1) ? 1 : 3'(i3);` with an 81-bit
+`i2 = 81'h179d52130af22f97212d1` (divisor 1, so the condition is `i2`,
+nonzero) takes the false branch in Icarus. The same expression in a
+procedural `$display`, or with `i2 = 81'hafb0...`, is right. Verilator and
+veriforge take the true branch. Found 2026-10-17 (fuzz seed 104810). Not a
+veriforge bug -- do not replicate.
+
 ### Icarus: a reduction of an oversized unsized literal
 
 Icarus sizes the unsized literal `4294967295` to 33 bits (so `~&` of it is
@@ -280,6 +294,32 @@ instead of a 1-bit -1: assigned to 16 bits it gives `0001`, where
 `$signed(~&33'h0ffffffff)` gives `ffff` (veriforge: `ffff` for both).
 Verilator sizes the literal to 32 bits (`fuzzer.md`). Found 2026-10-14
 (fuzz seed 8071). Not a veriforge bug -- do not replicate.
+
+### Icarus: unsized constant shifts keep their carried-out bits
+
+Icarus evaluates a constant expression of unsized operands without losing
+bits: `~(1966122574 <<< 16)` is 48 bits there (`8acf59b1ffff`), so
+`^(~(1966122574 <<< 16))` is 1. An unsized literal is 32 bits (IEEE
+1800-2017 5.7.1), giving `2bb1ffff` and 0, as veriforge and Verilator have
+it; assigned to a 32-bit wire first, Icarus agrees. Found 2026-10-16 (fuzz
+seed 83121). Not a veriforge bug -- do not replicate.
+
+### Icarus: `$signed`/`$unsigned` pass the assignment's width into their argument
+
+`r5 = $unsigned(i3 * 2147483647);` with a 63-bit `i3` and a 128-bit `r5`:
+Icarus multiplies at 128 bits (`...3fffffff7ffffff88000000f`), as it does
+for the plain `r5 = i3 * 2147483647;`. The argument of a cast function is
+self-determined, so the product wraps at 63 bits (`...7ffffff88000000f`);
+Verilator and veriforge agree on that. Found 2026-10-16 (fuzz seed 82656).
+Not a veriforge bug -- do not replicate.
+
+### Icarus: a `?:` with a constant condition takes the chosen branch's width
+
+`$display("%o", p1 ? p1 : r[53:47])` with a 1-bit parameter `p1 = 1`
+prints `1` in Icarus: it folds the condition and sizes the result as `p1`
+alone. A conditional's width is that of its wider branch (IEEE 1800-2017
+11.6.1): 7 bits, `001`, as veriforge prints. Found 2026-10-16 (fuzz seed
+101064). Not a veriforge bug -- do not replicate.
 
 ### Icarus: real formats of signed expressions, leading x/X
 

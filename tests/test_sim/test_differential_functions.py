@@ -693,3 +693,34 @@ endmodule
         y0, y1 = sim.read("y0"), sim.read("y1")
         assert y0 == td.Value(77, width=64), f"engine={engine} y0={y0!r}"
         assert y1 == td.Value(30, width=64), f"engine={engine} y1={y1!r}"
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_nested_call_with_same_named_local(engine: str) -> None:
+    """A function calling another whose local has the same name as one of
+    its own: reference reused the caller's local (and its 4-bit width) for
+    the callee's 32-bit `l2`, so `l2[11:8]` read x (fuzz seed 102448,
+    2026-10-16). Expected values from Icarus."""
+    source = """
+module t(input [2:0] a, output [6:0] y1, output [6:0] y2);
+    function automatic [3:0] f1 (input [3:0] a1);
+        reg [31:0] l2;
+        begin l2 = {28'd0, a1}; l2 = l2 << 8; f1 = l2[11:8]; end
+    endfunction
+    function automatic [6:0] f2 (input [31:0] a1);
+        reg [3:0] l2;
+        begin l2 = 4'd3; f2 = f1(4'd5); end
+    endfunction
+    function automatic [6:0] f3 (input [31:0] a1);
+        reg [3:0] l9;
+        begin l9 = 4'd3; f3 = f1(4'd5); end
+    endfunction
+    assign y1 = f2(a[1]);
+    assign y2 = f3(a[1]);
+endmodule
+"""
+    sim = td._sim_for(source, engine)
+    sim.drive("a", td.Value(2, width=3))
+    sim.settle()
+    assert [sim.read(s).val for s in ("y1", "y2")] == [5, 5]
+    assert not sim.read("y1").mask
