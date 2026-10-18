@@ -541,7 +541,12 @@ class CythonCompiler:  # cm:3d7f4a
         # Cython's parser recurses once per nesting level, so a long
         # associative chain (a 200-input XOR becomes 200 nested parentheses)
         # hit Python's recursion limit and the build failed. Run the build
-        # on a thread with a big stack and a high recursion limit.
+        # on a thread with a big stack and a high recursion limit. The
+        # stack size steps down until the platform accepts one: 512 MiB
+        # raised ValueError on one Windows machine (about 128 MiB was the
+        # most it took), failing every compiled build. The recursion limit
+        # scales with the stack actually granted, so a deep chain still
+        # stops with RecursionError rather than overflowing the C stack.
         return f"""\
 import sys
 import threading
@@ -571,18 +576,31 @@ def _build():
 _failure = []
 
 
-def _run():
+def _run(limit):
     try:
+        sys.setrecursionlimit(limit)
         _build()
     except BaseException as exc:  # noqa: BLE001 -- re-raised in the main thread
         _failure.append(exc)
 
 
-sys.setrecursionlimit(200000)
-threading.stack_size(512 * 1024 * 1024)
-_thread = threading.Thread(target=_run)
-_thread.start()
-_thread.join()
+_thread = None
+for _mib in (512, 256, 128, 64, 32):
+    # (~2.6 KiB of C stack per Python frame: 200000 frames at 512 MiB.)
+    _limit = max(10000, 200000 * _mib // 512)
+    try:
+        threading.stack_size(_mib * 1024 * 1024)
+        _candidate = threading.Thread(target=_run, args=(_limit,))
+        _candidate.start()
+    except (ValueError, RuntimeError, MemoryError):
+        continue  # (this size isn't available here: try a smaller one)
+    _thread = _candidate
+    break
+if _thread is None:
+    # No large stack at all: build on this thread, as plain setuptools would.
+    _run(max(sys.getrecursionlimit(), 10000))
+else:
+    _thread.join()
 if _failure:
     raise _failure[0]
 """

@@ -425,3 +425,63 @@ class TestTimingDiagnostics:
         assert any("preflight" in str(w.message).lower() for w in user_warnings), (
             f"Expected a UserWarning with 'preflight', got: {[str(w.message) for w in user_warnings]}"
         )
+
+
+class TestSetupScriptStackSize:
+    """The generated setup.py builds on a thread with a big stack (Cython's
+    parser recurses once per nesting level). It asked for 512 MiB outright,
+    and `threading.stack_size` raised ValueError on a Windows machine that
+    took about 128 MiB at most -- every compiled build failed there
+    (2026-10-17). It steps down now, scaling the recursion limit to the
+    stack it got. Run with stand-ins for setuptools/Cython: no C build."""
+
+    def _run_script(self, monkeypatch, max_mib):
+        import sys
+        import threading
+        import types
+
+        seen = {}
+        current = {"size": 0}
+
+        def fake_stack_size(size=None):
+            if size is None:
+                return current["size"]
+            if max_mib is not None and size > max_mib * 1024 * 1024:
+                raise ValueError("size not valid")
+            current["size"] = size
+            return 0
+
+        def fake_setup(**kwargs):
+            seen["stack_mib"] = current["size"] // (1024 * 1024)
+            seen["limit"] = sys.getrecursionlimit()
+            seen["thread"] = threading.current_thread() is not threading.main_thread()
+
+        setuptools = types.ModuleType("setuptools")
+        setuptools.Extension = lambda *a, **k: (a, k)
+        setuptools.setup = fake_setup
+        cython = types.ModuleType("Cython")
+        cython_build = types.ModuleType("Cython.Build")
+        cython_build.cythonize = lambda exts, **k: exts
+        monkeypatch.setitem(sys.modules, "setuptools", setuptools)
+        monkeypatch.setitem(sys.modules, "Cython", cython)
+        monkeypatch.setitem(sys.modules, "Cython.Build", cython_build)
+        monkeypatch.setattr(threading, "stack_size", fake_stack_size)
+        old_limit = sys.getrecursionlimit()
+        try:
+            script = CythonCompiler()._generate_setup_py("compiled_t")
+            exec(compile(script, "setup.py", "exec"), {"__name__": "__main__"})  # noqa: S102
+        finally:
+            sys.setrecursionlimit(old_limit)
+        return seen
+
+    def test_takes_512_mib_when_available(self, monkeypatch):
+        seen = self._run_script(monkeypatch, None)
+        assert seen == {"stack_mib": 512, "limit": 200000, "thread": True}
+
+    def test_steps_down_when_512_mib_is_refused(self, monkeypatch):
+        seen = self._run_script(monkeypatch, 128)
+        assert seen == {"stack_mib": 128, "limit": 50000, "thread": True}
+
+    def test_no_large_stack_at_all_builds_on_the_main_thread(self, monkeypatch):
+        seen = self._run_script(monkeypatch, 16)
+        assert seen["thread"] is False and seen["limit"] >= 10000
