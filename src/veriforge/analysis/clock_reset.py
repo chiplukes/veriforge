@@ -167,8 +167,41 @@ def _is_zero_literal(expr) -> bool:
     return False
 
 
-def _analyze_sequential_block(block: AlwaysBlock, clocks: dict, resets: dict) -> None:
-    """Analyze a sequential always block for clock and reset signals."""
+def _loads_data(branch: object, signals: frozenset[str]) -> bool:
+    """Whether an ``if`` branch assigns anything but constants: an
+    assignment whose right-hand side reads one of *signals* (the module's
+    ports, nets and variables). Parameters and enum members are constants;
+    a ``for`` loop's own variable (``mem[i] <= 0``) is too. A reset branch
+    only ever loads constants (``q <= 0``, ``state <= IDLE``); ``if
+    (i_start) b <= a`` is an enable, not a reset."""
+    from veriforge.model.statements import BlockingAssign, ForLoop, NonblockingAssign  # noqa: PLC0415
+
+    if branch is None or not signals:
+        return False
+    loop_vars = {
+        target.name
+        for node in branch.walk()  # type: ignore[attr-defined]
+        if isinstance(node, ForLoop) and node.init is not None
+        for target in [getattr(node.init, "lhs", None)]
+        if isinstance(target, Identifier)
+    }
+    for node in branch.walk():  # type: ignore[attr-defined]
+        if isinstance(node, (BlockingAssign, NonblockingAssign)):
+            lhs = node.lhs
+            if isinstance(lhs, Identifier) and lhs.name in loop_vars:
+                continue  # (the loop's own counter)
+            for ident in node.rhs.walk():
+                if isinstance(ident, Identifier) and ident.name in signals and ident.name not in loop_vars:
+                    return True
+    return False
+
+
+def _analyze_sequential_block(
+    block: AlwaysBlock, clocks: dict, resets: dict, signals: frozenset[str] = frozenset()
+) -> None:
+    """Analyze a sequential always block for clock and reset signals.
+    *signals*: the module's port, net and variable names (a candidate whose
+    branch loads one of them is not a reset -- see `_loads_data`)."""
     edges = block.sensitivity_list
     if not edges:
         return
@@ -178,6 +211,11 @@ def _analyze_sequential_block(block: AlwaysBlock, clocks: dict, resets: dict) ->
 
     if first_if is not None:
         reset_signal_name = _extract_condition_signal(first_if.condition)
+        if len(edges) == 1 and reset_signal_name is not None and _loads_data(first_if.then_body, signals):
+            # (`if (i_start) b <= a;` used to be taken for a sync reset, and
+            # being first by name it became the domain's reset over `rst`.
+            # An async candidate already has its sensitivity edge.)
+            reset_signal_name = None
 
     if len(edges) == 1:
         # Single edge → clock only, possibly with sync reset
@@ -297,10 +335,13 @@ def extract_clocks_resets(module: Module) -> ClockResetInfo:  # cm:f2b8e7
     clocks: dict[str, ClockSignal] = {}
     resets: dict[str, ResetSignal] = {}
 
+    signals = frozenset(
+        [*(p.name for p in module.ports), *(n.name for n in module.nets), *(v.name for v in module.variables)]
+    )
     for block in module.always_blocks:
         if block.sensitivity_type != SensitivityType.SEQUENTIAL:
             continue
-        _analyze_sequential_block(block, clocks, resets)
+        _analyze_sequential_block(block, clocks, resets, signals)
 
     # A reset must be driven from outside the module: it must be an input port.
     # Internal regs (e.g. ``trig_rise_strobe_int``) and enables that appear as

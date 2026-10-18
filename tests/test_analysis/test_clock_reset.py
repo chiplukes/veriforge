@@ -456,3 +456,32 @@ class TestDesignLevel:
         assert "mod_b" in result
         assert len(result["mod_a"].clocks) == 1
         assert len(result["mod_b"].clocks) == 0
+
+
+class TestEnableIsNotAReset:
+    """A first-`if` signal whose branch loads data (`if (i_start) b <= a;`)
+    is an enable, not a sync reset. It used to be taken for one and, sorting
+    before `rst`, became the clock domain's reset (2026-10-18)."""
+
+    def test_load_branch_disqualifies(self):
+        mod = _parse("""
+module t(input clk, input rst, input i_start, input [7:0] d, output reg [7:0] a, output reg [7:0] b);
+  always @(posedge clk) if (rst) a <= 0; else a <= d;
+  always @(posedge clk) if (i_start) b <= a;
+endmodule
+""")
+        assert [(r.name, r.style, r.clock) for r in extract_clocks_resets(mod).resets] == [("rst", "sync", "clk")]
+
+    def test_constant_resets_still_count(self):
+        # A parameter, an enum member and a memory-clear loop are constants.
+        mod = _parse("""
+module u #(parameter [7:0] INIT = 8'h5a) (input clk, input srst, input clr, output reg [7:0] q, output reg [1:0] st);
+  typedef enum logic [1:0] {IDLE, RUN} s_t;
+  reg [7:0] mem [0:3];
+  integer i;
+  always @(posedge clk) if (srst) q <= INIT; else q <= q + 1;
+  always @(posedge clk) if (srst) st <= IDLE; else st <= RUN;
+  always @(posedge clk) if (clr) for (i = 0; i < 4; i = i + 1) mem[i] <= 8'd0; else mem[0] <= q;
+endmodule
+""")
+        assert sorted(r.name for r in extract_clocks_resets(mod).resets) == ["clr", "srst"]

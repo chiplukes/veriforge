@@ -365,3 +365,34 @@ class TestPlanInvariants:
         assert "bclk" in text
         assert "m_axis" in text
         assert "s_axis" in text
+
+
+def test_enable_sorting_before_rst_is_not_the_reset():
+    # `i_start` (an enable: its branch loads `a`) sorts before `rst` and used
+    # to become the domain's reset (2026-10-18).
+    mod = _parse("""
+module t(input clk, input rst, input i_start, input [7:0] d, output reg [7:0] a, output reg [7:0] b);
+  always @(posedge clk) if (rst) a <= 0; else a <= d;
+  always @(posedge clk) if (i_start) b <= a;
+endmodule
+""")
+    plan = build_plan(mod)
+    assert [(d.name, d.reset.name if d.reset else None) for d in plan.domains] == [("clk", "rst")]
+
+
+@pytest.mark.parametrize(
+    ("other", "reset"),
+    [("clr", "rst"), ("a_flush", "core_rst_n"), ("init", "srst")],
+)
+def test_reset_like_name_wins_among_candidates(other, reset):
+    # Two constant-only first-`if` signals on one clock: both qualify as sync
+    # resets structurally, and the first by name used to win (`clr` over
+    # `rst`). The more reset-like name wins now (2026-10-18).
+    mod = _parse(f"""
+module t(input clk, input {other}, input {reset}, output reg [7:0] a, output reg [7:0] b);
+  always @(posedge clk) if ({other}) a <= 0; else a <= a + 1;
+  always @(posedge clk) if ({reset}) b <= 0; else b <= b + 1;
+endmodule
+""")
+    plan = build_plan(mod)
+    assert [(d.name, d.reset.name if d.reset else None) for d in plan.domains] == [("clk", reset)]

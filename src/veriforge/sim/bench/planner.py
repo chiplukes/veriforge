@@ -18,6 +18,7 @@ owns an interface.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -335,10 +336,13 @@ def _build_domains(
     applied: list[str] = []
     clock_to_domain: dict[str, str] = {}
 
-    # Group resets by their associated clock (from structural analysis).
+    # Group resets by their associated clock (from structural analysis). With
+    # several candidates for one clock, the most reset-like name wins
+    # (`_reset_name_rank`); it used to be the first by name, so an enable
+    # like `i_start` could beat `rst`.
     resets_by_clock: dict[str, ResetSignal] = {}
     unassigned_resets: list[ResetSignal] = []
-    for r in info.resets:
+    for r in sorted(info.resets, key=_reset_name_rank):  # (stable: then by name)
         if r.clock is not None and r.clock not in resets_by_clock:
             resets_by_clock[r.clock] = r
         elif r.clock is None:
@@ -487,6 +491,24 @@ def _bind_interfaces(  # noqa: PLR0912
         bindings.append(_binding(iface, signals, clock_to_domain[chosen], "naming"))
 
     return tuple(bindings), warnings, applied
+
+
+_RESET_WORD = re.compile(r"(?:^|_)[a-z]?(?:rst|reset)n?(?:$|_)")
+
+
+def _reset_name_rank(reset: ResetSignal) -> int:
+    """How reset-like a candidate's name is, best first: 0 a canonical name
+    (`rst_n`, `aresetn`, `reset`), 1 a canonical suffix (`sys_rst`,
+    `core_rst_n`), 2 `rst`/`reset` as a word (`srst`, `arst_n`, `rst_sync`;
+    not `burst_len`), 3 anything else."""
+    lower = reset.name.lower()
+    if lower in {name for name, _, _ in _RESET_PORT_NAMES}:
+        return 0
+    if any(lower.endswith(suffix) and len(lower) > len(suffix) for suffix, _ in _PREFIXED_RESET_SUFFIXES):
+        return 1
+    if _RESET_WORD.search(lower):
+        return 2
+    return 3
 
 
 def _resets_are_non_canonical(resets: "list[ResetSignal]") -> bool:
