@@ -54,7 +54,7 @@ from ..model.statements import (
 from ..model.variables import Variable
 from ..model.variables import INTEGER_ATOM_WIDTHS
 from .format_style import FormatStyle
-from .verilog_emitter import emit_expression
+from .verilog_emitter import emit_expression, select_scope
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,11 @@ class VerilogFormatter:
             parts.append(self.format_module(mod, emit_comments=emit_comments))
         return "\n".join(parts) + "\n"
 
-    def format_module(self, module: Module, *, emit_comments: bool = True) -> str:  # noqa: PLR0912, PLR0915
+    def format_module(self, module: Module, *, emit_comments: bool = True) -> str:
+        with select_scope(module):  # (selects of selects: verilog_emitter._legal_select)
+            return self._format_module(module, emit_comments=emit_comments)
+
+    def _format_module(self, module: Module, *, emit_comments: bool = True) -> str:  # noqa: PLR0912, PLR0915
         self._comments = emit_comments
         lines: list[str] = []
         ind = self._ind

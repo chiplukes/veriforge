@@ -129,6 +129,33 @@ def emit_style(style: EmitStyle) -> Iterator[None]:
         _STYLE.reset(token)
 
 
+# Names in the module being emitted that can take a select of a select
+# (`m[i][j]` of a memory, `p[3:2][1]` of a packed multi-dimensional array);
+# None outside a module (see `_legal_select`).
+_ARRAY_NAMES: ContextVar[frozenset[str] | None] = ContextVar("verilog_emit_array_names", default=None)
+
+
+@contextmanager
+def select_scope(module: Module) -> Iterator[None]:
+    """Emit selects inside *module* knowing which of its names are arrays."""
+    decls: list = [*module.ports, *module.nets, *module.variables]
+    subs: list = [*module.functions, *module.tasks]
+    for sub in subs:
+        decls.extend([*sub.ports, *getattr(sub, "locals", ()), *getattr(sub, "local_vars", ())])
+    names = frozenset(
+        d.name
+        for d in decls
+        if len(getattr(d, "dimensions", None) or ()) > getattr(d, "packed_dim_count", 0)
+        or getattr(d, "packed_dim_count", 0) > 1
+        or getattr(d, "type_name", None)  # (a typedef'd type may be packed multi-dimensional)
+    )
+    token = _ARRAY_NAMES.set(names)
+    try:
+        yield
+    finally:
+        _ARRAY_NAMES.reset(token)
+
+
 def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True) -> str:
     """Emit a full Design as Verilog source text.
 
@@ -156,7 +183,7 @@ def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = T
     return "\n".join(parts) + "\n"
 
 
-def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = True) -> str:  # noqa: PLR0912, PLR0915  # cm:b7a6d5
+def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = True) -> str:  # cm:b7a6d5
     """Emit a Module as Verilog source text.
 
     Args:
@@ -167,6 +194,11 @@ def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = T
     Returns:
         Verilog module declaration text.
     """
+    with select_scope(module):
+        return _emit_module(module, indent=indent, emit_comments=emit_comments)
+
+
+def _emit_module(module: Module, *, indent: str, emit_comments: bool) -> str:  # noqa: PLR0912, PLR0915
     lines: list[str] = []
 
     # Leading comments on the module itself
@@ -882,6 +914,96 @@ def _prec(op: str) -> int:
     return _BINARY_PREC.get(op, 0)
 
 
+def _select_root(expr: Expression) -> Identifier | None:
+    while isinstance(expr, (BitSelect, RangeSelect, PartSelect)):
+        expr = expr.target
+    return expr if isinstance(expr, Identifier) else None
+
+
+def _int(expr: Expression | None) -> int | None:
+    from veriforge.semantics import const_int  # noqa: PLC0415
+
+    return const_int(expr) if expr is not None else None
+
+
+def _legal_select(expr: BitSelect | RangeSelect | PartSelect) -> Expression | None:  # noqa: PLR0911
+    """A select of something Verilog can't select from -- a slice of a
+    vector (`a[3:2][1]`, which the DSL builds and the simulators read as bit
+    1 of the slice: `a[3]`) or an expression (`(a + b)[7]`, emitted as `a +
+    b[7]` before) -- as an equivalent legal one, or None when *expr* is
+    already legal. A select of a memory word or of a packed
+    multi-dimensional array (`m[i][j]`, `p[3:2][1]`) is legal and kept, so
+    only a module whose declarations are known (`select_scope`) rewrites a
+    select of a select. A constant select of a slice folds to one select
+    (`a[3]`); anything else selects the target's value bits by a shift:
+    `$unsigned(1'((a + b) >> 7))`."""
+    target = expr.target
+    if isinstance(target, Identifier):
+        return None
+    if isinstance(target, (BitSelect, RangeSelect, PartSelect)):
+        arrays = _ARRAY_NAMES.get()
+        root = _select_root(target)
+        if arrays is None or root is None or root.name in arrays:
+            return None  # (maybe a memory word or a packed array element)
+        folded = _fold_select(expr, target)
+        if folded is not None:
+            return folded
+    elif not isinstance(target, Expression):
+        return None
+    return _shift_select(expr, target)
+
+
+def _fold_select(expr: BitSelect | RangeSelect | PartSelect, inner: Expression) -> Expression | None:
+    """`a[3:2][1]` -> `a[3]`, `a[7:4][2:1]` -> `a[6:5]`, `a[3][0]` -> `a[3]`
+    (constant indices within the inner select only)."""
+    if isinstance(inner, RangeSelect):
+        m, l = _int(inner.msb), _int(inner.lsb)
+        if m is None or l is None:
+            return None
+        width = abs(m - l) + 1
+
+        def at(k: int) -> Literal:
+            return Literal(l + k if m >= l else l - k, width=32, original_text=str(l + k if m >= l else l - k))
+
+        if isinstance(expr, BitSelect):
+            k = _int(expr.index)
+            if k is None or not 0 <= k < width:
+                return None
+            return BitSelect(inner.target, at(k))
+        if isinstance(expr, RangeSelect):
+            hi, lo = _int(expr.msb), _int(expr.lsb)
+            if hi is None or lo is None or not (0 <= lo <= hi < width):
+                return None
+            return RangeSelect(inner.target, at(hi), at(lo)) if m >= l else RangeSelect(inner.target, at(lo), at(hi))
+        return None
+    if isinstance(inner, BitSelect) and isinstance(expr, BitSelect) and _int(expr.index) == 0:
+        return inner  # (bit 0 of one bit)
+    return None
+
+
+def _shift_select(expr: BitSelect | RangeSelect | PartSelect, value: Expression) -> Expression | None:
+    """*expr*'s bits of *value*, as `$unsigned(W'((value) >> lsb))`."""
+    if isinstance(expr, BitSelect):
+        width, lsb = 1, expr.index
+    elif isinstance(expr, RangeSelect):
+        m, l = _int(expr.msb), _int(expr.lsb)
+        if m is None or l is None:
+            return None
+        width, lsb = abs(m - l) + 1, Literal(min(m, l), width=32, original_text=str(min(m, l)))
+    else:
+        w = _int(expr.width)
+        if w is None:
+            return None
+        width = w
+        lsb = (
+            expr.base
+            if expr.direction == "+:"
+            else BinaryOp("-", expr.base, Literal(w - 1, width=32, original_text=str(w - 1)))
+        )
+    shifted = BinaryOp(">>", value, lsb)
+    return FunctionCall("$unsigned", [WidthCast(Literal(width, width=32, original_text=str(width)), shifted)])
+
+
 def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
     """Emit an Expression as Verilog text."""
     if isinstance(expr, Literal):
@@ -958,6 +1080,10 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         slice_str = emit_expression(expr.slice_size) if expr.slice_size is not None else ""
         parts = ", ".join(emit_expression(p) for p in expr.parts)
         return "{<<" + slice_str + "{" + parts + "}}"
+    if isinstance(expr, (BitSelect, RangeSelect, PartSelect)):
+        legal = _legal_select(expr)
+        if legal is not None:
+            return emit_expression(legal)
     if isinstance(expr, BitSelect):
         return f"{emit_expression(expr.target)}[{emit_expression(expr.index)}]"
     if isinstance(expr, RangeSelect):
