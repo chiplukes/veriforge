@@ -91,9 +91,10 @@ src/veriforge/
 │   ├── scheduler.py      # EventQueue, Process types, Scheduler (delta cycles, struct registration, memory registration, run_step)
 │   ├── event_queue.py    # TimedEvent + EventQueueMixin + CoroutineMixin + SignalDictBase (shared primitives for all engines)
 │   ├── elaborate.py      # Generate elaboration, hierarchy flattening, enum/package/struct resolution, interface binding
-│   ├── ascending.py      # Range lowering: ascending [L:R] packed ranges -> descending (lower_ascending_ranges), memories rebased to start at 0 (lower_memory_bases), multi-dim unpacked arrays flattened (flatten_unpacked_arrays)
+│   ├── ascending.py      # Range lowering: ascending [L:R] packed ranges -> descending (lower_ascending_ranges), memories rebased to start at 0 (lower_memory_bases), multi-dim unpacked arrays flattened (flatten_unpacked_arrays), sub-array assignments expanded per element
 │   ├── readmem.py        # $readmemh/$readmemb file loading (1364-2005 rules: x/z digits, comments, start/end, @address in declared addresses), shared by executor and VM
 │   ├── sv_functions.py   # SV query/bit functions ($size/$left/$countones...), width casts, 2-state lowering
+│   ├── reals.py          # real/realtime lowering: 64-bit IEEE 754 bit patterns, $__vf_real operations (lower_reals, real_op)
 │   ├── display_format.py # $display-family formatting (Icarus conventions), %m scope names, display-arg lowering
 │   ├── severity.py       # $info/$warning/$error/$fatal lowered to marked $display (+ $finish)
 │   ├── testbench.py      # SignalHandle, Triggers, Clock, Simulator (engine selection)
