@@ -54,7 +54,7 @@ from ..model.statements import (
 from ..model.variables import Variable
 from ..model.variables import INTEGER_ATOM_WIDTHS
 from .format_style import FormatStyle
-from .verilog_emitter import emit_expression, select_scope
+from .verilog_emitter import emit_expression, select_scope, split_dimensions
 
 
 # ---------------------------------------------------------------------------
@@ -62,14 +62,20 @@ from .verilog_emitter import emit_expression, select_scope
 # ---------------------------------------------------------------------------
 
 
-def format_design(design: Design, style: FormatStyle | None = None, *, emit_comments: bool = True) -> str:
-    """Format a full :class:`Design` as Verilog source text."""
-    return VerilogFormatter(style).format_design(design, emit_comments=emit_comments)
+def format_design(
+    design: Design, style: FormatStyle | None = None, *, emit_comments: bool = True, dialect: str | None = None
+) -> str:
+    """Format a full :class:`Design` as Verilog source text (*dialect*: "sv",
+    the default, or "verilog2005" -- see `verilog_emitter.emit_module`)."""
+    return VerilogFormatter(style).format_design(design, emit_comments=emit_comments, dialect=dialect)
 
 
-def format_module(module: Module, style: FormatStyle | None = None, *, emit_comments: bool = True) -> str:
-    """Format a single :class:`Module` as Verilog source text."""
-    return VerilogFormatter(style).format_module(module, emit_comments=emit_comments)
+def format_module(
+    module: Module, style: FormatStyle | None = None, *, emit_comments: bool = True, dialect: str | None = None
+) -> str:
+    """Format a single :class:`Module` as Verilog source text (*dialect*: see
+    `format_design`)."""
+    return VerilogFormatter(style).format_module(module, emit_comments=emit_comments, dialect=dialect)
 
 
 # ---------------------------------------------------------------------------
@@ -87,17 +93,17 @@ class VerilogFormatter:
 
     # -- Top-level entry points ---------------------------------------------
 
-    def format_design(self, design: Design, *, emit_comments: bool = True) -> str:
+    def format_design(self, design: Design, *, emit_comments: bool = True, dialect: str | None = None) -> str:
         self._comments = emit_comments
         parts: list[str] = []
         for i, mod in enumerate(design.modules):
             if i > 0:
                 parts.append("")
-            parts.append(self.format_module(mod, emit_comments=emit_comments))
+            parts.append(self.format_module(mod, emit_comments=emit_comments, dialect=dialect))
         return "\n".join(parts) + "\n"
 
-    def format_module(self, module: Module, *, emit_comments: bool = True) -> str:
-        with select_scope(module):  # (selects of selects: verilog_emitter._legal_select)
+    def format_module(self, module: Module, *, emit_comments: bool = True, dialect: str | None = None) -> str:
+        with select_scope(module, dialect):  # (selects of selects: verilog_emitter._legal_select)
             return self._format_module(module, emit_comments=emit_comments)
 
     def _format_module(self, module: Module, *, emit_comments: bool = True) -> str:  # noqa: PLR0912, PLR0915
@@ -865,8 +871,10 @@ class VerilogFormatter:
             if port.signed:
                 parts.append("signed")
             if port.width:
-                parts.append(f"[{emit_expression(port.width.msb)}:{emit_expression(port.width.lsb)}]")
+                parts.append("".join(VerilogFormatter._range(d) for d in [*split_dimensions(port)[0], port.width]))
         parts.append(port.name)
+        for dim in split_dimensions(port)[1]:
+            parts.append(VerilogFormatter._range(dim))
         if port.default_value:
             parts.append("=")
             parts.append(emit_expression(port.default_value))
@@ -909,11 +917,10 @@ class VerilogFormatter:
         if net.signed:
             parts.append("signed")
         if net.width:
-            parts.append(self._range(net.width))
+            parts.append("".join(self._range(d) for d in [*split_dimensions(net)[0], net.width]))
         parts.append(net.name)
-        if net.dimensions:
-            for dim in net.dimensions:
-                parts.append(self._range(dim))
+        for dim in split_dimensions(net)[1]:
+            parts.append(self._range(dim))
         if net.initial_value and not net.dimensions:
             # Array/memory nets can't take an inline initializer in Verilog
             # -- only scalar/vector nets can. Any runtime default for an
@@ -929,11 +936,10 @@ class VerilogFormatter:
         if var.signed:
             parts.append("signed")
         if var.width:
-            parts.append(self._range(var.width))
+            parts.append("".join(self._range(d) for d in [*split_dimensions(var)[0], var.width]))
         parts.append(var.name)
-        if var.dimensions:
-            for dim in var.dimensions:
-                parts.append(self._range(dim))
+        for dim in split_dimensions(var)[1]:
+            parts.append(self._range(dim))
         if var.initial_value and not var.dimensions:
             # Array/memory regs can't take an inline initializer in
             # Verilog -- only scalar/vector regs can. Any runtime default

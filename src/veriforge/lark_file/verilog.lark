@@ -558,19 +558,19 @@ realtime_declaration: KW_REALTIME list_of_real_identifiers ";"
 // SYNTHESIZABLE: YES
 // EXAMPLE: reg [7:0] counter;
 // SUPPORT: YES
-reg_declaration: KW_REG KW_SIGNED? range? list_of_variable_identifiers ";"
+reg_declaration: KW_REG KW_SIGNED? range* list_of_variable_identifiers ";"
 // SV: logic_declaration ::= logic [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [7:0] data;
 // SUPPORT: YES
-logic_declaration: KW_LOGIC KW_SIGNED? range? list_of_variable_identifiers ";"
+logic_declaration: KW_LOGIC KW_SIGNED? range* list_of_variable_identifiers ";"
 // SV: bit_declaration ::= bit [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: bit [3:0] nibble;
 // SUPPORT: YES
-bit_declaration: KW_BIT KW_SIGNED? range? list_of_variable_identifiers ";"
+bit_declaration: KW_BIT KW_SIGNED? range* list_of_variable_identifiers ";"
 // SV: byte_declaration ::= byte [ signed ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES

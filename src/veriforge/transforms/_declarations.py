@@ -48,6 +48,8 @@ class _RegVariableContext:
     signed: bool | None
     loc: SourceLocation | None
     build_constant_expression: BuildConstantExpressionFn
+    # Packed ranges before the element's own (`reg [3:0][7:0] v;`: `[3:0]`).
+    extra_dims: tuple[Range, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -466,6 +468,7 @@ def _extract_net_declaration(
                 signed=signed,
                 dimensions=all_dims or None,
                 packed_dim_count=packed_dim_count,
+                packed_only=bool(extra_dims) and not dims,
                 loc=loc,
             )
         )
@@ -481,7 +484,7 @@ def _extract_reg_declaration(
 ) -> list[Variable]:
     """Extract variables from a reg_declaration or logic/bit declaration subtree."""
     variables: list[Variable] = []
-    width: Range | None = None
+    packed: list[Range] = []
     signed: bool | None = None  # None: the kind's default (`int` signed, `reg` not)
     loc = _loc_from_tree(tree, source_file)
 
@@ -493,15 +496,20 @@ def _extract_reg_declaration(
                 signed = False
         elif isinstance(child, Tree):
             if child.data == "range":
-                width = _build_range(child, source_file, build_constant_expression)
+                range_ = _build_range(child, source_file, build_constant_expression)
+                if range_ is not None:
+                    packed.append(range_)
             elif child.data == "list_of_variable_identifiers":
+                # (`reg [3:0][7:0] v;` used to parse as a variable of a user
+                # type named `reg`, losing its width.)
                 ctx = _RegVariableContext(
                     source_file=source_file,
                     kind=kind,
-                    width=width,
+                    width=packed[-1] if packed else None,
                     signed=signed,
                     loc=loc,
                     build_constant_expression=build_constant_expression,
+                    extra_dims=tuple(packed[:-1]),
                 )
                 variables.extend(_extract_reg_variable_items(child, ctx))
 
@@ -519,8 +527,27 @@ def _extract_reg_variable_items(
             if variable is not None:
                 variables.append(variable)
         elif isinstance(child, Token):
-            variables.append(Variable(name=str(child), kind=ctx.kind, width=ctx.width, signed=ctx.signed, loc=ctx.loc))
+            variables.append(_reg_variable(str(child), ctx, [], None))
     return variables
+
+
+def _reg_variable(name: str, ctx: _RegVariableContext, dims: list[Range], initial_value) -> Variable:
+    """A variable with its packed (`ctx.extra_dims`) and unpacked (*dims*)
+    dimensions, as `_extract_net_declaration` builds a net."""
+    extra = list(ctx.extra_dims)
+    return Variable(
+        name=name,
+        kind=ctx.kind,
+        width=ctx.width,
+        signed=ctx.signed,
+        dimensions=[*extra, *dims],
+        # (See `_extract_net_declaration`: without an unpacked dimension the
+        # innermost extra packed one is borrowed as the address level.)
+        packed_dim_count=len(extra) if dims else max(0, len(extra) - 1),
+        packed_only=bool(extra) and not dims,
+        initial_value=initial_value,
+        loc=ctx.loc,
+    )
 
 
 def _extract_reg_variable_item(
@@ -532,15 +559,7 @@ def _extract_reg_variable_item(
         return None
     dims = _extract_dimensions(tree, ctx.source_file, ctx.build_constant_expression)
     initial_value = _extract_variable_initial_value(tree, ctx.source_file, ctx.build_constant_expression)
-    return Variable(
-        name=name,
-        kind=ctx.kind,
-        width=ctx.width,
-        signed=ctx.signed,
-        dimensions=dims,
-        initial_value=initial_value,
-        loc=ctx.loc,
-    )
+    return _reg_variable(name, ctx, dims, initial_value)
 
 
 def _extract_typed_variable(
@@ -952,6 +971,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                         width=width,
                         dimensions=[*extra_packed_dims, *declared_dims, *dims],
                         packed_dim_count=packed_dim_count,
+                        packed_only=bool(extra_packed_dims) and not (declared_dims or dims),
                         signed=signed,
                         default_value=default_value,
                         loc=loc,

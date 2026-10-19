@@ -29,6 +29,7 @@ class Port(VerilogNode):  # cm:9f1b3d
         "name",
         "net_type",
         "packed_dim_count",
+        "packed_only",
         "signed",
         "width",
     )
@@ -43,6 +44,7 @@ class Port(VerilogNode):  # cm:9f1b3d
         width: Range | None = None,
         dimensions: list[Range] | None = None,
         packed_dim_count: int = 0,
+        packed_only: bool = False,
         signed: bool = False,
         default_value: Expression | None = None,
         loc: SourceLocation | None = None,
@@ -57,6 +59,12 @@ class Port(VerilogNode):  # cm:9f1b3d
         # See `Net.packed_dim_count`'s identical docstring (model/nets.py)
         # for what this counts and why it's needed.
         self.packed_dim_count = packed_dim_count
+        # All of `dimensions` are PACKED ranges (`logic [3:0][7:0] p;`: no
+        # unpacked dimension -- the address level `p[i]` is borrowed from the
+        # packed ranges). `packed_dim_count` alone can't tell this from
+        # `logic [7:0] p [3:0];`, so the emitter needs it to print the
+        # declaration back as written.
+        self.packed_only = packed_only
         self.signed = signed
         self.default_value = default_value
         # Connectivity — populated by Layer 3 analysis (same as Net/Variable)
@@ -100,6 +108,8 @@ class Port(VerilogNode):  # cm:9f1b3d
             d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
         if self.packed_dim_count:
             d["packed_dim_count"] = self.packed_dim_count
+        if self.packed_only:
+            d["packed_only"] = True
         if self.signed:
             d["signed"] = True
         if self.default_value:

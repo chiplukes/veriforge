@@ -129,40 +129,56 @@ def emit_style(style: EmitStyle) -> Iterator[None]:
         _STYLE.reset(token)
 
 
-# Names in the module being emitted that can take a select of a select
-# (`m[i][j]` of a memory, `p[3:2][1]` of a packed multi-dimensional array);
-# None outside a module (see `_legal_select`).
-_ARRAY_NAMES: ContextVar[frozenset[str] | None] = ContextVar("verilog_emit_array_names", default=None)
+DIALECTS = ("sv", "verilog2005")
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """What the emitter knows about the module being emitted: its array
+    names (a select of a select is legal on those -- `m[i][j]`), and every
+    declaration by name (operand widths for Verilog-2005 casts)."""
+
+    arrays: frozenset[str]
+    decls: dict[str, object]
+
+
+_SCOPE: ContextVar[_Scope | None] = ContextVar("verilog_emit_scope", default=None)
+_DIALECT: ContextVar[str] = ContextVar("verilog_emit_dialect", default="sv")
 
 
 @contextmanager
-def select_scope(module: Module) -> Iterator[None]:
-    """Emit selects inside *module* knowing which of its names are arrays."""
+def select_scope(module: Module, dialect: str | None = None) -> Iterator[None]:
+    """Emit expressions inside *module* knowing its declarations (and, with
+    *dialect*, for that language: "sv" or "verilog2005")."""
+    if dialect is not None and dialect not in DIALECTS:
+        raise ValueError(f"unknown dialect {dialect!r}: use one of {DIALECTS}")
     decls: list = [*module.ports, *module.nets, *module.variables]
     subs: list = [*module.functions, *module.tasks]
     for sub in subs:
         decls.extend([*sub.ports, *getattr(sub, "locals", ()), *getattr(sub, "local_vars", ())])
-    names = frozenset(
+    arrays = frozenset(
         d.name
         for d in decls
-        if len(getattr(d, "dimensions", None) or ()) > getattr(d, "packed_dim_count", 0)
-        or getattr(d, "packed_dim_count", 0) > 1
-        or getattr(d, "type_name", None)  # (a typedef'd type may be packed multi-dimensional)
+        if getattr(d, "dimensions", None) or getattr(d, "type_name", None)  # (a typedef may be packed multi-dim)
     )
-    token = _ARRAY_NAMES.set(names)
+    token = _SCOPE.set(_Scope(arrays, {d.name: d for d in decls}))
+    dialect_token = _DIALECT.set(dialect) if dialect is not None else None
     try:
         yield
     finally:
-        _ARRAY_NAMES.reset(token)
+        _SCOPE.reset(token)
+        if dialect_token is not None:
+            _DIALECT.reset(dialect_token)
 
 
-def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True) -> str:
+def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = True, dialect: str | None = None) -> str:
     """Emit a full Design as Verilog source text.
 
     Args:
         design: The Design model to emit.
         indent: Indentation string (default 4 spaces).
         emit_comments: Whether to include comments in output.
+        dialect: "sv" (the default) or "verilog2005" (see `emit_module`).
 
     Returns:
         Complete Verilog source text.
@@ -171,7 +187,7 @@ def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = T
     for i, module in enumerate(design.modules):
         if i > 0:
             parts.append("")  # blank line between modules
-        parts.append(emit_module(module, indent=indent, emit_comments=emit_comments))
+        parts.append(emit_module(module, indent=indent, emit_comments=emit_comments, dialect=dialect))
     for iface in design.interfaces:
         if parts:
             parts.append("")
@@ -183,18 +199,26 @@ def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = T
     return "\n".join(parts) + "\n"
 
 
-def emit_module(module: Module, *, indent: str = "    ", emit_comments: bool = True) -> str:  # cm:b7a6d5
+def emit_module(
+    module: Module, *, indent: str = "    ", emit_comments: bool = True, dialect: str | None = None
+) -> str:  # cm:b7a6d5
     """Emit a Module as Verilog source text.
 
     Args:
         module: The Module model to emit.
         indent: Indentation string (default 4 spaces).
         emit_comments: Whether to include comments in output.
+        dialect: "sv" (the default) or "verilog2005". In Verilog-2005 the
+            constructs the emitter writes itself -- a select of an
+            expression, and a size cast `N'(x)` (the DSL's `cast()`) --
+            take Verilog-2005 forms; SystemVerilog constructs that are in
+            the model itself (`logic`, `always_comb`, ...) are emitted as
+            they are.
 
     Returns:
         Verilog module declaration text.
     """
-    with select_scope(module):
+    with select_scope(module, dialect):
         return _emit_module(module, indent=indent, emit_comments=emit_comments)
 
 
@@ -695,8 +719,10 @@ def _emit_port(port: Port) -> str:
         if port.signed:
             parts.append("signed")
         if port.width:
-            parts.append(_emit_range(port.width))
+            parts.append("".join(_emit_range(d) for d in [*split_dimensions(port)[0], port.width]))
     parts.append(port.name)
+    for dim in split_dimensions(port)[1]:  # (port dimensions used to be dropped)
+        parts.append(_emit_range(dim))
     if port.default_value:
         parts.append("=")
         parts.append(emit_expression(port.default_value))
@@ -734,12 +760,12 @@ def _emit_net(net: Net, indent: str, assign_rhs: Expression | None = None) -> st
     parts = [f"{indent}{net.kind.value}"]
     if net.signed:
         parts.append("signed")
+    packed, unpacked = split_dimensions(net)
     if net.width:
-        parts.append(_emit_range(net.width))
+        parts.append("".join(_emit_range(d) for d in [*packed, net.width]))
     parts.append(net.name)
-    if net.dimensions:
-        for dim in net.dimensions:
-            parts.append(_emit_range(dim))
+    for dim in unpacked:
+        parts.append(_emit_range(dim))
     if assign_rhs is not None:
         parts.append("=")
         parts.append(emit_expression(assign_rhs))
@@ -765,11 +791,10 @@ def _emit_variable(var: Variable, indent: str) -> str:
         elif not var.signed and var.kind in SIGNED_KINDS:
             parts.append("unsigned")
         if var.width:
-            parts.append(_emit_range(var.width))
+            parts.append("".join(_emit_range(d) for d in [*split_dimensions(var)[0], var.width]))
     parts.append(var.name)
-    if var.dimensions:
-        for dim in var.dimensions:
-            parts.append(_emit_range(dim))
+    for dim in split_dimensions(var)[1]:
+        parts.append(_emit_range(dim))
     if var.initial_value and not var.dimensions:
         # Array/memory regs can't take an inline initializer in Verilog --
         # only scalar/vector regs can. Any runtime default for an array is
@@ -778,6 +803,18 @@ def _emit_variable(var: Variable, indent: str) -> str:
         parts.append("=")
         parts.append(emit_expression(var.initial_value))
     return " ".join(parts) + ";"
+
+
+def split_dimensions(decl: object) -> tuple[list[Range], list[Range]]:
+    """A declaration's (packed, unpacked) dimensions, outermost first. The
+    model keeps extra packed ranges in `dimensions` too (`logic [3:0][7:0]
+    q [0:1]`: `[3:0]`, then `[0:1]`; see `Net.packed_dim_count` and
+    `packed_only`) -- they used to be printed after the name, as unpacked."""
+    dims = list(getattr(decl, "dimensions", None) or [])
+    if getattr(decl, "packed_only", False):
+        return dims, []
+    count = getattr(decl, "packed_dim_count", 0)
+    return dims[:count], dims[count:]
 
 
 def _emit_range(r: Range) -> str:
@@ -941,9 +978,9 @@ def _legal_select(expr: BitSelect | RangeSelect | PartSelect) -> Expression | No
     if isinstance(target, Identifier):
         return None
     if isinstance(target, (BitSelect, RangeSelect, PartSelect)):
-        arrays = _ARRAY_NAMES.get()
+        scope = _SCOPE.get()
         root = _select_root(target)
-        if arrays is None or root is None or root.name in arrays:
+        if scope is None or root is None or root.name in scope.arrays:
             return None  # (maybe a memory word or a packed array element)
         folded = _fold_select(expr, target)
         if folded is not None:
@@ -981,8 +1018,31 @@ def _fold_select(expr: BitSelect | RangeSelect | PartSelect, inner: Expression) 
     return None
 
 
+def _bit(value: Expression, index: Expression) -> Expression:
+    """Bit *index* of *value* in Verilog-2005: `|((value >> index) & 1'b1)`
+    (one bit wide; an x bit stays x)."""
+    one = Literal(1, width=1, base="b", original_text="1'b1")
+    return UnaryOp("|", BinaryOp("&", BinaryOp(">>", value, index), one))
+
+
+def _plus(base: Expression, k: int) -> Expression:
+    if k == 0:
+        return base
+    if isinstance(base, Literal) and isinstance(base.value, int) and base.width == 32:  # noqa: PLR2004
+        return Literal(base.value + k, width=32, original_text=str(base.value + k))
+    return BinaryOp("+", base, Literal(k, width=32, original_text=str(k)))
+
+
+def _bits_2005(value: Expression, lsb: Expression, width: int) -> Expression:
+    """Bits `lsb + width - 1 .. lsb` of *value*, Verilog-2005 (no size cast)."""
+    if width == 1:
+        return _bit(value, lsb)
+    return Concatenation([_bit(value, _plus(lsb, k)) for k in range(width - 1, -1, -1)])
+
+
 def _shift_select(expr: BitSelect | RangeSelect | PartSelect, value: Expression) -> Expression | None:
-    """*expr*'s bits of *value*, as `$unsigned(W'((value) >> lsb))`."""
+    """*expr*'s bits of *value*, as `$unsigned(W'((value) >> lsb))` (in
+    Verilog-2005, `_bits_2005`)."""
     if isinstance(expr, BitSelect):
         width, lsb = 1, expr.index
     elif isinstance(expr, RangeSelect):
@@ -1000,8 +1060,114 @@ def _shift_select(expr: BitSelect | RangeSelect | PartSelect, value: Expression)
             if expr.direction == "+:"
             else BinaryOp("-", expr.base, Literal(w - 1, width=32, original_text=str(w - 1)))
         )
+    if _DIALECT.get() == "verilog2005":
+        return _bits_2005(value, lsb, width)
     shifted = BinaryOp(">>", value, lsb)
     return FunctionCall("$unsigned", [WidthCast(Literal(width, width=32, original_text=str(width)), shifted)])
+
+
+def _decl_width(decl: object) -> int | None:
+    """A declaration's whole width (packed dimensions included)."""
+    from veriforge.model.variables import INTEGER_ATOM_WIDTHS as atoms  # noqa: PLC0415
+
+    width = getattr(decl, "width", None)
+    if width is None:
+        kind = getattr(getattr(decl, "kind", None), "value", None) or getattr(decl, "data_type", None)
+        if kind in atoms:
+            return atoms[kind]
+        if kind == "integer":
+            return 32
+        return None if getattr(decl, "type_name", None) else 1
+    w = _int(width.msb), _int(width.lsb)
+    if w[0] is None or w[1] is None:
+        return None
+    total = abs(w[0] - w[1]) + 1
+    for dim in split_dimensions(decl)[0]:
+        d = _int(dim.msb), _int(dim.lsb)
+        if d[0] is None or d[1] is None:
+            return None
+        total *= abs(d[0] - d[1]) + 1
+    return total
+
+
+def _operand_width(expr: Expression) -> int | None:
+    """*expr*'s self-determined width, or None if the emitter can't tell."""
+    from veriforge.semantics import expr_width  # noqa: PLC0415
+
+    scope = _SCOPE.get()
+    if scope is None:
+        return None
+    unknown: list[str] = []
+
+    def width_of(name: str) -> int:
+        decl = scope.decls.get(name)
+        w = _decl_width(decl) if decl is not None else None
+        if w is None:
+            unknown.append(name)
+            return 1
+        return w
+
+    for node in expr.walk():
+        # (A word of a memory: expr_width reads every BitSelect as 1 bit.)
+        if isinstance(node, BitSelect) and (root := _select_root(node)) is not None and root.name in scope.arrays:
+            return None
+    width = expr_width(expr, width_of)
+    return None if unknown else width
+
+
+def _cast_2005(cast: WidthCast) -> Expression:
+    """`N'(x)` in Verilog-2005: *x* evaluated at max(N, its width) -- as an
+    assignment to N bits -- then cut to N bits, signed if *x* is."""
+    from veriforge.semantics import expr_signed  # noqa: PLC0415
+
+    n = _int(cast.width)
+    w = _operand_width(cast.operand)
+    if n is None or w is None:
+        raise ValueError(
+            f"can't write {emit_expression(cast.width)}'({emit_expression(cast.operand)}) in Verilog-2005: "
+            "the operand's width isn't known here "
+            "(use dialect='sv')"
+        )
+    scope = _SCOPE.get()
+    signed = False
+    if scope is not None:
+        try:
+            signed = expr_signed(cast.operand, lambda name: bool(getattr(scope.decls.get(name), "signed", False)))
+        except Exception:  # noqa: BLE001 -- an unusual operand: unsigned
+            signed = False
+    if n >= w:
+        # `x + {N{1'b0}}`: the zero makes the addition (and x) N bits wide;
+        # the braces stop it there (a concatenation is self-determined).
+        zero: Expression = Replication(
+            Literal(n, width=32, original_text=str(n)), Literal(0, width=1, base="b", original_text="1'b0")
+        )
+        if signed:
+            zero = FunctionCall("$signed", [zero])
+        result: Expression = Concatenation([BinaryOp("+", cast.operand, zero)])
+    else:
+        result = _low_bits_of_vector(cast.operand, n) or _bits_2005(
+            cast.operand, Literal(0, width=32, original_text="0"), n
+        )
+    return FunctionCall("$signed", [result]) if signed else result
+
+
+def _low_bits_of_vector(expr: Expression, n: int) -> Expression | None:
+    """The low *n* bits of a plain vector as a part select (`a[3:0]`; of
+    `reg [0:7] a`, `a[4:7]`), or None for anything else."""
+    scope = _SCOPE.get()
+    if scope is None or not isinstance(expr, Identifier) or expr.hierarchy or expr.name in scope.arrays:
+        return None
+    width = getattr(scope.decls.get(expr.name), "width", None)
+    left, right = (_int(width.msb), _int(width.lsb)) if width is not None else (None, None)
+    if left is None or right is None:
+        return None
+
+    def lit(v: int) -> Literal:
+        return Literal(v, width=32, original_text=str(v))
+
+    if left >= right:
+        return RangeSelect(expr, lit(right + n - 1), lit(right))
+    return RangeSelect(expr, lit(right - n + 1), lit(right))
 
 
 def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
@@ -1063,6 +1229,8 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
             return "{>>{" + parts + "}}"
         return "{" + parts + "}"
     if isinstance(expr, WidthCast):
+        if _DIALECT.get() == "verilog2005":
+            return emit_expression(_cast_2005(expr))
         return f"{emit_expression(expr.width)}'({emit_expression(expr.operand)})"
     if isinstance(expr, Replication):
         # When the value is a Concatenation, emit its parts directly inside the

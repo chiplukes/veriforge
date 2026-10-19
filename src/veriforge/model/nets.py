@@ -38,6 +38,7 @@ class Net(VerilogNode):
         "loads",
         "name",
         "packed_dim_count",
+        "packed_only",
         "signed",
         "width",
     )
@@ -51,6 +52,7 @@ class Net(VerilogNode):
         signed: bool = False,
         dimensions: list[Range] | None = None,
         packed_dim_count: int = 0,
+        packed_only: bool = False,
         initial_value: Expression | None = None,
         loc: SourceLocation | None = None,
     ):
@@ -71,6 +73,12 @@ class Net(VerilogNode):
         # preserves prior behavior for any caller that builds a `Net`
         # directly without setting this.
         self.packed_dim_count = packed_dim_count
+        # All of `dimensions` are PACKED ranges (`logic [3:0][7:0] p;`: no
+        # unpacked dimension -- the address level `p[i]` is borrowed from the
+        # packed ranges). `packed_dim_count` alone can't tell this from
+        # `logic [7:0] p [3:0];`, so the emitter needs it to print the
+        # declaration back as written.
+        self.packed_only = packed_only
         self.initial_value = initial_value
         # Connectivity — populated by Layer 3 analysis
         self.drivers: list = []
@@ -107,6 +115,8 @@ class Net(VerilogNode):
             d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
         if self.packed_dim_count:
             d["packed_dim_count"] = self.packed_dim_count
+        if self.packed_only:
+            d["packed_only"] = True
         if self.initial_value:
             d["initial_value"] = self.initial_value.to_dict()
         return d

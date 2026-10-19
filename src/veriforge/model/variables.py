@@ -47,6 +47,7 @@ class Variable(VerilogNode):
         "loads",
         "name",
         "packed_dim_count",
+        "packed_only",
         "signed",
         "type_name",
         "width",
@@ -61,6 +62,7 @@ class Variable(VerilogNode):
         signed: bool | None = None,
         dimensions: list[Range] | None = None,
         packed_dim_count: int = 0,
+        packed_only: bool = False,
         initial_value: Expression | None = None,
         type_name: str | None = None,
         loc: SourceLocation | None = None,
@@ -77,6 +79,12 @@ class Variable(VerilogNode):
         # See `Net.packed_dim_count`'s identical docstring (model/nets.py)
         # for what this counts and why it's needed.
         self.packed_dim_count = packed_dim_count
+        # All of `dimensions` are PACKED ranges (`logic [3:0][7:0] p;`: no
+        # unpacked dimension -- the address level `p[i]` is borrowed from the
+        # packed ranges). `packed_dim_count` alone can't tell this from
+        # `logic [7:0] p [3:0];`, so the emitter needs it to print the
+        # declaration back as written.
+        self.packed_only = packed_only
         self.initial_value = initial_value
         self.type_name = type_name
         # Connectivity — populated by Layer 3 analysis
@@ -114,6 +122,8 @@ class Variable(VerilogNode):
             d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
         if self.packed_dim_count:
             d["packed_dim_count"] = self.packed_dim_count
+        if self.packed_only:
+            d["packed_only"] = True
         if self.initial_value:
             d["initial_value"] = self.initial_value.to_dict()
         return d

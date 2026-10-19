@@ -94,3 +94,76 @@ def test_memory_word_bit_is_kept():
         ).modules[0]
     )
     assert "mem[i][3]" in text, text
+
+
+def _cast_module():
+    from veriforge.dsl import cast
+
+    m = Module("c")
+    a = m.input("a", width=8)
+    b = m.input("b", width=8)
+    s = m.input("s", width=4, signed=True)
+    for name, width, value in (
+        ("c9", 9, cast(9, a + b)),  # (the carry kept)
+        ("c4", 4, cast(4, a + b)),
+        ("cs", 8, cast(8, s)),  # (sign-extended)
+    ):
+        m.assign(m.output(name, width=width), value)
+    m.assign(m.output("w", width=1), (a + b)[7])
+    return m.build()
+
+
+def test_verilog2005_dialect_has_no_size_casts():
+    # The other project's point: `1'(...)` is SystemVerilog, which a plain
+    # Verilog-2005 flow may reject. dialect="verilog2005" writes the select
+    # of an expression and the DSL's cast() without one.
+    text = emit_module(_cast_module(), dialect="verilog2005")
+    assert "'(" not in text, text
+    assert "{a + b + {9{1'b0}}}" in text and "$signed({s + $signed({8{1'b0}})})" in text, text
+    assert "|(a + b >> 7 & 1'b1)" in text, text
+    assert "'(" in emit_module(_cast_module())  # (sv, the default, is unchanged)
+    with pytest.raises(ValueError, match="unknown dialect"):
+        emit_module(_cast_module(), dialect="vhdl")
+
+
+@pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
+@pytest.mark.parametrize(("dialect", "flag"), [("sv", "-g2012"), ("verilog2005", "-g2005")])
+def test_dialects_compile_and_agree_with_the_simulator(tmp_path, dialect, flag):
+    import copy
+
+    module = _cast_module()
+    sim = Simulator(copy.deepcopy(module))  # (simulation lowers its module in place)
+    drives = {"a": 0b10101100, "b": 0b10000000, "s": 0b1010}
+    for name, value in drives.items():
+        sim.drive(name, value)
+    sim.settle()
+    outs = {"c9": 9, "c4": 4, "cs": 8, "w": 1}
+    want = [format(sim.read(n).val, f"0{w}b") for n, w in outs.items()]
+    src = tmp_path / "c.v"
+    src.write_text(
+        emit_module(module, dialect=dialect)
+        + "\nmodule tb;\n  reg [7:0] a = 8'b10101100, b = 8'b10000000;\n  reg signed [3:0] s = 4'b1010;\n"
+        + "".join(f"  wire [{w - 1}:0] {n};\n" for n, w in outs.items())
+        + "  c d("
+        + ", ".join(f".{n}({n})" for n in ["a", "b", "s", *outs])
+        + ");\n"
+        + '  initial #1 $display("'
+        + " ".join("%b" for _ in outs)
+        + '", '
+        + ", ".join(outs)
+        + ");\nendmodule\n"
+    )
+    out = tmp_path / "c.vvp"
+    subprocess.run(["iverilog", flag, "-o", str(out), str(src)], check=True, capture_output=True)
+    result = subprocess.run(["vvp", str(out)], check=True, capture_output=True, text=True)
+    assert result.stdout.split() == want
+
+
+def test_verilog2005_cast_of_a_memory_word_raises():
+    module = tree_to_design(
+        verilog_parser(start="source_text").build_tree(
+            "module k(input [1:0] i, output [3:0] q); reg [7:0] mem [0:3]; assign q = 4'(mem[i]); endmodule"
+        )
+    ).modules[0]
+    with pytest.raises(ValueError, match="Verilog-2005"):
+        emit_module(module, dialect="verilog2005")

@@ -484,6 +484,11 @@ def test_vm_fast_uses_c_poll():
     # vm-fast compares narrow signals in C (CyContext.trace_poll, 2026-10-16:
     # a 7,700-signal design ran ~60x slower traced, reading every signal into
     # a Value per time step); wide signals and memory elements stay in Python.
+    # (Without the native extension -- CI's sim job -- vm-fast is pure Python.)
+    from veriforge.sim.vm.vm_scheduler import _HAS_CYTHON  # noqa: PLC0415
+
+    if not _HAS_CYTHON:
+        pytest.skip("requires the native VM extension")
     sim = _sim("vm-fast")
     with attach_vcd(sim, io.StringIO()) as session:
         hub = sim._sched._trace_hub

@@ -785,6 +785,14 @@ def _build_subcommand_parser(*, require_command: bool) -> argparse.ArgumentParse
         default=False,
         help="Write formatted output back to the file instead of printing to stdout.",
     )
+    format_parser.add_argument(
+        "--dialect",
+        choices=("sv", "verilog2005"),
+        default="sv",
+        help=(
+            "Language for constructs the formatter writes itself -- selects of expressions, size casts (default: sv)."
+        ),
+    )
 
     return parser
 
@@ -1359,7 +1367,7 @@ def _run_lint(args: argparse.Namespace) -> None:
 def _run_format(args: argparse.Namespace) -> None:
     design = parse_file(args.file, preprocess=True)
     style = getattr(FormatStyle, args.style)()
-    text = _format_design(design, style)
+    text = _format_design(design, style, dialect=args.dialect)
     if args.write:
         args.file.write_text(text, encoding="utf-8")
     else:

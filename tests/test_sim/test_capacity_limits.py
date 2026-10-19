@@ -177,6 +177,10 @@ endmodule
 def test_batch_run_output_beyond_64kb(engine):
     """~100 KB of `$display` output in one batch_run (compiled kept only the
     first 64 KB: its output buffer is drained when the batch returns)."""
+    from veriforge.sim.vm.vm_scheduler import _HAS_CYTHON  # noqa: PLC0415
+
+    if engine == "vm-fast" and not _HAS_CYTHON:
+        pytest.skip("vm-fast batch_run requires the native VM extension")
     sim = _sim(_CHATTY, engine, "cap_chatty.v")
     cycles = 1000
     assert sim.batch_run(cycles, "clk", 10) == cycles
