@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -51,6 +51,7 @@ jobs:
           tests/test_analysis/test_const_fold.py
           tests/test_preprocessor/test_preprocessor.py
           tests/test_formatter/test_formatter.py
+          tests/test_dsl/test_name_inference.py
           --tb=short -q
 
   sim-smoke:

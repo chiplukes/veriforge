@@ -219,6 +219,7 @@ src/veriforge/
 │                         #   thin backward-compatible re-export shim, see notes/developer/architecture.md)
 ├── dsl/                  # Hardware Construction DSL (Phase 7)
 │   ├── __init__.py       # Public API: Module, Signal, Expr, Interface, helpers
+│   ├── _varname.py       # Name inference: `x = m.wire()` names the wire from the caller's bytecode
 │   ├── builder.py        # Operator-overloaded Python DSL → model objects
 │   ├── interface.py      # Interface / bus grouping abstraction
 │   ├── prelude.py        # Star-import convenience module for DSL user code
@@ -354,6 +355,7 @@ tests/
 │   ├── test_roundtrip_dsl.py      # Verilog → DSL → Verilog round-trip tests (54 tests)
 │   ├── test_sv_dsl.py             # SV DSL builder + translator tests (44 tests)
 │   ├── test_dsl_boundary.py       # Python/DSL boundary semantics tests (20 tests)
+│   ├── test_name_inference.py     # Declaration names inferred from the assigned variable, under tracers (116 tests)
 │   ├── test_testbench_bench_style.py # Bench-framework-style testbench generator tests (24 tests)
 │   ├── test_testbench_deps.py     # SV dependency-discovery helper + CLI --auto-deps tests (3 tests)
 │   ├── test_testbench_enhanced.py # Enhanced multi-domain testbench generator tests (11 tests)

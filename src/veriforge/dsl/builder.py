@@ -66,11 +66,13 @@ from ..model.statements import (
 )
 from ..model.sv_types import EnumMember, EnumType, StructField, StructType, TypedefDecl, UnionType
 from ..model.variables import Variable, VariableKind
+from . import _varname
 from .interface import BoundInterface, Interface
 
 import copy
 import functools
 import re
+import sys
 import warnings
 
 # ---------------------------------------------------------------------------
@@ -1181,11 +1183,45 @@ class Module:  # cm:2b9e4c
         self._signals[name] = sig
         return sig
 
+    def _target_name(self, name: object, method: str, second: str | None) -> str:
+        """*name*, or the variable the user's ``x = m.<method>(...)`` stores into.
+
+        Called first thing in a declaration method, so frame 2 is the user's call.
+        *second* is the method's next parameter, for the error when a non-string
+        lands in *name* (``m.wire(8)`` rather than ``m.wire(width=8)``).
+        """
+        if isinstance(name, str):
+            return name
+        if name is not None:
+            hint = f"; without a name, pass {second}= by keyword: x = m.{method}({second}=...)" if second else ""
+            raise TypeError(f"m.{method}(): the name must be a string, got {name!r}{hint}")
+        frame = sys._getframe(2)
+        where = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+        inferred = _varname.assigned_name(frame)
+        if inferred is None:
+            why = (
+                f"the result isn't assigned to a plain variable (x = m.{method}(...))"
+                if _varname.SUPPORTED
+                else f"name inference needs CPython, not {sys.implementation.name}"
+            )
+            raise ValueError(f'm.{method}() at {where}: can\'t infer a name: {why}; pass one: m.{method}("x", ...)')
+        if inferred in _varname.VERILOG_KEYWORDS:
+            raise ValueError(
+                f"m.{method}() at {where}: the variable name {inferred!r} is a Verilog keyword; "
+                f"rename the variable or pass a name"
+            )
+        if inferred in self._signals:
+            raise ValueError(
+                f"Signal '{inferred}' already declared in module '{self._name}' (m.{method}() at {where} "
+                f'took its name from the variable; in a loop or helper, pass a name, e.g. f"{inferred}_{{i}}")'
+            )
+        return inferred
+
     # --- Port declarations ---
 
     def input(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool | None = None,
@@ -1200,6 +1236,7 @@ class Module:  # cm:2b9e4c
         the type's own width, signed unless ``signed=False`` (``time``:
         unsigned unless ``signed=True``).
         """
+        name = self._target_name(name, "input", "width")
         width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
@@ -1218,7 +1255,7 @@ class Module:  # cm:2b9e4c
 
     def output(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool | None = None,
@@ -1233,6 +1270,7 @@ class Module:  # cm:2b9e4c
         the type's own width, signed unless ``signed=False`` (``time``:
         unsigned unless ``signed=True``).
         """
+        name = self._target_name(name, "output", "width")
         width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
@@ -1251,7 +1289,7 @@ class Module:  # cm:2b9e4c
 
     def output_reg(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool = False,
@@ -1265,6 +1303,7 @@ class Module:  # cm:2b9e4c
 
         Emits: ``output reg [7:0] q = 0``
         """
+        name = self._target_name(name, "output_reg", "width")
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
         port = Port(
@@ -1278,7 +1317,7 @@ class Module:  # cm:2b9e4c
 
     def inout(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool | None = None,
@@ -1293,6 +1332,7 @@ class Module:  # cm:2b9e4c
         the type's own width, signed unless ``signed=False`` (``time``:
         unsigned unless ``signed=True``).
         """
+        name = self._target_name(name, "inout", "width")
         width, signed = _port_kind_width(kind, width, signed)
         range_obj = _make_range(width)
         default_expr = _to_expr_node(init) if init is not None else None
@@ -1475,7 +1515,7 @@ class Module:  # cm:2b9e4c
 
     def wire(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool = False,
@@ -1488,6 +1528,7 @@ class Module:  # cm:2b9e4c
             init: Initial value (``wire [7:0] w = 8'hFF;``).
             depth: Memory depth (``wire [7:0] w [0:depth-1];``).
         """
+        name = self._target_name(name, "wire", "width")
         range_obj = _make_range(width)
         dims = [_make_dim(depth)] if depth is not None else None
         init_expr = _to_expr_node(init) if init is not None else None
@@ -1498,7 +1539,7 @@ class Module:  # cm:2b9e4c
 
     def reg(
         self,
-        name: str,
+        name: str | None = None,
         width: int | Expr = 1,
         *,
         signed: bool | None = None,
@@ -1516,6 +1557,7 @@ class Module:  # cm:2b9e4c
                 ``"shortint"``, ``"longint"`` (fixed width, signed unless
                 ``signed=False``; *width* is then ignored).
         """
+        name = self._target_name(name, "reg", "width")
         if kind not in _REG_KINDS:
             raise ValueError(f"reg {name!r}: unknown kind {kind!r} (one of {', '.join(_REG_KINDS)})")
         var_kind, atom_width = _REG_KINDS[kind]
@@ -1534,14 +1576,15 @@ class Module:  # cm:2b9e4c
         self._variables.append(var)
         return self._declare_signal(name, width if atom_width is None else atom_width, depth)
 
-    def integer(self, name: str) -> Signal:
+    def integer(self, name: str | None = None) -> Signal:
         """Declare an integer variable."""
+        name = self._target_name(name, "integer", None)
         var = Variable(name, VariableKind.INTEGER)
         self._flush_pending(var)
         self._variables.append(var)
         return self._declare_signal(name, 32)
 
-    def struct_var(self, name: str, type_name: str) -> Signal:
+    def struct_var(self, name: str | None = None, type_name: str | None = None) -> Signal:
         """Declare a variable of a previously defined struct typedef.
 
         The struct must have been declared with :meth:`typedef_struct` and
@@ -1551,6 +1594,9 @@ class Module:  # cm:2b9e4c
             name: Variable name.
             type_name: Name of the typedef struct (e.g. ``"bus_t"``).
         """
+        name = self._target_name(name, "struct_var", "type_name")
+        if type_name is None:
+            raise TypeError("m.struct_var() needs type_name=, the struct typedef's name")
         # Look up the struct typedef
         td = None
         for t in self._typedefs:
@@ -1567,9 +1613,10 @@ class Module:  # cm:2b9e4c
         return self._declare_signal(name, width)
 
     def parameter(
-        self, name: str, default: int | Expr = 0, *, width: int | None = None, signed: bool = False
+        self, name: str | None = None, default: int | Expr = 0, *, width: int | None = None, signed: bool = False
     ) -> Signal:
         """Declare a parameter."""
+        name = self._target_name(name, "parameter", "default")
         range_obj = _make_range(width) if width is not None else None
         default_expr = _to_expr_node(default)
         param = Parameter(name, default_value=default_expr, is_local=False, width=range_obj, signed=signed)
@@ -1577,8 +1624,11 @@ class Module:  # cm:2b9e4c
         self._parameters.append(param)
         return self._declare_signal(name, width or 32)
 
-    def localparam(self, name: str, value: int | Expr = 0, *, width: int | None = None, signed: bool = False) -> Signal:
+    def localparam(
+        self, name: str | None = None, value: int | Expr = 0, *, width: int | None = None, signed: bool = False
+    ) -> Signal:
         """Declare a localparam."""
+        name = self._target_name(name, "localparam", "value")
         range_obj = _make_range(width) if width is not None else None
         val_expr = _to_expr_node(value)
         param = Parameter(name, default_value=val_expr, is_local=True, width=range_obj, signed=signed)
