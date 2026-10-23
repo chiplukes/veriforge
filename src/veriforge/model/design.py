@@ -9,7 +9,7 @@ from .assignments import ContinuousAssign
 from .behavioral import AlwaysBlock, InitialBlock
 from .functions import FunctionDecl, TaskDecl
 from .generate import GenerateCase, GenerateFor, GenerateIf, GenvarDecl
-from .instances import Instance
+from .instances import DefParam, Instance
 from .nets import Net
 from .parameters import Parameter
 from .ports import Port, PortDirection
@@ -27,6 +27,7 @@ class Module(VerilogNode):  # cm:b2d4f1
         "always_blocks",
         "attributes",
         "continuous_assigns",
+        "defparams",
         "functions",
         "generate_blocks",
         "hierarchy_map",
@@ -72,6 +73,7 @@ class Module(VerilogNode):  # cm:b2d4f1
         self.tasks: list[TaskDecl] = []
         self.generate_blocks: list[GenerateFor | GenerateIf | GenerateCase | GenvarDecl] = []
         self.specify_blocks: list[SpecifyBlock] = []
+        self.defparams: list[DefParam] = []
         self.typedefs: list[TypedefDecl] = []
         self.imports: list[ImportDecl] = []
         self.attributes = {}  # type: ignore[assignment]
@@ -150,6 +152,7 @@ class Module(VerilogNode):  # cm:b2d4f1
         nodes.extend(self.tasks)
         nodes.extend(self.generate_blocks)
         nodes.extend(self.specify_blocks)
+        nodes.extend(self.defparams)
         return nodes
 
     def to_dict(self) -> dict:  # noqa: PLR0912
@@ -179,6 +182,8 @@ class Module(VerilogNode):  # cm:b2d4f1
             d["generate_blocks"] = [g.to_dict() for g in self.generate_blocks]
         if self.specify_blocks:
             d["specify_blocks"] = [s.to_dict() for s in self.specify_blocks]
+        if self.defparams:
+            d["defparams"] = [p.to_dict() for p in self.defparams]
         if self.imports:
             d["imports"] = [i.to_dict() for i in self.imports]
         if self.attributes:

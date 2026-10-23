@@ -1457,8 +1457,9 @@ ordered_port_connection: attribute_instance* expression?
 // SYNTHESIZABLE: YES
 // EXAMPLE: .clk(sys_clk)
 // SUPPORT: YES
+// `.clk` alone (SV) means `.clk(clk)`; aliased so it isn't read as `.clk()` (unconnected).
 named_port_connection: attribute_instance* "." PORT_IDENTIFIER "(" expression? ")"
-    | attribute_instance* "." PORT_IDENTIFIER
+    | attribute_instance* "." PORT_IDENTIFIER -> implicit_named_port_connection
 
 // SECTION: A.4.2 Generate construct
 // BNF: generate_region ::=

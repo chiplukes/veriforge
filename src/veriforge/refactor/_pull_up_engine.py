@@ -2232,6 +2232,8 @@ def _unsupported_pull_up_features(module: Module) -> RefactorDiagnostic | None:
         unsupported.append("generate blocks")
     if module.specify_blocks:
         unsupported.append("specify blocks")
+    if module.defparams:
+        unsupported.append("defparams")
     if module.typedefs:
         unsupported.append("typedefs")
     if module.imports:

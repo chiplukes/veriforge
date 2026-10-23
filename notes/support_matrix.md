@@ -61,6 +61,7 @@ current detailed story.
 | Common expressions: arithmetic, bitwise, logical, comparisons, ternary | Supported | Supported | Supported | Partial | Supported for common operators | Partial | Partial |
 | Bit/range/part selects, concatenation, replication | Supported | Supported | Supported | Partial | Supported | Partial | Partial |
 | Module instantiation and multi-file elaboration/linking | Supported | Supported | Supported through elaboration/flattening | Partial | Supported for construction | Partial | Partial |
+| `defparam` | Supported | Supported | Supported for paths down from the module | Supported for paths down from the module | Not applicable (use `parameters=`) | Unsupported (generated code fails to build) | Limited |
 | Memories and memory element read/write flows | Supported | Supported | Supported for intended memory patterns | Partial | Supported for declaration/construction | Supported for simple memory forms | Partial |
 | Delays, event controls, and timing-oriented procedural flow | Supported | Supported | Supported | Fallback / partial | Supported for common testbench use | Partial | Limited |
 | Common system tasks: `$display`, `$write`, `$monitor`, `$finish`, `$stop` | Supported | Supported | Supported | Partial | Supported | Partial | Limited |

@@ -1181,6 +1181,16 @@ class TestInterfaceBinding:
         var_names = {v.name for v in flat.variables}
         assert "intf0.data_reg" in var_names
 
+    def test_interface_kept_with_generate_block(self):
+        """elaborate_generates rebuilt the module without its interface instances."""
+        from veriforge.model.generate import GenerateBlock, GenerateIf  # noqa: PLC0415
+
+        m = ModelModule("top")
+        m.interface_instances = [("bus0", self._make_interface())]
+        m.generate_blocks = [GenerateIf(Literal(1), GenerateBlock(name="g", items=[Net("w", NetKind.WIRE)]))]
+        net_names = {n.name for n in flatten_module(m).nets}
+        assert {"bus0.data", "bus0.valid", "g.w"} <= net_names
+
     def test_no_interfaces_no_change(self):
         """Module without interface_instances should flatten normally."""
         m = ModelModule("top")

@@ -12,7 +12,7 @@ from ..model.behavioral import AlwaysBlock, InitialBlock
 from ..model.design import Design, Module
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.generate import GenerateCase, GenerateFor, GenerateIf, GenvarDecl
-from ..model.instances import Instance
+from ..model.instances import DefParam, Instance
 from ..model.interface import Interface, Modport, ModportPort
 from ..model.nets import Net
 from ..model.package import ImportDecl, Package
@@ -85,7 +85,7 @@ _INTERFACE_WRAPPER_NODES = frozenset(
     }
 )
 _INTERFACE_SKIP_NODES = frozenset({"attribute_instance"})
-_UNMODELED_MODULE_ITEMS = frozenset({"dpi_import_export", "parameter_override", "specparam_declaration"})
+_UNMODELED_MODULE_ITEMS = frozenset({"dpi_import_export", "specparam_declaration"})
 _DIRECTION_TOKENS = {
     "KW_INPUT": PortDirection.INPUT,
     "KW_OUTPUT": PortDirection.OUTPUT,
@@ -106,6 +106,7 @@ class _DesignBuilderCallbacks:
     extract_udp_as_instance: ExtractInstanceFn
     extract_gate_instantiation: ExtractGateFn
     extract_continuous_assign: ExtractAssignsFn
+    extract_defparams: Callable[[Tree, str | None], list[DefParam]]
     extract_always_construct: BuildAlwaysFn
     extract_always_comb_construct: BuildAlwaysFn
     extract_always_ff_construct: BuildAlwaysFn
@@ -128,6 +129,7 @@ class _ModuleItems:
     __slots__ = (
         "always_blocks",
         "continuous_assigns",
+        "defparams",
         "functions",
         "generate_blocks",
         "imports",
@@ -158,6 +160,7 @@ class _ModuleItems:
         specify_blocks: list[SpecifyBlock],
         typedefs: list[TypedefDecl] | None = None,
         imports: list[ImportDecl] | None = None,
+        defparams: list[DefParam] | None = None,
     ):
         self.parameters = parameters
         self.nets = nets
@@ -173,6 +176,7 @@ class _ModuleItems:
         self.specify_blocks = specify_blocks
         self.typedefs: list[TypedefDecl] = typedefs if typedefs is not None else []
         self.imports: list[ImportDecl] = imports if imports is not None else []
+        self.defparams: list[DefParam] = defparams if defparams is not None else []
 
 
 @dataclass
@@ -192,9 +196,11 @@ class _ModuleContext:
     specify_blocks: list[SpecifyBlock] = None  # type: ignore[assignment]
     typedefs: list[TypedefDecl] = None  # type: ignore[assignment]
     imports: list[ImportDecl] = None  # type: ignore[assignment]
+    defparams: list[DefParam] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self.parameters = []
+        self.defparams = []
         self.ports = []
         self.nets = []
         self.variables = []
@@ -303,6 +309,7 @@ def _build_module(
 ) -> Module:
     """Build a Module from a module_declaration tree node."""
     ctx = _ModuleContext()
+    header_params: list[Parameter] = []
 
     for child in tree.children:
         if isinstance(child, Token):
@@ -310,7 +317,10 @@ def _build_module(
                 ctx.name = str(child)
         elif isinstance(child, Tree):
             _update_module_context(ctx, child, source_file, source_text, callbacks)
+            if child.data == "module_parameter_port_list":
+                header_params = list(ctx.parameters)
 
+    _localize_body_parameters(ctx.parameters, header_params)
     module = Module(
         name=ctx.name,
         parameters=ctx.parameters,
@@ -329,8 +339,21 @@ def _build_module(
     module.specify_blocks = ctx.specify_blocks
     module.typedefs = ctx.typedefs
     module.imports = ctx.imports
+    module.defparams = ctx.defparams
     _attach_module_children(module, ctx)
     return module
+
+
+def _localize_body_parameters(parameters: list[Parameter], header_params: list[Parameter]) -> None:
+    """A body ``parameter`` of a module or interface with a ``#(...)`` parameter
+    list is a localparam (IEEE 1800 6.20.1): an instance can't override it, and
+    the emitter keeps it out of the header."""
+    if not any(not p.is_local for p in header_params):
+        return
+    header = {id(p) for p in header_params}
+    for param in parameters:
+        if id(param) not in header:
+            param.is_local = True
 
 
 def _wraps_port_declaration(module_item: Tree) -> bool:
@@ -426,6 +449,7 @@ def _update_module_context(
             ctx.specify_blocks,
             ctx.typedefs,
             ctx.imports,
+            ctx.defparams,
         )
         _extract_module_items(child, source_file, items, source_text, callbacks)
 
@@ -446,6 +470,7 @@ def _attach_module_children(module: Module, ctx: _ModuleContext) -> None:
         *ctx.specify_blocks,
         *ctx.typedefs,
         *ctx.imports,
+        *ctx.defparams,
     ):
         child.parent = module
 
@@ -457,6 +482,7 @@ def _build_interface(
 ) -> Interface:
     """Build an Interface from an interface_declaration tree node."""
     ctx = _InterfaceContext()
+    header_params: list[Parameter] = []
 
     for child in tree.children:
         if isinstance(child, Token):
@@ -465,9 +491,11 @@ def _build_interface(
         elif isinstance(child, Tree):
             if child.data == "module_parameter_port_list":
                 ctx.parameters.extend(callbacks.extract_parameters(child, source_file, False))
+                header_params = list(ctx.parameters)
             elif child.data == "interface_item":
                 _extract_interface_item(child, source_file, ctx, callbacks)
 
+    _localize_body_parameters(ctx.parameters, header_params)
     iface = Interface(
         name=ctx.name,
         parameters=ctx.parameters,
@@ -681,6 +709,8 @@ def _extract_module_items(  # noqa: PLR0912
             items.instances.extend(callbacks.extract_gate_instantiation(node, source_file))
         elif node.data == "continuous_assign":
             items.continuous_assigns.extend(callbacks.extract_continuous_assign(node, source_file))
+        elif node.data == "parameter_override":
+            items.defparams.extend(callbacks.extract_defparams(node, source_file))
         elif node.data in _UNMODELED_MODULE_ITEMS:
             continue
         else:

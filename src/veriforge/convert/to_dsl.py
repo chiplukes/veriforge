@@ -673,6 +673,10 @@ def module_to_dsl(module: Module, *, module_var: str = "m") -> str:  # noqa: PLR
     for gen in module.generate_blocks:
         lines.append(f'unsupported("generate block ({type(gen).__name__})")')
 
+    # --- Defparams (unsupported; dropping one would change parameter values, so building fails) ---
+    for dp in module.defparams:
+        lines.append(f'unsupported("defparam {dp.path}")')
+
     # --- Specify blocks (unsupported) ---
     for _spec in module.specify_blocks:
         lines.append("# UNSUPPORTED: specify block")

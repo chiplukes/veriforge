@@ -63,7 +63,7 @@ from .expressions import (
 )
 
 # Instances
-from .instances import Instance, ParameterBinding, PortConnection
+from .instances import DefParam, Instance, ParameterBinding, PortConnection
 
 # Nets
 from .nets import Net, NetKind
@@ -123,6 +123,7 @@ __all__ = [
     "Comment",
     "Concatenation",
     "ContinuousAssign",
+    "DefParam",
     "DelayControl",
     "Design",
     "DisableStatement",

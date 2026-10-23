@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .base import SourceLocation, VerilogNode
-from .expressions import Expression, Range
+from .expressions import Expression, Identifier, Range
 
 if TYPE_CHECKING:
     from .design import Module
@@ -58,6 +58,40 @@ class PortConnection(VerilogNode):
         if self.expression is not None:
             d["expression"] = self.expression.to_dict()
         d["is_named"] = self.is_named
+        return d
+
+
+class DefParam(VerilogNode):
+    """A ``defparam`` assignment: ``defparam u1.u2.WIDTH = 16;``.
+
+    ``target`` is the hierarchical parameter name (``Identifier("WIDTH",
+    hierarchy=["u1", "u2"])``); ``value`` is evaluated in the scope of the
+    module that holds the defparam. Elaboration applies it to that instance,
+    taking precedence over the instance's ``#(...)`` value.
+    """
+
+    __slots__ = ("target", "value")
+
+    def __init__(self, *, target: Identifier, value: Expression, loc: SourceLocation | None = None):
+        super().__init__(loc=loc)
+        self.target = target
+        self.value = value
+
+    def __repr__(self) -> str:
+        return f"DefParam({self.path!r} = {self.value!r})"
+
+    @property
+    def path(self) -> str:
+        """The dotted target, e.g. ``"u1.u2.WIDTH"``."""
+        return ".".join([*(self.target.hierarchy or []), self.target.name])
+
+    def _child_nodes(self) -> list[VerilogNode]:
+        return [self.target, self.value]
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["target"] = self.target.to_dict()
+        d["value"] = self.value.to_dict()
         return d
 
 
