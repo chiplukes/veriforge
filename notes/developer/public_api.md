@@ -159,8 +159,8 @@ from veriforge.dsl import Module, posedge, cat, mux
 from veriforge.codegen import emit_module
 
 with Module("counter") as m:
-    clk = m.input("clk")
-    q = m.output_reg("q", width=8)
+    clk = m.input()
+    q = m.output_reg(width=8)
     with m.always(posedge(clk)):
         q <<= q + 1
 

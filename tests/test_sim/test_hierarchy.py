@@ -1252,3 +1252,34 @@ class TestConstantPortBootstrap:
         top, _child, design = _make_top_with_const_port()
         sim = Simulator(top, engine=engine, design=design)
         assert int(sim.read("out")) == 5, f"[{engine}] out should be 5, got {sim.read('out')!r}"
+
+
+# ── A connection to a port the child doesn't have ────────────────────
+
+
+def _make_top_with_unknown_port() -> tuple[Module, Design]:
+    """inverter u1 (.a(in_a), .yy(out_y)): Icarus rejects it at elaboration."""
+    top, inv, _ = _make_top_with_inverter()
+    top.instances[0].port_connections[1] = PortConnection(port_name="yy", expression=Identifier("out_y"), is_named=True)
+    design = Design(modules=[top, inv])
+    link_instances(design)
+    resolve_port_connections(design)
+    return top, design
+
+
+class TestUnknownPortConnection:
+    """Used to be skipped silently, leaving the parent's signal undriven (x)."""
+
+    def test_flatten_raises(self):
+        top, design = _make_top_with_unknown_port()
+        with pytest.raises(
+            ValueError,
+            match=r"Instance 'u1' connects port 'yy', which module 'inverter' doesn't have \(its ports: a, y\)",
+        ):
+            flatten_module(top, design=design)
+
+    @pytest.mark.parametrize("engine", _HIER_ENGINES)
+    def test_simulator_raises(self, engine):
+        top, design = _make_top_with_unknown_port()
+        with pytest.raises(ValueError, match="connects port 'yy'"):
+            Simulator(top, engine=engine, design=design)

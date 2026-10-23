@@ -43,14 +43,14 @@ def pipeline(name, data_width, stages, *, enable=True):
         valid_out              — output valid (delayed by len(stages) cycles)
     """
     m = Module(name)
-    clk = m.input("clk").comment("Pipeline clock")
-    rst = m.input("rst").comment("Synchronous reset")
-    en = m.input("en").comment("Pipeline enable (stall when low)") if enable else None
+    clk = m.input(comment="Pipeline clock")
+    rst = m.input(comment="Synchronous reset")
+    en = m.input(comment="Pipeline enable (stall when low)") if enable else None
 
-    din = m.input("din", width=data_width).comment("Pipeline input data")
-    valid_in = m.input("valid_in").comment("Input valid")
-    dout = m.output_reg("dout", width=data_width).comment("Pipeline output data")
-    valid_out = m.output_reg("valid_out").comment("Output valid")
+    din = m.input(width=data_width, comment="Pipeline input data")
+    valid_in = m.input(comment="Input valid")
+    dout = m.output_reg(width=data_width, comment="Pipeline output data")
+    valid_out = m.output_reg(comment="Output valid")
 
     prev_data = din
     prev_valid = valid_in

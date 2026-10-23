@@ -144,12 +144,12 @@ def single_port_ram(data_width, depth, sync_read=True, style="auto"):
     m = Module("single_port_ram")
     # ...
     if sync_read:
-        rdata = m.output_reg("rdata", width=data_width)
+        rdata = m.output_reg(width=data_width)
         with m.always(posedge(clk)):
             with m.if_(re):
                 rdata <<= mem[addr]
     else:
-        rdata = m.output("rdata", width=data_width)
+        rdata = m.output(width=data_width)
         m.assign(rdata, mem[addr])
 
     if style == "block":
@@ -177,9 +177,9 @@ def my_module(debug=False):
     m = Module("my_mod")
     # ... normal design ...
     if debug:
-        dbg_state = m.output("dbg_state", width=4)
+        dbg_state = m.output(width=4)
         m.assign(dbg_state, state)
-        dbg_count = m.output("dbg_count", width=32)
+        dbg_count = m.output(width=32)
         m.assign(dbg_count, cycle_counter)
     return m
 ```
@@ -356,10 +356,10 @@ Library modules compose like function calls:
 ```python
 # Build a system from library primitives
 top = Module("audio_pipeline")
-clk = top.input("clk")
-rst = top.input("rst")
-audio_in = top.input("audio_in", width=16)
-audio_out = top.output("audio_out", width=16)
+clk = top.input()
+rst = top.input()
+audio_in = top.input(width=16)
+audio_out = top.output(width=16)
 
 # Instantiate library components with different parameters
 fifo_in = sync_fifo(data_width=16, depth=64, style="block")

@@ -12,12 +12,12 @@ from veriforge.dsl.lib import axi_stream, axis_register
 def data_source():
     """Simple AXI-Stream master that outputs incrementing data."""
     m = Module("data_source")
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
 
     # Bind as master: tvalid/tdata/tlast are outputs, tready is input
     out = m.interface("m_axis", axi_stream(data_width=8), role="master", reg=True)
-    counter = m.reg("counter", width=8)
+    counter = m.reg(width=8)
 
     with m.always(posedge(clk)):
         with m.if_(rst):
@@ -36,14 +36,14 @@ def data_source():
 def data_sink():
     """Simple AXI-Stream slave that accepts everything."""
     m = Module("data_sink")
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
 
     # Bind as slave: tvalid/tdata/tlast are inputs, tready is output
     inp = m.interface("s_axis", axi_stream(data_width=8), role="slave")
     m.assign(inp.tready, 1)  # always ready
 
-    received = m.output_reg("received", width=8)
+    received = m.output_reg(width=8)
     with m.always(posedge(clk)):
         with m.if_(rst):
             received <<= 0

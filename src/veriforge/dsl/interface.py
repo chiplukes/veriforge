@@ -20,7 +20,7 @@ Example::
 
     # Bind to a module as master ports
     m = Module("producer")
-    clk = m.input("clk")
+    clk = m.input()
     m_axis = m.interface("m_axis", axi_stream, role="master")
     # Creates:  output m_axis_tvalid, input m_axis_tready,
     #           output [7:0] m_axis_tdata, output m_axis_tlast

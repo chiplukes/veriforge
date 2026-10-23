@@ -1,7 +1,8 @@
 """Example: 8-bit counter with synchronous reset.
 
 Demonstrates:
-- Port declarations (input, output_reg)
+- Port declarations (input, output_reg), named after their Python variables
+- Declaration comments (comment=)
 - Always block with posedge sensitivity
 - If/else control flow
 - Non-blocking assignment (<<=)
@@ -15,9 +16,9 @@ from veriforge.sim import Clock, Simulator
 # -- Build the counter module --
 
 m = Module("counter")
-clk = m.input("clk").comment("System clock")
-rst = m.input("rst").comment("Synchronous reset, active high")
-count = m.output_reg("count", width=8).comment("Free-running counter")
+clk = m.input(comment="System clock")
+rst = m.input(comment="Synchronous reset, active high")
+count = m.output_reg(width=8, comment="Free-running counter")
 
 with m.always(posedge(clk)):
     with m.if_(rst):

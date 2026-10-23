@@ -181,18 +181,18 @@ content-hash cached per module, so parallel workers are safe.
 
 ### 2.1 Prefer the imperative style
 
-Use the imperative `Module` builder (`m.input("clk")`, `m.reg(…)`,
-`m.interface(…)`). Signal declarations are a bit more verbose, but the
-signals are first-class locals afterward and generation/loops are natural:
+Use the imperative `Module` builder (`clk = m.input()`, `m.reg(…)`,
+`m.interface(…)`). The signals are first-class locals, and generation/loops
+are natural:
 
 ```python
 from veriforge.dsl import Module, posedge
 from veriforge.codegen import emit_module
 
 with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+    clk = m.input()
+    rst = m.input()
+    count = m.output_reg(width=8)
 
     with m.always(posedge(clk)):
         with m.if_(rst):
@@ -202,6 +202,24 @@ with Module("counter") as m:
 
 mod = m.build()
 ```
+
+A declaration without a name is named after the variable it is assigned
+to. Pass the name explicitly (`m.wire("x", width=8)`) whenever:
+
+- the signal name should differ from the variable (`s_tvalid = m.input("s_axis_tvalid")`);
+- there is no single plain variable — `a, b = m.wire(), m.wire()`,
+  `a = b = m.wire()`, `self.x = m.wire()`, `[m.wire() for ...]`, `f(m.wire())`;
+- the declaration is inside a loop body or comprehension (refused even on
+  the first pass; the error shows the line rewritten with a generated name
+  such as `m.reg(f"tap_{i}", width=8)`), unless the loop creates the module
+  itself on each pass;
+- a helper declares into the same module more than once;
+- the code may run on PyPy (inference is CPython-only).
+
+Those cases raise a `ValueError` naming the file and line rather than
+guessing. Use `comment=`/`attrs=` on the declaration instead of chaining
+`.comment()`/`.attr()` (chaining hides the variable), and pass width etc. by
+keyword (`m.wire(width=8)`, not `m.wire(8)`).
 
 The declarative `ModuleSpec` style (class attributes) is fine for a fixed
 interface, but reach for the imperative builder whenever the signal set is
@@ -221,8 +239,8 @@ from veriforge.dsl import Module, posedge
 from veriforge.dsl.lib import axi_stream, axi4_lite
 
 with Module("producer") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
     out = m.interface("m_axis", axi_stream(data_width=32), role="master", reg=True)
 
     with m.always(posedge(clk)):
@@ -232,7 +250,7 @@ with Module("producer") as m:
 
 # AXI4-Lite peripheral (full 5-channel template):
 with Module("regs") as m:
-    clk = m.input("clk")
+    clk = m.input()
     s_axi = m.interface("s_axi", axi4_lite(data_width=32, addr_width=8), role="slave")
     # s_axi.awaddr / .awvalid / .awready / .wdata / .bvalid / .rdata / ...
 ```

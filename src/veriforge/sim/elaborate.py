@@ -1068,6 +1068,14 @@ def _wire_port_connections(flat: Module, inst: Instance, sub: Module, prefix: st
     """Create continuous assigns that wire parent signals to child signals."""
     for conn in inst.port_connections:
         port = _resolve_port_for_conn(conn, sub)
+        if port is None and conn.is_named and conn.port_name:
+            # Icarus: "port ``x'' is not a port of u1" (an elaboration error). Skipping
+            # it silently left the parent's signal undriven.
+            ports = ", ".join(p.name for p in sub.ports) or "none"
+            raise ValueError(
+                f"Instance '{inst.instance_name}' connects port '{conn.port_name}', which module "
+                f"'{sub.name}' doesn't have (its ports: {ports})"
+            )
         if port is None or conn.expression is None:
             continue
 

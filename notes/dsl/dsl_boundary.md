@@ -21,8 +21,8 @@ No simulation occurs.
 
 ```python
 with Module("example") as m:
-    clk = m.input("clk")
-    count = m.output_reg("count", width=8)
+    clk = m.input()
+    count = m.output_reg(width=8)
 
     print("Building module...")         # Runs NOW, at build time
     for i in range(4):                  # Python loop — unrolls at build time
@@ -131,8 +131,8 @@ This is expected and useful for meta-programming:
 # Python dict for configuration — runs at build time, no Verilog output
 config = {"width": 8, "depth": 256}
 with Module("ram") as m:
-    data = m.input("data", width=config["width"])
-    mem = m.reg("mem", width=config["width"], depth=config["depth"])
+    data = m.input(width=config["width"])
+    mem = m.reg(width=config["width"], depth=config["depth"])
 ```
 
 The dict, string formatting, and arithmetic all execute in Python and

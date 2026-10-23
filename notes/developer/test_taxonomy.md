@@ -94,7 +94,8 @@ with four jobs:
 `mypy src/veriforge/ veriforge_lsp/`, `python tools/check_files.py`.
 
 **`test`** (needs `lint`) — the fast parser/model/analysis/preprocessor/
-formatter slice, on a Python 3.10/3.11/3.12/3.13 matrix:
+formatter slice plus `tests/test_dsl/test_name_inference.py` (bytecode
+details differ per version), on a Python 3.10/3.11/3.12/3.13/3.14 matrix:
 
 ```
 uv run pytest

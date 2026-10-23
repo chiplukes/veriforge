@@ -11,14 +11,17 @@ compose freely:
   a signal's name is never typed twice. **This is the default/recommended
   style** for anything with a fixed interface, and is what the rest of this
   guide leads with.
-- **Imperative (`Module` builder)** — `clk = m.input("clk")`,
-  `count = m.reg("cnt", width=8)`. The name is passed as an explicit
-  string. This is what `ModuleSpec` itself calls internally, and it's still
-  the right tool when the set of signals isn't fixed at write-time — a
-  `for` loop generating N ports, a bus interface expanding into a variable
-  number of prefixed signals, or a module converted from parsed Verilog.
-  See **[The Imperative Builder](#the-imperative-builder)** below for the
-  full picture of when and how to reach for it.
+- **Imperative (`Module` builder)** — `clk = m.input()`,
+  `count = m.reg(width=8)`. The name comes from the variable the result is
+  assigned to (or pass it as a string, `m.reg("cnt", width=8)`, when the
+  two differ or there is no plain variable — see
+  [Signal names](#signal-names-inferred-or-explicit)). This is what
+  `ModuleSpec` itself calls internally, and it's the right tool when the
+  set of signals isn't fixed at write-time — a `for` loop generating N
+  ports, a bus interface expanding into a variable number of prefixed
+  signals, or a module converted from parsed Verilog. See
+  **[The Imperative Builder](#the-imperative-builder)** below for the full
+  picture of when and how to reach for it.
 
 **Source:** `src/veriforge/dsl/builder.py` (~1480 lines), `src/veriforge/dsl/spec.py` (declarative layer), `src/veriforge/dsl/interface.py` (~170 lines)
 
@@ -83,8 +86,8 @@ an immutable model `Module` object. See
 Every declaration method returns a `Signal` (subclass of `Expr`). `Signal` objects capture hardware expressions via Python operator overloading — no computation happens at build time, only expression tree construction.
 
 ```python
-a = m.input("a", width=8)  # or self.a from a ModuleSpec's In(8), inside body()
-b = m.input("b", width=8)
+a = m.input(width=8)  # or self.a from a ModuleSpec's In(8), inside body()
+b = m.input(width=8)
 result = (a + b) & 0xFF   # Expr wrapping BinaryOp("&", BinaryOp("+", ...), Literal(255))
 ```
 
@@ -238,39 +241,129 @@ write-time:
 ### Single-signal declarations
 
 Every descriptor in the table above is backed by one of these `Module`
-methods — the name is now a required string argument:
+methods. Leave the name out and it is taken from the variable; pass it as
+the first argument when it should differ:
 
 ```python
 # Ports
-clk   = m.input("clk")                       # input clk
-data  = m.input("data", width=8)              # input [7:0] data
-sdata = m.input("sdata", width=8, signed=True)  # input signed [7:0] sdata
-y     = m.output("y", width=4)                # output [3:0] y
-q     = m.output_reg("q", width=8)            # output reg [7:0] q  (also creates a variable)
-q0    = m.output_reg("q0", width=8, init=0)   # output reg [7:0] q0 = 0
-bus   = m.inout("bus", width=8)               # inout [7:0] bus
+clk   = m.input()                          # input clk
+data  = m.input(width=8)                   # input [7:0] data
+sdata = m.input(width=8, signed=True)      # input signed [7:0] sdata
+y     = m.output(width=4)                  # output [3:0] y
+q     = m.output_reg(width=8)              # output reg [7:0] q  (also creates a variable)
+q0    = m.output_reg(width=8, init=0)      # output reg [7:0] q0 = 0
+bus   = m.inout(width=8)                   # inout [7:0] bus
 
 # Internal signals
-w  = m.wire("w", width=16)                    # wire [15:0] w
-w0 = m.wire("w0", width=8, init=0)            # wire [7:0] w0 = 0
-r  = m.reg("state", width=4)                  # reg [3:0] state
-r0 = m.reg("cnt", width=8, init=0)            # reg [7:0] cnt = 0
-i  = m.integer("i")                           # integer i (no declarative equivalent)
-l  = m.reg("l", width=4, kind="logic")        # logic [3:0] l (may be continuously assigned)
-n  = m.reg("n", kind="int")                   # int n (atom kinds: int, integer, byte,
-                                              #  shortint, longint -- fixed width, signed)
+w     = m.wire(width=16)                   # wire [15:0] w
+w0    = m.wire(width=8, init=0)            # wire [7:0] w0 = 0
+r     = m.reg("state", width=4)            # reg [3:0] state  (explicit: differs from `r`)
+cnt   = m.reg(width=8, init=0)             # reg [7:0] cnt = 0
+i     = m.integer()                        # integer i (no declarative equivalent)
+l     = m.reg(width=4, kind="logic")       # logic [3:0] l (may be continuously assigned)
+n     = m.reg(kind="int")                  # int n (atom kinds: int, integer, byte,
+                                           #  shortint, longint -- fixed width, signed)
 
 # Memory arrays
-mem = m.reg("mem", width=8, depth=256)        # reg [7:0] mem [0:255]
-rom = m.wire("rom", width=32, depth=1024)     # wire [31:0] rom [0:1023]
+mem   = m.reg(width=8, depth=256)          # reg [7:0] mem [0:255]
+rom   = m.wire(width=32, depth=1024)       # wire [31:0] rom [0:1023]
 
 # Parameters
-W = m.parameter("WIDTH", default=8)           # parameter WIDTH = 8
-H = m.localparam("HALF", value=4)             # localparam HALF = 4 (no declarative equivalent)
+WIDTH = m.parameter(default=8)             # parameter WIDTH = 8
+HALF  = m.localparam(value=4)              # localparam HALF = 4 (no declarative equivalent)
 
 # Parameterized width — width argument accepts Signal/Expr
-data = m.input("data", width=W)               # input [WIDTH-1:0] data
+din   = m.input(width=WIDTH)               # input [WIDTH-1:0] din
+
+# Comments and synthesis attributes (see Comments / Synthesis Attributes)
+state = m.reg(width=3, attrs={"fsm_encoding": "one_hot"}, comment="FSM state")
 ```
+
+Without a name, everything after it is passed by keyword: `m.wire(width=8)`,
+not `m.wire(8)` (which raises a `TypeError` saying so).
+
+### Signal names: inferred or explicit
+
+`x = m.wire(width=8)` names the wire `x`. The builder reads the calling
+line's bytecode to see which variable the result is stored in (the same
+technique as Amaranth's `Signal()` naming), so this works for every
+declaration method: `input`, `output`, `output_reg`, `inout`, `wire`,
+`reg`, `integer`, `struct_var`, `parameter` and `localparam`.
+
+A name is inferred only when the call's result goes **straight into one
+plain variable**. In every other case the declaration raises a
+`ValueError` naming the file and line, rather than guessing:
+
+| Code | Result |
+|------|--------|
+| `x = m.wire()` (also `x: Signal = ...`, module level, `global x`, a class body, a closure variable) | `x` |
+| `x = m.wire() if wide else m.reg()` / `x = flag and m.wire()` | `x` |
+| `a, b = m.wire(), m.wire()` | refused — unpacking a tuple |
+| `a = b = m.wire()` | refused — two targets |
+| `self.x = m.wire()`, `d["x"] = m.wire()` | refused — attribute / subscript target |
+| `[m.wire() for _ in ...]`, `f(m.wire())`, `return m.wire()` | refused — no variable |
+| `(x := m.wire())` | refused — walrus |
+| `x = m.wire().comment("...")` | refused — the result goes to `.comment()` first; use `x = m.wire(comment="...")` |
+| `x = m.wire() + 1` | refused — `x` holds an expression, not the wire |
+| `for i in range(n): lane = m.wire()` | refused on the **first** pass — every pass would reuse `lane`; the error shows the line rewritten as `lane = m.wire(f"lane_{i}")` |
+| `[m.reg(width=8) for i in range(n)]`, `taps.append(m.wire())` in a loop | refused — the same, with the loop variable in the suggested name |
+| `for w in (8, 16): m = Module(f"add{w}"); a = m.input(width=w)` | `a` — the module is created inside the same loop, so each pass declares into a new module |
+
+When a name can't be inferred, pass it: `a, b = m.wire("a"), m.wire("b")`,
+`self.x = m.wire("x")`. For a tuple of same-kind signals, the
+[bulk declarations](#bulk-declarations) below name every signal in one
+call: `a, b = m.wires("a b")`.
+
+Other rules:
+
+- **Loops.** A declaration without a name inside a loop body (`for`,
+  `while`, or a comprehension) is refused on the loop's first pass: every
+  pass would store into the same variable, so the second would repeat the
+  name. Refusing up front means a generator doesn't work with `n = 1` and
+  then fail with `n = 4`. The error shows the offending line and the same
+  line with a per-pass name built from the loop variable, e.g.
+
+  ```text
+  m.wire() at gen.py:12 is inside a loop, so it can't take its signal name from the variable:
+
+      lane = m.wire(width=8)
+
+  Every pass through the loop would declare another signal named 'lane', and the signal
+  names in a module must be unique. Pass a name that is different on each pass, built
+  from the loop variable 'i':
+
+      lane = m.wire(f"lane_{i}", width=8)
+
+  If the signals are needed after the loop, keep them in a list or dict. (Outside a loop,
+  `x = m.wire(...)` names the signal 'x' with no string needed.)
+  ```
+
+  The one exception is a loop that creates the module itself on each pass
+  (`for w in widths: m = Module(f"add{w}")` ... in the same function and
+  the same innermost loop): each pass declares into a new module, so
+  inferred names are fine there. A module built by a helper called in the
+  loop is built in the helper's own function, where its declarations
+  aren't in a loop at all.
+- **Helpers called twice.** A helper with `tap = m.wire()` that is called
+  twice for the same module declares `tap` twice, which raises the
+  duplicate-signal error (saying the line probably runs more than once).
+  Give the helper a `name` parameter, or build the name from an argument —
+  `m.wire(f"tap_{n}")`.
+- **Wrappers.** The name is read from the line that calls the `Module`
+  method directly. A helper `def wire8(): return m.wire(width=8)` is
+  refused (its call is a `return`); give the helper a `name` parameter and
+  pass it through.
+- **Verilog keywords.** A variable can be called `output`, `begin` or
+  `logic`; a signal can't. An inferred name that is a Verilog-2005 or
+  SystemVerilog keyword is refused (rename the variable or pass a name).
+- **Explicit names are unchanged.** `m.wire("x", 8)`, `m.input(name="clk")`
+  and every existing call behave exactly as before, so a variable and its
+  signal can have different names (`s_tvalid = m.input("s_axis_tvalid")`).
+- **CPython only.** Inference needs CPython 3.10+ (it works under
+  debuggers, coverage and other `sys.settrace`/`sys.monitoring` tools). On
+  PyPy every declaration needs an explicit name.
+- **Cost.** Each calling function's bytecode is read once and cached; after
+  that an inferred name adds about a microsecond or less per declaration.
 
 ### Bulk declarations
 
@@ -288,7 +381,11 @@ w1, w2       = m.wires("w1:16 w2:16")
 s1, s2       = m.regs("s1:4 s2:4")
 ```
 
-For `signed=`, `init=`, or `depth=`, use the single-signal forms.
+For `signed=`, `init=`, or `depth=`, use the single-signal forms. The bulk
+forms are also how to declare a tuple of signals in one line: `a, b =
+m.wire(), m.wire()` can't infer names (see
+[Signal names](#signal-names-inferred-or-explicit)), `a, b = m.wires("a b")`
+names both.
 
 ### Side by side with Quick Start
 
@@ -299,9 +396,9 @@ from veriforge.dsl import Module, posedge
 from veriforge.codegen.verilog_emitter import emit_module
 
 with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+    clk = m.input()
+    rst = m.input()
+    count = m.output_reg(width=8)
 
     with m.always(posedge(clk)):
         with m.if_(rst):
@@ -333,9 +430,9 @@ for i in range(4):
 # Adder tree
 m = Module("adder_tree")
 a = [m.input(f"a{i}", width=8) for i in range(4)]
-s01   = m.wire("s01", width=9)
-s23   = m.wire("s23", width=9)
-total = m.output("total", width=10)
+s01   = m.wire(width=9)
+s23   = m.wire(width=9)
+total = m.output(width=10)
 m.assign(s01, a[0] + a[1])
 m.assign(s23, a[2] + a[3])
 m.assign(total, s01 + s23)
@@ -575,7 +672,7 @@ with m.initial():
 ### Memory Initialization
 
 ```python
-mem = m.reg("mem", width=8, depth=256)
+mem = m.reg(width=8, depth=256)
 with m.initial():
     m.readmemh("data.hex", mem)       # $readmemh("data.hex", mem);
     m.readmemb("data.bin", mem)       # $readmemb("data.bin", mem);
@@ -638,8 +735,8 @@ with m.initial():
 
 ```python
 with Module("tb") as m:
-    clk  = m.input("clk")
-    data = m.output_reg("data", width=8)
+    clk  = m.input()
+    data = m.output_reg(width=8)
 
     with m.initial():
         m.assign(data, 0)
@@ -727,9 +824,9 @@ class Counter(ModuleSpec):
 # The top-level wiring is procedural (it's just an instance + a wire), so
 # it stays imperative even though the reusable submodule above is not.
 with Module("top") as top:
-    sys_clk = top.input("sys_clk")
-    sys_rst = top.input("sys_rst")
-    cnt     = top.wire("cnt", width=8)
+    sys_clk = top.input()
+    sys_rst = top.input()
+    cnt     = top.wire(width=8)
 
     top.instance("Counter", "u_counter", ports={
         "clk":   sys_clk,
@@ -787,14 +884,31 @@ top.instance("counter", "u_cnt",
 
 Emits: `.count()`
 
+### Port names are strings
+
+`ports={"count": cnt}` names the child's ports by string, and the child's
+port names come from its own declarations — with inferred names, from its
+variable names. Renaming a variable in the child therefore renames its port,
+and an instance that still connects the old name is now an elaboration error
+on every engine (as in Icarus), rather than a silently undriven signal:
+
+```text
+ValueError: Instance 'u_cnt_0' connects port 'cnt', which module 'counter' doesn't have (its ports: clk, rst, count)
+```
+
+Instance names (`f"u_cnt_{i}"`) are never inferred; a repeated one raises
+`Duplicate instance name`.
+
 ### Multiple Instances
 
-Python loops work naturally for arrays of instances:
+Python loops work naturally for arrays of instances. The wires feeding
+them are declared in a loop too, so they take explicit, generated names
+(an unnamed `cnt = m.wire(width=8)` inside the loop would be refused):
 
 ```python
 with Module("top") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
     counts = [m.wire(f"cnt_{i}", width=8) for i in range(4)]
 
     for i in range(4):
@@ -835,15 +949,15 @@ Comments attach to declarations and blocks and appear in the emitted Verilog.
 
 ### Signal Comments
 
-Call `.comment()` on any signal. Port comments become trailing (`// text` on
-the same line); wire/reg comments become leading (line above):
+Pass `comment=` to any signal declaration. Port comments become trailing
+(`// text` on the same line); wire/reg comments become leading (line above):
 
 ```python
-clk   = m.input("clk").comment("100 MHz system clock")
-rst   = m.input("rst").comment("Active-high synchronous reset")
-count = m.output_reg("count", width=8).comment("Free-running counter")
-state = m.reg("state", width=2).comment("FSM state")
-bus   = m.wire("bus", width=8).comment("Internal data bus")
+clk   = m.input(comment="100 MHz system clock")
+rst   = m.input(comment="Active-high synchronous reset")
+count = m.output_reg(width=8, comment="Free-running counter")
+state = m.reg(width=2, comment="FSM state")
+bus   = m.wire(width=8, comment="Internal data bus")
 ```
 
 Emits:
@@ -861,7 +975,12 @@ module counter (
     wire [7:0] bus;
 ```
 
-Multiple `.comment()` calls add multiple lines. Chaining returns `self`.
+`.comment()` on a signal does the same and returns the signal, so it can be
+chained — but only after an explicit name (`clk = m.input("clk").comment(...)`):
+with the name left out, the declaration's result goes to `.comment()` before
+the variable, so the name can't be inferred and the declaration raises a
+`ValueError` pointing at `comment=`. Multiple `.comment()` calls add multiple
+lines.
 
 ### Block and Assign Comments
 
@@ -898,9 +1017,9 @@ The comment appears above the next declaration, assignment, or block:
 ```python
 m = Module("adder_tree")
 a = [m.input(f"a{i}", width=8) for i in range(4)]
-s01   = m.wire("s01", width=9)
-s23   = m.wire("s23", width=9)
-total = m.output("total", width=10)
+s01   = m.wire(width=9)
+s23   = m.wire(width=9)
+total = m.output(width=10)
 
 m.comment("Stage 1: partial sums")
 m.assign(s01, a[0] + a[1])
@@ -942,13 +1061,14 @@ Emits:
 
 ## Synthesis Attributes
 
-Call `.attr()` on any signal to attach synthesis attributes. They appear
-as `(* ... *)` above the declaration in emitted Verilog:
+Pass `attrs=` (a dict of name to value, `None` for a valueless attribute)
+to any signal declaration to attach synthesis attributes. They appear as
+`(* ... *)` above the declaration in emitted Verilog:
 
 ```python
-state = m.reg("state", width=3).attr("fsm_encoding", "one_hot")
-clk_buf = m.wire("clk_buf").attr("dont_touch")
-data = m.input("data", width=8).attr("io_standard", "LVCMOS33")
+state = m.reg(width=3, attrs={"fsm_encoding": "one_hot"})
+clk_buf = m.wire(attrs={"dont_touch": None})
+data = m.input(width=8, attrs={"io_standard": "LVCMOS33"})
 ```
 
 Emits:
@@ -962,11 +1082,13 @@ Emits:
 
 For ports, the attribute appears on the line above the port in the port list.
 
-Multiple `.attr()` calls combine into a single `(* ... *)` line. Chaining
-with `.comment()` works:
+Several attributes combine into a single `(* ... *)` line. `.attr(name,
+value)` on a signal does the same and can be chained after an explicit name
+(`state = m.reg("state", width=3).attr("fsm_encoding", "one_hot")`), like
+`.comment()` above. `attrs=` and `comment=` combine:
 
 ```python
-state = m.reg("state", width=3).attr("fsm_encoding", "one_hot").comment("FSM state")
+state = m.reg(width=3, attrs={"fsm_encoding": "one_hot"}, comment="FSM state")
 ```
 
 ## Interfaces (Signal Bus Grouping)
@@ -1012,7 +1134,7 @@ Use `m.interface()` to create prefixed ports:
 
 ```python
 m = Module("producer")
-clk = m.input("clk")
+clk = m.input()
 m_axis = m.interface("m_axis", axi_stream, role="master")
 ```
 
@@ -1065,7 +1187,7 @@ Use `m.wire_interface()` for internal wires (no role needed):
 
 ```python
 top = Module("top")
-clk = top.input("clk")
+clk = top.input()
 axis = top.wire_interface("axis", axi_stream)
 # wire axis_tvalid, wire axis_tready, wire [7:0] axis_tdata, wire axis_tlast
 ```
@@ -1203,7 +1325,7 @@ class AxiProducer(ModuleSpec):
 
     def body(self, m):
         m_axis = m.interface("m_axis", axi_s, role="master", reg=True)
-        cnt = m.reg("cnt", width=8)
+        cnt = m.reg(width=8)
         with m.always(posedge(self.clk)):
             with m.if_(self.rst):
                 m_axis.tvalid <<= 0

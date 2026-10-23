@@ -11,6 +11,11 @@ patterns.
 | `alu.py` | ALU-style combinational logic. |
 | `testbench.py` | Basic testbench-oriented DSL constructs. |
 
+The examples name most signals after their Python variable
+(`clk = m.input()`, `count = m.output_reg(width=8, comment="...")`); see
+[Signal names](../../notes/dsl/dsl_guide.md#signal-names-inferred-or-explicit)
+for when to pass a name instead.
+
 Run an example from the repository root:
 
 ```powershell

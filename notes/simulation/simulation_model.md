@@ -876,9 +876,9 @@ values — Python expressions become circuit descriptions.
 
 ```python
 with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+    clk = m.input()
+    rst = m.input()
+    count = m.output_reg(width=8)
 
     with m.always(posedge(clk)):
         with m.if_(rst):

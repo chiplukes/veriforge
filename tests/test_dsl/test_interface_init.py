@@ -10,6 +10,8 @@ import pytest
 from veriforge.codegen.verilog_emitter import emit_design
 from veriforge.dsl import Interface, Module, posedge
 from veriforge.project import Design
+from veriforge.sim import Simulator
+from veriforge.sim.vm.vm_scheduler import _HAS_CYTHON
 
 
 def _axis(width=8):
@@ -57,3 +59,25 @@ def test_rejects_bad_use():
         m.interface("a", _axis(), role="master", init=0)
     with pytest.raises(ValueError, match="tready"):
         m.interface("b", _axis(), role="master", reg=True, init={"tready": 1})
+
+
+def _engines():
+    return ["reference", "vm"] + (["vm-fast"] if _HAS_CYTHON else [])
+
+
+@pytest.mark.parametrize("engine", _engines())
+def test_output_reg_init_simulates(engine):
+    # The port's `= init` reached the emitted Verilog but not the simulator: output_reg
+    # also creates the variable the engines initialize, and it had no initial value.
+    m = Module("init_sim")
+    m.input("clk")
+    m.output_reg("q", width=8, init=0x5A)
+    m.output_reg("u", width=8)
+    bus = m.interface("m_axis", _axis(), role="master", reg=True, init={"tvalid": 1, "tdata": 0x33})
+    assert bus is not None
+    sim = Simulator(m.build(), engine=engine)
+    sim.run(lambda s: None, max_time=1)
+    assert sim.read("q") == 0x5A
+    assert str(sim.read("u")) == "8'bxxxxxxxx"
+    assert sim.read("m_axis_tvalid") == 1
+    assert sim.read("m_axis_tdata") == 0x33

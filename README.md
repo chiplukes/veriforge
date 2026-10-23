@@ -121,7 +121,9 @@ for w in lint_design(design):
 
 The full test suite passes under PyPy. Running the simulator under PyPy gives
 approximately **4x faster simulation** compared to CPython thanks to JIT
-compilation, with zero code changes required.
+compilation, with zero code changes required. One exception: the DSL's
+name inference (`clk = m.input()`) is CPython-only, so DSL code that runs
+on PyPy passes names explicitly (`clk = m.input("clk")`).
 
 1. Install PyPy 3.10+ from https://www.pypy.org/download.html
 2. Install dependencies: `pypy3 -m pip install lark rich treelib pygls intervaltree`

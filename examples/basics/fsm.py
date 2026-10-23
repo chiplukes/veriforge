@@ -16,12 +16,12 @@ from veriforge.sim import Clock, Simulator
 # -- Build the FSM --
 
 m = Module("traffic_light")
-clk = m.input("clk")
-rst = m.input("rst")
-green = m.output_reg("green")
-yellow = m.output_reg("yellow")
-red = m.output_reg("red")
-timer_done = m.input("timer_done").comment("External timer expired")
+clk = m.input()
+rst = m.input()
+green = m.output_reg()
+yellow = m.output_reg()
+red = m.output_reg()
+timer_done = m.input(comment="External timer expired")
 
 # State encoding — use Python constants for simulation compatibility.
 # Localparams appear in emitted Verilog but the simulator evaluates using
@@ -33,8 +33,8 @@ m.localparam("S_GREEN", value=S_GREEN)
 m.localparam("S_YELLOW", value=S_YELLOW)
 m.localparam("S_RED", value=S_RED)
 
-state = m.reg("state", width=2)
-next_state = m.reg("next_state", width=2)
+state = m.reg(width=2)
+next_state = m.reg(width=2)
 
 # Sequential: state register
 m.comment("State register")

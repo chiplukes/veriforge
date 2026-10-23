@@ -74,17 +74,17 @@ def build_demo_pipeline(m, clk, rst, ce, tdata, tvalid, tlast, sideband, sof):
     """
     del sideband, sof  # unused: this pipeline doesn't propagate sideband or use sof
 
-    data_p1 = m.reg("data_p1", width=DATA_WIDTH, init=0)
-    tvalid_p1 = m.reg("tvalid_p1", init=0)
-    tlast_p1 = m.reg("tlast_p1", init=0)
+    data_p1 = m.reg(width=DATA_WIDTH, init=0)
+    tvalid_p1 = m.reg(init=0)
+    tlast_p1 = m.reg(init=0)
 
-    data_p2 = m.reg("data_p2", width=DATA_WIDTH, init=0)
-    tvalid_p2 = m.reg("tvalid_p2", init=0)
-    tlast_p2 = m.reg("tlast_p2", init=0)
+    data_p2 = m.reg(width=DATA_WIDTH, init=0)
+    tvalid_p2 = m.reg(init=0)
+    tlast_p2 = m.reg(init=0)
 
-    data_p3 = m.reg("data_p3", width=DATA_WIDTH, init=0)
-    tvalid_p3 = m.reg("tvalid_p3", init=0)
-    tlast_p3 = m.reg("tlast_p3", init=0)
+    data_p3 = m.reg(width=DATA_WIDTH, init=0)
+    tvalid_p3 = m.reg(init=0)
+    tlast_p3 = m.reg(init=0)
 
     with m.always(posedge(clk)):
         with m.if_(ce):
@@ -136,10 +136,10 @@ def build_running_sum_pipeline(m, clk, rst, ce, tdata, tvalid, tlast, sideband, 
     beat. Hence the explicit ``with m.if_(tvalid):`` gate below, in
     addition to ``ce``.
     """
-    acc = m.reg("acc", width=DATA_WIDTH, init=0)
-    tvalid_p1 = m.reg("tvalid_p1", init=0)
-    tlast_p1 = m.reg("tlast_p1", init=0)
-    tuser_p1 = m.reg("tuser_p1", width=TUSER_WIDTH, init=0)
+    acc = m.reg(width=DATA_WIDTH, init=0)
+    tvalid_p1 = m.reg(init=0)
+    tlast_p1 = m.reg(init=0)
+    tuser_p1 = m.reg(width=TUSER_WIDTH, init=0)
 
     with m.always(posedge(clk)):
         with m.if_(ce):

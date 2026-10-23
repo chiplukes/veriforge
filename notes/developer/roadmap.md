@@ -1327,6 +1327,10 @@ file at a time:
 - Round-trip check: re-emit both the original and converted module and
   diff the Verilog output (or run both through the reference engine on the
   same stimulus) to catch a bad rewrite before it lands.
+- Note (2026-10-22): the imperative builder now infers names
+  (`clk = m.input()`), which removes the duplicated name the migration was
+  mostly for; dropping a name string that equals its variable is a smaller
+  rewrite than converting to `ModuleSpec`, and may be all most files need.
 - Likely entry point: `veriforge convert-dsl-style <file>` alongside the
   existing `design_to_dsl`/`export_dsl_project` conversion commands (which
   go the other direction, Verilog → DSL); this tool goes DSL → DSL.

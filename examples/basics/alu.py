@@ -17,12 +17,12 @@ from veriforge.sim import Simulator
 # -- Build the ALU --
 
 m = Module("alu")
-a = m.input("a", width=8).comment("Operand A")
-b = m.input("b", width=8).comment("Operand B")
-op = m.input("op", width=2).comment("Operation select")
-result = m.output_reg("result", width=8).comment("ALU result")
-carry = m.output_reg("carry").comment("Carry/borrow out")
-zero = m.output("zero").comment("Result is zero")
+a = m.input(width=8, comment="Operand A")
+b = m.input(width=8, comment="Operand B")
+op = m.input(width=2, comment="Operation select")
+result = m.output_reg(width=8, comment="ALU result")
+carry = m.output_reg(comment="Carry/borrow out")
+zero = m.output(comment="Result is zero")
 
 # Operation encoding — Python constants used for simulation;
 # localparams emitted in Verilog output.
@@ -36,7 +36,7 @@ m.localparam("OP_AND", value=OP_AND)
 m.localparam("OP_OR", value=OP_OR)
 
 # Internal 9-bit sum/diff for carry detection
-tmp = m.reg("tmp", width=9)
+tmp = m.reg(width=9)
 
 m.comment("ALU operation decode")
 with m.always():

@@ -124,17 +124,18 @@ class Counter(ModuleSpec):
 print(emit_module(Counter().build()))
 ```
 
-There's also an imperative builder (`clk = m.input("clk")`, name passed as
-a string) for cases where the set of signals isn't fixed at write-time —
-a loop generating N ports, for instance:
+There's also an imperative builder (`clk = m.input()`, the name taken from
+the variable; pass `m.input("clk")` to give it explicitly) for cases where
+the set of signals isn't fixed at write-time — a loop generating N ports,
+for instance:
 
 ```python
 from veriforge.dsl import Module, posedge
 
 with Module("counter") as m:
-    clk = m.input("clk")
-    rst = m.input("rst")
-    count = m.output_reg("count", width=8)
+    clk = m.input()
+    rst = m.input()
+    count = m.output_reg(width=8)
 
     with m.always(posedge(clk)):
         with m.if_(rst):

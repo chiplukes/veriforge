@@ -64,17 +64,17 @@ def build_axi_stream_slice_iface(
     _SIDEBAND = [("tuser", tuser_width), ("tid", tid_width), ("tdest", tdest_width)]
 
     m = Module(name)
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
 
     s = m.interface("s_axis", intf, role="slave", reg=True)  # s.tready is output_reg
     out = m.interface("m_axis", intf, role="master", reg=True)  # out.tvalid/tdata/tuser/tid/tdest/tlast are output_reg
 
-    r_tdata = m.reg("r_tdata", width=data_width, init=0)
-    r_tlast = m.reg("r_tlast", init=0)
+    r_tdata = m.reg(width=data_width, init=0)
+    r_tlast = m.reg(init=0)
     r_side = {name: (m.reg(f"r_{name}", width=width, init=0) if width else None) for name, width in _SIDEBAND}
 
-    r_tvalid_w = m.wire("r_tvalid_w")
+    r_tvalid_w = m.wire()
     r_tvalid_w.assign = ~s.tready
 
     with m.always(posedge(clk)):

@@ -813,10 +813,11 @@ The DSL is useful when you want:
 Ports, registers, and wires are declared declaratively, as class attributes
 on a `ModuleSpec` subclass — this is the recommended default, and means a
 signal's name is never passed as a string *and* assigned to a variable of
-the same name. There's also an imperative builder (`m.input("clk", ...)`,
-name given as a string) for when the set of signals isn't fixed at
-write-time; see [dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder) for
-when to reach for it — the two compose freely in the same module.
+the same name. There's also an imperative builder (`clk = m.input()`, the
+name taken from the variable, or `m.input("clk")` to give it explicitly)
+for when the set of signals isn't fixed at write-time; see
+[dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder) for when to reach
+for it — the two compose freely in the same module.
 
 ### Minimal sequential example
 
@@ -873,21 +874,30 @@ Declarative (class attributes, no name strings — recommended default):
 | `q = OutReg(8, init=0)` | `output reg [7:0] q = 0` | Initial value |
 | `d = In("W")` | `input [W-1:0] d` | Parameterized width — string names a `Param` |
 
-Imperative (`Module` builder, name is an explicit string — for
-dynamic/generated signal counts, see
-[dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder)):
+Imperative (`Module` builder — for dynamic/generated signal counts, see
+[dsl_guide.md](dsl/dsl_guide.md#the-imperative-builder)). With the name
+left out, a signal is named after the variable it is assigned to; pass it
+as the first argument when they differ, or when there is no single plain
+variable (`a, b = m.wire(), m.wire()`, `self.x = m.wire()`), and inside
+loop bodies and comprehensions, where every pass would repeat the name —
+these raise a `ValueError` naming the line and showing the fix. Inference
+needs CPython; see
+[Signal names](dsl/dsl_guide.md#signal-names-inferred-or-explicit):
 
 | Python DSL | Verilog | Notes |
 |------------|---------|-------|
-| `m.input("d", width=8)` | `input [7:0] d` | `m.output`, `m.output_reg`, `m.inout` |
-| `m.wire("w", width=8)` | `wire [7:0] w` | Internal wire |
-| `m.reg("r", width=4)` | `reg [3:0] r` | Internal register |
-| `m.reg("mem", width=8, depth=256)` | `reg [7:0] mem [0:255]` | Memory array |
-| `m.integer("i")` | `integer i` | 32-bit integer variable — no declarative equivalent |
-| `m.parameter("W", default=8)` | `parameter W = 8` | Module parameter |
-| `m.localparam("H", value=4)` | `localparam H = 4` | Local parameter — no declarative equivalent |
-| `m.output_reg("q", width=8, init=0)` | `output reg [7:0] q = 0` | Initial value |
-| `m.input("d", width=W)` | `input [W-1:0] d` | Parameterized width |
+| `d = m.input(width=8)` | `input [7:0] d` | `m.output`, `m.output_reg`, `m.inout` |
+| `w = m.wire(width=8)` | `wire [7:0] w` | Internal wire |
+| `r = m.reg(width=4)` | `reg [3:0] r` | Internal register |
+| `mem = m.reg(width=8, depth=256)` | `reg [7:0] mem [0:255]` | Memory array |
+| `i = m.integer()` | `integer i` | 32-bit integer variable — no declarative equivalent |
+| `W = m.parameter(default=8)` | `parameter W = 8` | Module parameter |
+| `H = m.localparam(value=4)` | `localparam H = 4` | Local parameter — no declarative equivalent |
+| `q = m.output_reg(width=8, init=0)` | `output reg [7:0] q = 0` | Initial value |
+| `d = m.input(width=W)` | `input [W-1:0] d` | Parameterized width |
+| `s = m.output("sum", width=9)` | `output [8:0] sum` | Explicit name (differs from the variable) |
+| `taps = [m.reg(f"tap{i}", width=8) for i in range(4)]` | `reg [7:0] tap0; ...` | Generated names stay explicit |
+| `clk = m.input(comment="System clock")` | `input clk  // System clock` | Also `attrs={"keep": "true"}` |
 
 #### Assignments
 
@@ -1007,8 +1017,8 @@ with m.initial():
 #### Comments, attributes, and interfaces
 
 ```python
-clk = m.input("clk").comment("System clock")
-state = m.reg("state", width=3).attr("fsm_encoding", "one_hot")
+clk = m.input(comment="System clock")
+state = m.reg(width=3, attrs={"fsm_encoding": "one_hot"})
 m.comment("Stage 1: partial sums")     # standalone comment
 
 # Interfaces (expand to flat prefixed ports in Verilog 2005)

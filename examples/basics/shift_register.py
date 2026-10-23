@@ -19,13 +19,13 @@ def build_shift_register(depth: int = 4) -> Module:
     This shows how Python functions replace Verilog parameterized modules.
     """
     m = Module("shift_register")
-    clk = m.input("clk")
-    rst = m.input("rst")
-    din = m.input("din").comment("Serial data in")
-    dout = m.output("dout").comment("Serial data out (oldest bit)")
-    parallel = m.output_reg("parallel", width=depth).comment("Parallel snapshot")
+    clk = m.input()
+    rst = m.input()
+    din = m.input(comment="Serial data in")
+    dout = m.output(comment="Serial data out (oldest bit)")
+    parallel = m.output(width=depth, comment="Parallel snapshot")
 
-    sr = m.reg("sr", width=depth).comment(f"{depth}-bit shift chain")
+    sr = m.reg(width=depth, comment=f"{depth}-bit shift chain")
 
     # Shift: new data enters MSB, old data exits LSB
     with m.always(posedge(clk)):
@@ -64,8 +64,9 @@ sim.drive("rst", 0)
 bits = [1, 0, 1, 1]
 for bit in bits:
     sim.drive("din", bit)
-    sim.run(lambda s: None, max_time=10)  # one clock cycle
+    sim.run(lambda s: None, max_time=sim.time + 10)  # one clock cycle (max_time is absolute)
 
 parallel = int(sim.read("parallel"))
 print(f"\n// After shifting in {bits}: parallel = {parallel:#06b} ({parallel})")
+assert parallel == 0b1101, "din enters at the MSB: 1, 0, 1, 1 -> 0b1101"
 print("// Simulation PASSED")

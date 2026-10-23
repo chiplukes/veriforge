@@ -14,10 +14,10 @@ from veriforge.codegen.verilog_emitter import emit_module
 # -- Build a simple DUT (device under test) --
 
 dut = Module("counter")
-clk = dut.input("clk")
-rst = dut.input("rst")
-en = dut.input("en").comment("Count enable")
-count = dut.output_reg("count", width=8)
+clk = dut.input()
+rst = dut.input()
+en = dut.input(comment="Count enable")
+count = dut.output_reg(width=8)
 
 with dut.always(posedge(clk)):
     with dut.if_(rst):

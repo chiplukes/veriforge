@@ -54,12 +54,12 @@ def register_bank(name, registers, *, data_width=32, addr_width=8):
         <name>_in      — one input per read-only register (external value)
     """
     m = Module(name)
-    clk = m.input("clk")
-    rst = m.input("rst")
-    addr = m.input("addr", width=addr_width)
-    wdata = m.input("wdata", width=data_width)
-    we = m.input("we")
-    rdata = m.output_reg("rdata", width=data_width)
+    clk = m.input()
+    rst = m.input()
+    addr = m.input(width=addr_width)
+    wdata = m.input(width=data_width)
+    we = m.input()
+    rdata = m.output_reg(width=data_width)
 
     reg_signals = {}  # name -> Signal
 

@@ -149,7 +149,8 @@ table.
 
 | Construct | Verilog | DSL API | Emit | Sim | Notes |
 |-----------|---------|---------|------|-----|-------|
-| Module attributes | `(* syn_keep *)` | ✅ `.attr()` | ✅ | ❌ | FPGA synthesis pragmas |
+| Module attributes | `(* syn_keep *)` | ✅ `.attr()` / `attrs=` | ✅ | ❌ | FPGA synthesis pragmas |
+| Signal name from the variable | — | ✅ `x = m.wire()` | — | — | CPython; plain-variable targets only, see [Signal names](dsl_guide.md#signal-names-inferred-or-explicit) |
 | Interface / bus grouping | SV `interface` | ✅ `Interface` + `m.interface()` | ✅ | ❌ | Emits flat prefixed ports |
 | Specify block | `specify ... endspecify` | ❌ | ✅ | ❌ | ASIC timing; out of scope |
 | Multi-module design | multiple modules | ❌ | ✅ | ❌ | Build modules individually |

@@ -87,6 +87,35 @@ non-bugs, kept here because they're the kind of thing a future
 investigation could easily mistake for a live defect and waste time
 re-deriving.
 
+### DSL name inference: plain-variable stores only, CPython only
+
+`x = m.wire(width=8)` names the wire by reading the caller's bytecode
+(`src/veriforge/dsl/_varname.py`, the technique Amaranth uses). By design
+it infers a name only when the declaration's result is stored straight into
+one plain variable (directly, or through a conditional expression's forward
+jump) and raises a `ValueError` naming the line for anything else — tuple
+unpacking (`a, b = m.wire(), m.wire()`), chained targets, attributes,
+subscripts, walrus, a call used as an argument or returned, a chained
+`.comment()`/`.attr()` (use `comment=`/`attrs=`), and any opcode a future
+Python adds. Amaranth instead falls back to a default name, and on 3.13+
+silently misnames `t` in `s = Signal(); t = Signal(); return s, t` (it
+doesn't know the `STORE_FAST_LOAD_FAST` superinstruction); don't copy that
+fallback. The per-version opcode details (3.11/3.12 `f_lasti` sitting on
+the call's last inline CACHE slot; 3.13+ fused stores) are covered by
+`tests/test_dsl/test_name_inference.py` on every CI Python, plain and under
+`sys.settrace`/`sys.monitoring`; a new Python release should be checked
+there first. On PyPy, `SUPPORTED` is False and every declaration needs an
+explicit name, which is why `dsl/lib` and `dsl/ram.py` keep explicit names.
+
+Loops: a call inside a loop body is refused even on the first pass
+(`_varname._loops`). A loop is a backward jump reached by *normal* control
+flow from the function entry; exception handlers (reached only through the
+exception table, out of line on 3.11+) also jump backward, to the code after
+a `with`/`try`/`await`/`yield from`, and treating those as loops flags
+every declaration after the first `with m.always(...)` block on 3.12 (the
+other versions happen not to emit such jumps). `Module()` records
+its creation site so a loop that creates a fresh module each pass is allowed.
+
 ### Self-referential combinational reads (resolved 2026-10-14)
 
 `always @(*) begin o5 = o6; ... o6 = ~something; end` (reading a signal

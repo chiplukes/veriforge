@@ -12,17 +12,17 @@ from veriforge.dsl.lib import axi4_lite
 def axi_lite_slave():
     """Minimal AXI4-Lite slave with 4 read/write registers."""
     m = Module("axi_lite_regs")
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
 
     # Bind as slave: master-driven signals become inputs
     s = m.interface("s_axi", axi4_lite(data_width=32, addr_width=4), role="slave", reg=True)
 
     # Internal register file (4 x 32-bit)
-    reg0 = m.reg("reg0", width=32)
-    reg1 = m.reg("reg1", width=32)
-    reg2 = m.reg("reg2", width=32)
-    reg3 = m.reg("reg3", width=32)
+    reg0 = m.reg(width=32)
+    reg1 = m.reg(width=32)
+    reg2 = m.reg(width=32)
+    reg3 = m.reg(width=32)
 
     # Write logic
     with m.always(posedge(clk)):

@@ -140,8 +140,8 @@ def axis_streamify(
             )
 
             m = Module(mod_name)
-            clk = m.input("clk")
-            rst = m.input("rst")
+            clk = m.input()
+            rst = m.input()
 
             s = m.interface("s_axis", intf, role="slave")
             mo = m.interface("m_axis", intf, role="master")
@@ -161,7 +161,7 @@ def axis_streamify(
 
             in_sideband = {f: getattr(in_, f) for f in sideband_fields}
             if sof_tuser_bit is not None:
-                sof = m.wire("sof")
+                sof = m.wire()
                 sof.assign = in_.tvalid & in_.tuser[sof_tuser_bit]
             else:
                 sof = 0

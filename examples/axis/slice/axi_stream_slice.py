@@ -52,8 +52,8 @@ def _nb(sig: Signal | None, val: object) -> None:
 def build_axi_stream_slice(data_width=32, tuser_width=0, has_tlast=True, name="axi_stream_slice"):
     m = Module(name)
 
-    clk = m.input("clk")
-    rst = m.input("rst")
+    clk = m.input()
+    rst = m.input()
 
     # Raw ports throughout (both sides): s_axis_tready is registered here,
     # which needs direct control over the always-block logic below rather
@@ -75,11 +75,11 @@ def build_axi_stream_slice(data_width=32, tuser_width=0, has_tlast=True, name="a
 
     # Skid register: catches the beat s_axis_tready already accepted the
     # cycle m_axis_tvalid&~m_axis_tready first held the output register full.
-    r_tdata = m.reg("r_tdata", width=data_width, init=0)
-    r_tuser = m.reg("r_tuser", width=tuser_width, init=0) if tuser_width else None
-    r_tlast = m.reg("r_tlast", init=0) if has_tlast else None
+    r_tdata = m.reg(width=data_width, init=0)
+    r_tuser = m.reg(width=tuser_width, init=0) if tuser_width else None
+    r_tlast = m.reg(init=0) if has_tlast else None
 
-    r_tvalid_w = m.wire("r_tvalid_w")
+    r_tvalid_w = m.wire()
     r_tvalid_w.assign = ~s_tready
 
     with m.always(posedge(clk)):

@@ -9,9 +9,9 @@ Usage::
     from veriforge.dsl import Module, posedge
 
     with Module("counter") as m:
-        clk = m.input("clk")
-        rst = m.input("rst")
-        count = m.output_reg("count", width=8)
+        clk = m.input()
+        rst = m.input()
+        count = m.output_reg(width=8)
 
         with m.always(posedge(clk)):
             with m.if_(rst):
@@ -20,6 +20,10 @@ Usage::
                 count <<= count + 1
 
     module = m.build()
+
+A declaration without a name takes it from the variable it is assigned to
+(``_varname.py``); pass the name when they differ or there is no plain
+variable (``s = m.output("sum", width=9)``, ``a, b = m.wire("a"), m.wire("b")``).
 """
 
 from __future__ import annotations
@@ -71,15 +75,64 @@ from .interface import BoundInterface, Interface
 
 import copy
 import functools
+import io
+import linecache
 import re
 import sys
+import tokenize
 import warnings
+from types import FrameType
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 _VALID_IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
+
+
+def _without_comment(line: str) -> str:
+    """*line* without a trailing ``# comment`` (a ``#`` inside a string stays)."""
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(line).readline):
+            if tok.type == tokenize.COMMENT:
+                return line[: tok.start[1]].rstrip()
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    return line
+
+
+def _loop_error(frame: FrameType, method: str, where: str, stored: str | None, loop_var: str | None) -> str:
+    """The error for a declaration without a name inside a loop body: what went
+    wrong, the offending line, and the same line with a per-pass name."""
+    line = _without_comment(linecache.getline(frame.f_code.co_filename, frame.f_lineno)).strip()
+    target = re.match(r"(\w+)\s*(?::[^=]*)?=(?!=)", line) or re.search(r"(\w+)\.(?:append|insert|extend)\(", line)
+    stem = stored or (target.group(1) if target else "sig")
+    var = loop_var or "n"
+    name_arg = f'f"{stem}_{{{var}}}"'
+    call = f".{method}("
+    if line.count(call) == 1:
+        head, rest = line.split(call)
+        fixed = f"{head}{call}{name_arg}{'' if rest.startswith(')') else ', '}{rest}"
+    else:
+        fixed = f"{stem} = m.{method}({name_arg}, ...)"
+    if stored:
+        why = (
+            f"Every pass through the loop would declare another signal named '{stored}', "
+            f"and the signal names in a module must be unique."
+        )
+    else:
+        why = "The declaration runs once per pass through the loop, so each pass needs its own signal name."
+    source = f"\n\n    {line}\n" if line else "\n"
+    built_from = (
+        f"the loop variable '{loop_var}'" if loop_var else "a counter (or anything else that changes each pass)"
+    )
+    return (
+        f"m.{method}() at {where} is inside a loop, so it can't take its signal name from the variable:"
+        f"{source}\n{why} Pass a name that is different on each pass, built from {built_from}:\n\n"
+        f"    {fixed}\n\n"
+        f"If the signals are needed after the loop, keep them in a list or dict. (Outside a loop, "
+        f"`x = m.{method}(...)` names the signal 'x' with no string needed.)"
+    )
 
 
 def _check_identifier(name: str, kind: str = "signal") -> None:
@@ -654,6 +707,10 @@ class Signal(Expr):  # cm:7d5f3a
         multiple comment lines.  Returns self for chaining::
 
             clk = m.input("clk").comment("100 MHz system clock")
+
+        The same as ``comment=`` on the declaration, which is the form to use
+        when the name is inferred (``clk = m.input(comment="...")``): chained
+        onto ``m.input()``, the result goes to ``.comment()`` before the variable.
         """
         self._comments.append(text)
         return self
@@ -667,6 +724,8 @@ class Signal(Expr):  # cm:7d5f3a
             state = m.reg("state", width=3).attr("fsm_encoding", "one_hot")
 
         Multiple calls add multiple attributes.  Returns self for chaining.
+        The same as ``attrs={name: value}`` on the declaration, which is the
+        form to use when the name is inferred (see :meth:`comment`).
         """
         self._attributes[name] = value
         return self
@@ -1091,9 +1150,9 @@ class Module:  # cm:2b9e4c
     Example::
 
         m = Module("adder")
-        a = m.input("a", width=8)
-        b = m.input("b", width=8)
-        s = m.output("sum", width=9)
+        a = m.input(width=8)              # named "a" after the variable
+        b = m.input(width=8)
+        s = m.output("sum", width=9)      # explicit: the variable is "s"
         m.assign(s, a + b)
         module = m.build()
     """
@@ -1110,6 +1169,7 @@ class Module:  # cm:2b9e4c
         "_last_aug_assign",
         "_name",
         "_nets",
+        "_origin",
         "_parameters",
         "_pending_comments",
         "_ports",
@@ -1121,6 +1181,9 @@ class Module:  # cm:2b9e4c
     def __init__(self, name: str):
         _check_identifier(name, "module")
         self._name = name
+        # Where the module was created: a loop that creates a fresh module on each
+        # pass may declare signals without names (see _target_name).
+        self._origin = _varname.call_site(sys._getframe(1))
         self._ports: list[Port] = []
         self._parameters: list[Parameter] = []
         self._nets: list[Net] = []
@@ -1175,13 +1238,38 @@ class Module:  # cm:2b9e4c
         if name in self._signals:
             raise ValueError(f"Signal '{name}' already declared in module '{self._name}'")
 
-    def _declare_signal(self, name: str, width: int | Expr | None = 1, depth: int | None = None) -> Signal:
-        """Validate and register a new signal, returning the Signal proxy."""
+    def _declare_signal(
+        self,
+        name: str,
+        width: int | Expr | None = 1,
+        depth: int | None = None,
+        *,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
+    ) -> Signal:
+        """Validate and register a new signal, returning the Signal proxy.
+
+        *comment* and *attrs* are the declaration's ``comment=``/``attrs=``
+        (the same as chaining ``.comment()``/``.attr()``).
+        """
         _check_identifier(name)
         self._check_duplicate_signal(name)
         sig = Signal(self, name, width, depth)
         self._signals[name] = sig
+        if comment is not None:
+            sig.comment(comment)
+        if attrs:
+            for key, value in attrs.items():
+                sig.attr(key, value)
         return sig
+
+    def _made_in_loop(self, frame: FrameType, loop: tuple[int, int]) -> bool:
+        """Whether this module was created inside *loop* in *frame*'s function, so
+        each pass of the loop declares into a fresh module."""
+        if self._origin is None:
+            return False
+        code, offset = self._origin
+        return code is frame.f_code and loop[0] <= offset < loop[1]
 
     def _target_name(self, name: object, method: str, second: str | None) -> str:
         """*name*, or the variable the user's ``x = m.<method>(...)`` stores into.
@@ -1196,26 +1284,41 @@ class Module:  # cm:2b9e4c
             hint = f"; without a name, pass {second}= by keyword: x = m.{method}({second}=...)" if second else ""
             raise TypeError(f"m.{method}(): the name must be a string, got {name!r}{hint}")
         frame = sys._getframe(2)
-        where = f"{frame.f_code.co_filename}:{frame.f_lineno}"
         inferred = _varname.assigned_name(frame)
+        if inferred is not None and inferred not in _varname.VERILOG_KEYWORDS and inferred not in self._signals:
+            return inferred
+        loop = _varname.innermost_loop(frame)
+        if loop is not None and self._made_in_loop(frame, loop):
+            inferred = _varname.stored_name(frame)
+            if inferred is not None and inferred not in _varname.VERILOG_KEYWORDS and inferred not in self._signals:
+                return inferred
+            loop = None  # a fresh module each pass: report as outside a loop
+        where = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+        if loop is not None:
+            _, loop_var = _varname.enclosing_loop(frame)
+            raise ValueError(_loop_error(frame, method, where, _varname.stored_name(frame), loop_var))
         if inferred is None:
-            why = (
-                f"the result isn't assigned to a plain variable (x = m.{method}(...))"
-                if _varname.SUPPORTED
-                else f"name inference needs CPython, not {sys.implementation.name}"
-            )
+            chained = _varname.attribute_after_call(frame)
+            if not _varname.SUPPORTED:
+                why = f"name inference needs CPython, not {sys.implementation.name}"
+            elif chained in ("comment", "attr"):
+                keyword = "comment=..." if chained == "comment" else "attrs={...}"
+                why = f"the result goes to .{chained}() first (use x = m.{method}(..., {keyword}) instead)"
+            else:
+                why = f"the result isn't assigned to a plain variable (x = m.{method}(...))"
             raise ValueError(f'm.{method}() at {where}: can\'t infer a name: {why}; pass one: m.{method}("x", ...)')
         if inferred in _varname.VERILOG_KEYWORDS:
             raise ValueError(
                 f"m.{method}() at {where}: the variable name {inferred!r} is a Verilog keyword; "
                 f"rename the variable or pass a name"
             )
-        if inferred in self._signals:
-            raise ValueError(
-                f"Signal '{inferred}' already declared in module '{self._name}' (m.{method}() at {where} "
-                f'took its name from the variable; in a loop or helper, pass a name, e.g. f"{inferred}_{{i}}")'
-            )
-        return inferred
+        raise ValueError(
+            f"Signal '{inferred}' already declared in module '{self._name}'. m.{method}() at {where} "
+            f"took the name '{inferred}' from its variable, but the module already has a signal with "
+            f"that name: another declaration uses it, or this line runs more than once (a helper "
+            f"called twice, or recursion). Pass a name that is unique each time, e.g. "
+            f'm.{method}(f"{inferred}_{{n}}", ...), or give the helper a name parameter and pass it through.'
+        )
 
     # --- Port declarations ---
 
@@ -1228,8 +1331,14 @@ class Module:  # cm:2b9e4c
         init: int | Expr | None = None,
         net_type: str | None = None,
         kind: str | None = None,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an input port.
+
+        *name* left out, the signal is named after the variable the result is
+        assigned to (``clk = m.input()``); see :class:`Module`. ``comment=`` and
+        ``attrs=`` are the same as chaining :meth:`Signal.comment` / :meth:`Signal.attr`.
 
         ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
         ``time``) declares an integer-atom-typed port (``input int x``):
@@ -1251,7 +1360,7 @@ class Module:  # cm:2b9e4c
         )
         self._flush_pending(port)
         self._ports.append(port)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, comment=comment, attrs=attrs)
 
     def output(
         self,
@@ -1262,8 +1371,14 @@ class Module:  # cm:2b9e4c
         init: int | Expr | None = None,
         net_type: str | None = None,
         kind: str | None = None,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an output port (wire).
+
+        *name* left out, the signal is named after the variable the result is
+        assigned to (``clk = m.input()``); see :class:`Module`. ``comment=`` and
+        ``attrs=`` are the same as chaining :meth:`Signal.comment` / :meth:`Signal.attr`.
 
         ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
         ``time``) declares an integer-atom-typed port (``output int x``):
@@ -1285,7 +1400,7 @@ class Module:  # cm:2b9e4c
         )
         self._flush_pending(port)
         self._ports.append(port)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, comment=comment, attrs=attrs)
 
     def output_reg(
         self,
@@ -1294,12 +1409,18 @@ class Module:  # cm:2b9e4c
         *,
         signed: bool = False,
         init: int | Expr | None = None,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an output reg port.
 
+        *name* left out, the signal is named after the variable the result is
+        assigned to (``clk = m.input()``); see :class:`Module`. ``comment=`` and
+        ``attrs=`` are the same as chaining :meth:`Signal.comment` / :meth:`Signal.attr`.
+
         Pass ``init=`` to set a default value::
 
-            q = m.output_reg("q", width=8, init=0)
+            q = m.output_reg(width=8, init=0)
 
         Emits: ``output reg [7:0] q = 0``
         """
@@ -1311,9 +1432,12 @@ class Module:  # cm:2b9e4c
         )
         self._flush_pending(port)
         self._ports.append(port)
-        var = Variable(name, VariableKind.REG, width=range_obj, signed=signed)
+        # The simulator initializes the variable, not the port: give it init= too
+        # (the emitter still prints one ``output reg ... = init``).
+        init_expr = _to_expr_node(init) if init is not None else None
+        var = Variable(name, VariableKind.REG, width=range_obj, signed=signed, initial_value=init_expr)
         self._variables.append(var)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, comment=comment, attrs=attrs)
 
     def inout(
         self,
@@ -1324,8 +1448,14 @@ class Module:  # cm:2b9e4c
         init: int | Expr | None = None,
         net_type: str | None = None,
         kind: str | None = None,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an inout port.
+
+        *name* left out, the signal is named after the variable the result is
+        assigned to (``clk = m.input()``); see :class:`Module`. ``comment=`` and
+        ``attrs=`` are the same as chaining :meth:`Signal.comment` / :meth:`Signal.attr`.
 
         ``kind="int"`` (or ``byte``/``shortint``/``longint``/``integer``/
         ``time``) declares an integer-atom-typed port (``inout int x``):
@@ -1347,7 +1477,7 @@ class Module:  # cm:2b9e4c
         )
         self._flush_pending(port)
         self._ports.append(port)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, comment=comment, attrs=attrs)
 
     # --- Bulk declarations ---
 
@@ -1521,12 +1651,18 @@ class Module:  # cm:2b9e4c
         signed: bool = False,
         init: int | Expr | None = None,
         depth: int | None = None,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an internal wire.
 
         Args:
+            name: Wire name; left out, the name of the variable the result is
+                assigned to (``w = m.wire(width=8)``).
             init: Initial value (``wire [7:0] w = 8'hFF;``).
             depth: Memory depth (``wire [7:0] w [0:depth-1];``).
+            comment: Declaration comment (same as chaining ``.comment()``).
+            attrs: Synthesis attributes, ``{name: value or None}`` (same as ``.attr()``).
         """
         name = self._target_name(name, "wire", "width")
         range_obj = _make_range(width)
@@ -1535,7 +1671,7 @@ class Module:  # cm:2b9e4c
         net = Net(name, NetKind.WIRE, width=range_obj, signed=signed, dimensions=dims, initial_value=init_expr)
         self._flush_pending(net)
         self._nets.append(net)
-        return self._declare_signal(name, width, depth)
+        return self._declare_signal(name, width, depth, comment=comment, attrs=attrs)
 
     def reg(
         self,
@@ -1546,16 +1682,22 @@ class Module:  # cm:2b9e4c
         init: int | Expr | None = None,
         depth: int | None = None,
         kind: str = "reg",
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
     ) -> Signal:
         """Declare an internal reg.
 
         Args:
+            name: Reg name; left out, the name of the variable the result is
+                assigned to (``r = m.reg(width=8)``).
             init: Initial value (``reg [7:0] r = 0;``).
             depth: Memory depth (``reg [7:0] mem [0:depth-1];``).
             kind: The variable type: ``"reg"`` (default), ``"logic"``, ``"bit"``,
                 or an integer atom type ``"int"``, ``"integer"``, ``"byte"``,
                 ``"shortint"``, ``"longint"`` (fixed width, signed unless
                 ``signed=False``; *width* is then ignored).
+            comment: Declaration comment (same as chaining ``.comment()``).
+            attrs: Synthesis attributes, ``{name: value or None}`` (same as ``.attr()``).
         """
         name = self._target_name(name, "reg", "width")
         if kind not in _REG_KINDS:
@@ -1574,24 +1716,36 @@ class Module:  # cm:2b9e4c
         )
         self._flush_pending(var)
         self._variables.append(var)
-        return self._declare_signal(name, width if atom_width is None else atom_width, depth)
+        return self._declare_signal(
+            name, width if atom_width is None else atom_width, depth, comment=comment, attrs=attrs
+        )
 
-    def integer(self, name: str | None = None) -> Signal:
-        """Declare an integer variable."""
+    def integer(
+        self, name: str | None = None, *, comment: str | None = None, attrs: dict[str, str | None] | None = None
+    ) -> Signal:
+        """Declare an integer variable (named after the assigned variable if *name* is left out)."""
         name = self._target_name(name, "integer", None)
         var = Variable(name, VariableKind.INTEGER)
         self._flush_pending(var)
         self._variables.append(var)
-        return self._declare_signal(name, 32)
+        return self._declare_signal(name, 32, comment=comment, attrs=attrs)
 
-    def struct_var(self, name: str | None = None, type_name: str | None = None) -> Signal:
+    def struct_var(
+        self,
+        name: str | None = None,
+        type_name: str | None = None,
+        *,
+        comment: str | None = None,
+        attrs: dict[str, str | None] | None = None,
+    ) -> Signal:
         """Declare a variable of a previously defined struct typedef.
 
         The struct must have been declared with :meth:`typedef_struct` and
         must be ``packed`` so its total width can be computed.
 
         Args:
-            name: Variable name.
+            name: Variable name; left out, the name of the variable the result
+                is assigned to (``bus = m.struct_var(type_name="bus_t")``).
             type_name: Name of the typedef struct (e.g. ``"bus_t"``).
         """
         name = self._target_name(name, "struct_var", "type_name")
@@ -1610,12 +1764,12 @@ class Module:  # cm:2b9e4c
         var = Variable(name, VariableKind.REG, width=range_obj, type_name=type_name)
         self._flush_pending(var)
         self._variables.append(var)
-        return self._declare_signal(name, width)
+        return self._declare_signal(name, width, comment=comment, attrs=attrs)
 
     def parameter(
         self, name: str | None = None, default: int | Expr = 0, *, width: int | None = None, signed: bool = False
     ) -> Signal:
-        """Declare a parameter."""
+        """Declare a parameter (``WIDTH = m.parameter(default=8)`` names it after the variable)."""
         name = self._target_name(name, "parameter", "default")
         range_obj = _make_range(width) if width is not None else None
         default_expr = _to_expr_node(default)
@@ -1627,7 +1781,7 @@ class Module:  # cm:2b9e4c
     def localparam(
         self, name: str | None = None, value: int | Expr = 0, *, width: int | None = None, signed: bool = False
     ) -> Signal:
-        """Declare a localparam."""
+        """Declare a localparam (``DEPTH = m.localparam(value=4)`` names it after the variable)."""
         name = self._target_name(name, "localparam", "value")
         range_obj = _make_range(width) if width is not None else None
         val_expr = _to_expr_node(value)
@@ -1926,7 +2080,7 @@ class Module:  # cm:2b9e4c
 
         Example::
 
-            mem = m.reg("mem", width=8, depth=256)
+            mem = m.reg(width=8, depth=256)
             with m.initial():
                 m.readmemh("data.hex", mem)
         """
