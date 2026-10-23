@@ -929,6 +929,10 @@ on every engine (as in Icarus), rather than a silently undriven signal:
 ValueError: Instance 'u_cnt_0' connects port 'cnt', which module 'counter' doesn't have (its ports: clk, rst, count)
 ```
 
+`parameters={"WIDTH": 8}` is checked the same way: a name the child doesn't
+declare, or one of its `localparam`s, is an error rather than a value that
+is quietly ignored.
+
 Instance names (`f"u_cnt_{i}"`) are never inferred; a repeated one raises
 `Duplicate instance name`.
 

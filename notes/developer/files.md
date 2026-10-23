@@ -293,6 +293,7 @@ tests/
 │   ├── compiled/                  # Compiled Cython engine tests, feature-organized package (4627 tests)
 │   ├── test_generate.py           # Generate construct elaboration tests (40 tests)
 │   ├── test_hierarchy.py          # Hierarchy flattening + hierarchical signal access tests (62 tests)
+│   ├── test_instance_checks.py    # Port connections, parameter overrides and defparam vs Icarus, all engines (71 tests)
 │   ├── test_function_task.py      # User-defined function/task simulation tests (22 tests)
 │   ├── test_memory.py             # Memory array, $readmemh/$readmemb, $dumpfile/$dumpvars tests (18 tests)
 │   ├── test_sim_sv.py             # SystemVerilog simulation support tests (55 tests)

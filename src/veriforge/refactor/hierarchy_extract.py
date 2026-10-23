@@ -1020,6 +1020,15 @@ def _instance_selection_diagnostics(  # noqa: PLR0912, PLR0913, PLR0915
                     severity="error",
                 )
             )
+        if any(dp.path.startswith(f"{inst.instance_name}.") for dp in module.defparams):
+            diagnostics.append(
+                RefactorDiagnostic(
+                    "unsupported-defparam-target",
+                    f"A defparam in {module.name!r} sets a parameter of selected instance {inst.instance_name!r}; "
+                    "moving the instance would break its path.",
+                    severity="error",
+                )
+            )
 
         resolved, port_connections, resolution_diagnostics = _resolved_instance_connections(design, inst)
         diagnostics.extend(resolution_diagnostics)

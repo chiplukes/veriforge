@@ -216,6 +216,8 @@ def _unsupported_push_down_features(module: Module) -> RefactorDiagnostic | None
         unsupported.append("generate blocks")
     if module.specify_blocks:
         unsupported.append("specify blocks")
+    if module.defparams:
+        unsupported.append("defparams")
     if module.typedefs:
         unsupported.append("typedefs")
     if module.functions:

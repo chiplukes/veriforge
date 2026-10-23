@@ -80,6 +80,29 @@ not yet supported"). Elements (`m[i][j]`), `$readmem` into rebased memories,
 hierarchical references and the Python API (`sim.read("m[4]")`, VCD labels)
 all use declared addresses (fixed 2026-10-12).
 
+### Instances and module items: remaining gaps
+
+**Status**: Open (2026-10-22). Found while fixing instance checks
+(`tests/test_sim/test_instance_checks.py`: positional ports were all
+dropped, `.a` was unconnected, unknown/local parameter overrides and
+`defparam` were silently ignored). Still open, none of them silent in
+simulation unless noted:
+
+- **The formatter and emitter drop DPI imports and module-level
+  `specparam`s** (silent): `transforms/_design_builder.py`'s
+  `_UNMODELED_MODULE_ITEMS` skips them, so `veriforge format --write`
+  deletes `import "DPI-C" function ...;` and `specparam T = 5;` from the
+  file. Needs a model node (or verbatim source text, as `SpecifyBlock`
+  keeps) and emission.
+- **Interface instances in parsed Verilog** (`bus_if b();`) are read as
+  module instances and fail with "Cannot resolve module 'bus_if'". Only a
+  hand-built `Module.interface_instances` is flattened.
+- **`.*` port connections** are a parse error.
+- **`defparam` paths** must go down from the module holding them (or start
+  with its own name). Paths through an instance array (`u[0].W`), upward
+  beyond the module, or from another module raise a `ValueError`; Icarus
+  supports them, and only warns about a path to a missing instance (we raise).
+
 ## Reference notes (not defects)
 
 These are deliberate design decisions or investigated-and-closed

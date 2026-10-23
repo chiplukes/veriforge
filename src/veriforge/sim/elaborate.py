@@ -16,6 +16,7 @@ without engine-level hierarchy awareness.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -44,7 +45,7 @@ from ..model.expressions import (
     UnaryOp,
 )
 from ..model.generate import GenerateCase, GenerateFor, GenerateIf, GenvarDecl
-from ..model.instances import Instance
+from ..model.instances import DefParam, Instance
 from ..model.nets import Net, NetKind
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
@@ -520,6 +521,7 @@ def flatten_module(top: Module, design: Design | None = None) -> Module:  # cm:9
         _resolve_parameterized_widths(top)
 
     has_interfaces = bool(getattr(top, "interface_instances", None))
+    defparams = _route_defparams(top, top.instances, top.defparams)
 
     if not top.instances and not has_interfaces:
         return top
@@ -549,7 +551,7 @@ def flatten_module(top: Module, design: Design | None = None) -> Module:  # cm:9
 
     hierarchy_map: dict[str, str] = {}
     if top.instances:
-        _inline_instances(flat, top.instances, "", module_map, hierarchy_map, design)
+        _inline_instances(flat, top.instances, "", module_map, hierarchy_map, design, defparams)
 
     # Flatten interface instances — create prefixed signals and continuous assigns
     if has_interfaces:
@@ -580,9 +582,14 @@ def _inline_instances(
     module_map: dict[str, Module],
     hierarchy_map: dict[str, str],
     design: Design | None = None,
+    defparams: dict[str, tuple[dict[str, Expression], list[DefParam]]] | None = None,
 ) -> None:
-    """Recursively inline instances into *flat*."""
+    """Recursively inline instances into *flat*.
+
+    *defparams* is :func:`_route_defparams`'s result for *flat*'s defparams.
+    """
     for inst in instances:
+        own_defparams, deeper_defparams = (defparams or {}).get(inst.instance_name, ({}, []))
         sub = inst.resolved_module or module_map.get(inst.module_name)
         if sub is None:
             raise ValueError(
@@ -603,8 +610,8 @@ def _inline_instances(
 
         # Apply parameter overrides to submodule BEFORE recursive flatten/generates
         # so that downstream modules see the correct parameter values.
-        if inst.parameter_bindings:
-            sub = _pre_apply_param_overrides(flat, inst, sub)
+        if inst.parameter_bindings or own_defparams:
+            sub = _pre_apply_param_overrides(flat, inst, sub, own_defparams)
 
         # Resolve typedef-based port/signal widths only after instance parameter
         # overrides have been applied; pre-resolving raw default-zero parameterized
@@ -623,8 +630,14 @@ def _inline_instances(
             # Resolve widths on newly promoted variables/nets from generate blocks
             _resolve_parameterized_widths(sub)
 
+        if deeper_defparams:
+            # `defparam u1.u2.W = ...;`: u1's flatten applies `u2.W` (a shallow copy,
+            # so the shared module keeps its own defparams).
+            sub = copy.copy(sub)
+            sub.defparams = [*sub.defparams, *deeper_defparams]
+
         # Recursively flatten the submodule first if it has its own instances
-        if sub.instances:
+        if sub.instances or sub.defparams:
             sub = flatten_module(sub, design=design)
             # Re-populate module_map with the resolved references already collected
             _collect_resolved(sub, module_map)
@@ -639,7 +652,7 @@ def _inline_instances(
         _create_prefixed_signals(flat, sub, prefix)
 
         # --- Apply parameter overrides from instance bindings ---
-        _apply_param_overrides(flat, inst, sub, prefix)
+        _apply_param_overrides(flat, inst, sub, prefix, own_defparams)
 
         # --- Wire port connections as continuous assigns ---
         _wire_port_connections(flat, inst, sub, prefix)
@@ -820,7 +833,124 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
 _TWO_STATE_PORT_TYPES = frozenset({"bit", "byte", "shortint", "int", "longint"})
 
 
-def _pre_apply_param_overrides(flat: Module, inst: Instance, sub: Module) -> Module:
+def _param_override_map(
+    inst: Instance, sub: Module, defparams: dict[str, Expression], *, warn: bool = True
+) -> dict[str, Expression]:
+    """{parameter name: override value} from *inst*'s ``#(...)`` bindings and
+    the *defparams* aimed at it, which take precedence (as in Icarus).
+
+    Positional values go to *sub*'s overridable parameters in order (never a
+    localparam, nor a body ``parameter`` of a module with a ``#(...)`` list,
+    which IEEE 1800 6.20.1 makes local). Like Icarus, an unknown or local name
+    is an error and extra positional values are ignored with a warning.
+    """
+    overridable = [p for p in sub.parameters if not p.is_local]
+    by_name = {p.name: p for p in sub.parameters}
+    override_map: dict[str, Expression] = {}
+    for i, binding in enumerate(inst.parameter_bindings):
+        name = binding.name
+        if name:
+            param = by_name.get(name)
+            if param is None:
+                names = ", ".join(p.name for p in overridable) or "none"
+                raise ValueError(
+                    f"Instance '{inst.instance_name}' overrides parameter '{name}', which module "
+                    f"'{sub.name}' doesn't have (its parameters: {names})"
+                )
+            if param.is_local:
+                raise ValueError(
+                    f"Instance '{inst.instance_name}' overrides '{name}', which is local to module "
+                    f"'{sub.name}' (a localparam, or a body parameter of a module with a #(...) "
+                    f"parameter list) and can't be overridden"
+                )
+        elif i < len(overridable):
+            name = overridable[i].name
+        else:
+            if not warn:
+                break
+            logging.getLogger(__name__).warning(
+                "Instance '%s': ignoring %d extra parameter value(s); module '%s' has %d overridable parameter(s)",
+                inst.instance_name,
+                len(inst.parameter_bindings) - len(overridable),
+                sub.name,
+                len(overridable),
+            )
+            break
+        if name in override_map:
+            raise ValueError(f"Instance '{inst.instance_name}' overrides parameter '{name}' twice")
+        if binding.value is not None:
+            override_map[name] = binding.value
+    for name, value in defparams.items():
+        param = by_name.get(name)
+        if param is None:
+            names = ", ".join(p.name for p in overridable) or "none"
+            raise ValueError(
+                f"defparam {inst.instance_name}.{name}: module '{sub.name}' has no parameter "
+                f"'{name}' (its parameters: {names})"
+            )
+        if param.is_local:
+            raise ValueError(
+                f"defparam {inst.instance_name}.{name}: '{name}' is local to module '{sub.name}' "
+                f"(a localparam, or a body parameter of a module with a #(...) parameter list) "
+                f"and can't be overridden"
+            )
+        override_map[name] = value
+    return override_map
+
+
+def _route_defparams(
+    module: Module, instances: list[Instance], defparams: list[DefParam]
+) -> dict[str, tuple[dict[str, Expression], list[DefParam]]]:
+    """Split *module*'s defparams by the instance they reach into:
+    {instance name: ({parameter: value} on that instance, defparams for instances below it)}.
+
+    A path is matched against the instance names (``g[0].u1`` after generate
+    elaboration) by its longest prefix; ``top.u1.W`` inside ``top`` is an
+    upward reference to ``u1.W``. A value bound for a deeper instance is
+    evaluated here, in the scope that holds the defparam. Paths that reach no
+    instance are an error (Icarus: "parameter `W` not found").
+    """
+    routed: dict[str, tuple[dict[str, Expression], list[DefParam]]] = {}
+    if not defparams:
+        return routed
+    names = sorted((i.instance_name for i in instances), key=len, reverse=True)
+    env: dict | None = None
+    for dp in defparams:
+        path = dp.path
+        inst_name = next((n for n in names if path.startswith(n + ".")), None)
+        if inst_name is None and path.startswith(module.name + "."):
+            path = path[len(module.name) + 1 :]
+            inst_name = next((n for n in names if path.startswith(n + ".")), None)
+        if inst_name is None:
+            listed = ", ".join(sorted(names)) or "none"
+            raise ValueError(
+                f"defparam {dp.path} in module '{module.name}' doesn't reach a parameter of an "
+                f"instance in it (its instances: {listed}); only paths down from the module are supported"
+            )
+        rest = path[len(inst_name) + 1 :]
+        own, deeper = routed.setdefault(inst_name, ({}, []))
+        if "." not in rest:
+            own[rest] = dp.value
+            continue
+        if env is None:
+            env = _build_param_env(module)
+        value = dp.value
+        try:
+            val = _eval_const_expr(value, env)
+            if isinstance(val, int):
+                value = Literal(int(val))
+            elif isinstance(val, str):
+                value = StringLiteral(val)
+        except (ValueError, TypeError):
+            value = copy.deepcopy(value)
+        *hierarchy, name = rest.split(".")
+        deeper.append(DefParam(target=Identifier(name, hierarchy=hierarchy), value=value, loc=dp.loc))
+    return routed
+
+
+def _pre_apply_param_overrides(
+    flat: Module, inst: Instance, sub: Module, defparams: dict[str, Expression] | None = None
+) -> Module:
     """Apply parameter overrides to *sub* before recursive flatten/generates.
 
     Returns a copy of *sub* with parameter default_values updated to reflect
@@ -828,14 +958,7 @@ def _pre_apply_param_overrides(flat: Module, inst: Instance, sub: Module) -> Mod
     and generate elaboration see the correct parameter values rather than the
     module-level defaults.
     """
-    # Build override map from instance's parameter bindings
-    override_map: dict[str, Expression] = {}
-    for i, binding in enumerate(inst.parameter_bindings):
-        if binding.name:
-            override_map[binding.name] = binding.value
-        elif i < len(sub.parameters):
-            override_map[sub.parameters[i].name] = binding.value
-
+    override_map = _param_override_map(inst, sub, defparams or {}, warn=False)  # _apply_param_overrides warns
     if not override_map:
         return sub
 
@@ -1009,16 +1132,11 @@ def _apply_type_aliases(module: Module, alias_map: dict[str, str]) -> None:
                     _rewrite_generate_block(case_item.body)
 
 
-def _apply_param_overrides(flat: Module, inst: Instance, sub: Module, prefix: str) -> None:
+def _apply_param_overrides(
+    flat: Module, inst: Instance, sub: Module, prefix: str, defparams: dict[str, Expression] | None = None
+) -> None:
     """Create prefixed parameters in *flat*, applying instance parameter overrides."""
-    # Build override map from instance's parameter bindings
-    override_map: dict[str, Expression] = {}
-    for i, binding in enumerate(inst.parameter_bindings):
-        if binding.name:
-            override_map[binding.name] = binding.value
-        elif i < len(sub.parameters):
-            # Positional binding
-            override_map[sub.parameters[i].name] = binding.value
+    override_map = _param_override_map(inst, sub, defparams or {})
 
     # Build a param env from the current flat module so we can resolve
     # override expressions that reference parent-scope parameters
@@ -1066,8 +1184,18 @@ def _apply_param_overrides(flat: Module, inst: Instance, sub: Module, prefix: st
 
 def _wire_port_connections(flat: Module, inst: Instance, sub: Module, prefix: str) -> None:
     """Create continuous assigns that wire parent signals to child signals."""
-    for conn in inst.port_connections:
-        port = _resolve_port_for_conn(conn, sub)
+    conns = inst.port_connections
+    # `u1 ()` parses as one empty positional connection, even for a module without ports.
+    positional = [c for c in conns if not c.is_named]
+    if len(positional) > len(sub.ports) and not (len(conns) == 1 and conns[0].expression is None):
+        # Icarus: "Wrong number of ports. Expecting at most 2, got 3."
+        raise ValueError(
+            f"Instance '{inst.instance_name}' has {len(positional)} positional port connections, but "
+            f"module '{sub.name}' has {len(sub.ports)} port(s)"
+        )
+    connected: set[str] = set()
+    for i, conn in enumerate(conns):
+        port = _resolve_port_for_conn(conn, sub, i)
         if port is None and conn.is_named and conn.port_name:
             # Icarus: "port ``x'' is not a port of u1" (an elaboration error). Skipping
             # it silently left the parent's signal undriven.
@@ -1076,7 +1204,12 @@ def _wire_port_connections(flat: Module, inst: Instance, sub: Module, prefix: st
                 f"Instance '{inst.instance_name}' connects port '{conn.port_name}', which module "
                 f"'{sub.name}' doesn't have (its ports: {ports})"
             )
-        if port is None or conn.expression is None:
+        if port is None:
+            continue
+        if port.name in connected:
+            raise ValueError(f"Instance '{inst.instance_name}' connects port '{port.name}' twice")
+        connected.add(port.name)
+        if conn.expression is None:
             continue
 
         child_id = Identifier(f"{prefix}.{port.name}")
@@ -1132,17 +1265,17 @@ def _dimension_indices(dim: Range) -> list[int] | None:
     return list(range(msb, lsb + step, step))
 
 
-def _resolve_port_for_conn(conn, sub: Module) -> Port | None:
-    """Resolve the port object for a port connection."""
-    if conn.resolved_port is not None:
-        return conn.resolved_port
-    if conn.is_named and conn.port_name:
-        return sub.get_port(conn.port_name)
-    # Positional: match by index (need to find the index)
-    # The caller iterates inst.port_connections, but we don't have the index here.
-    # For positional connections, resolved_port should already be set by
-    # resolve_port_connections(). If not, we can try matching by position.
-    return None
+def _resolve_port_for_conn(conn, sub: Module, index: int) -> Port | None:
+    """The port of *sub* that the *index*-th connection binds, by name or position.
+
+    Looked up on *sub* itself (not ``conn.resolved_port``, which only
+    ``resolve_port_connections()`` sets, and only on the unspecialised module):
+    ``parse_file()`` doesn't run that pass, so positional connections were
+    all dropped, leaving every port of a positional instance undriven.
+    """
+    if conn.is_named:
+        return sub.get_port(conn.port_name) if conn.port_name else None
+    return sub.ports[index] if index < len(sub.ports) else None
 
 
 def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str]) -> None:
@@ -1401,6 +1534,8 @@ def elaborate_generates(module: Module, param_values: dict[str, int] | None = No
     result.tasks = list(module.tasks)
     result.typedefs = list(module.typedefs)
     result.imports = list(module.imports)
+    result.defparams = list(module.defparams)
+    result.interface_instances = list(module.interface_instances)
 
     env = _build_param_env(result, param_values)
     unnamed_ct = [0]
@@ -2528,10 +2663,13 @@ def _promote_block_items(  # noqa: PLR0912, PLR0913
 
     # Collect local signal names declared in the block (need scope prefix)
     local_signals: set[str] = set()
+    local_instances: set[str] = set()
     if scope:
         for item in items:
             if isinstance(item, (Net, Variable)):
                 local_signals.add(item.name)
+            elif isinstance(item, Instance):
+                local_instances.add(item.instance_name)
 
     for item in items:
         if isinstance(item, Net):
@@ -2578,6 +2716,12 @@ def _promote_block_items(  # noqa: PLR0912, PLR0913
             if scope:
                 item.instance_name = f"{scope}.{item.instance_name}"
             module.instances.append(item)
+        elif isinstance(item, DefParam):
+            # `defparam u1.W = ...;` beside `u1` in the block: u1 is now `g[0].u1`.
+            hierarchy = item.target.hierarchy
+            if scope and hierarchy and hierarchy[0] in local_instances:
+                hierarchy[0] = f"{scope}.{hierarchy[0]}"
+            module.defparams.append(item)
         elif isinstance(item, (GenerateFor, GenerateIf, GenerateCase, GenvarDecl)):
             # Build accumulated ancestor locals for nested generates
             nested_ancestors = dict(ancestor_locals) if ancestor_locals else {}

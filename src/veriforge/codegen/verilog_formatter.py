@@ -24,7 +24,7 @@ from ..model.generate import (
     GenerateIf,
     GenvarDecl,
 )
-from ..model.instances import Instance, ParameterBinding, PortConnection
+from ..model.instances import DefParam, Instance, ParameterBinding, PortConnection
 from ..model.nets import Net
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
@@ -225,6 +225,8 @@ class VerilogFormatter:
                 if t:
                     item += f"  {t}"
             body.append(item)
+        for dp in module.defparams:
+            body.append(self._defparam(dp, ind))
 
         # Always blocks
         for ab in module.always_blocks:
@@ -742,6 +744,8 @@ class VerilogFormatter:
             return self._continuous_assign(item, ci)
         if isinstance(item, Instance):
             return self._instance(item, ci)
+        if isinstance(item, DefParam):
+            return self._defparam(item, ci)
         if isinstance(item, Parameter):
             return self._localparam(item, ci)
         if isinstance(item, AlwaysBlock):
@@ -798,6 +802,9 @@ class VerilogFormatter:
         return "\n".join(lines)
 
     # -- Instance emission with column-limit wrapping -----------------------
+
+    def _defparam(self, dp: DefParam, ci: str) -> str:
+        return f"{ci}defparam {dp.path} = {self._expr(dp.value)};"
 
     def _instance(self, inst: Instance, ci: str) -> str:
         parts = [f"{ci}{inst.module_name}"]

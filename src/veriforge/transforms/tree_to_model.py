@@ -39,7 +39,7 @@ from ..model.generate import (
     GenerateIf,
     GenvarDecl,
 )
-from ..model.instances import Instance, ParameterBinding, PortConnection
+from ..model.instances import DefParam, Instance, ParameterBinding, PortConnection
 from ..model.nets import Net
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
@@ -168,6 +168,7 @@ from ._generate import (
 )
 from ._instances import (
     _PrimitiveCallbacks,
+    _extract_defparams as _extract_defparams_from_tree,
     _extract_gate_instantiation as _extract_gate_instantiation_from_tree,
     _extract_module_instantiation as _extract_module_instantiation_from_tree,
     _extract_named_port_connection as _extract_named_port_connection_from_tree,
@@ -281,6 +282,7 @@ def _design_builder_callbacks() -> _DesignBuilderCallbacks:
         extract_udp_as_instance=_extract_udp_as_instance,
         extract_gate_instantiation=_extract_gate_instantiation,
         extract_continuous_assign=_extract_continuous_assign,
+        extract_defparams=_extract_defparams,
         extract_always_construct=_extract_always_construct,
         extract_always_comb_construct=_extract_always_comb_construct,
         extract_always_ff_construct=_extract_always_ff_construct,
@@ -578,6 +580,11 @@ def _extract_module_instantiation(tree: Tree, source_file: str | None) -> list[I
         _build_expression,
         _token_to_expression,
     )
+
+
+def _extract_defparams(tree: Tree, source_file: str | None) -> list[DefParam]:
+    """Extract DefParam objects from a parameter_override (``defparam ...;``) subtree."""
+    return _extract_defparams_from_tree(tree, source_file, _build_hierarchical_identifier, _build_constant_expression)
 
 
 def _extract_parameter_value_assignment(tree: Tree, source_file: str | None) -> list[ParameterBinding]:

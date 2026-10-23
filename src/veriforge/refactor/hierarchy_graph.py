@@ -329,6 +329,14 @@ def _unsupported_diagnostics(module: Module) -> list[RefactorDiagnostic]:
                 severity="warning",
             )
         )
+    if module.defparams:
+        diagnostics.append(
+            RefactorDiagnostic(
+                "defparams",
+                "Defparams are not supported by hierarchy collapse.",
+                severity="warning",
+            )
+        )
     if module.interface_instances:
         diagnostics.append(
             RefactorDiagnostic(

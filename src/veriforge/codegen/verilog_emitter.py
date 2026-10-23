@@ -53,7 +53,7 @@ from ..model.generate import (
     GenerateIf,
     GenvarDecl,
 )
-from ..model.instances import Instance, ParameterBinding, PortConnection
+from ..model.instances import DefParam, Instance, ParameterBinding, PortConnection
 from ..model.specify import SpecifyBlock
 from ..model.sv_types import EnumType, StructType, TypedefDecl, UnionType
 from ..model.interface import Interface, Modport
@@ -359,6 +359,8 @@ def _emit_module(module: Module, *, indent: str, emit_comments: bool) -> str:  #
             if trailing:
                 item += f"  {trailing}"
         body_items.append(item)
+    for dp in module.defparams:
+        body_items.append(_emit_defparam(dp, indent))
 
     # Always blocks
     for ab in module.always_blocks:
@@ -825,6 +827,10 @@ def _emit_range(r: Range) -> str:
 def _emit_continuous_assign(ca: ContinuousAssign, indent: str) -> str:
     """Emit a continuous assignment: assign lhs = rhs;"""
     return f"{indent}assign {emit_expression(ca.lhs)} = {emit_expression(ca.rhs)};"
+
+
+def _emit_defparam(dp: DefParam, indent: str) -> str:
+    return f"{indent}defparam {dp.path} = {emit_expression(dp.value)};"
 
 
 def _emit_instance(inst: Instance, indent: str) -> str:
@@ -2022,6 +2028,8 @@ def _emit_generate_block_item(item: VerilogNode, indent: str, current_indent: st
         return _emit_continuous_assign(item, current_indent)
     elif isinstance(item, Instance):
         return _emit_instance(item, current_indent)
+    elif isinstance(item, DefParam):
+        return _emit_defparam(item, current_indent)
     elif isinstance(item, Parameter):
         return _emit_localparam(item, current_indent)
     elif isinstance(item, AlwaysBlock):

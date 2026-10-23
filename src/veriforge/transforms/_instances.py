@@ -7,14 +7,15 @@ from dataclasses import dataclass
 
 from lark import Token, Tree
 
-from ..model.expressions import Expression, Range
-from ..model.instances import Instance, ParameterBinding, PortConnection
+from ..model.expressions import Expression, Identifier, Range
+from ..model.instances import DefParam, Instance, ParameterBinding, PortConnection
 from ._tree_utils import _loc_from_tree
 
 BuildExpressionFn = Callable[[Tree, str | None], Expression]
 BuildNetLvalueFn = Callable[[Tree, str | None], Expression]
 BuildRangeFn = Callable[[Tree, str | None], Range | None]
 TokenToExpressionFn = Callable[[Token, str | None], Expression]
+BuildIdentifierFn = Callable[[Tree, str | None], Identifier]
 
 _GATE_TYPE_RULES = frozenset(
     {
@@ -209,6 +210,27 @@ def _extract_ordered_parameter_assignment(
     return ParameterBinding(name=None, value=value, loc=loc)
 
 
+def _extract_defparams(
+    tree: Tree,
+    source_file: str | None,
+    build_hierarchical_identifier: BuildIdentifierFn,
+    build_constant_expression: BuildExpressionFn,
+) -> list[DefParam]:
+    """``defparam u1.W = 8, u2.W = 4;`` -> one DefParam per assignment."""
+    defparams: list[DefParam] = []
+    for node in tree.find_data("defparam_assignment"):
+        target: Identifier | None = None
+        value: Expression | None = None
+        for child in node.children:
+            if isinstance(child, Tree) and child.data == "hierarchical_parameter_identifier":
+                target = build_hierarchical_identifier(child, source_file)
+            elif isinstance(child, Tree) and child.data == "constant_mintypmax_expression":
+                value = build_constant_expression(child, source_file)
+        if target is not None and value is not None:
+            defparams.append(DefParam(target=target, value=value, loc=_loc_from_tree(node, source_file)))
+    return defparams
+
+
 def _extract_port_connections(
     tree: Tree,
     source_file: str | None,
@@ -219,7 +241,7 @@ def _extract_port_connections(
 
     for child in tree.children:
         if isinstance(child, Tree):
-            if child.data == "named_port_connection":
+            if child.data in ("named_port_connection", "implicit_named_port_connection"):
                 connections.append(_extract_named_port_connection(child, source_file, build_expression))
             elif child.data == "ordered_port_connection":
                 connections.append(_extract_ordered_port_connection(child, source_file, build_expression))
@@ -243,6 +265,9 @@ def _extract_named_port_connection(
             expression = build_expression(child, source_file)
 
     loc = _loc_from_tree(tree, source_file)
+    if tree.data == "implicit_named_port_connection" and port_name is not None:
+        # `.clk` connects the parent's signal of the same name.
+        expression = Identifier(port_name, loc=loc)
     return PortConnection(port_name=port_name, expression=expression, is_named=True, loc=loc)
 
 

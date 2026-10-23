@@ -13,7 +13,7 @@ from ..model.behavioral import AlwaysBlock, InitialBlock
 from ..model.expressions import Expression, Identifier
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.generate import GenerateBlock, GenerateCase, GenerateCaseItem, GenerateFor, GenerateIf, GenvarDecl
-from ..model.instances import Instance
+from ..model.instances import DefParam, Instance
 from ..model.nets import Net
 from ..model.package import ImportDecl
 from ..model.parameters import Parameter
@@ -56,6 +56,7 @@ class _GenerateModuleItems:
     specify_blocks: list[SpecifyBlock] = field(default_factory=list)
     typedefs: list[TypedefDecl] = field(default_factory=list)
     imports: list[ImportDecl] = field(default_factory=list)
+    defparams: list[DefParam] = field(default_factory=list)
 
 
 ExtractModuleItemsFn = Callable[[Tree, str | None, _GenerateModuleItems], None]
@@ -235,6 +236,7 @@ def _extract_generate_block_items(
         *items.parameters,
         *items.continuous_assigns,
         *items.instances,
+        *items.defparams,
         *items.always_blocks,
         *items.initial_blocks,
         *items.functions,
