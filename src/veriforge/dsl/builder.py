@@ -70,7 +70,7 @@ from ..model.statements import (
 )
 from ..model.sv_types import EnumMember, EnumType, StructField, StructType, TypedefDecl, UnionType
 from ..model.variables import Variable, VariableKind
-from . import _varname
+from . import _driver_type, _varname
 from .interface import BoundInterface, Interface
 
 import copy
@@ -1645,33 +1645,80 @@ class Module:  # cm:2b9e4c
 
     def wire(
         self,
-        name: str | None = None,
-        width: int | Expr = 1,
+        name: str | Expr | None = None,
+        width: int | Expr | None = None,
         *,
-        signed: bool = False,
+        signed: bool | None = None,
         init: int | Expr | None = None,
         depth: int | None = None,
         comment: str | None = None,
         attrs: dict[str, str | None] | None = None,
     ) -> Signal:
-        """Declare an internal wire.
+        """Declare an internal wire, or declare one and drive it.
+
+        ``x = m.wire(expr)`` declares wire ``x`` and assigns it ``expr``: the
+        same as ``x = m.wire(width=..., signed=...)`` then ``x.assign = expr``.
+        The width and signedness default to the driver's (see
+        ``_driver_type``); an expression that carries or grows (``+``, ``*``,
+        ``<<``, ...) needs ``width=``. A driven wire's name is always inferred.
 
         Args:
             name: Wire name; left out, the name of the variable the result is
-                assigned to (``w = m.wire(width=8)``).
+                assigned to (``w = m.wire(width=8)``). A signal or expression
+                here is the driver instead.
+            width: Width (default 1, or the driver's).
+            signed: Signedness (default unsigned, or the driver's).
             init: Initial value (``wire [7:0] w = 8'hFF;``).
             depth: Memory depth (``wire [7:0] w [0:depth-1];``).
             comment: Declaration comment (same as chaining ``.comment()``).
             attrs: Synthesis attributes, ``{name: value or None}`` (same as ``.attr()``).
         """
+        driver = None
+        if isinstance(name, Expr):
+            driver, name = name, None
+            if init is not None or depth is not None:
+                raise TypeError("m.wire(expr): a driven wire takes no init= or depth=")
         name = self._target_name(name, "wire", "width")
+        if driver is not None:
+            width, signed = self._driver_type(name, driver, width, signed)
+        width = 1 if width is None else width
+        signed = bool(signed)
         range_obj = _make_range(width)
         dims = [_make_dim(depth)] if depth is not None else None
         init_expr = _to_expr_node(init) if init is not None else None
         net = Net(name, NetKind.WIRE, width=range_obj, signed=signed, dimensions=dims, initial_value=init_expr)
         self._flush_pending(net)
         self._nets.append(net)
-        return self._declare_signal(name, width, depth, comment=comment, attrs=attrs)
+        sig = self._declare_signal(name, width, depth, comment=comment, attrs=attrs)
+        if driver is not None:
+            self.assign(sig, driver)
+        return sig
+
+    def _driver_type(
+        self, name: str, driver: Expr, width: int | Expr | None, signed: bool | None
+    ) -> tuple[int | Expr, bool]:
+        """Width and signedness for ``name = m.wire(driver)``: as given, else the driver's."""
+        if width is not None and signed is not None:
+            return width, signed
+
+        def lookup(sig_name: str) -> tuple[int | None, bool, bool]:
+            sig = self._signals.get(sig_name)
+            if sig is None:
+                raise _driver_type.NeedWidth(f"{sig_name!r} is not a signal of this module")
+            decls = [*self._ports, *self._nets, *self._variables]
+            decl_signed = next((bool(d.signed) for d in decls if d.name == sig_name), False)
+            return (sig._width if isinstance(sig._width, int) else None), decl_signed, sig._depth is not None
+
+        node = driver._as_expr()
+        try:
+            if signed is None:
+                signed = _driver_type.driver_signed(node, lookup)
+            if width is None:
+                width = _driver_type.driver_width(node, lookup)
+        except _driver_type.NeedWidth as why:
+            missing = "width=" if signed is not None else "signed="
+            raise ValueError(f"{name} = m.wire(expr): {why}; pass {missing}") from None
+        return width, signed
 
     def reg(
         self,

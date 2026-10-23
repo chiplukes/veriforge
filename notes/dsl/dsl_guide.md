@@ -103,6 +103,7 @@ Three assignment types exist (non-blocking, blocking, continuous), each with an 
 | `signal.now = expr` | `signal = expr;` | Blocking (property form) |
 | `m.assign(lhs, rhs)` | `assign lhs = rhs;` | Continuous assignment (outside always) |
 | `signal.assign = expr` | `assign signal = expr;` | Continuous assignment (property form) |
+| `x = m.wire(expr)` | `wire x; assign x = expr;` | Declare a wire and drive it (see [Driven wires](#driven-wires-x--mwireexpr)) |
 | `m.assign_nb(lhs, rhs)` | `lhs <= rhs;` | Non-blocking (method form) |
 | `m.assign_b(lhs, rhs)` | `lhs = rhs;` | Blocking (method form) |
 
@@ -364,6 +365,38 @@ Other rules:
   PyPy every declaration needs an explicit name.
 - **Cost.** Each calling function's bytecode is read once and cached; after
   that an inferred name adds about a microsecond or less per declaration.
+
+### Driven wires: `x = m.wire(expr)`
+
+A wire that is declared and assigned at once takes the expression as its first
+argument: `x = m.wire(expr)` is `x = m.wire(width=..., signed=...)` followed by
+`x.assign = expr`, and emits the same `wire` declaration and `assign`. The name
+comes from the variable (a driven wire is never named explicitly; declare it
+and use `.assign` inside a loop). Width and signedness default to the driver's:
+
+| Driver | Width | Signed |
+|--------|-------|--------|
+| compare, `&&`/`||`/`!`, reduction, bit select | 1 | no |
+| `&`, `|`, `^`, `~`, mux (`mux`, `when`, `select`) | widest operand | if every operand is |
+| `>>`, `>>>` | left operand | left operand |
+| part select, concatenation, replication | its bits | no |
+| `$signed(a)` / `$unsigned(a)` | `a`'s | yes / no |
+
+A bare integer in a bitwise operation or mux counts at the width its value
+needs (one bit more in a signed expression), so `mux(c, a[5:0], 0)` is 6 bits.
+Operations that carry or grow (`+`, `-`, `*`, `/`, `%`, `**`, `<<`, `<<<`, unary
+`-`) have no single natural width, so their wires need `width=`, as do a
+negative integer in an unsigned expression and an expression of integers only:
+
+```python
+accept = m.wire(s_valid & s_ready)                      # wire accept;
+level = m.wire(mux(push, count, 0))                      # wire [W-1:0] level;
+total = m.wire(count + incoming, width=W + 1)            # width= required
+```
+
+`width=` and `signed=` override the inferred values; `comment=` and `attrs=`
+work as for any wire. `init=` and `depth=` are refused: a driven wire has one
+driver and is not a memory.
 
 ### Bulk declarations
 
