@@ -1645,9 +1645,11 @@ class Module:  # cm:2b9e4c
 
     def wire(
         self,
-        name: str | Expr | None = None,
+        name_or_driver: str | Expr | None = None,
+        /,
         width: int | Expr | None = None,
         *,
+        name: str | None = None,
         signed: bool | None = None,
         init: int | Expr | None = None,
         depth: int | None = None,
@@ -1660,13 +1662,17 @@ class Module:  # cm:2b9e4c
         same as ``x = m.wire(width=..., signed=...)`` then ``x.assign = expr``.
         The width and signedness default to the driver's (see
         ``_driver_type``); an expression that carries or grows (``+``, ``*``,
-        ``<<``, ...) needs ``width=``. A driven wire's name is always inferred.
+        ``<<``, ...) needs ``width=``. A driven wire's name is inferred like
+        any other, or given with ``name=`` where there is no plain variable
+        (``m.wire(expr, name=f"lane_w{i}")`` in a loop).
 
         Args:
-            name: Wire name; left out, the name of the variable the result is
-                assigned to (``w = m.wire(width=8)``). A signal or expression
-                here is the driver instead.
+            name_or_driver: Wire name, or a signal or expression that drives
+                the wire. Left out, the name of the variable the result is
+                assigned to (``w = m.wire(width=8)``).
             width: Width (default 1, or the driver's).
+            name: Wire name, by keyword (needed for a driven wire that has no
+                plain variable to take it from).
             signed: Signedness (default unsigned, or the driver's).
             init: Initial value (``wire [7:0] w = 8'hFF;``).
             depth: Memory depth (``wire [7:0] w [0:depth-1];``).
@@ -1674,10 +1680,14 @@ class Module:  # cm:2b9e4c
             attrs: Synthesis attributes, ``{name: value or None}`` (same as ``.attr()``).
         """
         driver = None
-        if isinstance(name, Expr):
-            driver, name = name, None
+        if isinstance(name_or_driver, Expr):
+            driver = name_or_driver
             if init is not None or depth is not None:
                 raise TypeError("m.wire(expr): a driven wire takes no init= or depth=")
+        elif name_or_driver is not None:
+            if name is not None:
+                raise TypeError(f"m.wire(): two names given, {name_or_driver!r} and name={name!r}")
+            name = name_or_driver  # a non-string is refused just below
         name = self._target_name(name, "wire", "width")
         if driver is not None:
             width, signed = self._driver_type(name, driver, width, signed)

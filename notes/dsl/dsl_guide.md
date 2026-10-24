@@ -371,8 +371,9 @@ Other rules:
 A wire that is declared and assigned at once takes the expression as its first
 argument: `x = m.wire(expr)` is `x = m.wire(width=..., signed=...)` followed by
 `x.assign = expr`, and emits the same `wire` declaration and `assign`. The name
-comes from the variable (a driven wire is never named explicitly; declare it
-and use `.assign` inside a loop). Width and signedness default to the driver's:
+comes from the variable, or from `name=` where there is no plain variable to
+take it from, such as a loop: `lane_w = m.wire(data[i], name=f"lane_w{i}")`.
+Width and signedness default to the driver's:
 
 | Driver | Width | Signed |
 |--------|-------|--------|

@@ -125,3 +125,36 @@ def test_int_first_argument_still_means_a_missing_width_keyword():
     m = Module("t")
     with pytest.raises(TypeError, match="width= by keyword"):
         t = m.wire(8)  # noqa: F841
+
+
+def test_name_keyword_names_a_driven_wire_in_a_loop():
+    one = Module("t")
+    a, b, c, s4, s6, mem = _ports(one)
+    lanes = [one.wire(a[2 * i + 1 : 2 * i] & b[2 * i + 1 : 2 * i], name=f"lane_w{i}") for i in range(4)]
+    o = one.output(width=8)
+    o.assign = cat(*reversed(lanes))
+
+    two = Module("t")
+    a, b, c, s4, s6, mem = _ports(two)
+    lanes = []
+    for i in range(4):
+        lane = two.wire(f"lane_w{i}", width=2)
+        lane.assign = a[2 * i + 1 : 2 * i] & b[2 * i + 1 : 2 * i]
+        lanes.append(lane)
+    o = two.output(width=8)
+    o.assign = cat(*reversed(lanes))
+
+    assert emit_module(one.build()) == emit_module(two.build())
+
+
+def test_name_keyword_also_names_an_undriven_wire():
+    m = Module("t")
+    w = m.wire(name="spare", width=3)
+    assert w._name == "spare"
+    assert _decl(emit_module(m.build()), "spare") == "wire [2:0] spare;"
+
+
+def test_two_names_are_refused():
+    m = Module("t")
+    with pytest.raises(TypeError, match="two names"):
+        m.wire("x", name="y")
