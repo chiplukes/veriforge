@@ -138,6 +138,23 @@ class _StmtEmittersMixin:
             "Use engine='vm' or engine='reference' for this construct."
         )
 
+    def _emit_scoped(self, stmt: Statement, indent: int, *, context: str = "process") -> list[str]:
+        """Emit a statement that runs on some paths only: an if or case arm, a loop body.
+
+        A temporary hoisted inside it (`_et{n}_v = ...`) is assigned only when that
+        path runs, so its entries in the node-value caches (`_et_node_vals`,
+        `_et_node_masks`, keyed by expression identity) are dropped afterwards.
+        Otherwise a sibling arm, or a statement after the branch, that uses the same
+        expression object reads a temporary that was never assigned on its path:
+        `if (a) y <= eq; else if (b) y <= eq;` with one `eq = (x == 3)` node gave
+        y = 0 in the else arm. Temporaries from before the branch stay visible.
+        `_et_count` is not restored, so names stay unique."""
+        node_vals, node_masks = dict(self._et_node_vals), dict(self._et_node_masks)
+        try:
+            return self._emit_stmt(stmt, indent, context=context)
+        finally:
+            self._et_node_vals, self._et_node_masks = node_vals, node_masks
+
     def _emit_task_enable(self, stmt: TaskEnable, indent: int) -> list[str]:
         """Emit a user-defined task call."""
         from veriforge.model.ports import PortDirection
@@ -2670,14 +2687,14 @@ class _StmtEmittersMixin:
         lines = [*et_lines, *cond_setup, f"{pad}if ({cond}):"]
 
         if stmt.then_body:
-            body = self._emit_stmt(stmt.then_body, indent + 1, context=context)
+            body = self._emit_scoped(stmt.then_body, indent + 1, context=context)
             lines.extend(body if body else [f"{'    ' * (indent + 1)}pass"])
         else:
             lines.append(f"{'    ' * (indent + 1)}pass")
 
         if stmt.else_body:
             lines.append(f"{pad}else:")
-            body = self._emit_stmt(stmt.else_body, indent + 1, context=context)
+            body = self._emit_scoped(stmt.else_body, indent + 1, context=context)
             lines.extend(body if body else [f"{'    ' * (indent + 1)}pass"])
 
         return lines
@@ -2773,7 +2790,7 @@ class _StmtEmittersMixin:
 
         for item in stmt.items:
             if item.is_default:
-                default_lines = self._emit_stmt(item.body, indent + 1, context=context) if item.body else []
+                default_lines = self._emit_scoped(item.body, indent + 1, context=context) if item.body else []
                 continue
 
             # Build comparison conditions
@@ -2795,7 +2812,7 @@ class _StmtEmittersMixin:
             first = False
 
             if item.body:
-                body = self._emit_stmt(item.body, indent + 1, context=context)
+                body = self._emit_scoped(item.body, indent + 1, context=context)
                 lines.extend(body if body else [f"{'    ' * (indent + 1)}pass"])
             else:
                 lines.append(f"{'    ' * (indent + 1)}pass")
@@ -2869,11 +2886,13 @@ class _StmtEmittersMixin:
             body_pad = "    " * body_indent
             lines.append(f"{body_pad}{done} = 1")
             if item.body:
-                lines.extend(self._emit_stmt(item.body, body_indent, context=context))
+                lines.extend(self._emit_scoped(item.body, body_indent, context=context))
 
         if default_item is not None:
             lines.append(f"{pad}if not {done}:")
-            default_lines = self._emit_stmt(default_item.body, indent + 1, context=context) if default_item.body else []
+            default_lines = (
+                self._emit_scoped(default_item.body, indent + 1, context=context) if default_item.body else []
+            )
             lines.extend(default_lines if default_lines else [f"{pad}    pass"])
 
         return lines
@@ -2995,7 +3014,7 @@ class _StmtEmittersMixin:
 
         for item, flag in zip(stmt.items, match_flags, strict=True):
             if item.is_default:
-                default_lines = self._emit_stmt(item.body, indent + 1, context=context) if item.body else []
+                default_lines = self._emit_scoped(item.body, indent + 1, context=context) if item.body else []
                 continue
 
             keyword = "if" if first else "elif"
@@ -3003,7 +3022,7 @@ class _StmtEmittersMixin:
             first = False
 
             if item.body:
-                body = self._emit_stmt(item.body, indent + 1, context=context)
+                body = self._emit_scoped(item.body, indent + 1, context=context)
                 lines.extend(body if body else [f"{'    ' * (indent + 1)}pass"])
             else:
                 lines.append(f"{'    ' * (indent + 1)}pass")
@@ -3044,6 +3063,9 @@ class _StmtEmittersMixin:
         pad = "    " * indent
         lines.append(f"{pad}while True:")
         inner_pad = "    " * (indent + 1)
+        # The loop's condition, body and update run on some paths only (zero or more
+        # times): their node-cache entries are dropped after the loop (`_emit_scoped`).
+        loop_node_vals, loop_node_masks = dict(self._et_node_vals), dict(self._et_node_masks)
         if stmt.signed_var and isinstance(stmt.init, BlockingAssign) and isinstance(stmt.init.lhs, Identifier):
             loop_width = self._expr_width(stmt.init.lhs)
             if loop_var_name is not None:
@@ -3064,6 +3086,7 @@ class _StmtEmittersMixin:
             lines.extend(self._emit_stmt(stmt.body, indent + 1, context=context))
         # update
         lines.extend(self._emit_stmt(stmt.update, indent + 1, context=context))
+        self._et_node_vals, self._et_node_masks = loop_node_vals, loop_node_masks
 
         # Remove local var after loop scope
         if loop_var_name is not None:
@@ -3095,7 +3118,7 @@ class _StmtEmittersMixin:
         ]
 
         if stmt.body:
-            body = self._emit_stmt(stmt.body, indent + 1, context=context)
+            body = self._emit_scoped(stmt.body, indent + 1, context=context)
             lines.extend(body if body else [f"{inner_pad}pass"])
         else:
             lines.append(f"{inner_pad}pass")
@@ -3139,7 +3162,7 @@ class _StmtEmittersMixin:
         ]
 
         if stmt.body:
-            body = self._emit_stmt(stmt.body, indent + 1, context=context)
+            body = self._emit_scoped(stmt.body, indent + 1, context=context)
             lines.extend(body if body else [f"{inner_pad}pass"])
         else:
             lines.append(f"{inner_pad}pass")
@@ -3169,7 +3192,7 @@ class _StmtEmittersMixin:
         ]
 
         if stmt.body:
-            body = self._emit_stmt(stmt.body, indent + 1, context=context)
+            body = self._emit_scoped(stmt.body, indent + 1, context=context)
             lines.extend(body if body else [f"{inner_pad}pass"])
         else:
             lines.append(f"{inner_pad}pass")
