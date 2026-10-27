@@ -39,7 +39,10 @@ class PauseGenerator:  # cm:b4e6d8
     Args:
         num_pause: Expected number of paused cycles out of every *denom*.
         denom: Window size (denominator). Must be > 0.
-        seed: Optional RNG seed for reproducible sequences.
+        seed: RNG seed (``seed`` attribute). The default 0 makes every run
+            repeat; give generators that should pause independently (AW and W,
+            several streams) distinct seeds, or they pause in step. ``None``
+            seeds from OS entropy.
 
     Raises:
         ValueError: If ``num_pause < 0``, ``denom <= 0``, or
@@ -56,7 +59,7 @@ class PauseGenerator:  # cm:b4e6d8
         # Never pause.
         gen = PauseGenerator.never()
 
-        # 40 % pause rate with a fixed seed for reproducibility.
+        # 40 % pause rate, its own sequence (independent of other generators).
         gen = PauseGenerator.duty(0.4, seed=7)
     """
 
@@ -65,7 +68,7 @@ class PauseGenerator:  # cm:b4e6d8
         num_pause: int,
         denom: int,
         *,
-        seed: int | None = None,
+        seed: int | None = 0,
     ) -> None:
         if num_pause < 0:
             raise ValueError(f"num_pause must be >= 0, got {num_pause}")
@@ -75,6 +78,7 @@ class PauseGenerator:  # cm:b4e6d8
             raise ValueError(f"num_pause ({num_pause}) must be <= denom ({denom})")
         self._n = num_pause
         self._d = denom
+        self.seed = seed
         self._rng = random.Random(seed)  # noqa: S311 — not for cryptography
 
     def __call__(self) -> bool:
@@ -96,13 +100,13 @@ class PauseGenerator:  # cm:b4e6d8
         return cls(1, 1)
 
     @classmethod
-    def duty(cls, fraction: float, *, seed: int | None = None) -> "PauseGenerator":
+    def duty(cls, fraction: float, *, seed: int | None = 0) -> "PauseGenerator":
         """Return a generator with the given pause duty cycle fraction.
 
         Args:
             fraction: Fraction of cycles to pause; ``0.0`` = never,
                 ``1.0`` = always.
-            seed: Optional RNG seed for reproducible sequences.
+            seed: RNG seed, as for the constructor (default 0).
 
         Raises:
             ValueError: If *fraction* is outside [0.0, 1.0].

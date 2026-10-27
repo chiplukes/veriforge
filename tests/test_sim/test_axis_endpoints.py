@@ -239,6 +239,14 @@ def test_pause_generator_seeded_reproducible() -> None:
     assert sequence_a == sequence_b
 
 
+def test_pause_generator_default_seed_repeats() -> None:
+    """Unseeded generators repeat run to run (seed 0); seed=None draws from OS entropy."""
+    assert PauseGenerator(1, 3).seed == 0 and PauseGenerator.duty(0.3).seed == 0
+    gen_a, gen_b = PauseGenerator.duty(0.3), PauseGenerator(300, 1000, seed=0)
+    assert [gen_a() for _ in range(50)] == [gen_b() for _ in range(50)]
+    assert PauseGenerator(1, 3, seed=None).seed is None
+
+
 def test_pause_generator_duty_factory() -> None:
     gen = PauseGenerator.duty(0.5, seed=1)
     results = [gen() for _ in range(1000)]
