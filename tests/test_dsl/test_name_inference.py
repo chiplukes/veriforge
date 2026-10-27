@@ -486,7 +486,7 @@ class TestRefused:
     def test_positional_width_is_a_type_error(self):
         m = Module("t")
         with pytest.raises(
-            TypeError, match=r"m\.wire\(\): the name must be a string, got 8; .* pass width= by keyword"
+            TypeError, match=r"m\.wire\(8\): an int is not a name\. .* pass width= by keyword: x = m\.wire\(width=8\)"
         ):
             m.wire(8)
         with pytest.raises(TypeError, match=r"pass default= by keyword"):

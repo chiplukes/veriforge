@@ -135,6 +135,21 @@ def _loop_error(frame: FrameType, method: str, where: str, stored: str | None, l
     )
 
 
+def _int_wire_argument_error(value: int, name: str | None) -> str:
+    """The error for ``m.wire(<int>)`` without ``width=``: the int is either a
+    constant driver missing its width or a width missing its keyword."""
+    if name is not None:
+        return (
+            f"m.wire({value!r}, name={name!r}): a constant driver needs width= (an int has no width of its "
+            f"own): m.wire({value!r}, name={name!r}, width=W)"
+        )
+    return (
+        f"m.wire({value!r}): an int is not a name. For a wire driven by the constant {value!r}, give its "
+        f"width: x = m.wire({value!r}, width=W). If {value!r} is meant as the width, pass width= by "
+        f"keyword: x = m.wire(width={value!r})"
+    )
+
+
 def _check_identifier(name: str, kind: str = "signal") -> None:
     """Raise ValueError if *name* is not a valid Verilog identifier."""
     if not _VALID_IDENT_RE.match(name):
@@ -1645,7 +1660,7 @@ class Module:  # cm:2b9e4c
 
     def wire(
         self,
-        name_or_driver: str | Expr | None = None,
+        name_or_driver: str | Expr | int | None = None,
         /,
         width: int | Expr | None = None,
         *,
@@ -1668,8 +1683,9 @@ class Module:  # cm:2b9e4c
 
         Args:
             name_or_driver: Wire name, or a signal or expression that drives
-                the wire. Left out, the name of the variable the result is
-                assigned to (``w = m.wire(width=8)``).
+                the wire, or an int constant driver (with ``width=``). Left
+                out, the name of the variable the result is assigned to
+                (``w = m.wire(width=8)``).
             width: Width (default 1, or the driver's).
             name: Wire name, by keyword (needed for a driven wire that has no
                 plain variable to take it from).
@@ -1679,17 +1695,23 @@ class Module:  # cm:2b9e4c
             comment: Declaration comment (same as chaining ``.comment()``).
             attrs: Synthesis attributes, ``{name: value or None}`` (same as ``.attr()``).
         """
-        driver = None
+        driver: Expr | int | None = None
         if isinstance(name_or_driver, Expr):
             driver = name_or_driver
-            if init is not None or depth is not None:
-                raise TypeError("m.wire(expr): a driven wire takes no init= or depth=")
+        elif isinstance(name_or_driver, int):
+            # An int has no width of its own, and without width= it is more
+            # likely m.wire(8) written for m.wire(width=8) than a constant.
+            if width is None:
+                raise TypeError(_int_wire_argument_error(name_or_driver, name))
+            driver = name_or_driver
         elif name_or_driver is not None:
             if name is not None:
                 raise TypeError(f"m.wire(): two names given, {name_or_driver!r} and name={name!r}")
             name = name_or_driver  # a non-string is refused just below
+        if driver is not None and (init is not None or depth is not None):
+            raise TypeError("m.wire(expr): a driven wire takes no init= or depth=")
         name = self._target_name(name, "wire", "width")
-        if driver is not None:
+        if isinstance(driver, Expr):
             width, signed = self._driver_type(name, driver, width, signed)
         width = 1 if width is None else width
         signed = bool(signed)

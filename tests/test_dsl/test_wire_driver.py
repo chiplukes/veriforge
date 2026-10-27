@@ -6,6 +6,8 @@ import pytest
 
 from veriforge.codegen.verilog_emitter import emit_module
 from veriforge.dsl import Module, cat, mux, signed
+from veriforge.sim.testbench import Simulator
+from tests.test_sim.engines import ENGINES
 
 
 def _ports(m: Module):
@@ -121,10 +123,49 @@ def test_driven_wire_refuses_init_and_depth():
         t = m.wire(a & b, init=0)  # noqa: F841
 
 
-def test_int_first_argument_still_means_a_missing_width_keyword():
+def test_int_first_argument_without_width_is_refused_with_both_readings():
     m = Module("t")
-    with pytest.raises(TypeError, match="width= by keyword"):
+    with pytest.raises(
+        TypeError,
+        match=re.escape(
+            "m.wire(8): an int is not a name. For a wire driven by the constant 8, give its width: "
+            "x = m.wire(8, width=W). If 8 is meant as the width, pass width= by keyword: x = m.wire(width=8)"
+        ),
+    ):
         t = m.wire(8)  # noqa: F841
+    with pytest.raises(
+        TypeError, match=re.escape("m.wire(1, name='q'): a constant driver needs width= (an int has no width")
+    ):
+        m.wire(1, name="q")
+
+
+@pytest.mark.parametrize("use_a", [True, False])
+@pytest.mark.parametrize("engine", ENGINES)
+def test_int_driver_with_width(engine, use_a):
+    # The pattern that hit this: a driver chosen in Python is sometimes a bare int.
+    m = Module("t")
+    a = m.input(width=4)
+    y = m.output(width=4)
+    x = m.wire(a if use_a else 0, width=4)
+    z = m.wire(a if use_a else 1, name="z_w", width=4)
+    s = m.wire(-1, width=4, signed=True)
+    y.assign = x ^ z ^ s[3:0]
+    mod = m.build()
+    text = emit_module(mod)
+    assert _decl(text, "x") == "wire [3:0] x;"
+    assert _decl(text, "s") == "wire signed [3:0] s;"
+    assert ("assign x = a;" if use_a else "assign x = 0;") in text
+    assert "assign s = -1;" in text
+    sim = Simulator(mod, engine=engine)
+    sim.drive("a", 6)
+    sim.run(max_time=1)
+    assert sim.read("y") == (0xF if use_a else 0xE)
+
+
+def test_int_driver_refuses_init():
+    m = Module("t")
+    with pytest.raises(TypeError, match="init= or depth="):
+        t = m.wire(0, width=1, init=0)  # noqa: F841
 
 
 def test_name_keyword_names_a_driven_wire_in_a_loop():

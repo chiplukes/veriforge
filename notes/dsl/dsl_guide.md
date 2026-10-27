@@ -395,6 +395,11 @@ level = m.wire(mux(push, count, 0))                      # wire [W-1:0] level;
 total = m.wire(count + incoming, width=W + 1)            # width= required
 ```
 
+A plain integer can drive the wire too, given `width=`, so a driver picked in
+Python works with either result: `x = m.wire(a if use_a else 0, width=W)`.
+Without `width=` an integer is refused, since `m.wire(8)` is more likely
+`m.wire(width=8)` with the keyword left out than a constant.
+
 `width=` and `signed=` override the inferred values; `comment=` and `attrs=`
 work as for any wire. `init=` and `depth=` are refused: a driven wire has one
 driver and is not a memory.
