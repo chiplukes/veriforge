@@ -539,6 +539,11 @@ class Simulator:  # cm:a5c8f4
             self._sched.settle()
             for callback in list(self._pre_step_callbacks):
                 callback()
+            # Settle the callbacks' own drives too (a responder starting an R
+            # burst in the low phase): otherwise the edge this step takes
+            # samples the old values while the endpoint counts the beat as
+            # offered and retires it.
+            self._sched.settle()
         if self._engine == "reference":
             return self._sched.run_step()
         if self._engine in ("vm", "vm-fast"):

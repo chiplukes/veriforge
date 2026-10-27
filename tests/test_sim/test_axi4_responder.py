@@ -392,6 +392,70 @@ def test_axi4_responder_pause_ar_holds_arready_low(engine: str) -> None:
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_axi4_responder_pause_r_drawn_once_per_cycle(engine: str) -> None:
+    """`pause_r` (like `pause_b`) is evaluated at most once per clock cycle, as the stream
+    endpoints evaluate `pause`. It used to be called on every low-phase callback (the time
+    step's and the pre-step's), so a random pause paused less often than asked (p * p for
+    two draws) and could start a burst on the last callback before the edge."""
+    sim = _make_stub_sim(engine)
+    responder = AXI4Responder(sim, "m_axi", initial_memory={0x0: 0x1234})
+    cycles: list[int] = []
+
+    def pause() -> bool:
+        cycles.append(responder._cycle_count)
+        return len(cycles) < 20  # held, then released so the burst completes
+
+    responder.pause_r = pause
+    sim.drive("m_axi_arvalid", 1)
+    sim.drive("m_axi_araddr", 0x0)
+    sim.drive("m_axi_arlen", 0)
+    sim.drive("m_axi_arsize", 2)
+    sim.drive("m_axi_arburst", 1)
+    sim.drive("m_axi_rready", 1)
+    step_run_until(sim, 25)
+    sim.drive("m_axi_arvalid", 0)
+    step_run_until(sim, 400)
+    assert len(cycles) >= 20
+    assert len(cycles) == len(set(cycles)), f"pause_r drawn more than once in a cycle: {cycles}"
+    assert responder.read_log and set(responder.read_log) == {0x0}  # released, the reads complete
+    responder.close()
+
+
+def test_axi4_responder_latency_seed_default_repeats() -> None:
+    """The latency jitter is seeded (0) by default, so two runs draw the same latencies;
+    assigning `latency_seed` restarts the sequence, and None seeds from OS entropy."""
+    sim = _make_stub_sim("reference")
+    first, second = AXI4Responder(sim, "m_axi"), AXI4Responder(sim, "m_axi")
+    assert first.latency_seed == 0
+    draws = [first._draw_latency_cycles(20) for _ in range(16)]
+    assert draws == [second._draw_latency_cycles(20) for _ in range(16)]
+    assert len(set(draws)) > 1  # jittered, not constant
+    first.latency_seed = 0
+    assert [first._draw_latency_cycles(20) for _ in range(16)] == draws
+    first.latency_seed = 7
+    assert [first._draw_latency_cycles(20) for _ in range(16)] != draws
+    assert AXI4Responder(sim, "m_axi", latency_seed=None).latency_seed is None
+    for responder in (first, second):
+        responder.close()
+
+
+def test_axi4_proxy_forwards_latency_seed() -> None:
+    """`bench.iface("m_axi").latency_seed` reads and reseeds the responder behind the proxy."""
+    from veriforge.sim.bench import Testbench
+
+    bench = Testbench(_parse(AXI4_READ_MASTER_FSM_SRC), engine="reference")
+    with bench.run():
+        m_axi = bench.iface("m_axi")
+        assert m_axi.latency_seed == 0
+        m_axi.latency_seed = 3
+        assert m_axi._responder.latency_seed == 3
+        reference = AXI4Responder(bench.sim, "m_axi", latency_seed=3)
+        draws = [reference._draw_latency_cycles(20) for _ in range(8)]
+        assert [m_axi._responder._draw_latency_cycles(20) for _ in range(8)] == draws
+        reference.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_axi4_responder_queue_write_response_overrides_bresp(engine: str) -> None:
     sim = _make_stub_sim(engine)
     responder = AXI4Responder(sim, "m_axi")

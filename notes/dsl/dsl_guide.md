@@ -622,6 +622,47 @@ A `when()` chain must be closed with `.otherwise(default)` before it can be
 used in an expression or assignment; forgetting it raises a `TypeError` at the
 point of use. Chains are immutable — each `.when()` returns a new chain.
 
+### Packed-word fields: `PackedLayout`
+
+A wide word with named fields (a FIFO entry, a command or descriptor, a
+header beat) is easier to keep consistent from one place than as hand-written
+bit ranges. `PackedLayout` (in `veriforge.dsl.lib`) lists the fields as
+`(name, width)` pairs, first field lowest, and gives each field's slice, a
+contiguous span of fields, and the concatenation of one part per field:
+
+```python
+from veriforge.dsl.lib import PackedLayout
+
+DESC = PackedLayout(("port", 2), ("slice", 3), ("words", 5), ("last", 1), ("addr", 20))
+DESC.width                                  # 31
+DESC["words"]                               # Field(name='words', lsb=5, width=5); .msb == 9
+
+word = m.wire(DESC.pack(port=p, slice=s, words=n, last=l, addr=a))  # {a, l, n, s, p}
+words = m.wire(DESC["words"].of(word))      # word[9:5]
+last = m.wire(DESC["last"].of(word))        # word[10] (a one-bit field is a bit select)
+entry = m.wire(DESC.span("port", "last").of(word))  # word[10:0]
+```
+
+`pack()` takes the parts by name (keywords, a mapping, or both) and refuses a
+missing or unknown field. A Signal part must have the field's declared width;
+an int part becomes a sized literal of the field's width (`pad=0` emits
+`2'd0`); other expressions must already be the field's width. Nothing is
+declared: `of()` and `pack()` return a select and a concatenation, as if
+written by hand.
+
+A testbench uses the same layout on Python ints, so stimulus and checks name
+the fields the RTL does:
+
+```python
+value = DESC.pack_int(port=1, slice=0, words=4, last=1, addr=0x100)
+DESC.unpack_int(value)       # {'port': 1, 'slice': 0, 'words': 4, 'last': 1, 'addr': 256}
+DESC["words"].get(value)     # 4
+```
+
+Widths are ints of at least 1. A field that is empty in some configuration
+(one port, so no port bits) is usually kept one bit wide and driven 0, so the
+fields above it keep their positions.
+
 ## Behavioral Blocks
 
 ### Always Blocks

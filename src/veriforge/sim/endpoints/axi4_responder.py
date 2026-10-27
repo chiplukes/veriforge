@@ -15,7 +15,9 @@ read (write) beat returned to an idle pipeline pays a randomized
 ``rd_latency_cycles`` (``wr_latency_cycles``) delay, while subsequent
 back-to-back bursts queued behind it are throttled to sustain
 ``max_bw_percent`` (``wr_max_bw_percent``) of the theoretical peak instead
-of re-paying that latency. Also supports per-channel PAUSE (``.pause_aw``,
+of re-paying that latency. The jitter and throttling draw from
+``random.Random(latency_seed)``: the default seed 0 makes runs repeat, ``None``
+seeds from OS entropy, and assigning ``latency_seed`` reseeds. Also supports per-channel PAUSE (``.pause_aw``,
 ``.pause_w``, ``.pause_ar``, ``.pause_b``, ``.pause_r``) in addition to the
 legacy combined ``.pause``, and can be constructed against a DUT that only
 exposes a write channel (AW/W/B) or only a read channel (AR/R) — the
@@ -71,7 +73,7 @@ class AXI4Responder:  # cm:7e9b5d
         wr_latency_cycles: int = 1,
         max_bw_percent: int = 100,
         wr_max_bw_percent: int | None = None,
-        latency_seed: int | None = None,
+        latency_seed: int | None = 0,
     ) -> None:
         self.sim = sim
         self.prefix = prefix
@@ -143,12 +145,14 @@ class AXI4Responder:  # cm:7e9b5d
         # callable, or a PauseGenerator, same as the legacy `.pause`.
         # `.pause_b`/`.pause_r` gate *starting* a new response only (they
         # don't interrupt a burst already in flight, since AXI4 forbids
-        # dropping VALID once asserted without a handshake).
+        # dropping VALID once asserted without a handshake). Each is
+        # evaluated at most once per clock cycle.
         self.pause_aw = False
         self.pause_w = False
         self.pause_ar = False
         self.pause_b = False
         self.pause_r = False
+        self._pause_draws: dict[str, tuple[int, bool]] = {}  # channel -> (cycle, paused)
 
         self.data_bytes = (self.wdata.width if self.wdata is not None else self.rdata.width) // 8
 
@@ -159,7 +163,7 @@ class AXI4Responder:  # cm:7e9b5d
         self.wr_latency_cycles = wr_latency_cycles
         self.max_bw_percent = max_bw_percent
         self.wr_max_bw_percent = max_bw_percent if wr_max_bw_percent is None else wr_max_bw_percent
-        self._rng = random.Random(latency_seed)  # noqa: S311 — not for cryptography
+        self.latency_seed = latency_seed  # creates self._rng
         self._cycle_count = 0
         self._rd_primed = False
         self._wr_primed = False
@@ -259,9 +263,29 @@ class AXI4Responder:  # cm:7e9b5d
     def _is_high(self, signal) -> bool:
         return self._read_known(signal) == 1
 
+    @property
+    def latency_seed(self) -> int | None:
+        """Seed of the latency/bandwidth RNG (None: OS entropy); assigning reseeds it."""
+        return self._latency_seed
+
+    @latency_seed.setter
+    def latency_seed(self, seed: int | None) -> None:
+        self._latency_seed = seed
+        self._rng = random.Random(seed)  # noqa: S311 — not for cryptography
+
     @staticmethod
     def _is_paused(pause_attr) -> bool:
         return pause_attr() if callable(pause_attr) else bool(pause_attr)
+
+    def _paused_this_cycle(self, channel: str) -> bool:
+        """`pause_<channel>` drawn once per clock cycle. B and R start from the low phase,
+        which can run several callbacks (the time step's, then the pre-step's); a fresh
+        draw in each would pause less often than asked."""
+        drawn = self._pause_draws.get(channel)
+        if drawn is None or drawn[0] != self._cycle_count:
+            drawn = (self._cycle_count, self._is_paused(getattr(self, f"pause_{channel}")))
+            self._pause_draws[channel] = drawn
+        return drawn[1]
 
     def _draw_latency_cycles(self, mean_cycles: int) -> int:
         """Extra wait cycles before the first beat of a freshly-primed pipeline.
@@ -522,7 +546,7 @@ class AXI4Responder:  # cm:7e9b5d
                 not self._b_active
                 and self._b_waiting is not None
                 and self._cycle_count >= self._b_wait_target_cycle
-                and not self._is_paused(self.pause_b)
+                and not self._paused_this_cycle("b")
             ):
                 resp, bid = self._b_waiting
                 self._b_waiting = None
@@ -547,7 +571,7 @@ class AXI4Responder:  # cm:7e9b5d
                 not self._r_active
                 and self._r_waiting is not None
                 and self._cycle_count >= self._r_wait_target_cycle
-                and not self._is_paused(self.pause_r)
+                and not self._paused_this_cycle("r")
             ):
                 burst = self._r_waiting
                 self._r_waiting = None

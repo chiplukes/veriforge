@@ -20,6 +20,7 @@ from .cdc import edge_detector, synchronizer
 from .codec import binary_decoder, priority_encoder
 from .axi_stream import axi_stream, axis_register
 from .axi import axi4_lite
+from .layout import Field, PackedLayout
 from .dsp import fir_filter, mac, pipelined_mult
 from .xilinx import lutram, shift_register_srl
 
@@ -40,6 +41,9 @@ __all__ = [  # noqa: RUF022  # grouped by category, alphabetical order within ea
     "axis_register",
     # AXI4-Lite
     "axi4_lite",
+    # Packed-word field layouts
+    "Field",
+    "PackedLayout",
     # DSP inference
     "mac",
     "pipelined_mult",

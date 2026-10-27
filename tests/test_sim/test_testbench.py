@@ -706,3 +706,44 @@ class TestDeltaLimitPlumbing:
     def test_default_delta_limit(self, engine):
         sim = Simulator(_make_adder(), engine=engine)
         assert sim._sched.delta_limit == 10_000
+
+
+class TestPreStepCallbackDrives:
+    """A drive made in a pre-step callback reaches the edge of the step it precedes."""
+
+    FF_SRC = """
+module pre_step_ff (input wire clk, input wire d, input wire en, output reg q);
+    wire take = d & en;
+    always @(posedge clk) q <= take;
+endmodule
+"""
+
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_low_phase_drive_captured_at_next_edge(self, engine):
+        """Regression: run_step() settled before the pre-step callbacks but not after, so
+        on the reference engine a wire derived from their drives kept its old value at the
+        edge that followed (AXI4Responder starting an R burst in the pre-step: the DUT's
+        `rvalid & rready` missed the beat the responder then retired)."""
+        from veriforge.transforms.tree_to_model import tree_to_design
+        from veriforge.verilog_parser import verilog_parser
+
+        tree = verilog_parser(start="module_declaration").build_tree(text=self.FF_SRC)
+        sim = Simulator(tree_to_design(tree).modules[0], engine=engine)
+        sim.drive("d", 0)
+        sim.drive("en", 1)
+        sim.run(max_time=0)
+        sim.schedule_clock(Clock(sim.signal("clk"), period=10), 200)
+        step_run_until(sim, 12)
+
+        armed = [True]
+
+        def drive_d_while_low() -> None:
+            if armed[0] and sim.read("clk").val == 0:
+                sim.drive("d", 1)
+                armed[0] = False
+
+        sim.add_pre_step_callback(drive_d_while_low)
+        while armed[0]:
+            sim.run_step()
+        assert sim.read("clk").val == 1, "expected the drive in the pre-step just before a rising edge"
+        assert sim.read("q").val == 1, "the rising edge right after the pre-step drive did not capture d & en"

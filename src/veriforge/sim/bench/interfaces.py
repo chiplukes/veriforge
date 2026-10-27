@@ -635,6 +635,17 @@ class AXI4Proxy:  # cm:1a5c6e
             self._responder.rd_latency_cycles = value
 
     @property
+    def latency_seed(self) -> int | None:
+        """Seed of the responder's latency/bandwidth jitter (role='master' only; default 0,
+        None for OS entropy). Assigning reseeds it, restarting the sequence."""
+        return self._responder.latency_seed if self._responder is not None else None
+
+    @latency_seed.setter
+    def latency_seed(self, value: int | None) -> None:
+        if self._responder is not None:
+            self._responder.latency_seed = value
+
+    @property
     def wr_latency_cycles(self) -> int:
         """Mean extra-cycle latency before the first B of an idle write
         pipeline (role='master' only)."""
