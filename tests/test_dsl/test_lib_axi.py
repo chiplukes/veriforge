@@ -6,7 +6,7 @@ import pytest
 
 from veriforge.codegen.verilog_emitter import emit_module
 from veriforge.dsl import Module, posedge
-from veriforge.dsl.lib import axi4_lite, axi_stream, axis_register
+from veriforge.dsl.lib import axi4_lite, axi4_read, axi_stream, axis_register
 
 
 def _sig(intf, name):
@@ -286,6 +286,97 @@ class TestAxi4LiteInterface:
         assert "input m_axi_awready" in v
         assert "input m_axi_bvalid" in v
         assert "input [31:0] m_axi_rdata" in v
+
+
+class TestAxi4ReadInterface:
+    """Test axi4_read(): the AR and R channels of AXI4, no IDs."""
+
+    ORDER = [
+        "araddr",
+        "arlen",
+        "arsize",
+        "arburst",
+        "arvalid",
+        "arready",
+        "rdata",
+        "rresp",
+        "rlast",
+        "rvalid",
+        "rready",
+    ]
+
+    def test_fields_in_order(self):
+        assert [s.name for s in axi4_read()._signals] == self.ORDER
+
+    def test_directions_and_widths(self):
+        intf = axi4_read(data_width=256, addr_width=34)
+        master = {"araddr", "arlen", "arsize", "arburst", "arvalid", "rready"}
+        for s in intf._signals:
+            assert s.src == ("master" if s.name in master else "slave"), s.name
+        assert [_sig(intf, n).width for n in ("araddr", "arlen", "arsize", "arburst", "rdata", "rresp")] == [
+            34,
+            8,
+            3,
+            2,
+            256,
+            2,
+        ]
+
+    def test_without_rready(self):
+        assert [s.name for s in axi4_read(include_rready=False)._signals] == self.ORDER[:-1]
+
+    def test_master_ports(self):
+        m = Module("rd_master")
+        m.input("clk")
+        m.interface("m_axi", axi4_read(data_width=64, addr_width=16), role="master")
+        v = emit_module(m.build())
+        assert "output [15:0] m_axi_araddr" in v
+        assert "input [63:0] m_axi_rdata" in v
+        assert "input m_axi_rlast" in v
+        assert "output m_axi_rready" in v
+
+    def test_bench_responder_serves_a_burst(self):
+        """The bench recognizes the interface as AXI4 and answers a two-beat INCR burst."""
+        from veriforge.sim.bench import Testbench
+
+        m = Module("rd_burst")
+        clk = m.input()
+        rst = m.input()
+        m_axi = m.interface("m_axi", axi4_read(data_width=32, addr_width=8), role="master", reg=True)
+        beat0 = m.output_reg(width=32, init=0)
+        beat1 = m.output_reg(width=32, init=0)
+        beats = m.reg(width=2, init=0)
+        issued = m.reg(init=0)
+        with m.always(posedge(clk)):
+            with m.if_(rst):
+                m_axi.arvalid <<= 0
+                m_axi.rready <<= 0
+                beats <<= 0
+                issued <<= 0
+            with m.else_():
+                m_axi.araddr <<= 0x10
+                m_axi.arlen <<= 1
+                m_axi.arsize <<= 2
+                m_axi.arburst <<= 1
+                m_axi.rready <<= 1
+                with m.if_(~issued):
+                    m_axi.arvalid <<= 1
+                    issued <<= 1
+                with m.elif_(m_axi.arvalid & m_axi.arready):
+                    m_axi.arvalid <<= 0
+                with m.if_(m_axi.rvalid & m_axi.rready):
+                    beats <<= beats + 1
+                    with m.if_(beats == 0):
+                        beat0 <<= m_axi.rdata
+                    with m.else_():
+                        beat1 <<= m_axi.rdata
+        bench = Testbench(m.build(), engine="reference")
+        with bench.run():
+            bench.reset_all()
+            bench.iface("m_axi").memory.update({0x10: 0xA5A5_0001, 0x14: 0x5A5A_0002})
+            bench.step(60)
+            assert int(bench.sim.read("beat0")) == 0xA5A5_0001
+            assert int(bench.sim.read("beat1")) == 0x5A5A_0002
 
 
 class TestLibReexports:

@@ -19,7 +19,7 @@ from .fifo import sync_fifo
 from .cdc import edge_detector, synchronizer
 from .codec import binary_decoder, priority_encoder
 from .axi_stream import axi_stream, axis_register
-from .axi import axi4_lite
+from .axi import axi4_lite, axi4_read
 from .layout import Field, PackedLayout
 from .dsp import fir_filter, mac, pipelined_mult
 from .xilinx import lutram, shift_register_srl
@@ -39,8 +39,9 @@ __all__ = [  # noqa: RUF022  # grouped by category, alphabetical order within ea
     # AXI Stream
     "axi_stream",
     "axis_register",
-    # AXI4-Lite
+    # AXI4-Lite and AXI4 read
     "axi4_lite",
+    "axi4_read",
     # Packed-word field layouts
     "Field",
     "PackedLayout",

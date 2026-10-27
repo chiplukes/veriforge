@@ -1,7 +1,8 @@
-"""AXI4-Lite protocol interface definition.
+"""AXI interface definitions: AXI4-Lite, and the read channels of AXI4.
 
-Provides the standard AXI4-Lite interface template for register-based
-peripherals.
+`axi4_lite` is the standard AXI4-Lite template for register-based
+peripherals; `axi4_read` is the AR/R subset of full AXI4 for a read-only
+burst master (a DMA reader, an HBM read port).
 
 Usage::
 
@@ -72,5 +73,49 @@ def axi4_lite(
     i.signal("rresp", width=2, src="slave")
     i.signal("rvalid", src="slave")
     i.signal("rready", src="master")
+
+    return i
+
+
+def axi4_read(
+    data_width: int = 32,
+    addr_width: int = 32,
+    *,
+    include_rready: bool = True,
+) -> Interface:
+    """Create a read-only AXI4 interface definition: the AR and R channels.
+
+    INCR bursts without IDs or the optional AR attributes: ``araddr``,
+    ``arlen``, ``arsize``, ``arburst``, ``arvalid``/``arready``, then ``rdata``,
+    ``rresp``, ``rlast``, ``rvalid`` and ``rready``, in that order. Without IDs
+    the slave returns bursts in request order. Bind it with
+    ``m.interface(prefix, axi4_read(...), role="master"|"slave")``.
+
+    Args:
+        data_width: Width of rdata in bits.
+        addr_width: Width of araddr in bits.
+        include_rready: False leaves out ``rready``, for a master that accepts
+            every beat (the slave then treats R as always ready).
+
+    Returns:
+        Interface template with 11 signals (10 without rready).
+    """
+    i = Interface("axi4_read")
+
+    # Read address channel (AR)
+    i.signal("araddr", width=addr_width, src="master")
+    i.signal("arlen", width=8, src="master")
+    i.signal("arsize", width=3, src="master")
+    i.signal("arburst", width=2, src="master")
+    i.signal("arvalid", src="master")
+    i.signal("arready", src="slave")
+
+    # Read data channel (R)
+    i.signal("rdata", width=data_width, src="slave")
+    i.signal("rresp", width=2, src="slave")
+    i.signal("rlast", src="slave")
+    i.signal("rvalid", src="slave")
+    if include_rready:
+        i.signal("rready", src="master")
 
     return i
