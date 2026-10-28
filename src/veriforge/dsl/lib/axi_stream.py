@@ -34,14 +34,15 @@ def axi_stream(
     tid_width: int = 0,
     tdest_width: int = 0,
     tuser_width: int = 0,
+    include_tlast: bool = True,
 ) -> Interface:
     """Create an AXI4-Stream interface definition.
 
     Returns an :class:`Interface` template.  Bind it to a module with
     ``m.interface(prefix, intf, role="master"|"slave")``.
 
-    Standard signals (always present):
-        tvalid, tready, tdata [data_width-1:0], tlast
+    Standard signals:
+        tvalid, tready, tdata [data_width-1:0], tlast (unless include_tlast=False)
 
     Optional signals (present when width > 0):
         tid [tid_width-1:0], tdest [tdest_width-1:0], tuser [tuser_width-1:0]
@@ -51,6 +52,9 @@ def axi_stream(
         tid_width: Width of tid (0 = omit).
         tdest_width: Width of tdest (0 = omit).
         tuser_width: Width of tuser (0 = omit).
+        include_tlast: False omits tlast, for an unframed stream (a FIFO
+            carrying single words). The bench then needs
+            ``PlannerOverrides(relaxed_iface_signals={"axi_stream": ["tlast"]})``.
 
     Returns:
         Interface template.
@@ -59,7 +63,8 @@ def axi_stream(
     i.signal("tvalid", src="master")
     i.signal("tready", src="slave")
     i.signal("tdata", width=data_width, src="master")
-    i.signal("tlast", src="master")
+    if include_tlast:
+        i.signal("tlast", src="master")
     if tid_width > 0:
         i.signal("tid", width=tid_width, src="master")
     if tdest_width > 0:

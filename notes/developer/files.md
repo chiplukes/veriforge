@@ -236,6 +236,7 @@ src/veriforge/
 │       ├── axi_stream.py # axi_stream() interface + axis_register() pipeline reg
 │       ├── axi.py        # axi4_lite() interface (all 5 channels, 19 signals)
 │       ├── dsp.py        # mac(), pipelined_mult(), fir_filter() — DSP inference
+│       ├── layout.py     # PackedLayout/Field — named fields of a packed word (slices, pack, int pack/unpack)
 │       └── xilinx.py     # shift_register_srl(), lutram() — Xilinx inference
 └── fuzz/                 # Grammar-driven randomized differential-testing fuzzer
     ├── __init__.py       # Public API exports
@@ -294,6 +295,7 @@ tests/
 │   ├── test_generate.py           # Generate construct elaboration tests (40 tests)
 │   ├── test_hierarchy.py          # Hierarchy flattening + hierarchical signal access tests (62 tests)
 │   ├── test_instance_checks.py    # Port connections, parameter overrides and defparam vs Icarus, all engines (71 tests)
+│   ├── test_drive_wake_and_select_bounds.py # Drives waking always @*, dynamic selects outside the target vs Icarus (180 tests)
 │   ├── test_function_task.py      # User-defined function/task simulation tests (22 tests)
 │   ├── test_memory.py             # Memory array, $readmemh/$readmemb, $dumpfile/$dumpvars tests (18 tests)
 │   ├── test_sim_sv.py             # SystemVerilog simulation support tests (55 tests)

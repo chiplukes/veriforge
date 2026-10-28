@@ -609,6 +609,20 @@ class Scheduler:  # cm:9a7f2c
         # trigger posedge/negedge-sensitive always blocks.
         self._process_external_drives()
 
+        # (Drives before the first run() wake the combinational blocks reading
+        # them, or reading what they drive through continuous assigns -- not
+        # as edges. The fan-out goes first: after the full pass below, `s` of
+        # `assign s = i;` is already settled, so `always @* o = s;` never woke.)
+        bootstrapping = not self._combo_bootstrapped
+        drives: set[str] = set()
+        if bootstrapping:
+            drives = set(self._pending_drives)
+            self._pending_drives.clear()
+            if drives:
+                for _ in range(self.delta_limit):
+                    if not self._run_dirty_continuous_assigns(drives):
+                        break
+
         # Bootstrap: evaluate all continuous assigns until stable
         for _ in range(self.delta_limit):
             if not self._run_continuous_assigns():
@@ -618,16 +632,8 @@ class Scheduler:  # cm:9a7f2c
         # first run()/settle() only -- they used to run again on every run()
         # call, an extra activation each time, and their changes weren't
         # propagated).
-        if not self._combo_bootstrapped:
+        if bootstrapping:
             self._combo_bootstrapped = True
-            # (Drives before this first run() wake the combinational blocks
-            # reading them -- not as edges, as before.)
-            drives = set(self._pending_drives)
-            self._pending_drives.clear()
-            if drives:
-                for _ in range(self.delta_limit):
-                    if not self._run_dirty_continuous_assigns(drives):
-                        break
             self._bootstrap_combos(drives=drives)
 
         # Start the $dumpvars trace session, if an initial block requested one.
@@ -678,6 +684,11 @@ class Scheduler:  # cm:9a7f2c
             new_val = self.ctx._signals.get(name)
             if new_val is not None and (old_val.val != new_val.val or old_val.mask != new_val.mask):
                 drive_dirty.add(name)
+        # Memories aren't in the snapshot: take the driven ones from
+        # drive_signal() (consumed here, so settle() doesn't wake them again).
+        driven_memories = {name for name in self._pending_drives if name in self.ctx._memories}
+        self._pending_drives -= driven_memories
+        drive_dirty |= driven_memories
 
         if not drive_dirty:
             return
@@ -688,7 +699,7 @@ class Scheduler:  # cm:9a7f2c
                 break
 
         # Recompute full dirty set after CA propagation
-        all_dirty: set[str] = set()
+        all_dirty: set[str] = set(driven_memories)
         for name, old_val in old_signals.items():
             new_val = self.ctx._signals.get(name)
             if new_val is not None and (old_val.val != new_val.val or old_val.mask != new_val.mask):
@@ -1359,6 +1370,12 @@ class Scheduler:  # cm:9a7f2c
             self._settle_snapshot = self._snapshot_signals()
         self.ctx.write_signal(name, value)
         self._pending_drives.add(name)
+        # A memory element drive (`m[0]`) is a change to `m`, the name
+        # sensitivity lists and internal writes use; without it an `always @*`
+        # reading the memory never woke.
+        bracket = name.find("[")
+        if bracket > 0 and name.endswith("]") and name[:bracket] in self.ctx._memories:
+            self._pending_drives.add(name[:bracket])
 
     def settle(self) -> None:
         """Propagate pending external drives through combinational logic.
@@ -2032,6 +2049,11 @@ def _lhs_base_names(lhs: Expression) -> set[str]:
         parts = name.split(".")
         for index in range(1, len(parts)):
             names.add(".".join(parts[:index]))
+        # A struct field of a memory element (`src[1].data`) writes the
+        # memory `src`, the name its write dirties; without it an `always @*`
+        # that writes and reads the memory re-triggered itself forever.
+        if "[" in name:
+            names.add(name.split("[", 1)[0])
         return names
     if isinstance(lhs, (BitSelect, RangeSelect, PartSelect)):
         return _lhs_base_names(lhs.target)

@@ -255,8 +255,9 @@ with Module("regs") as m:
     # s_axi.awaddr / .awvalid / .awready / .wdata / .bvalid / .rdata / ...
 ```
 
-- `axi_stream(data_width, tid_width=, tdest_width=, tuser_width=)` — optional
-  sideband signals only appear when their width is > 0.
+- `axi_stream(data_width, tid_width=, tdest_width=, tuser_width=, include_tlast=True)` —
+  optional sideband signals only appear when their width is > 0;
+  `include_tlast=False` drops `tlast` for an unframed word stream.
 - `axi4_lite(data_width, addr_width)` — all five channels.
 - Wire bus between two instances with `**iface.port_map("prefix")` in
   `m.instance(..., ports={...})`.

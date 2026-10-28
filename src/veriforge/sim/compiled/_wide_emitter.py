@@ -335,29 +335,35 @@ class _WideEmitterMixin:
     ) -> list[str]:
         pad = "    " * indent
         elem_w, _depth = self._mem_info[mid]
+        # A bit outside the element, or an x index (_X_INDEX), writes nothing
+        # (IEEE 1800 7.4.6): its mask is 0 and its word stays in bounds. The
+        # wide form indexed past the memory arrays (a segfault), the narrow
+        # one wrapped (bit 70 of a 64-bit element wrote bit 6).
         if elem_w > _WORD_BITS:
             words = self._mem_words(mid)
             lines = [
                 f"{pad}cdef long long idx = ({idx_expr})",
                 f"{pad}cdef long long bit = ({bit_expr})",
-                f"{pad}cdef long long word = bit >> 6",
+                f"{pad}cdef int bit_ok = 0 <= bit < {elem_w}",
+                f"{pad}cdef long long word = (bit >> 6) if bit_ok else 0",
                 f"{pad}cdef long long word_lsb = bit & 0x3f",
                 f"{pad}cdef long long word_addr = (idx * {words}) + word",
-                f"{pad}cdef unsigned long long bit_mask = (<unsigned long long>1) << word_lsb",
+                f"{pad}cdef unsigned long long bit_mask = ((<unsigned long long>1) << word_lsb) if bit_ok else 0",
                 f"{pad}cdef unsigned long long rval = (<unsigned long long>({rhs_val_expr})) & 1",
                 f"{pad}cdef unsigned long long rmask = (<unsigned long long>({rhs_mask_expr})) & 1",
             ]
             if is_nba:
                 lines.extend(
                     [
-                        f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
-                        f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = word_addr",
-                        f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = word_lsb",
-                        f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
-                        f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = <long long>rval",
-                        f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>rmask",
-                        f"{pad}_nba_mem_push(c)",
-                        f"{pad}c.nba_pending = 1",
+                        f"{pad}if bit_ok:",
+                        f"{pad}    c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                        f"{pad}    c.nba_mem_range_addr[c.nba_mem_range_count] = word_addr",
+                        f"{pad}    c.nba_mem_range_msb[c.nba_mem_range_count] = word_lsb",
+                        f"{pad}    c.nba_mem_range_lsb[c.nba_mem_range_count] = word_lsb",
+                        f"{pad}    c.nba_mem_range_val[c.nba_mem_range_count] = <long long>rval",
+                        f"{pad}    c.nba_mem_range_mask[c.nba_mem_range_count] = <long long>rmask",
+                        f"{pad}    _nba_mem_push(c)",
+                        f"{pad}    c.nba_pending = 1",
                     ]
                 )
                 return lines
@@ -365,9 +371,9 @@ class _WideEmitterMixin:
             lines.extend(
                 [
                     f"{pad}cdef unsigned long long new_v = ((c.wide_mem_{mid}_val[word_addr] & ~bit_mask)"
-                    f" | (((rval & ~rmask) & 1) << word_lsb))",
+                    f" | ((((rval & ~rmask) & 1) << word_lsb) & bit_mask))",
                     f"{pad}cdef unsigned long long new_m = ((c.wide_mem_{mid}_mask[word_addr] & ~bit_mask)"
-                    f" | ((rmask & 1) << word_lsb))",
+                    f" | (((rmask & 1) << word_lsb) & bit_mask))",
                 ]
             )
             # Always change-aware: an unconditional marker toggle would make
@@ -386,25 +392,28 @@ class _WideEmitterMixin:
 
         if is_nba:
             return [
-                f"{pad}c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
-                f"{pad}c.nba_mem_range_addr[c.nba_mem_range_count] = ({idx_expr})",
-                f"{pad}c.nba_mem_range_msb[c.nba_mem_range_count] = ({bit_expr})",
-                f"{pad}c.nba_mem_range_lsb[c.nba_mem_range_count] = ({bit_expr})",
-                f"{pad}c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val_expr}) & 1",
-                f"{pad}c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask_expr}) & 1",
-                f"{pad}_nba_mem_push(c)",
-                f"{pad}c.nba_pending = 1",
+                f"{pad}if 0 <= ({bit_expr}) < {elem_w}:",
+                f"{pad}    c.nba_mem_range_mid[c.nba_mem_range_count] = {mid}",
+                f"{pad}    c.nba_mem_range_addr[c.nba_mem_range_count] = ({idx_expr})",
+                f"{pad}    c.nba_mem_range_msb[c.nba_mem_range_count] = ({bit_expr})",
+                f"{pad}    c.nba_mem_range_lsb[c.nba_mem_range_count] = ({bit_expr})",
+                f"{pad}    c.nba_mem_range_val[c.nba_mem_range_count] = ({rhs_val_expr}) & 1",
+                f"{pad}    c.nba_mem_range_mask[c.nba_mem_range_count] = ({rhs_mask_expr}) & 1",
+                f"{pad}    _nba_mem_push(c)",
+                f"{pad}    c.nba_pending = 1",
             ]
 
         lines = [
             f"{pad}cdef long long idx = ({idx_expr})",
-            f"{pad}cdef long long bit = ({bit_expr}) & 0x3f",
+            f"{pad}cdef long long bit = ({bit_expr})",
+            f"{pad}cdef long long bit_m = (1LL << (bit & 0x3f)) if 0 <= bit < {elem_w} else 0",
+            f"{pad}bit = bit & 0x3f",
             f"{pad}cdef long long rval = ({rhs_val_expr}) & 1",
             f"{pad}cdef long long m = ({rhs_mask_expr}) & 1",
             f"{pad}cdef long long old_v = c.mem_{mid}_val[idx]",
             f"{pad}cdef long long old_m = c.mem_{mid}_mask[idx]",
-            f"{pad}cdef long long new_v = (old_v & ~(1LL << bit)) | ((rval & ~m) << bit)",
-            f"{pad}cdef long long new_m = (old_m & ~(1LL << bit)) | (m << bit)",
+            f"{pad}cdef long long new_v = (old_v & ~bit_m) | (((rval & ~m) << bit) & bit_m)",
+            f"{pad}cdef long long new_m = (old_m & ~bit_m) | ((m << bit) & bit_m)",
         ]
         # Always change-aware (see comment in the wide branch above).
         lines.extend(
@@ -433,13 +442,19 @@ class _WideEmitterMixin:
     ) -> list[str]:
         pad = "    " * indent
         words = self._mem_words(mid)
+        top = self._mem_info[mid][0] - 1
+        # Only the bits inside the element are written (an x base, _X_INDEX,
+        # none): the range is clamped to [0, top] -- it used to index past the
+        # memory arrays. The RHS shift stays relative to the unclamped lsb.
         lines = [
             f"{pad}cdef long long idx = ({idx_expr})",
             f"{pad}cdef int range_msb = ({msb_expr})",
             f"{pad}cdef int range_lsb = ({lsb_expr})",
+            f"{pad}cdef int range_lo = range_lsb if range_lsb > 0 else 0",
+            f"{pad}cdef int range_hi = range_msb if range_msb < {top} else {top}",
             f"{pad}cdef long long idx_word_base = idx * {words}",
-            f"{pad}cdef int start_word = range_lsb >> 6",
-            f"{pad}cdef int end_word = range_msb >> 6",
+            f"{pad}cdef int start_word = range_lo >> 6",
+            f"{pad}cdef int end_word = (range_hi >> 6) if range_lo <= range_hi else start_word - 1",
             f"{pad}cdef int word_index = start_word",
             f"{pad}cdef int chunk_lsb",
             f"{pad}cdef int chunk_msb",
@@ -453,8 +468,8 @@ class _WideEmitterMixin:
             f"{pad}cdef unsigned long long chunk_rmask",
             f"{pad}_mchg = 0",
             f"{pad}while word_index <= end_word:",
-            f"{pad}    chunk_lsb = range_lsb if range_lsb > (word_index << 6) else (word_index << 6)",
-            f"{pad}    chunk_msb = range_msb if range_msb < (((word_index + 1) << 6) - 1) else (((word_index + 1) << 6) - 1)",
+            f"{pad}    chunk_lsb = range_lo if range_lo > (word_index << 6) else (word_index << 6)",
+            f"{pad}    chunk_msb = range_hi if range_hi < (((word_index + 1) << 6) - 1) else (((word_index + 1) << 6) - 1)",
             f"{pad}    chunk_w = chunk_msb - chunk_lsb + 1",
             f"{pad}    src_shift = chunk_lsb - range_lsb",
             f"{pad}    word_lsb = chunk_lsb - (word_index << 6)",

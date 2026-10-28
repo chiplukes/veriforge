@@ -694,6 +694,16 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if self._combo_bootstrapped and self._pending_drives:
             self.settle()
 
+        # Before the first run(), the drives' continuous fan-out counts as
+        # driven too. It goes first: after the full pass below a memory
+        # element written by `assign src[1] = {hi, lo};` is already settled,
+        # so `always @* dst[0] = src[1];` never woke (as in reference).
+        boot_drives: set[int] = set()
+        if not self._combo_bootstrapped and self._pending_drives:
+            boot_drives = set(self._pending_drives)
+            self._pending_drives.clear()
+            self._propagate_continuous(boot_drives)
+
         # Bootstrap / re-bootstrap: execute all continuous assigns until stable.
         # This must run on every run() call so that external drive() changes
         # propagate through combinational logic.
@@ -720,7 +730,7 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             self._combo_bootstrapped = True
             # (Drives before this first run() wake the combinational blocks
             # reading them -- not as edges, as before.)
-            drives = set(self._pending_drives)
+            drives = boot_drives | self._pending_drives
             self._pending_drives.clear()
             self._bootstrap_combos(drives)
 

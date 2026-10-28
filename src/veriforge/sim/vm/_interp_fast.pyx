@@ -1516,6 +1516,13 @@ cdef int _execute_core(
                     a = stack[sp]
                     n += i
                     i = 0
+                # Nor above the top bit: r[64 +: 3] of a 64-bit reg shifted
+                # by 64 (undefined; it wrapped to bit 0) and r[6 +: 3] of an
+                # 8-bit one wrote past bit 7.
+                if i >= w:
+                    n = 0
+                elif i + n > w:
+                    n = w - i
                 if n > 0:
                     if wctx != NULL and wctx.sig_offset[arg1] >= 0:
                         # Wide signal: update word-by-word
@@ -1590,6 +1597,7 @@ cdef int _execute_core(
             a = stack[sp]      # value
             a_wide = wflag[sp]
             if t.mask == 0 and b.mask == 0:
+                w = sig_width[arg1]
                 i = <int>b.val         # lsb
                 n = <int>(t.val - b.val + 1)  # width of range
                 if i < 0 and n > 0:
@@ -1599,6 +1607,11 @@ cdef int _execute_core(
                     a = stack[sp]
                     n += i
                     i = 0
+                # Nor above the top bit (see OP_STORE_RANGE).
+                if i >= w:
+                    n = 0
+                elif i + n > w:
+                    n = w - i
                 if n > 0:
                     if wctx != NULL and wctx.sig_offset[arg1] >= 0:
                         # Wide signal: queue partial NBA for read-modify-write at apply time

@@ -656,10 +656,24 @@ class _StmtEmittersMixin:
                         f"{pad}{helper}(c, {sid}, <int>({idx}), 1, <unsigned long long>(({rhs_val}) & 1),"
                         f" <unsigned long long>(({rhs_mask}) & 1))",
                     ]
-                bit = f"(<long long>1 << ({idx}))"
-                return setup + self._narrow_partial_write_lines(
-                    sid, bit, f"((({rhs_mask}) & 1) << ({idx}))", rhs_val, "1", f"({idx})", pad, is_nba
-                )
+                # A bit outside the signal (or an x index, _X_INDEX) writes
+                # nothing: `1 << 64` is undefined in C and wrapped on x86
+                # (r[64] of a 64-bit reg wrote bit 0).
+                return [
+                    *setup,
+                    f"{pad}_rmw_msb = ({idx})",
+                    f"{pad}if 0 <= _rmw_msb < {lhs_w}:",
+                    *self._narrow_partial_write_lines(
+                        sid,
+                        "(<long long>1 << _rmw_msb)",
+                        f"((({rhs_mask}) & 1) << _rmw_msb)",
+                        rhs_val,
+                        "1",
+                        "_rmw_msb",
+                        pad + "    ",
+                        is_nba,
+                    ),
+                ]
             raise NotImplementedError(
                 f"Compiled engine does not support bit-select write on "
                 f"{type(lhs.target).__name__!r} target. "

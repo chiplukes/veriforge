@@ -118,6 +118,43 @@ class TestAxiStreamInterface:
         assert "output reg m_axis_tlast" in v
         assert "input m_axis_tready" in v  # inputs stay as inputs
 
+    def test_without_tlast(self):
+        """include_tlast=False drops tlast and keeps the other signals in order."""
+        names = [s.name for s in axi_stream(tuser_width=2, include_tlast=False)._signals]
+        assert names == ["tvalid", "tready", "tdata", "tuser"]
+
+    def test_without_tlast_ports(self):
+        m = Module("test_no_tlast")
+        m.input("clk")
+        m.interface("m_axis", axi_stream(data_width=8, include_tlast=False), role="master")
+        v = emit_module(m.build())
+        assert "output [7:0] m_axis_tdata" in v
+        assert "m_axis_tlast" not in v
+
+    def test_without_tlast_bench(self):
+        """The bench drives and collects an unframed stream with tlast relaxed."""
+        from veriforge.sim.bench import PlannerOverrides, Testbench
+
+        m = Module("word_stage")
+        clk = m.input()
+        rst = m.input()
+        s_axis = m.interface("s_axis", axi_stream(data_width=8, include_tlast=False), role="slave")
+        m_axis = m.interface("m_axis", axi_stream(data_width=8, include_tlast=False), role="master", reg=True)
+        s_axis.tready.assign = ~m_axis.tvalid | m_axis.tready
+        with m.always(posedge(clk)):
+            with m.if_(rst):
+                m_axis.tvalid <<= 0
+            with m.elif_(s_axis.tready):
+                m_axis.tvalid <<= s_axis.tvalid
+                m_axis.tdata <<= s_axis.tdata
+        bench = Testbench(m.build(), overrides=PlannerOverrides(relaxed_iface_signals={"axi_stream": ["tlast"]}))
+        words = [3, 141, 59, 26]
+        with bench.run():
+            bench.reset_all()
+            bench.iface("s_axis").put(words)
+            got = [bench.iface("m_axis").get(timeout=100).data[0] for _ in words]
+        assert got == words
+
 
 # ===================================================================
 # AXI-Stream pipeline register

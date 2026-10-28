@@ -1664,7 +1664,7 @@ def _make_wide_combo_repeat(src_width: int, count: int) -> Module:
 
 
 def _make_wide_combo_literal(width: int, value: int) -> Module:
-    """always @(*) y = LITERAL; using a wide whole-signal blocking assignment."""
+    """always_comb y = LITERAL; using a wide whole-signal blocking assignment."""
     mod = Module(
         f"wide_combo_literal_{width}",
         ports=[Port("y", PortDirection.OUTPUT, width=_w(width))],
@@ -1674,6 +1674,7 @@ def _make_wide_combo_literal(width: int, value: int) -> Module:
         AlwaysBlock(
             BlockingAssign(Identifier("y"), Literal(value, width=width)),
             sensitivity_type=SensitivityType.COMBINATIONAL,
+            keyword="always_comb",  # (runs at time 0; an `always @*` waits for a change)
         ),
     ]
     return mod

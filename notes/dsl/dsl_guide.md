@@ -1350,10 +1350,10 @@ Interfaces](#parameterized-interfaces) below: build each bus's `Interface`
 so its signal set matches *both* ends of that physical wire exactly (true
 by construction for most internal buses, since one instance's output
 literally drives the other's input). `dsl.lib.axi_stream`'s
-`axi_stream(data_width, *, tid_width=0, tdest_width=0, tuser_width=0)`
+`axi_stream(data_width, *, tid_width=0, tdest_width=0, tuser_width=0, include_tlast=True)`
 already follows this: `tid`/`tdest`/`tuser` are only added to the
-`Interface` when their width is nonzero, so you control the exact optional
-signal set per call. It does not currently support `tkeep`/`tstrb` at all —
+`Interface` when their width is nonzero, and `include_tlast=False` drops
+`tlast`, so you control the exact optional signal set per call. It does not currently support `tkeep`/`tstrb` at all —
 if a design needs those, either extend `axi_stream()` locally (it's a
 ~10-line function; `.signal("tkeep", width=data_width // 8, src="master")`
 following the same `if width > 0` pattern) or use the asymmetric override
