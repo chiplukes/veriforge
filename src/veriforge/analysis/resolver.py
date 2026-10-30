@@ -108,6 +108,7 @@ class Load:
 # ---------------------------------------------------------------------------
 
 
+# cm:35e51e
 def analyze_design(design: Design) -> None:
     """Run all analysis passes on a design, mutating model objects in-place.
 

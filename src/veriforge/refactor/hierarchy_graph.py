@@ -122,6 +122,7 @@ class HierarchyGraph:
         }
 
 
+# cm:33582f
 def build_hierarchy_graph(design: Design, *, top: str | None = None, max_depth: int | None = 8) -> HierarchyGraph:
     """Build a resolved hierarchy tree with wrapper metadata."""
 

@@ -18,6 +18,7 @@ from collections import deque
 from veriforge.sim.step_harness import step_drive
 
 
+# cm:783d3e
 class StreamSource:
     """Pure-Python ready/valid stream source endpoint.
 

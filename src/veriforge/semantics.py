@@ -320,6 +320,7 @@ def _eval_const_func(expr: FunctionCall, env: Mapping[str, int]) -> int:
     raise ValueError(f"Unsupported system function {name!r} in constant expression")
 
 
+# cm:45b2cc
 def const_int(expr: Expression | None, env: Mapping[str, int] | None = None) -> int | None:
     """Evaluate *expr* to a constant integer, or ``None`` if it cannot be.
 
@@ -395,6 +396,7 @@ _ONE_BIT_UNARY = frozenset({"!", "&", "|", "^", "~&", "~|", "~^", "^~"})
 _LEFT_WIDTH_BINARY = frozenset({"<<", ">>", "<<<", ">>>"})
 
 
+# cm:e7ddf7
 def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[str, int] | None = None) -> int:
     """Self-determined bit width of *expr* per IEEE 1364-2005 §5.4.1 / Table 5-22.
 

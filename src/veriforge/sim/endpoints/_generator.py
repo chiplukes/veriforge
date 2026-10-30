@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+# cm:272377
 class GeneratorEndpoint:
     """Wraps a generator function as an endpoint implementing the phase contract.
 

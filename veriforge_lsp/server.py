@@ -71,6 +71,7 @@ _CAPABILITIES = ServerCapabilities(
 )
 
 
+# cm:aed9e1
 class VerilogLanguageServer(LanguageServer):
     """LanguageServer subclass that carries a Workspace instance."""
 

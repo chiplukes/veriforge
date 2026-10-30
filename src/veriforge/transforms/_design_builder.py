@@ -254,6 +254,7 @@ class _PackageContext:
         self.imports = []
 
 
+# cm:14a41a
 def _build_design(
     tree: Tree,
     source_file: str | None,

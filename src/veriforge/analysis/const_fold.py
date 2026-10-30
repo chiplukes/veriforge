@@ -51,6 +51,7 @@ def const_int(expr: Expression) -> int | None:
     return semantics_const_int(expr)
 
 
+# cm:fb07d2
 def const_fold(expr: Expression) -> Literal | None:
     """Fold a constant expression into a ``Literal`` node.
 

@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 _CONTEXT_ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "**", "<<", ">>", "<<<", ">>>"})
 
 
+# cm:7399e2
 class _ExprEmitterMixin:
     """Mixin providing expression and signal-walk emitters for CythonCodegen."""
 

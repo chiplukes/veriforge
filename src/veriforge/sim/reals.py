@@ -605,6 +605,7 @@ def _range64() -> Range:
     return Range(_lit32(_RANGE64[0]), _lit32(_RANGE64[1]))
 
 
+# cm:e2da99
 def lower_reals(module: Module, record: set[str] | None = None) -> Module:
     """Lower every real in *module*, in place (see the module docstring).
     *record* gets the names of the module-level real variables and ports

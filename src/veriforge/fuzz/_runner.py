@@ -97,6 +97,7 @@ class FuzzResult:
     mismatches: list[str]  # human-readable mismatch descriptions
 
 
+# cm:540612
 class FuzzRunner:
     """Main fuzz loop.
 

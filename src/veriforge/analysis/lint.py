@@ -500,6 +500,7 @@ def lint_module(
     return warnings
 
 
+# cm:48a2a1
 def lint_design(
     design: Design,
     *,

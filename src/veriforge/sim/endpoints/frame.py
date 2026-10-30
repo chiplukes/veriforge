@@ -50,6 +50,7 @@ def _coerce_scalar_or_list(values: int | list[int], *, name: str, expected_len: 
     raise ValueError(f"{name} should be an int or list of ints")
 
 
+# cm:578a20
 @dataclass(slots=True)
 class AXIStreamFrame:
     """Element-oriented AXI-Stream transaction container."""

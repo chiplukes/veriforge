@@ -11,6 +11,7 @@ from ..model.expressions import Expression, Identifier
 from .diagnostics import RefactorDiagnostic
 
 
+# cm:39e10a
 @dataclass(frozen=True)
 class TextEditPlan:
     """A source edit proposed by a refactor preview."""

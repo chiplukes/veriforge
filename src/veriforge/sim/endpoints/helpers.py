@@ -175,6 +175,7 @@ class EndpointCoordinator:
         raise TimeoutError(message)
 
 
+# cm:39df43
 class CombinationalCoordinator:
     """Drive → settle → sample coordinator for clockless / combinational DUTs.
 

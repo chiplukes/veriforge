@@ -188,6 +188,7 @@ class Reg(_PortItem):
         return m.reg(self.name, self._resolved_width(spec), signed=self.signed, init=self.init, depth=self.depth)
 
 
+# cm:0a994e
 class ModuleSpec:
     """Base class for declarative module definitions — see module docstring."""
 

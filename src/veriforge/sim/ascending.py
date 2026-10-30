@@ -153,6 +153,7 @@ def _redeclare(decls: list, asc: dict[str, tuple[int, int, int]]) -> None:
             decl.width = Range(_index_literal(abs(right - left)), _index_literal(0))
 
 
+# cm:c5fb11
 def lower_ascending_ranges(module: Module, *, offsets: bool = False) -> Module:
     """Rewrite *module*'s ascending packed ranges, in place (see the module
     docstring). With *offsets*, descending ranges not ending at 0

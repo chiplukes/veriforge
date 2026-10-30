@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 _COMMENT_RE = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
 
 
+# cm:96c35e
 def extract_comments(source: str, source_file: str | None = None) -> tuple[str, list[Comment]]:
     """Extract all comments from Verilog source text.
 

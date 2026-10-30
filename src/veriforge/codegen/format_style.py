@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# cm:a820d6
 @dataclass
 class FormatStyle:
     """Controls formatting decisions for Verilog code emission.

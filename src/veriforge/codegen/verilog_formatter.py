@@ -62,6 +62,7 @@ from .verilog_emitter import emit_expression, select_scope, split_dimensions
 # ---------------------------------------------------------------------------
 
 
+# cm:35f82b
 def format_design(
     design: Design, style: FormatStyle | None = None, *, emit_comments: bool = True, dialect: str | None = None
 ) -> str:

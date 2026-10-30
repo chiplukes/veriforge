@@ -27,6 +27,7 @@ from .expressions import Expression
 from .variables import Variable
 
 
+# cm:e3341c
 class Statement(VerilogNode):
     """Base class for all procedural statements."""
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 from . import Module, posedge
 
 
+# cm:21cc38
 def single_port_ram(
     data_width: int = 8,
     depth: int = 256,

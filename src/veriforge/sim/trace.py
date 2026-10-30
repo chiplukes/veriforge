@@ -965,6 +965,7 @@ class CaptureSession(_TraceSink):
         self.close()
 
 
+# cm:bdbb9b
 def attach_capture(  # noqa: PLR0913
     sim: Simulator,
     path: str | Path,

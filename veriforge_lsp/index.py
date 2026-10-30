@@ -43,6 +43,7 @@ def _loc_to_interval(loc: SourceLocation) -> tuple[int, int] | None:
     return start, end
 
 
+# cm:12fcef
 class LocationIndex:
     """Dual index for position→node and node→reference-locations lookups."""
 

@@ -9,6 +9,7 @@ from lark.reconstruct import Reconstructor
 from .preprocessor import strip_parser_blocking_directives
 
 
+# cm:1c7a4e
 class VerilogParser:
     def __init__(
         self,
@@ -42,6 +43,7 @@ class VerilogParser:
                     maybe_placeholders=False,
                 )
 
+    # cm:d5f3b8
     def build_tree(self, text: str | Path | None = None) -> Any:
         """Build AST from *text* (string or file path)."""
         if isinstance(text, Path):

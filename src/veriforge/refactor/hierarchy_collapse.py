@@ -71,6 +71,7 @@ class CollapseApplyResult:
         }
 
 
+# cm:7ea124
 def preview_collapse_hierarchy(design: Design, instance_path: str) -> CollapsePreview:
     """Preview collapsing a pure pass-through wrapper instance."""
 

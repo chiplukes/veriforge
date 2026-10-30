@@ -51,6 +51,7 @@ class Field:
         return (word >> self.lsb) & ((1 << self.width) - 1)
 
 
+# cm:5c367d
 class PackedLayout:
     """Fields of a packed word from ``(name, width)`` pairs, first field lowest.
 

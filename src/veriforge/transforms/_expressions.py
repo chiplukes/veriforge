@@ -713,21 +713,24 @@ def _build_const_function_call(
     return FunctionCall(name=name, arguments=args, loc=loc)
 
 
+# cm:7dd132
 def _build_constant_primary(
     tree: Tree,
     source_file: str | None,
     callbacks: _ExpressionCallbacks,
 ) -> Expression:
     """Build expression from a constant_primary node."""
+    result: Expression | None = None
     for child in tree.children:
         if isinstance(child, Tree):
-            result = _build_constant_primary_child(child, source_file, callbacks)
-            if result is not None:
-                return result
-        elif isinstance(child, Token):
-            return _token_to_expression(child, source_file)
+            if child.data == "constant_range_expression" and result is not None:
+                result = _build_range_select(result, child, source_file, callbacks)
+            elif result is None:
+                result = _build_constant_primary_child(child, source_file, callbacks)
+        elif isinstance(child, Token) and result is None:
+            result = _token_to_expression(child, source_file)
 
-    return Identifier("?")
+    return result if result is not None else Identifier("?")
 
 
 def _build_constant_primary_child(

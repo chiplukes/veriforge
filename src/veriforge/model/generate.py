@@ -60,6 +60,7 @@ class GenerateBlock(VerilogNode):
         return d
 
 
+# cm:634e6f
 class GenerateFor(VerilogNode):
     """A generate-for loop construct.
 

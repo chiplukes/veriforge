@@ -343,6 +343,7 @@ class WidthCast(Expression):
         return d
 
 
+# cm:4f3b46
 class BitSelect(Expression):
     """a[3]"""
 

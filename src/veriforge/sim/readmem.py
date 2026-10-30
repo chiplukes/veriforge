@@ -55,6 +55,7 @@ def _word(token: str, is_hex: bool, width: int) -> tuple[int, int]:
     return val & full, mask & full
 
 
+# cm:f7bb56
 def load(
     text: str,
     *,

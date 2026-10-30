@@ -54,6 +54,7 @@ def _get_lark_parser():
     return _lark_parser_singleton
 
 
+# cm:4caa8b
 class Workspace:
     """
     Owns the Design object and the LocationIndex for one LSP workspace root.

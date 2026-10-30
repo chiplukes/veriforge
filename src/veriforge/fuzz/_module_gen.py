@@ -114,6 +114,7 @@ class _FuncSpec:
     arg_widths: list[int]
 
 
+# cm:6ae64a
 class ModuleGenerator:
     """Orchestrates generation of a complete Verilog module.
 

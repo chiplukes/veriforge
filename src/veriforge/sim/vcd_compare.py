@@ -212,6 +212,7 @@ def _skip_section(lines: list[str], i: int, first_line: str) -> int:
 # ── VCD Comparator ───────────────────────────────────────────────────
 
 
+# cm:70d916
 def compare_vcd(  # noqa: PLR0912
     ref: VcdData,
     test: VcdData,

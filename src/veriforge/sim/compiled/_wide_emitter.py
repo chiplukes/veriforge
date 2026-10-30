@@ -35,6 +35,7 @@ from veriforge.sim.compiled._codegen_utils import (
 from veriforge.sim.value import Value
 
 
+# cm:901398
 class _WideEmitterMixin:
     """Mixin providing wide-value emitter helpers for CythonCodegen."""
 

@@ -71,6 +71,7 @@ _PURE_EXPRESSION_OPS = frozenset(
 _SIGNAL_WRITES = frozenset({Op.STORE_SIG, Op.STORE_BIT, Op.STORE_RANGE, Op.NBA_SIG, Op.NBA_BIT, Op.NBA_RANGE})
 
 
+# cm:e0f97b
 def plan_continuous_order(processes: list[CompiledProcess]) -> tuple[list[int], int] | None:
     """Return assignment indices in dependency order and maximum path length.
 

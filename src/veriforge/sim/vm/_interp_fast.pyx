@@ -6,6 +6,7 @@ Operates on flat C arrays — no Python objects in the hot loop.
 All 4-state logic is done inline with (val, mask, width) triples.
 """
 
+# cm:8a1602
 from libc.stdlib cimport calloc, malloc, free, realloc, qsort
 from libc.stdlib cimport rand as c_rand
 from libc.string cimport memcpy, memset

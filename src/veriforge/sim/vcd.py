@@ -25,6 +25,7 @@ from .reals import from_bits
 from .value import Value
 
 
+# cm:d1d261
 class VcdWriter:
     """Write VCD formatted waveform data.
 

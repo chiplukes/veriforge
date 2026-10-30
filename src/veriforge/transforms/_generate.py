@@ -245,6 +245,7 @@ def _extract_generate_block_items(
     ]
 
 
+# cm:ae3bd1
 def _extract_if_generate(
     tree: Tree,
     source_file: str | None,

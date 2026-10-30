@@ -81,6 +81,7 @@ class InterfaceSignal:
 # ---------------------------------------------------------------------------
 
 
+# cm:bd6c5d
 class Interface:
     """Reusable interface template defining a group of signals with role-based
     directions.

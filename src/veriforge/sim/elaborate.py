@@ -1512,6 +1512,7 @@ def _submodule_signal_names_from_intf(intf: object) -> set[str]:
 # ── Generate elaboration ─────────────────────────────────────────────
 
 
+# cm:f97081
 def elaborate_generates(module: Module, param_values: dict[str, int] | None = None) -> Module:
     """Evaluate generate constructs and promote items into the module.
 
@@ -1598,6 +1599,7 @@ _BINARY_OPS: dict[str, object] = {
 }
 
 
+# cm:a94064
 def _eval_const_expr(expr: Expression, env: dict[str, int | str]) -> int | str:
     """Evaluate a constant expression given genvar/parameter values in *env*."""
     if isinstance(expr, StringLiteral):
@@ -1673,6 +1675,12 @@ def _eval_const_expr(expr: Expression, env: dict[str, int | str]) -> int | str:
         for _ in range(count):
             result = (result << value_width) | (value & mask)
         return result
+    if isinstance(expr, BitSelect):
+        target_val = _eval_const_expr(expr.target, env)
+        index_val = _eval_const_expr(expr.index, env)
+        if isinstance(target_val, int) and isinstance(index_val, int) and index_val >= 0:
+            return (target_val >> index_val) & 1
+        raise ValueError("Cannot evaluate BitSelect as constant expression")
     if isinstance(expr, RangeSelect):
         base = _eval_const_expr(expr.target, env)
         if isinstance(base, int):
@@ -2294,6 +2302,7 @@ def _build_struct_env(module: Module) -> tuple[dict[str, StructLayout], dict[str
     return type_map, signal_map
 
 
+# cm:488174
 def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: PLR0912
     """Copy package symbols into module scope based on import declarations.
 
