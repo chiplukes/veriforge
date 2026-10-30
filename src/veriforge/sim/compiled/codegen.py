@@ -76,6 +76,7 @@ from veriforge.sim.compiled._gen_sections import _GenSectionsMixin
 from veriforge.sim.compiled._process_compiler import _ProcessCompilerMixin
 from veriforge.sim.compiled._stmt_emitters import _StmtEmittersMixin
 from veriforge.sim.compiled._wide_emitter import _WideEmitterMixin
+from veriforge.sim.compiled._helpers import finalize_sources, select_helpers
 from veriforge.sim.value import Value
 from veriforge.semantics import range_width as _range_width
 from veriforge.semantics import signed_memory_names
@@ -232,6 +233,7 @@ class CythonCodegen(
         "_scratch_peak",
         "_scratch_slot_count",
         "_seq_processes",
+        "_shared_initializers",
         "_signal_bases",
         "_signal_map",
         "_signal_names",
@@ -268,6 +270,7 @@ class CythonCodegen(
         self._combo_ext: list[frozenset[int]] = []
         self._stream_keepalive: list[object] = []  # (see _hoist_stream_reverse)
         self._seq_processes: list[tuple[dict[int, str], set[int], object]] = []
+        self._shared_initializers: list[tuple[str, str, int]] = []
         self._module: Module | None = None
         self._initial_lines: list[str] = []
         self._mem_map: dict[str, int] = {}
@@ -1754,7 +1757,7 @@ class CythonCodegen(
             self._gen_delta_loop(),
             self._gen_compiled_sim(),
         ]
-        return "\n\n".join(sections) + "\n"
+        return select_helpers("\n\n".join(sections) + "\n")
 
     def generate_to_file(self, module: Module, path: str, *, delta_limit: int = 10_000) -> str:
         """Generate a complete .pyx source for *module* and write it to *path*.
@@ -1769,8 +1772,6 @@ class CythonCodegen(
         this to :meth:`~.compiler.CythonCompiler.compile_pyx_file` as the
         ``source_sha256_hex`` argument.
         """
-        import hashlib
-
         self._module = module
         self._signed_memories = signed_memory_names(module)
         self._delta_limit = delta_limit
@@ -1797,14 +1798,11 @@ class CythonCodegen(
         self._scan_wide_intermediates(module)
         self._timing_diagnostics = self._collect_timing_diagnostics(module)
 
-        hasher = hashlib.sha256()
-
         with open(path, "wb") as fh:
 
             def _write(text: str) -> None:
                 encoded = text.encode("utf-8")
                 fh.write(encoded)
-                hasher.update(encoded)
 
             small_sections = [
                 self._gen_header,
@@ -1829,14 +1827,14 @@ class CythonCodegen(
 
             _write("\n")
 
-        return hasher.hexdigest()
+        return finalize_sources([path])
 
     # ΓöÇΓöÇ Signal registration ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     def generate_to_files(self, module: Module, out_dir: str, *, delta_limit: int = 10_000) -> tuple[list[str], str]:
         """Generate a design's compiled-engine source, split across multiple
         ``.pyx`` files when the design is large enough for that to matter,
-        for parallel Cython translation and C compilation.
+        for smaller Cython translation units and bounded parallel C compilation.
 
         Why this exists: a design with many `generate`-loop instances (a
         `generate for` of dozens/hundreds of structurally-identical
@@ -1897,7 +1895,6 @@ class CythonCodegen(
         always the main file; the combined hash covers every file's
         content, in the same order, for cache-key purposes.
         """
-        import hashlib
         import os
 
         self._module = module
@@ -1949,7 +1946,6 @@ class CythonCodegen(
         _min_funcs_to_split = 200
         n_workers = min(max(1, total_funcs // 50), 8) if (split_enabled and total_funcs >= _min_funcs_to_split) else 0
 
-        hasher = hashlib.sha256()
         file_paths: list[str] = []
 
         def _open_writer(path: str):
@@ -1958,7 +1954,6 @@ class CythonCodegen(
             def _write(text: str) -> None:
                 encoded = text.encode("utf-8")
                 fh.write(encoded)
-                hasher.update(encoded)
 
             return fh, _write
 
@@ -1988,20 +1983,15 @@ class CythonCodegen(
                     main_write("\n\n")
                     main_write(gen_fn())
                 main_write("\n")
-                return file_paths, hasher.hexdigest()
+                for handle in handles:
+                    handle.close()
+                return file_paths, finalize_sources(file_paths)
 
             # Split path: shared header + N worker files.
             header_path = os.path.join(out_dir, "shared.h")
             with open(header_path, "wb") as hfh:
                 hfh.write(self._gen_struct_extern_c().encode("utf-8"))
-            # The header participates in the build (every file #includes
-            # it) but not in the cache-key hash stream via _write above --
-            # hash it explicitly so a header-affecting change (e.g. a
-            # struct field added because a design has a different memory/
-            # signal count) still changes the cache key.
-            with open(header_path, "rb") as hfh:
-                hasher.update(hfh.read())
-
+            # finalize_sources hashes the header along with the finalized workers.
             worker_paths = [os.path.join(out_dir, f"worker{w}.pyx") for w in range(n_workers)]
             file_paths.extend(worker_paths)
             file_paths.append(header_path)
@@ -2097,6 +2087,13 @@ class CythonCodegen(
 
             self._gen_process_functions_to(main_write, route_fn=route_fn)
 
+            # Worker PyInit functions are not executed when their C objects are
+            # linked into one extension. Initialize shared pointers explicitly
+            # through public worker entry points called from the main module.
+            for initializer, prefix, index in self._shared_initializers:
+                worker = routing[(prefix, index)]
+                main_write(f'\ncdef extern from "worker{worker}.h":\n    void {initializer}() noexcept nogil\n')
+
             for gen_fn in (self._gen_delta_loop, self._gen_compiled_sim):
                 main_write("\n\n")
                 main_write(gen_fn())
@@ -2105,10 +2102,10 @@ class CythonCodegen(
             for wwrite in worker_writers:
                 wwrite("\n")
 
-            return file_paths, hasher.hexdigest()
         finally:
             for fh in handles:
                 fh.close()
+        return file_paths, finalize_sources(file_paths)
 
     def _register_signal(self, name: str, width: int, signed: bool = False) -> int:
         if name in self._signal_map:

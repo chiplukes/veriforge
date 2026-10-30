@@ -20,10 +20,11 @@ The cache key is a SHA-256 hash of:
 * The installed Cython version.
 * The Python platform tag (version, OS, architecture).
 * ``_CACHE_VERSION`` — bumped manually whenever codegen changes break existing .pyd files.
+* Normalized codegen/build options and compiler/linker environment settings.
 
-The compiled_scheduler also hashes ``codegen.py`` and ``elaborate.py`` into
-the elaboration cache key (``_codegen_infra_hash``), so changing those files
-automatically invalidates all elab cache entries on the next run.
+The compiled_scheduler also hashes the package's Python/grammar sources and
+codegen templates into the elaboration cache key (``_codegen_infra_hash``), so
+implementation changes invalidate elaboration entries on the next run.
 
 Disabling caching
 -----------------
@@ -53,6 +54,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import platform
@@ -72,7 +74,7 @@ log = logging.getLogger(__name__)
 
 # Bump this whenever the codegen framework changes in a way that
 # makes previously cached .pyd/.so files incompatible.
-_CACHE_VERSION = "5"
+_CACHE_VERSION = "6"
 
 
 def _progress_enabled() -> bool:
@@ -137,14 +139,53 @@ def _platform_tag() -> str:
     return f"{sys.platform}-{platform.machine()}-py{sys.version_info.major}.{sys.version_info.minor}"
 
 
+# cm:f25b91
+def _build_configuration() -> bytes:
+    """Fingerprint effective codegen/build options for both cache layers."""
+    from ._codegen_utils import delta_engine_mode
+    from ._helpers import helper_mode
+    from ._sharing import sharing_enabled
+
+    def positive_option(name: str, default: int | None) -> int | None:
+        raw = get_env(name)
+        value = int(raw) if raw else default
+        if value is not None and value < 1:
+            raise ValueError(f"VERIFORGE_{name} must be positive")
+        return value
+
+    options = {
+        "split": get_env("COMPILE_SPLIT", "0") in ("1", "true", "True"),
+        "delta_engine": delta_engine_mode(),
+        "helpers": helper_mode(),
+        "share_processes": sharing_enabled(),
+        "compile_jobs": positive_option("COMPILE_JOBS", 4),
+        "compile_memory_mb": positive_option("COMPILE_MEMORY_MB", None),
+        "compile_worker_memory_mb": positive_option("COMPILE_WORKER_MEMORY_MB", 1024),
+        "check_mem_snapshot": get_env("CHECK_MEM_SNAPSHOT", "0") == "1",
+        "toolchain": {
+            name: os.environ.get(name, "")
+            for name in (
+                "CC",
+                "CXX",
+                "CFLAGS",
+                "CXXFLAGS",
+                "CPPFLAGS",
+                "LDFLAGS",
+                "LDSHARED",
+                "CL",
+                "_CL_",
+                "LINK",
+                "LIB",
+                "INCLUDE",
+            )
+        },
+    }
+    return json.dumps(options, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def _cache_key(source: str) -> str:
     """Compute a cache key from source + environment + framework version."""
-    h = hashlib.sha256()
-    h.update(source.encode("utf-8"))
-    h.update(_cython_version().encode("utf-8"))
-    h.update(_platform_tag().encode("utf-8"))
-    h.update(_CACHE_VERSION.encode("utf-8"))
-    return h.hexdigest()[:16]
+    return _cache_key_from_source_hash(hashlib.sha256(source.encode("utf-8")).hexdigest())
 
 
 def _cache_key_from_source_hash(source_sha256_hex: str) -> str:
@@ -161,7 +202,14 @@ def _cache_key_from_source_hash(source_sha256_hex: str) -> str:
     h.update(_cython_version().encode("utf-8"))
     h.update(_platform_tag().encode("utf-8"))
     h.update(_CACHE_VERSION.encode("utf-8"))
+    h.update(_build_configuration())
     return h.hexdigest()[:16]
+
+
+def _fresh_build_key(key: str) -> str:
+    # A loaded Windows DLL cannot be overwritten. Uncached builds need their
+    # own binary path rather than trying to replace a warm cache's extension.
+    return hashlib.sha256(key.encode("ascii") + os.urandom(16)).hexdigest()[:16]
 
 
 def _module_name_key(module_name: str) -> str:
@@ -232,6 +280,8 @@ class CythonCompiler:  # cm:3d7f4a
         no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
 
         key = _cache_key(source)
+        if no_cache:
+            key = _fresh_build_key(key)
         # Use key in the actual module name to allow multiple versions to coexist
         keyed_name = _keyed_module_name(module_name, key)
         build_dir = os.path.join(self._cache_dir, keyed_name)
@@ -334,6 +384,8 @@ class CythonCompiler:  # cm:3d7f4a
         no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
 
         key = _cache_key_from_source_hash(source_sha256_hex)
+        if no_cache:
+            key = _fresh_build_key(key)
         keyed_name = _keyed_module_name(module_name, key)
         build_dir = os.path.join(self._cache_dir, keyed_name)
 
@@ -437,6 +489,8 @@ class CythonCompiler:  # cm:3d7f4a
         no_cache = get_env("NO_COMPILE_CACHE", "") == "1"
 
         key = _cache_key_from_source_hash(source_sha256_hex)
+        if no_cache:
+            key = _fresh_build_key(key)
         keyed_name = _keyed_module_name(module_name, key)
         build_dir = os.path.join(self._cache_dir, keyed_name)
 
@@ -553,12 +607,14 @@ import threading
 
 from setuptools import Extension, setup
 from Cython.Build import cythonize
+from veriforge.sim.compiled._build import ParallelBuildExt
 
 _args = [] if sys.platform == "win32" else ["-g0"]
 
 
 def _build():
     setup(
+        cmdclass={{"build_ext": ParallelBuildExt}},
         ext_modules=cythonize(
             [Extension("{module_name}", [{sources_repr}], extra_compile_args=_args)],
             compiler_directives={{
@@ -608,16 +664,9 @@ if _failure:
     def _run_build(self, build_dir: str, *, n_sources: int = 1) -> None:
         """Run the build command in the given directory.
 
-        *n_sources* is how many ``.pyx`` files this build's Extension has
-        (see :meth:`compile_pyx_files`) -- when more than one, the C
-        compiler's per-file `.c` -> `.o` steps are independent and safe to
-        run concurrently, so ``--parallel`` is passed (setuptools' own
-        thread-pool-based parallel `build_ext`, not Cython's separate
-        `nthreads` -- the latter uses `multiprocessing.Pool`/forkserver,
-        which was observed to fail outright in at least one sandboxed
-        environment during development; the thread-pool-based C-compile
-        parallelism has no such issue and is where most of the wall-clock
-        time is anyway for a large split design).
+        Source-object parallelism is handled by ParallelBuildExt. Setuptools'
+        --parallel schedules Extensions rather than sources and would not
+        parallelize our single multi-source Extension.
         """
         try:
             import Cython  # noqa: F401
@@ -627,10 +676,6 @@ if _failure:
             ) from None
 
         cmd = [sys.executable, "setup.py", "build_ext", "--inplace", "--build-temp", "t", "--build-lib", "l"]
-        if n_sources > 1:
-            n_jobs = min(n_sources, os.cpu_count() or 1)
-            if n_jobs > 1:
-                cmd.extend(["--parallel", str(n_jobs)])
         log.debug("Running: %s in %s", cmd, build_dir)
 
         # On Windows, MSVC (cl.exe) is a child of setup.py and inherits the
@@ -726,6 +771,8 @@ if _failure:
 
         Returns the imported module, or None if not found or load fails.
         """
+        if get_env("NO_COMPILE_CACHE", "") == "1":
+            return None
         build_dir = os.path.join(self._cache_dir, keyed_name)
         ext_path = _find_extension(build_dir, keyed_name)
         if ext_path is None:

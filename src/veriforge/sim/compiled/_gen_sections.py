@@ -33,6 +33,8 @@ from veriforge.sim.compiled._gen_narrow_stage import _gen_narrow_stage_code
 from veriforge.sim.compiled._gen_narrow_assign import _gen_narrow_assign_code
 from veriforge.sim.compiled._gen_narrow_tail import _gen_narrow_tail_code
 from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
+from veriforge.sim.compiled._helpers import HELPERS_BEGIN, HELPERS_END
+from veriforge.sim.compiled._sharing import ProcessSharing, sharing_enabled
 
 
 # Upper bound on a memory's snapshot journal (see CodeGenerator._mem_journal_cap).
@@ -1387,7 +1389,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "#ifndef VERIFORGE_SIMCTX_H",
                 "#define VERIFORGE_SIMCTX_H",
                 "struct SimCtx {",
-                *(f"    {line.strip()};" for line in body_lines),
+                *(f"    {line.split('#', 1)[0].strip()};" for line in body_lines if line.split("#", 1)[0].strip()),
                 "};",
                 "#endif",
             ]
@@ -1459,7 +1461,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 ]
             )
         lines.extend(_gen_narrow_tail_code())
-        return "\n".join(lines)
+        return HELPERS_BEGIN + "\n".join(lines) + "\n" + HELPERS_END
 
     def _gen_user_functions(self) -> str:
         """Generate Cython helpers for user-defined functions and tasks."""
@@ -1717,100 +1719,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
     def _gen_process_functions(self) -> str:
         parts: list[str] = []
-
-        # Continuous assign functions
-        if not self._processes and not self._combo_processes and not self._seq_processes:
-            return "# No process functions"
-
-        # Pre-compute per-seq-process edge-trigger sids (every posedge AND
-        # negedge sensitivity signal, ordinary clocks included). These must
-        # NOT be rewritten to sv[] in the body: by the time the body runs
-        # the edge has already genuinely happened, but sv[] still holds the
-        # PRE-transition value -- see `_seq_body_to_sv_reads`'s docstring.
-        seq_negedge_sids = [{sid for sid, _et in edges.items()} for edges, _, _ in self._seq_processes]
-        # Every user-defined function's own internal signals (ports, return
-        # variable, locals) must also never be rewritten to sv[]/sm[] -- see
-        # `_seq_body_to_sv_reads`'s own docstring (func_internal_sids
-        # exception) for the concrete Icarus-confirmed repro this avoids.
-        func_internal_sids = self._func_internal_sids()
-        external_input_sids = self._external_input_sids()
-
-        process_groups = (
-            ("cont", (body_lines for _sens, body_lines in self._processes), False, False),
-            ("combo", (self._compile_always_body(body) for _sens, body in self._combo_processes), True, False),
-            (
-                "seq",
-                (
-                    self._compile_always_body(body, is_seq=True, edge_sids=set(_edges))
-                    for _edges, _sens, body in self._seq_processes
-                ),
-                True,
-                True,
-            ),
-        )
-        for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
-            for i, body_lines in enumerate(body_groups):
-                if use_sv:
-                    # Seq procs receive the pre-posedge snapshot so that all sequential
-                    # processes read the same pre-clock-edge values, regardless of how many
-                    # cont-assign hops delayed their clock posedge detection.
-                    parts.append(
-                        f"cdef inline void {prefix}_{i}(SimCtx *c, long long *sv, long long *sm) noexcept nogil:"
-                    )
-                else:
-                    parts.append(f"cdef inline void {prefix}_{i}(SimCtx *c) noexcept nogil:")
-                if body_lines:
-                    decls: list[str] = []
-                    if use_sv:
-                        async_sids = seq_negedge_sids[i] if prefix == "seq" else None
-                        body_lines = _seq_body_to_sv_reads(
-                            body_lines, async_sids, func_internal_sids, external_input_sids
-                        )
-                    # Hoist inline cdef-with-initializer declarations to function
-                    # level so they are never emitted inside if/elif blocks (Cython
-                    # forbids cdef inside conditional blocks).
-                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
-                    decls.extend(hoisted_cdefs)
-                    joined = "\n".join(body_lines)
-                    if "_clhs" in joined:
-                        decls.append("    cdef long long _clhs")
-                    if "_cdv" in joined:
-                        decls.append("    cdef long long _cdv")
-                    if "_cdm" in joined:
-                        decls.append("    cdef long long _cdm")
-                    if "_sfv" in joined:
-                        decls.append("    cdef long long _sfv")
-                    if "_mchg" in joined:
-                        decls.append("    cdef int _mchg")
-                    if "_mwi" in joined:
-                        decls.append("    cdef long long _mwi")
-                    if "_mwv" in joined:
-                        decls.append("    cdef long long _mwv, _mwm")
-                    if "_mwvu" in joined:
-                        decls.append("    cdef unsigned long long _mwvu, _mwmu")
-                    if "_rmw_msb" in joined:
-                        decls.append("    cdef int _rmw_msb, _rmw_lsb, _rmw_drop")
-                        decls.append("    cdef long long _rmw_mask")
-                    if "_ps_lsb" in joined:
-                        decls.append("    cdef int _ps_lsb")
-                        decls.append("    cdef long long _ps_mask")
-                    for m in re.findall(r"\b(_lv_\w+)\b", joined):
-                        decl = f"    cdef long long {m}"
-                        if decl not in decls:
-                            decls.append(decl)
-                    sc_indices = sorted({int(s) for s in re.findall(r"_sc(\d+)_[vm]", joined)})
-                    if sc_indices:
-                        max_words = self._module_max_wide_words()
-                        for sc_i in range(sc_indices[-1] + 1):
-                            decls.append(f"    cdef unsigned long long _sc{sc_i}_v[{max_words}]")
-                            decls.append(f"    cdef unsigned long long _sc{sc_i}_m[{max_words}]")
-                    parts.extend(decls)
-                    parts.extend(body_lines)
-                elif emit_pass_when_empty:
-                    parts.append("    pass")
-                parts.append("")
-
-        return "\n".join(parts)
+        self._gen_process_functions_to(parts.append)
+        return "".join(parts)
 
     def _gen_process_functions_to(self, write_fn, *, route_fn=None) -> None:
         """Stream process functions one at a time via *write_fn*.
@@ -1867,6 +1777,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             ),
         )
         first_func_seen: set[int] = set()  # ids of streams that already received their first chunk
+        self._shared_initializers = []
+        sharing: dict[int, ProcessSharing] = {}
+        share = sharing_enabled()
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
             for i, body_lines in enumerate(body_groups):
                 routed = route_fn(prefix, i) if route_fn is not None else None
@@ -1936,6 +1849,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 # Tracked per-target (not globally) so each routed-to file's own
                 # first chunk is unprefixed, same as the single-stream case.
                 stream_key = id(target_write_fn)
+                if share:
+                    if stream_key not in sharing:
+                        sharing[stream_key] = ProcessSharing(
+                            self._signal_widths,
+                            self._gen_wmask(),
+                            signed=self._signal_signed,
+                            constants=self._param_init,
+                        )
+                    state = sharing[stream_key]
+                    before = len(state.initializers)
+                    chunk = state.emit(func_parts, prefix, i, use_sv)
+                    self._shared_initializers.extend(state.initializers[before:])
                 if stream_key not in first_func_seen:
                     target_write_fn(chunk)
                     first_func_seen.add(stream_key)
@@ -1981,8 +1906,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         - ``DL_CONT_FN`` (declaration order), ``DL_RANK_FN`` (dispatch rank
           order, cont then combo -- ``_delta_ranked_processes``),
           ``DL_SEQ_FN``: function pointers, filled once at module import.
-        - ``DL_SEQ_EDGE_OFF``/``_SID``/``_POS``: each seq process's edge
-          triggers, CSR (``POS`` 1 = posedge, 0 = negedge).
+        - ``DL_SEQ_EDGE_OFF``/``_PROC``/``_POS``: edge signal -> process
+          subscribers, CSR (``POS`` 1 = posedge, 0 = negedge).
+          ``DL_SEQ_EDGE_SID`` lists the distinct edge signals.
         - ``DL_NEG_REACT[sid]``: whether a falling edge of ``sid`` can make
           anything react (batch_run's negedge skip, ``_negedge_block_lines``).
 
@@ -2005,6 +1931,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "",
             "cdef void _dl_init_fn_tables() noexcept nogil:",
             "    pass",
+            *(f"    {name}()" for name, _prefix, _index in self._shared_initializers),
             *(f"    DL_CONT_FN[{i}] = cont_{i}" for i in range(n_cont)),
             # `call` is "cont_N(c)" / "combo_N(c)".
             *(f"    DL_RANK_FN[{r}] = {call.split('(')[0]}" for r, (call, _s, _p) in enumerate(ranked)),
@@ -2013,12 +1940,17 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "_dl_init_fn_tables()",
             "",
         ]
-        off, sids, pos = [0], [], []
-        for edges, _sens, _body in self._seq_processes:
+        subscribers: list[list[tuple[int, int]]] = [[] for _ in range(max(self._n_sigs, 1))]
+        for process_id, (edges, _sens, _body) in enumerate(self._seq_processes):
             for sid, edge_type in edges.items():
-                sids.append(sid)
-                pos.append(1 if edge_type == "posedge" else 0)
-            off.append(len(sids))
+                subscribers[sid].append((process_id, int(edge_type == "posedge")))
+        off, processes, pos = [0], [], []
+        sids = [sid for sid, readers in enumerate(subscribers) if readers]
+        for readers in subscribers:
+            for process_id, polarity in readers:
+                processes.append(process_id)
+                pos.append(polarity)
+            off.append(len(processes))
         n = max(self._n_sigs, 1)
         neg_react = [0] * n
         for sid in self._negedge_reacting_sids() or ():
@@ -2030,6 +1962,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             _c_const_array("int", "DL_SIG_WIDE_OFFSET", list(wide_offsets[: self._n_sigs])),
             _c_const_array("int", "DL_SEQ_EDGE_OFF", off),
             _c_const_array("int", "DL_SEQ_EDGE_SID", sids),
+            _c_const_array("int", "DL_SEQ_EDGE_PROC", processes),
             _c_const_array("unsigned char", "DL_SEQ_EDGE_POS", pos),
             _c_const_array("unsigned char", "DL_NEG_REACT", neg_react),
         ]
@@ -2039,10 +1972,28 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "DL_SIG_WIDE_OFFSET": "int",
             "DL_SEQ_EDGE_OFF": "int",
             "DL_SEQ_EDGE_SID": "int",
+            "DL_SEQ_EDGE_PROC": "int",
             "DL_SEQ_EDGE_POS": "unsigned char",
             "DL_NEG_REACT": "unsigned char",
         }
-        return lines + _c_const_array_block(arrays, ctypes)
+        return lines + self._ctz64_lines() + _c_const_array_block(arrays, ctypes)
+
+    @staticmethod
+    def _ctz64_lines() -> list[str]:
+        return [
+            "cdef extern from *:",
+            '    """',
+            "    #if defined(_MSC_VER)",
+            "    #include <intrin.h>",
+            "    static __inline int dl_ctz64(unsigned long long x) {",
+            "        unsigned long i; _BitScanForward64(&i, x); return (int)i;",
+            "    }",
+            "    #else",
+            "    static inline int dl_ctz64(unsigned long long x) { return __builtin_ctzll(x); }",
+            "    #endif",
+            '    """',
+            "    int dl_ctz64(unsigned long long x) noexcept nogil",
+        ]
 
     def _delta_start_ranks(self, ranked: list[tuple[str, set[int], bool]]) -> list[int]:
         """Ranks that run in the first delta iteration of a boot (the first
@@ -2079,7 +2030,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         )
 
     def _delta_common_local_lines(self) -> list[str]:
-        lines: list[str] = []
+        lines: list[str] = ["    cdef int _edge_count"]
         # Locals for NBA memory range drain (partial byte-lane writes)
         if self._n_mems > 0:
             lines.append("    cdef int _rmr_msb, _rmr_lsb")
@@ -2089,13 +2040,16 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         # detected (see _delta_seq_fire_lines).
         n_seq = len(self._seq_processes)
         if n_seq:
+            words = (n_seq + 63) // 64
             lines.extend(
                 [
                     "    cdef int _q, _qe, _qs, _hit, _qnx, _qox",
-                    f"    cdef unsigned char _sfire[{n_seq}]",
-                    f"    cdef unsigned char _sdone[{n_seq}]",
-                    f"    memset(_sfire, 0, {n_seq})",
-                    f"    memset(_sdone, 0, {n_seq})",
+                    "    cdef int _ei, _sparse, _smin, _smax, _sw, _qpos, _qneg",
+                    "    cdef unsigned long long _sword, _sbit",
+                    f"    cdef unsigned long long _sfire[{words}]",
+                    f"    cdef unsigned long long _sdone[{words}]",
+                    f"    memset(_sfire, 0, {words} * sizeof(unsigned long long))",
+                    f"    memset(_sdone, 0, {words} * sizeof(unsigned long long))",
                 ]
             )
         return lines
@@ -2115,42 +2069,56 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            memcpy(c.conv_wide_mask, c.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
         ]
 
+    # cm:a4b193
     def _delta_seq_fire_lines(self) -> list[str]:
-        """Edge detection, checked every iteration so edges propagated through
-        continuous assigns are caught; each sequential process fires at most
-        once per delta_loop call, in index order. Table-driven
-        (``DL_SEQ_EDGE_*``, ``DL_SEQ_FN``; see ``_proc_table_lines``)."""
+        """Index edge subscribers and dispatch fired IDs in declaration order.
+
+        Inspect the smaller of the dirty SID list and distinct edge signals.
+        Detection precedes all process calls, so the old dirty list remains
+        valid even after its count/bits were cleared at iteration start.
+        """
         if not self._seq_processes:
             return []
         n_seq = len(self._seq_processes)
+        words = (n_seq + 63) // 64
+        clocks = len({sid for edges, _sens, _body in self._seq_processes for sid in edges})
         return [
             "",
-            f"        for _q in range({n_seq}):",
-            "            if _sdone[_q] or _sfire[_q]:",
+            f"        _smin = {words}",
+            "        _smax = -1",
+            f"        _sparse = _edge_count < {clocks}",
+            f"        for _ei in range(_edge_count if _sparse else {clocks}):",
+            "            _qs = c.dlist[_ei] if _sparse else DL_SEQ_EDGE_SID[_ei]",
+            "            if DL_SEQ_EDGE_OFF[_qs] == DL_SEQ_EDGE_OFF[_qs + 1]:",
             "                continue",
-            "            for _qe in range(DL_SEQ_EDGE_OFF[_q], DL_SEQ_EDGE_OFF[_q + 1]):",
-            "                _qs = DL_SEQ_EDGE_SID[_qe]",
-            # IEEE 1364 9.7.2 with x: posedge = 0->1, x->1, 0->x; negedge
-            # = 1->0, x->0, 1->x (masks used to be ignored: 0->x and x->0
-            # never fired).
-            "                _qnx = c.mask[_qs] & 1",
-            # (x counts at t=0 too: `initial clk = 0;` is a negedge from x, as
-            # on reference/vm. A t=0 value-only rule here was there for a
-            # forked Python Clock's first fall from x -- not an edge since the
-            # first run()'s snapshot is taken after drives.)
-            "                _qox = sm[_qs] & 1",
-            "                if DL_SEQ_EDGE_POS[_qe]:",
-            "                    _hit = (not _qnx and (c.val[_qs] & 1) == 1 and (_qox or (sv[_qs] & 1) == 0))"
+            "            _qnx = c.mask[_qs] & 1",
+            "            _qox = sm[_qs] & 1",
+            # Preserve the original four-state edge rules, including t=0.
+            "            _qpos = (not _qnx and (c.val[_qs] & 1) == 1 and (_qox or (sv[_qs] & 1) == 0))"
             " or (_qnx and not _qox and (sv[_qs] & 1) == 0)",
-            "                else:",
-            "                    _hit = (not _qnx and (c.val[_qs] & 1) == 0 and (_qox or (sv[_qs] & 1) == 1))"
+            "            _qneg = (not _qnx and (c.val[_qs] & 1) == 0 and (_qox or (sv[_qs] & 1) == 1))"
             " or (_qnx and not _qox and (sv[_qs] & 1) == 1)",
-            "                if _hit:",
-            "                    _sfire[_q] = 1",
-            "                    break",
-            "",
-            f"        for _q in range({n_seq}):",
-            "            if _sfire[_q]:",
+            "            if not (_qpos or _qneg):",
+            "                continue",
+            "            for _qe in range(DL_SEQ_EDGE_OFF[_qs], DL_SEQ_EDGE_OFF[_qs + 1]):",
+            "                if not (_qpos if DL_SEQ_EDGE_POS[_qe] else _qneg):",
+            "                    continue",
+            "                _q = DL_SEQ_EDGE_PROC[_qe]",
+            "                _sw = _q >> 6",
+            "                _sbit = (<unsigned long long>1) << (_q & 63)",
+            "                if _sdone[_sw] & _sbit:",
+            "                    continue",
+            "                _sfire[_sw] |= _sbit",
+            "                if _sw < _smin:",
+            "                    _smin = _sw",
+            "                if _sw > _smax:",
+            "                    _smax = _sw",
+            "        for _sw in range(_smin, _smax + 1):",
+            "            _sword = _sfire[_sw]",
+            "            _sfire[_sw] = 0",
+            "            while _sword:",
+            "                _q = (_sw << 6) + dl_ctz64(_sword)",
+            "                _sword &= _sword - 1",
             "                DL_SEQ_FN[_q](c, sv, sm)",
             # No early return on c.finished: $finish stops only the calling
             # process (it returns); the time step still completes -- other
@@ -2158,8 +2126,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # stop after this delta_loop.
             "                if c.error_code != ERR_NONE:",
             "                    return it",
-            "                _sfire[_q] = 0",
-            "                _sdone[_q] = 1",
+            "                _sdone[_sw] |= (<unsigned long long>1) << (_q & 63)",
             "",
         ]
 
@@ -2301,6 +2268,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # Copy dirty -> trigger, then clear dirty (bits and list together,
             # keeping the sparse set consistent).
             "        changed = 0",
+            "        _edge_count = c.dcount",
             "        memcpy(trigger, c.dbit, N_SIGS * sizeof(int))",
             "        memset(c.dbit, 0, N_SIGS * sizeof(int))",
             *(
@@ -2454,17 +2422,8 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines = [
             "cdef extern from *:",
             '    """',
-            "    #if defined(_MSC_VER)",
-            "    #include <intrin.h>",
-            "    static __inline int dl_ctz64(unsigned long long x) {",
-            "        unsigned long i; _BitScanForward64(&i, x); return (int)i;",
-            "    }",
-            "    #else",
-            "    static inline int dl_ctz64(unsigned long long x) { return __builtin_ctzll(x); }",
-            "    #endif",
             *(text for text, _name, _len in arrays),
             '    """',
-            "    int dl_ctz64(unsigned long long x) noexcept nogil",
         ]
         ctypes = {"DL_IS_INTERESTING": "unsigned char", "DL_PURE": "unsigned char"}
         for _text, name, length in arrays:
@@ -2553,6 +2512,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # it == 0, since the previous call). Take them and clear their bits,
             # so this iteration's marks accumulate fresh in dlist.
             "        _tcount = c.dcount",
+            "        _edge_count = _tcount",
             "        memcpy(_tlist, c.dlist, _tcount * sizeof(int))",
             "        for _k in range(_tcount):",
             "            c.dbit[_tlist[_k]] = 0",

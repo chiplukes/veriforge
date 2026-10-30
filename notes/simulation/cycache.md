@@ -29,6 +29,9 @@ Caches the `.pyx → .pyd` compilation step.
 - Cython version
 - Platform tag (`sys.platform-machine-pyX.Y`)
 - `_CACHE_VERSION` (bumped when the codegen framework changes)
+- The normalized build configuration: delta engine, helper selection, split and
+  process-sharing modes, worker/memory settings, and compiler/linker environment
+  (`CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `LDSHARED`)
 
 **Keyed module name** = `vtc_<module-hash>_<key>` where:
 - `module-hash` is an 8-hex SHA-256 prefix of the requested module name
@@ -54,13 +57,14 @@ Caches the codegen step — generating `.pyx` from the Verilog model.
 - Module name
 - All source file contents (sorted)
 - All codegen infrastructure files (hashed together via `_codegen_infra_hash()`):
-  every `*.py` in `sim/compiled/`, every `sim/compiled/templates/*.pxi`, and
-  `elaborate.py`. (Globbed, not listed: a hardcoded list once omitted
+  package Python sources and grammar files, including every `*.py` in
+  `sim/compiled/` and every `sim/compiled/templates/*.pxi`.
+  (Globbed, not listed: a hardcoded list once omitted
   `_gen_wide_section.py`, the `_gen_narrow_*.py` generators, their templates,
   and `compiler.py`, so editing those silently reused stale modules.)
-- Codegen options that change the generated source without changing any file
-  above -- currently `VERIFORGE_DELTA_ENGINE` (read per call, so switching it
-  within one process takes effect)
+- The same normalized build configuration used by the compilation cache, read
+  per call so option changes in one process take effect
+- The requested `delta_limit`
 - `_CACHE_VERSION`
 - Cython version
 - Platform tag
@@ -112,6 +116,16 @@ elaborate(module, source_files):
 ```
 
 ## Performance
+
+For controlled cold-build measurements, use
+`uv run python benchmarks/compiled_scaling.py --case helpers` (or `idle`,
+`instances`, `split`). Each case uses an isolated temporary cache and reports
+build time, generated source size, and median runtime as JSON.
+
+`VERIFORGE_NO_COMPILE_CACHE=1` bypasses both cache layers and suppresses new
+elaboration sidecars. Each uncached build gets a distinct binary name/path so
+Windows can build again while a previous DLL remains loaded. Cached binaries
+are left available for subsequent normal cached runs.
 
 | Scenario | Codegen | C Compile | Total |
 |----------|---------|-----------|-------|

@@ -436,6 +436,8 @@ class TestSetupScriptStackSize:
     stack it got. Run with stand-ins for setuptools/Cython: no C build."""
 
     def _run_script(self, monkeypatch, max_mib):
+        from veriforge.sim.compiled._build import ParallelBuildExt
+
         import sys
         import threading
         import types
@@ -452,6 +454,7 @@ class TestSetupScriptStackSize:
             return 0
 
         def fake_setup(**kwargs):
+            assert kwargs["cmdclass"]["build_ext"] is ParallelBuildExt
             seen["stack_mib"] = current["size"] // (1024 * 1024)
             seen["limit"] = sys.getrecursionlimit()
             seen["thread"] = threading.current_thread() is not threading.main_thread()

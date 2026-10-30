@@ -35,6 +35,7 @@ from .codegen import CythonCodegen
 from .compiler import (
     CythonCompiler,
     _CACHE_VERSION,
+    _build_configuration,
     _cache_key_from_source_hash,
     _cython_version,
     _keyed_module_name,
@@ -154,7 +155,7 @@ def _codegen_infra_hash() -> str:
     return _codegen_infra_hash_cache
 
 
-def _compute_elab_hash(module: Module, source_files: list[str]) -> str:
+def _compute_elab_hash(module: Module, source_files: list[str], *, delta_limit: int = 10_000) -> str:
     """Compute a hash from source files + codegen infrastructure + module name.
 
     When a *source_files* entry is a real file on disk, its content is
@@ -181,10 +182,8 @@ def _compute_elab_hash(module: Module, source_files: list[str]) -> str:
     # Codegen options that change the generated source without changing any
     # hashed file. Read per call (not folded into the memoized infra hash)
     # so a mode switch within one process -- e.g. an A/B test -- takes effect.
-    from .codegen import delta_engine_mode  # noqa: PLC0415
-
-    h.update(delta_engine_mode().encode("utf-8"))
-    h.update((get_env("CHECK_MEM_SNAPSHOT", "0") or "0").encode("utf-8"))
+    h.update(_build_configuration())
+    h.update(str(delta_limit).encode("ascii"))
     for sf in sorted(source_files):
         try:
             h.update(Path(sf).read_bytes())
@@ -438,8 +437,8 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         """
         # Try codegen cache: skip .pyx generation if sources unchanged
         elab_hash: str | None = None
-        if source_files:
-            elab_hash = _compute_elab_hash(module, source_files)
+        if source_files and get_env("NO_COMPILE_CACHE", "") != "1":
+            elab_hash = _compute_elab_hash(module, source_files, delta_limit=self.delta_limit)
             cached = _load_elab_cache(self._compiler.cache_dir, elab_hash)
             if cached is not None:
                 mod = self._compiler.load_cached(cached["keyed_name"])

@@ -850,7 +850,7 @@ class TestCharProcessFunctions:
         entry, a fire flag array in delta_loop, and a DL_SEQ_FN slot."""
         pyx = CythonCodegen().generate(_make_counter())
         assert "DL_SEQ_EDGE_SID" in pyx
-        assert "cdef unsigned char _sfire[1]" in pyx
+        assert "cdef unsigned long long _sfire[1]" in pyx
         assert "DL_SEQ_FN[0] = seq_0" in pyx
 
     def test_delta_loop_present(self):
@@ -948,8 +948,9 @@ class TestCharLhsWriters:
         pyx = CythonCodegen().generate(_make_wide_combo_add(128))
         assert "_whole_assign_" in pyx
 
-    def test_whole_stage_helper_emitted_for_wide_nba_module(self):
-        """Wide NBA modules emit a _whole_stage_<signal> helper."""
+    def test_whole_stage_helper_emitted_for_wide_nba_module(self, monkeypatch):
+        """The all-helpers diagnostic mode retains bulk NBA helpers."""
+        monkeypatch.setenv("VERIFORGE_COMPILE_HELPERS", "all")
         pyx = CythonCodegen().generate(_make_wide_seq_add(128))
         assert "_whole_stage_" in pyx
 
@@ -1026,10 +1027,10 @@ class TestCharSystemTasks:
         pyx = CythonCodegen().generate(_make_write_with_format_always())
         assert "_out_char(" in pyx
 
-    def test_display_emits_out_int_dec_for_integer_arg(self):
-        """$write with integer arg emits _out_int_dec call."""
+    def test_display_emits_formatter_for_integer_arg(self):
+        """$write with integer arg retains its actual formatting helper."""
         pyx = CythonCodegen().generate(_make_write_with_format_always())
-        assert "_out_int_dec(" in pyx
+        assert "_out_fmt1(" in pyx
 
     def test_display_without_format_emits_space_separator(self):
         """$write without format string emits _out_char(c, 32) space separators."""

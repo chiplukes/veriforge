@@ -159,6 +159,9 @@ src/veriforge/
 │       │                          #   _sync_mem_to_ref / _sync_mem_from_ref: memory array sync
 │       │                          #   _wire_vcd_from_ref: VCD callback wiring from ref executor
 │       ├── _codegen_utils.py     # Shared helpers (indent, signal name mangling, etc.)
+│       ├── _helpers.py           # Conservative required-helper selection and streaming source finalization
+│       ├── _build.py             # Memory-bounded parallel C object builds with serial compiler fallback
+│       ├── _sharing.py           # Opt-in parameter-specialized scalar process implementations
 │       ├── _expr_emitter.py      # Expression AST → Cython expression string
 │       ├── _stmt_emitters.py     # Statement AST → Cython statement list
 │       ├── _process_compiler.py  # always/initial process compilation to Cython functions

@@ -767,6 +767,49 @@ cdef struct SimCtx:
 
 ---
 
+## Build and scheduling controls
+
+The compiler retains only referenced helper implementations and their dependency
+closure by default. Selection includes address-taken callbacks and keeps
+unrecognized definitions conservatively. Streaming generation finalizes just the
+helper region without loading the complete generated design into memory. Split
+workers retain their own required helpers.
+
+Sequential scheduling uses clock/event-to-process subscriber tables and ordered
+bitmaps. It inspects the smaller of changed signals and distinct edge signals,
+retaining four-state edge detection, process order, and pre-edge snapshots.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `VERIFORGE_COMPILE_HELPERS` | `needed` | `all` retains the full helper library for differential/debug builds |
+| `VERIFORGE_COMPILE_SPLIT` | `0` | `1` enables experimental multi-file generation for sufficiently large designs |
+| `VERIFORGE_COMPILE_JOBS` | `4` | Maximum concurrent C object jobs, also bounded by sources, CPUs, and memory |
+| `VERIFORGE_COMPILE_WORKER_MEMORY_MB` | `1024` | Estimated memory required per C object job |
+| `VERIFORGE_COMPILE_MEMORY_MB` | Half available RAM | Optional total memory budget for one build; limited by available RAM |
+| `VERIFORGE_COMPILE_SHARE_PROCESSES` | `0` | `1` shares compatible scalar process implementations |
+
+Parallel object scheduling currently supports the Unix compiler loop, including
+GCC/Clang. Custom compile loops such as MSVC retain serial compilation. Cython
+translation remains serial; the independent C object compilations overlap before
+linking one extension. Missing memory information conservatively selects one job
+unless an explicit memory budget is provided. Container memory limits are used
+where available.
+
+Process sharing is opt-in. Eligible bodies use per-process address descriptors;
+resolved parameter values, widths, and signedness remain specialization inputs.
+Each instance retains independent state and its position in event ordering.
+Memories, wide bodies, user functions/tasks, output/system-task bodies, and other
+unsupported patterns use the existing generator. Split worker initializers are
+called explicitly from the main extension; they do not rely on worker Python
+module initialization. Each translation unit's sharing cache holds at most 1,024
+groups of at most 8 KiB per body.
+
+Use `uv run python benchmarks/compiled_scaling.py --case instances --lanes 64`
+to compare the sharing tradeoff on repeated instances. Other cases are `helpers`,
+`idle`, and `split`; the benchmark uses fresh caches and verifies final counter
+values. See the [implementation plan](../plans/compiled_scaling_2026-10.md) for
+validation and recorded measurements.
+
 ## Limitations
 
 - **Raw codegen still expects elaborated input** — direct compiled codegen rejects
