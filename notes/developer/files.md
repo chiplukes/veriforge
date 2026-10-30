@@ -162,6 +162,7 @@ src/veriforge/
 │       ├── _helpers.py           # Conservative required-helper selection and streaming source finalization
 │       ├── _build.py             # Memory-bounded parallel C object builds with serial compiler fallback
 │       ├── _sharing.py           # Opt-in parameter-specialized scalar process implementations
+│       ├── _snapshots.py         # Conservative scalar/wide snapshot dependency collection and copy spans
 │       ├── _expr_emitter.py      # Expression AST → Cython expression string
 │       ├── _stmt_emitters.py     # Statement AST → Cython statement list
 │       ├── _process_compiler.py  # always/initial process compilation to Cython functions

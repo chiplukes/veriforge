@@ -29,7 +29,7 @@ Caches the `.pyx → .pyd` compilation step.
 - Cython version
 - Platform tag (`sys.platform-machine-pyX.Y`)
 - `_CACHE_VERSION` (bumped when the codegen framework changes)
-- The normalized build configuration: delta engine, helper selection, split and
+- The normalized build configuration: delta engine, helper/snapshot selection, split and
   process-sharing modes, worker/memory settings, and compiler/linker environment
   (`CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, `LDSHARED`)
 

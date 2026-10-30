@@ -15,9 +15,27 @@ approval round. Record implementation evidence and remaining limitations here.
 | 3 | Clock/event-indexed sequential scheduling | Implemented; 436 edge/equivalence checks passed |
 | 4 | Real, memory-bounded parallel source compilation | Implemented; resource and split integration checks passed |
 | 5 | Parameter-specialized process-body sharing | Implemented opt-in; compiled and cross-engine regressions passed |
+| 6 | Selective scalar/wide signal snapshots | Complete by default; broad and final focused regressions passed |
 
-Selective scalar/wide snapshots and bounded scan-fallback dispatch are follow-up
-investigations; they are not prerequisites for these five stages.
+Bounded scan-fallback dispatch remains a follow-up investigation.
+
+## Stage 6: Selective signal snapshots
+
+- Retain scalar snapshots for every edge trigger, and scalar/wide snapshots for
+  actual frozen reads in emitted process bodies, including whole-signal/slice
+  helpers and combinational bodies that use the snapshot convention.
+- Analyze before optional process sharing and routing, so streaming/split outputs
+  use the same dependency set. Unknown/dynamic snapshot uses conservatively copy
+  everything; keep an all-signals diagnostic mode in cache identity.
+- Copy compact contiguous spans, retaining full memcpy for dense sets. Apply the
+  same selection to snapshot(), refresh_data_snapshot(), event settling, and
+  both batch edges. Preserve clock history, live-read exceptions, memory
+  journals, and convergence snapshots.
+- Validate across engines, scan/queue, batch/stepped/event-driven execution,
+  four-state values, >64-bit whole/slice reads, split builds, and sharing.
+- Measure sparse narrow/wide designs and dense controls before choosing the
+  default; document measured gains and costs. Incremental dirty-signal journals
+  are outside this stage and need separate lifecycle/overhead measurements.
 
 ## Baseline evidence
 
@@ -154,7 +172,7 @@ Update simulator/cache notes, the codemap, and this status table as behavior lan
   `instances`, and `split` cases. Each reports generated-source size, cold build
   latency, and repeated runtime measurements while checking final values.
 
-## Final validation
+## Stages 1–5 validation
 
 - Compiled subsystem: **872 passed, 3,843 skipped** in 22m43s. This includes
   helper selection, both delta engines, split builds, process sharing, and
@@ -170,7 +188,7 @@ Update simulator/cache notes, the codemap, and this status table as behavior lan
 - Full-root pytest was not run. Native Windows/MSVC execution was not available;
   its custom compiler loop retains serial behavior.
 
-## Isolated measurements
+## Stages 1–5 isolated measurements
 
 Final measurements use the review platform above, forced queue mode, separate
 temporary caches, no concurrent tests/builds, and the benchmark's default
@@ -212,4 +230,62 @@ The idle-process cases improve about 5.7× and 12.8× relative to the recorded
 review measurements. Signal snapshot work remains proportional to signal count;
 the signal-only controls show that cost is still material. The earlier baseline
 and final measurements were separate runs, so small differences are not evidence
-of an optimization. Selective snapshots are the next runtime investigation.
+of an optimization. Selective snapshots are evaluated below.
+
+## Stage 6 implementation and measurements
+
+Implemented default `COMPILE_SNAPSHOTS=needed`, with `all` retaining the full
+signal-copy diagnostic path. Both cache layers include the effective setting.
+Snapshot dependencies are collected from emitted bodies before optional sharing,
+including whole-signal/slice helpers, with conservative fallback on unrecognized
+or dynamic uses. Edge-only wide signals require only their scalar mirror.
+Contiguous runs use memcpy, sets at least half full keep full copies, and more
+than four disjoint runs use compact tables. Table plans budget twelve extra slots
+per run and retain a full copy when fragmentation makes that cheaper. All seven
+signal snapshot sites
+share this plan; memory journals and convergence checks are unchanged.
+
+Reproduce with:
+
+```
+uv run python benchmarks/compiled_scaling.py --case snapshots --output snapshots.jsonl
+```
+
+The same platform, isolated-cache protocol, 100,000-cycle batches, and five-sample
+runtime median described above apply. Comparison is `all` → `needed` within the
+new implementation; each row checks its final counter value.
+
+| Design | Runtime ns/cycle | Cold build seconds | Generated lines |
+| --- | --- | --- | --- |
+| Small 16-bit counter | 11.12 → 11.06 | 3.68 → 3.62 | 1,198 → 1,198 |
+| Counter + 512 unused scalar signals | 59.37 → 8.48 | 3.63 → 3.63 | 3,414 → 3,416 |
+| 128-bit counter + 512 unused 256-bit signals | 581.27 → 12.00 | 3.78 → 3.78 | 4,539 → 4,537 |
+| Counter + 512 idle-clock counter processes | 53.20 → 52.30 | 6.65 → 6.66 | 10,114 → 10,114 |
+| 64 active leaf instances | 2,109 → 2,087 | 6.14 → 6.05 | 9,322 → 9,322 |
+| 64 counters interleaved with unused state | 383.90 → 386.98 | 4.40 → 4.18 | 3,138 → 3,138 |
+
+Sparse scalar/wide cases improve about 7×/48×. Dense and small controls have
+similar runtime and build cost; small differences are measurement noise, not
+claimed improvements. The sparse examples deliberately contain unconsumed state;
+application gains depend on how much state actually needs frozen reads. Idle
+processes still read their counter state and therefore retain those snapshots.
+Dirty-signal journaling is a possible later investigation, with extra writes and
+snapshot-lifetime complexity to assess before implementation.
+
+The fragmented control initially ran at 504 ns/cycle versus 392 for full
+copies. The per-run overhead budget retains full copies in this case and
+removes that regression. The first five rows use identical emitted copy plans
+before and after this adjustment. Use `--case fragmented` to isolate this
+control; it is also included in `--case snapshots`.
+
+The final **19 snapshot tests passed**, including scan/queue and all-signal versus
+selective comparisons against all four engine modes, >64-bit values and X masks,
+batch reset events versus stepped execution, unknown-helper fallback,
+streaming/hash identity, cache-option separation, and bounded sparse code size.
+Broad compiled and cross-engine regression validation: **1,385 passed, 3,843
+skipped** in 23m02s. This includes the compiled subsystem, startup/edge tests,
+batch propagation, wide-signal catchall, and narrow-to-wide writes. Final focused
+checks after the fragmentation adjustment also exercise table execution with
+8/128-bit state and the full-copy fallback. Ruff lint/format, mypy (170 sources),
+whitespace, 142 codemap anchors/local links, and the working-tree source inventory
+passed. Full-root pytest and native Windows execution were not run.

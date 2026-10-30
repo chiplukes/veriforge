@@ -779,9 +779,24 @@ Sequential scheduling uses clock/event-to-process subscriber tables and ordered
 bitmaps. It inspects the smaller of changed signals and distinct edge signals,
 retaining four-state edge detection, process order, and pre-edge snapshots.
 
+Signal snapshots retain edge-detection scalar slots and the frozen scalar/wide
+reads found in emitted sequential and combinational bodies. This includes source
+operands passed through whole-signal and slice helpers. Analysis runs before
+optional sharing and split routing. Unknown or dynamic snapshot uses retain full
+copies. Sparse copies coalesce adjacent slots/words; sets at least half full use
+full memcpy. Fragmented sets use compact tables rather than expanded code, with
+a full-copy fallback when per-run overhead outweighs the skipped slots (a
+twelve-slot overhead budget per table run).
+The same helper serves explicit snapshots, data refresh, pre-event settling, and
+both batch edges. Data refresh still preserves scalar edge history. Memory
+snapshot journals and convergence snapshots retain their existing behavior.
+This selects static dependencies; it does not journal signal writes or skip
+required reads solely because their clocks are idle.
+
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `VERIFORGE_COMPILE_HELPERS` | `needed` | `all` retains the full helper library for differential/debug builds |
+| `VERIFORGE_COMPILE_SNAPSHOTS` | `needed` | `all` copies every scalar slot and wide signal word at each snapshot |
 | `VERIFORGE_COMPILE_SPLIT` | `0` | `1` enables experimental multi-file generation for sufficiently large designs |
 | `VERIFORGE_COMPILE_JOBS` | `4` | Maximum concurrent C object jobs, also bounded by sources, CPUs, and memory |
 | `VERIFORGE_COMPILE_WORKER_MEMORY_MB` | `1024` | Estimated memory required per C object job |
@@ -806,7 +821,7 @@ groups of at most 8 KiB per body.
 
 Use `uv run python benchmarks/compiled_scaling.py --case instances --lanes 64`
 to compare the sharing tradeoff on repeated instances. Other cases are `helpers`,
-`idle`, and `split`; the benchmark uses fresh caches and verifies final counter
+`idle`, `split`, and `snapshots`; the benchmark uses fresh caches and verifies final counter
 values. See the [implementation plan](../plans/compiled_scaling_2026-10.md) for
 validation and recorded measurements.
 

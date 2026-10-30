@@ -145,6 +145,7 @@ def _build_configuration() -> bytes:
     from ._codegen_utils import delta_engine_mode
     from ._helpers import helper_mode
     from ._sharing import sharing_enabled
+    from ._snapshots import snapshot_mode
 
     def positive_option(name: str, default: int | None) -> int | None:
         raw = get_env(name)
@@ -157,6 +158,7 @@ def _build_configuration() -> bytes:
         "split": get_env("COMPILE_SPLIT", "0") in ("1", "true", "True"),
         "delta_engine": delta_engine_mode(),
         "helpers": helper_mode(),
+        "snapshots": snapshot_mode(),
         "share_processes": sharing_enabled(),
         "compile_jobs": positive_option("COMPILE_JOBS", 4),
         "compile_memory_mb": positive_option("COMPILE_MEMORY_MB", None),

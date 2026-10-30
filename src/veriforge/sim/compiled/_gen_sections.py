@@ -35,6 +35,7 @@ from veriforge.sim.compiled._gen_narrow_tail import _gen_narrow_tail_code
 from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
 from veriforge.sim.compiled._helpers import HELPERS_BEGIN, HELPERS_END
 from veriforge.sim.compiled._sharing import ProcessSharing, sharing_enabled
+from veriforge.sim.compiled._snapshots import SnapshotReads, copy_spans
 
 
 # Upper bound on a memory's snapshot journal (see CodeGenerator._mem_journal_cap).
@@ -649,10 +650,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         ~6.9 MB of per-cycle snapshot copies."""
         body = [
             "                # Snapshot before negedge (delta_loop above converged)",
-            f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-            f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-            "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-            "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+            *self._signal_snap_lines("                "),
             *self._mem_snap_memcpy_lines("                "),
             "                # Negedge: drive clk low",
             "                self.ctx.sim_time = t0 + i * period + period // 2",
@@ -951,10 +949,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         unconditionally regardless of design size.
         """
         return [
-            f"{indent}memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-            f"{indent}memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-            f"{indent}memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-            f"{indent}memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+            *self._signal_snap_lines(indent),
             *self._mem_snap_memcpy_lines(indent),
             f"{indent}delta_loop(&self.ctx, sv, sm)",
         ]
@@ -1748,6 +1743,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         function living in its own file has no same-file call site to
         benefit from inlining anyway.
         """
+        self._snapshot_reads = SnapshotReads(
+            self._n_sigs, {sid for edges, _sens, _body in self._seq_processes for sid in edges}
+        )
         if not self._processes and not self._combo_processes and not self._seq_processes:
             write_fn("# No process functions")
             return
@@ -1801,6 +1799,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                         body_lines = _seq_body_to_sv_reads(
                             body_lines, async_sids, func_internal_sids, external_input_sids
                         )
+                        self._snapshot_reads.record(body_lines)
                     hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                     decls.extend(hoisted_cdefs)
                     joined = "\n".join(body_lines)
@@ -1894,10 +1893,84 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         return any(self._combo_ext)
 
     def _gen_delta_loop(self) -> str:
-        tables = "\n".join(self._proc_table_lines())
+        tables = "\n".join(self._signal_snapshot_lines() + self._proc_table_lines())
         if self._delta_engine() == "scan":
             return tables + "\n" + self._gen_delta_loop_scan()
         return tables + "\n" + self._gen_delta_loop_queue()
+
+    def _signal_snapshot_lines(self) -> list[str]:
+        """Bounded code for selected scalar slots and wide backing words."""
+        reads = self._snapshot_reads
+        offsets, words, total = self._wide_layout()
+        wide = (
+            {word for sid in reads.data for word in range(offsets[sid], offsets[sid] + words[sid])}
+            if not reads.full
+            else set()
+        )
+        plans = (
+            (
+                "SCALAR",
+                copy_spans(reads.edges | reads.data, self._n_sigs, full=reads.full),
+                "sv",
+                "sm",
+                "c.val",
+                "c.mask",
+                "long long",
+            ),
+            (
+                "WIDE",
+                copy_spans(wide, total, full=reads.full),
+                "c.wide_snap_val",
+                "c.wide_snap_mask",
+                "c.wide_val",
+                "c.wide_mask",
+                "unsigned long long",
+            ),
+        )
+        arrays, ctypes = [], {}
+        body = [
+            "cdef inline void _signal_snapshot(SimCtx *c, long long *sv, long long *sm) noexcept nogil:",
+            "    cdef int _j, _off, _n",
+            "    pass",
+        ]
+        for name, spans, dst_v, dst_m, src_v, src_m, ctype in plans:
+            if len(spans) > 4:
+                starts, lengths = f"VF_SNAP_{name}_START", f"VF_SNAP_{name}_LEN"
+                arrays.extend(
+                    (
+                        _c_const_array("int", starts, [s for s, _ in spans]),
+                        _c_const_array("int", lengths, [n for _, n in spans]),
+                    )
+                )
+                ctypes.update({starts: "int", lengths: "int"})
+                body.extend(
+                    [
+                        f"    for _j in range({len(spans)}):",
+                        f"        _off = {starts}[_j]",
+                        f"        _n = {lengths}[_j]",
+                        f"        memcpy({dst_v} + _off, {src_v} + _off, _n * sizeof({ctype}))",
+                        f"        memcpy({dst_m} + _off, {src_m} + _off, _n * sizeof({ctype}))",
+                    ]
+                )
+            else:
+                for start, count in spans:
+                    if count == 1:
+                        body.extend(
+                            (f"    {dst_v}[{start}] = {src_v}[{start}]", f"    {dst_m}[{start}] = {src_m}[{start}]")
+                        )
+                    else:
+                        body.extend(
+                            (
+                                f"    memcpy({dst_v} + {start}, {src_v} + {start}, {count} * sizeof({ctype}))",
+                                f"    memcpy({dst_m} + {start}, {src_m} + {start}, {count} * sizeof({ctype}))",
+                            )
+                        )
+        return _c_const_array_block(arrays, ctypes) + body + [""]
+
+    @staticmethod
+    def _signal_snap_lines(indent: str, *, member: bool = False) -> list[str]:
+        args = "self._snap_v, self._snap_m" if member else "sv, sm"
+        return [f"{indent}_signal_snapshot(&self.ctx, {args})"]
 
     def _proc_table_lines(self) -> list[str]:
         """Tables that let generated code loop over processes instead of
@@ -3001,10 +3074,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             [
                 "",
                 "    cpdef void snapshot(self):",
-                f"        memcpy(self._snap_v, self.ctx.val, {sn} * sizeof(long long))",
-                f"        memcpy(self._snap_m, self.ctx.mask, {sn} * sizeof(long long))",
-                "        memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                "        memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._signal_snap_lines("        ", member=True),
                 *self._mem_snap_memcpy_lines("        "),
             ]
         )
@@ -3043,10 +3113,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     "    cpdef void refresh_data_snapshot(self):",
                     *save_lines,
                     *settle_lines,
-                    f"        memcpy(self._snap_v, self.ctx.val, {sn} * sizeof(long long))",
-                    f"        memcpy(self._snap_m, self.ctx.mask, {sn} * sizeof(long long))",
-                    "        memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                    "        memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                    *self._signal_snap_lines("        ", member=True),
                     *self._mem_snap_memcpy_lines("        "),
                     *restore_lines,
                 ]
@@ -3230,10 +3297,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # shifting every subsequent edge by one (see",
                 '                # notes/developer/roadmap.md "batch_run() first-call clock-state").',
                 *self._cont_settle_fixpoint_lines("                "),
-                f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-                f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-                "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._signal_snap_lines("                "),
                 *self._mem_snap_memcpy_lines("                "),
                 "                self.ctx.val[clk_sid] = 0",
                 "                self.ctx.mask[clk_sid] = 0",
@@ -3266,10 +3330,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                # before snapshotting so port wiring (e.g. DUT rst port",
                 "                # driven by bench rst reg) reflects the event in sv[].",
                 "                if ev_applied:",
-                f"                    memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-                f"                    memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-                "                    memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                "                    memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._signal_snap_lines("                    "),
                 *self._mem_snap_memcpy_lines("                    "),
                 "                    delta_loop(&self.ctx, sv, sm)",
                 "                    if self.ctx.error_code != ERR_NONE:",
@@ -3306,10 +3367,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 "                    if self.ctx.error_code != ERR_NONE:",
                 "                        cycles_run = i + 1",
                 "                        break",
-                f"                memcpy(sv, self.ctx.val, {sn} * sizeof(long long))",
-                f"                memcpy(sm, self.ctx.mask, {sn} * sizeof(long long))",
-                "                memcpy(self.ctx.wide_snap_val, self.ctx.wide_val, N_WIDE_WORDS * sizeof(unsigned long long))",
-                "                memcpy(self.ctx.wide_snap_mask, self.ctx.wide_mask, N_WIDE_WORDS * sizeof(unsigned long long))",
+                *self._signal_snap_lines("                "),
                 *self._mem_snap_memcpy_lines("                "),
                 # $time inside processes: posedge at t0 + i*period, negedge
                 # half a period later (matching the scheduler's own time

@@ -1,7 +1,7 @@
 """Measure compiled build options and idle-state scaling with fresh caches.
 
 Run ``uv run python benchmarks/compiled_scaling.py --case helpers`` or select
-``idle``, ``instances``, or ``split``. JSON rows include build time, generated
+``idle``, ``instances``, ``split``, or ``snapshots``. JSON rows include build time, generated
 source size, and median runtime excluding initialization/builds.
 """
 
@@ -23,11 +23,11 @@ from veriforge.transforms.tree_to_model import tree_to_design
 from veriforge.verilog_parser import VerilogParser
 
 
-def counter_source(extra=0, *, idle_processes=False, width=16):
+def counter_source(extra=0, *, idle_processes=False, width=16, idle_width=16):
     body = (
         "reg [15:0] idle_q; always @(posedge idle_clk) if (rst) idle_q <= 0; else idle_q <= idle_q + 16'd1;"
         if idle_processes
-        else "wire [15:0] idle_q;"
+        else f"wire [{idle_width - 1}:0] idle_q;"
     )
     return f"""module top(input clk, idle_clk, rst, output reg [{width - 1}:0] q);
   always @(posedge clk) if (rst) q <= 0; else q <= q + {width}'d1;
@@ -44,6 +44,16 @@ module top(input clk, rst, en);
   for (genvar i=0; i<{lanes}; i=i+1) begin : g
     wire [15:0] q, y;
     leaf u(.clk(clk), .rst(rst), .en(en), .q(q), .y(y));
+  end
+endmodule"""
+
+
+def fragmented_source(lanes):
+    return f"""module top(input clk, idle_clk, rst, output reg [15:0] q);
+  always @(posedge clk) if (rst) q <= 0; else q <= q + 16'd1;
+  for (genvar i=0; i<{lanes}; i=i+1) begin : g
+    reg [15:0] lane, padding_a, padding_b, padding_c;
+    always @(posedge clk) if (rst) lane <= 0; else lane <= lane + 16'd1;
   end
 endmodule"""
 
@@ -119,7 +129,9 @@ def measure(source, *, cycles, repeats, label, config, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("helpers", "idle", "instances", "split"), default="helpers")
+    parser.add_argument(
+        "--case", choices=("helpers", "idle", "instances", "split", "snapshots", "fragmented"), default="helpers"
+    )
     parser.add_argument("--lanes", type=int, default=64)
     parser.add_argument("--cycles", type=int, default=100000)
     parser.add_argument("--repeats", type=int, default=5)
@@ -131,6 +143,7 @@ def main():
         "VERIFORGE_DELTA_ENGINE": "queue",
         "VERIFORGE_COMPILE_SPLIT": "0",
         "VERIFORGE_COMPILE_HELPERS": "needed",
+        "VERIFORGE_COMPILE_SNAPSHOTS": "needed",
         "VERIFORGE_COMPILE_SHARE_PROCESSES": "0",
         "VERIFORGE_NO_COMPILE_CACHE": "0",
     }
@@ -148,6 +161,22 @@ def main():
             for n in (128, 512)
             for processes in (False, True)
         )
+    elif args.case in {"snapshots", "fragmented"}:
+        sources = (
+            ("small", counter_source()),
+            ("sparse_scalar", counter_source(512)),
+            ("sparse_wide", counter_source(512, width=128, idle_width=256)),
+            ("dense_scalar", counter_source(512, idle_processes=True)),
+            ("instances", instances_source(args.lanes)),
+            ("fragmented", fragmented_source(args.lanes)),
+        )
+        if args.case == "fragmented":
+            sources = sources[-1:]
+        cases = [
+            (source, f"snapshots_{label}_{mode}", {"VERIFORGE_COMPILE_SNAPSHOTS": mode})
+            for label, source in sources
+            for mode in ("all", "needed")
+        ]
     else:
         option = "VERIFORGE_COMPILE_SHARE_PROCESSES" if args.case == "instances" else "VERIFORGE_COMPILE_SPLIT"
         cases = [(instances_source(args.lanes), f"{args.case}_{value}", {option: value}) for value in ("0", "1")]

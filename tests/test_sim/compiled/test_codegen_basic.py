@@ -428,14 +428,14 @@ class TestPhase5Codegen:
         assert "cpdef int batch_run" in pyx
         assert "nogil" in pyx
 
-    def test_batch_run_has_memcpy(self):
-        """batch_run uses memcpy for snapshot inside the loop."""
+    def test_batch_run_captures_signal_snapshot(self):
+        """batch_run invokes the common snapshot path inside the loop."""
         cg = CythonCodegen()
         pyx = cg.generate(_make_counter())
         # Find the batch_run section
         idx = pyx.index("cpdef int batch_run")
         section = pyx[idx:]
-        assert "memcpy" in section
+        assert "_signal_snapshot(&self.ctx, sv, sm)" in section
 
 
 class TestPhase7Codegen:

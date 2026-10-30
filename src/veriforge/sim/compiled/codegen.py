@@ -240,6 +240,7 @@ class CythonCodegen(
         "_signal_signed",
         "_signal_widths",
         "_signed_memories",
+        "_snapshot_reads",
         "_stream_keepalive",
         "_struct_signal_types",
         "_struct_type_map",
