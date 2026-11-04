@@ -57,6 +57,30 @@ for operands that have nonzero upper words).
 | **Edge detection on wide signal** | N/A — not supported | ✅ raises | ✅ | `TestWideEdgeDetection` — `NotImplementedError` for posedge/negedge on >64-bit |
 | **User-defined function — wide port or return (>64 bits)** | ✅ | ✅ | ✅ | `test_function_wide_port_and_return` (2026-10-15; it used to raise on compiled). A wide argument is stored into the port's own wide storage just before the call, a wide return read from the return signal's -- see `_bind_wide_func_arg`/`_hoist_user_func_call`. |
 
+## Known gap: expression writes into wide packed-struct fields
+
+An isolated check on 2026-11-04 found a compiled NBA-write gap for a binary
+expression assigned to a field wider than 64 bits. This reproduces without
+generate blocks or hierarchical scope indices:
+
+```systemverilog
+module top(input clk, input [95:0] d, output [95:0] y);
+    typedef struct packed {logic [95:0] data; logic valid;} item_t;
+    item_t p0;
+    always @(posedge clk) p0.data <= d ^ 96'd2;
+    assign y = p0.data;
+endmodule
+```
+
+Drive `clk=0`, `d=5`, settle, then drive `clk=1` and settle. The expected `y`
+is 7; compiled returns 0. A direct `p0.data <= d` copy works in the same
+shape. Generated code for the expression uses a `long long _sfv` and scalar
+`c.nba_val` staging for the 97-bit packed base instead of its wide storage.
+The field-write coverage row above therefore does not establish complete
+support for arbitrary expressions assigned to wide fields. This remains a
+separate issue from the fixed
+[generated scope index resolution](generate_hierarchy.md).
+
 ## Test Selectors
 
 ```

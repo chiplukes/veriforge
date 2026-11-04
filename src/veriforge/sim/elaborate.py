@@ -19,7 +19,10 @@ import copy
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Iterable
+
+from lark.exceptions import UnexpectedInput
 
 from ..model.assignments import ContinuousAssign
 from ..model.base import VerilogNode
@@ -519,6 +522,8 @@ def flatten_module(top: Module, design: Design | None = None) -> Module:  # cm:9
         top = elaborate_generates(top)
         _resolve_typedef_widths(top)
         _resolve_parameterized_widths(top)
+    else:
+        top = _resolve_module_hierarchy_indices(top, _build_param_env(top))
 
     has_interfaces = bool(getattr(top, "interface_instances", None))
     defparams = _route_defparams(top, top.instances, top.defparams)
@@ -629,6 +634,8 @@ def _inline_instances(
             _resolve_typedef_widths(sub)
             # Resolve widths on newly promoted variables/nets from generate blocks
             _resolve_parameterized_widths(sub)
+        else:
+            sub = _resolve_module_hierarchy_indices(sub, _build_param_env(sub))
 
         if deeper_defparams:
             # `defparam u1.u2.W = ...;`: u1's flatten applies `u2.W` (a shallow copy,
@@ -1406,16 +1413,17 @@ def _prefix_identifiers(root: Expression, prefix: str, signal_names: set[str]) -
     """
     for node in root.walk():
         if isinstance(node, Identifier):
-            if node.name in signal_names:
+            if not node.hierarchy and node.name in signal_names:
                 node.name = f"{prefix}.{node.name}"
             elif node.hierarchy:
-                # Check if the first hierarchy part is a signal (struct field access)
-                first_part = node.hierarchy[0]
-                base_part = first_part.split("[", 1)[0] if "[" in first_part else first_part
-                if first_part in signal_names or base_part in signal_names:
-                    parts = [prefix, *node.hierarchy, node.name]
-                    node.name = ".".join(parts)
-                    node.hierarchy = None
+                full_name = ".".join([*node.hierarchy, node.name])
+                parts = [*node.hierarchy, node.name]
+                for i in range(len(parts), 0, -1):
+                    candidate = ".".join(parts[:i])
+                    if candidate in signal_names or normalize_struct_access_name(candidate) in signal_names:
+                        node.name = f"{prefix}.{full_name}"
+                        node.hierarchy = None
+                        break
             elif "." in node.name:
                 # Already-flattened dotted name (e.g. "inst.struct_var.field")
                 # Check if any prefix of the dotted name is a known signal
@@ -1435,7 +1443,7 @@ def _rename_identifiers(root: Expression, rename_map: dict[str, str]) -> None:
     """
     for node in root.walk():
         if isinstance(node, Identifier):
-            if node.name in rename_map:
+            if not node.hierarchy and node.name in rename_map:
                 node.name = rename_map[node.name]
             elif node.hierarchy:
                 first_part = node.hierarchy[0]
@@ -1512,6 +1520,103 @@ def _submodule_signal_names_from_intf(intf: object) -> set[str]:
 # ── Generate elaboration ─────────────────────────────────────────────
 
 
+@lru_cache(maxsize=1)
+def _scope_index_parser():
+    from ..verilog_parser import VerilogParser  # noqa: PLC0415
+
+    return VerilogParser(start="constant_expression")
+
+
+@lru_cache(maxsize=512)
+def _parse_scope_index(text: str) -> Expression:
+    from ..transforms.tree_to_model import _build_constant_expression  # noqa: PLC0415
+
+    return _build_constant_expression(_scope_index_parser().build_tree(text), None)
+
+
+def _fold_scope_indices(text: str, env: dict[str, int | str]) -> str:
+    if "[" not in text or "\\" in text:
+        return text
+    parts, cursor = [], 0
+    while (start := text.find("[", cursor)) >= 0:
+        depth, end = 1, start + 1
+        while end < len(text) and depth:
+            depth += (text[end] == "[") - (text[end] == "]")
+            end += 1
+        if depth:
+            return text
+        index = text[start + 1 : end - 1]
+        try:
+            value = int(index, 10)
+        except ValueError:
+            try:
+                value = _eval_const_expr(_parse_scope_index(index), env)
+            except (ValueError, TypeError, ZeroDivisionError, UnexpectedInput):
+                value = None
+        parts.extend((text[cursor : start + 1], str(value) if isinstance(value, int) else index, "]"))
+        cursor = end
+    return "".join(parts) + text[cursor:]
+
+
+def _hierarchy_identifiers(root: VerilogNode) -> Iterable[Identifier]:
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Identifier):
+            yield node
+        # Some type declarations expose resolved range descriptors among
+        # their children; those are layout data, not expression AST nodes.
+        pending.extend(child for child in node._child_nodes() if isinstance(child, VerilogNode))
+
+
+# cm:ba74d2
+def _resolve_hierarchy_indices(root: VerilogNode, env: dict[str, int | str]) -> VerilogNode:
+    """Resolve constant index text without changing the input model.
+
+    Dynamic memory-field indices stay intact. Only roots whose identifiers
+    change are copied; immutable parsed index ASTs are cached, never values
+    that could leak between parameter overrides or generate iterations.
+    """
+    updates = {}
+    for node in _hierarchy_identifiers(root):
+        name = _fold_scope_indices(node.name, env)
+        hierarchy = [_fold_scope_indices(part, env) for part in node.hierarchy] if node.hierarchy else node.hierarchy
+        if name != node.name or hierarchy != node.hierarchy:
+            updates[(node.name, tuple(node.hierarchy or ()))] = (name, hierarchy)
+    if not updates:
+        return root
+    result = copy.deepcopy(root)
+    for node in _hierarchy_identifiers(result):
+        if update := updates.get((node.name, tuple(node.hierarchy or ()))):
+            node.name, hierarchy = update
+            node.hierarchy = list(hierarchy) if hierarchy is not None else None
+    return result
+
+
+def _resolve_module_hierarchy_indices(module: Module, env: dict[str, int | str]) -> Module:
+    result = module
+    for attr in Module.__slots__:
+        if attr == "generate_blocks":
+            continue  # Resolve generated bodies in their own genvar environment.
+        items = getattr(module, attr, None)
+        if not isinstance(items, list):
+            continue
+        replacements = None
+        for index, item in enumerate(items):
+            if not isinstance(item, VerilogNode):
+                continue
+            resolved = _resolve_hierarchy_indices(item, env)
+            if resolved is not item:
+                if replacements is None:
+                    replacements = list(items)
+                replacements[index] = resolved
+        if replacements is not None:
+            if result is module:
+                result = copy.copy(module)
+            setattr(result, attr, replacements)
+    return result
+
+
 # cm:f97081
 def elaborate_generates(module: Module, param_values: dict[str, int] | None = None) -> Module:
     """Evaluate generate constructs and promote items into the module.
@@ -1543,7 +1648,7 @@ def elaborate_generates(module: Module, param_values: dict[str, int] | None = No
     for gen in module.generate_blocks:
         _elaborate_one(result, gen, env, unnamed_ct)
     # generate_blocks intentionally left empty on result
-    return result
+    return _resolve_module_hierarchy_indices(result, _build_param_env(module, param_values))
 
 
 # ── Constant expression evaluation ──────────────────────────────────
@@ -2681,6 +2786,8 @@ def _promote_block_items(  # noqa: PLR0912, PLR0913
                 local_instances.add(item.instance_name)
 
     for item in items:
+        if not isinstance(item, (GenerateFor, GenerateIf, GenerateCase, GenvarDecl)):
+            item = _resolve_hierarchy_indices(item, env)
         if isinstance(item, Net):
             if scope and item.name in local_signals:
                 item.name = f"{scope}.{item.name}"

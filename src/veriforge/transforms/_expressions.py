@@ -494,20 +494,6 @@ def _token_to_expression(token: Token, source_file: str | None) -> Expression:
     return Identifier(name=text)
 
 
-def _tree_source_text(node: Tree) -> str:
-    tokens: list[str] = []
-
-    def _walk_text(child: Tree | Token) -> None:
-        if isinstance(child, Token):
-            tokens.append(str(child))
-            return
-        for grandchild in child.children:
-            _walk_text(grandchild)
-
-    _walk_text(node)
-    return "".join(tokens)
-
-
 def _build_hierarchical_identifier(tree: Tree, source_file: str | None) -> Identifier:
     """Build an Identifier from a hierarchical_identifier or hierarchical_net_identifier."""
     parts: list[str] = []
@@ -521,7 +507,13 @@ def _build_hierarchical_identifier(tree: Tree, source_file: str | None) -> Ident
                 parts.append(pending_part)
             pending_part = str(child)
         elif isinstance(child, Tree) and child.data == "constant_expression" and pending_part is not None:
-            pending_part = f"{pending_part}[{_tree_source_text(child)}]"
+            # Token concatenation loses grouping punctuation discarded by the
+            # grammar: g[(K-1)*2] must not become g[K-1*2]. Preserve the AST's
+            # grouping until elaboration can evaluate the scope index.
+            from ..codegen.verilog_emitter import emit_expression  # noqa: PLC0415
+            from .tree_to_model import _build_constant_expression as build_index  # noqa: PLC0415
+
+            pending_part = f"{pending_part}[{emit_expression(build_index(child, source_file))}]"
 
     if pending_part is not None:
         parts.append(pending_part)
