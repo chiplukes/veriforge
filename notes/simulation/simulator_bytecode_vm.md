@@ -7,6 +7,14 @@ coexists with the reference (pure-Python tree-walking) engine. Both engines
 consume the same model AST and expose the same `Simulator` API; they differ
 only in the execution strategy.
 
+Implicit combinational dependencies include every index used on an assignment's
+left side, even with a constant RHS: indexed slices, nested memory/packed
+selectors, and concatenated targets. Reference and VM share the recursive
+`semantics.iter_lhs_indices` walker, while retaining engine-specific signal
+lookup. Changing only an address or slice base therefore wakes the process.
+See [target dependency regressions](../../tests/test_sim/test_lhs_dependencies.py)
+for cross-engine coverage, including values wider than 64 bits.
+
 **Reference engine**: Walks Expression/Statement trees recursively at runtime.
 Clean and auditable, but limited to ~16,300 cycles/s due to per-node Python
 function calls, dict-based signal lookups, and Value object allocation.

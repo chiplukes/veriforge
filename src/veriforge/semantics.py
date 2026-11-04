@@ -12,6 +12,10 @@ structures (symbol tables, codegen state, ``EvalContext``, ...) leak in here.
 Engine-specific lookups are passed in as callbacks (``env`` for constant
 identifiers, ``width_of``/``signed_of`` for signal declarations).
 
+Assignment-index traversal is also shared here: reference and VM sensitivity
+analysis must see every nested selector without counting the written target
+itself as a read.
+
 IEEE 1364-2005 references: §5.4.1 (self-determined widths, Table 5-22),
 §5.5 (signedness rules), §5.5.1 (bit-select/part-select/range-select are
 always unsigned regardless of the sliced signal's own declared signedness).
@@ -19,7 +23,7 @@ always unsigned regardless of the sliced signal's own declared signedness).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 
 from .model.base import VerilogNode
 from .model.expressions import (
@@ -48,10 +52,35 @@ __all__ = [
     "const_int",
     "expr_signed",
     "expr_width",
+    "iter_lhs_indices",
     "net_width",
     "range_width",
     "var_width",
 ]
+
+
+# cm:9f27ba
+def iter_lhs_indices(lhs: Expression) -> Iterator[Expression]:
+    """Yield all expressions read to select an assignment destination.
+
+    Traverse nested memory/packed selects and concatenations without treating
+    the written base signal itself as a read. Consumers retain their own
+    expression-to-signal lookup, while sharing complete target traversal.
+    """
+    if isinstance(lhs, (BitSelect, RangeSelect, PartSelect)):
+        yield from iter_lhs_indices(lhs.target)
+        if isinstance(lhs, BitSelect):
+            yield lhs.index
+        elif isinstance(lhs, RangeSelect):
+            yield lhs.msb
+            yield lhs.lsb
+        else:
+            yield lhs.base
+            yield lhs.width
+    elif isinstance(lhs, Concatenation):
+        for part in lhs.parts:
+            yield from iter_lhs_indices(part)
+
 
 # ── Constant expression evaluation ──────────────────────────────────────────
 

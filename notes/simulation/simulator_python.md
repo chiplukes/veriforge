@@ -323,6 +323,16 @@ can remain at X. Coverage lives in
 including the reported HDL fixture, both indexed-select directions, non-zero
 bases, wide values, mask-only changes, and both reference dispatch paths.
 
+All bit/range/indexed-select targets use that evaluator path, including slices
+of memory elements such as `mem[0][3:0]`. This avoids supporting a write in the
+executor while silently omitting its change notification in the scheduler.
+Implicit combinational sensitivity includes indices at every target nesting
+level, for example both `addr` and `bitidx` in `mem[addr][bitidx]`, and `idx` in
+`q[idx +: 3]` even when the RHS is constant. Reference and VM share
+`semantics.iter_lhs_indices` for this traversal, including concatenated targets;
+the written base signal is not counted as a read. Cross-engine regressions live
+in [test_lhs_dependencies.py](../../tests/test_sim/test_lhs_dependencies.py).
+
 ---
 
 ## Testbench API (`testbench.py`)

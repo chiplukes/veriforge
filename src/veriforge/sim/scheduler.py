@@ -40,6 +40,7 @@ from veriforge.model.expressions import (
 from veriforge.model.statements import SensitivityEdge
 
 from ..semantics import const_int as _const_int
+from ..semantics import iter_lhs_indices
 from ..semantics import range_width as _range_width
 from ..semantics import var_width as _var_width
 from .evaluator import EvalContext, ExpressionEvaluator, _expr_signed
@@ -1160,65 +1161,11 @@ class Scheduler:  # cm:9a7f2c
                         return v
                     parts.pop()
             return self.ctx.read_signal(lhs.name)
-        if isinstance(lhs, BitSelect) and isinstance(lhs.target, Identifier):
-            name = lhs.target.name
-            idx_val = self.evaluator.eval(lhs.index, self.ctx)
-            if not idx_val.is_defined:
-                return None
-            idx = int(idx_val)
-            if name in self.ctx._memory_names:
-                mem_data, _ = self.ctx._memories[name]
-                if 0 <= idx < len(mem_data):
-                    return mem_data[idx]
-                return None
-            # Adjust for non-zero base (e.g. logic [31:1] foo → foo[1] is bit 0)
-            idx -= self.ctx._signal_bases.get(name, 0)
-            current = self.ctx.read_signal(name)
-            # (With the bit's x/z: an x bit and a 0 bit compared equal, so a
-            # bit-select continuous assign going x -> 0 never marked its
-            # target changed and nothing downstream re-ran.)
-            return Value(int((current.val >> idx) & 1), width=1, mask=int((current.mask >> idx) & 1))
-        if (
-            isinstance(lhs, BitSelect)
-            and isinstance(lhs.target, BitSelect)
-            and isinstance(lhs.target.target, Identifier)
-        ):
-            name = lhs.target.target.name
-            outer_idx_val = self.evaluator.eval(lhs.target.index, self.ctx)
-            inner_idx_val = self.evaluator.eval(lhs.index, self.ctx)
-            if not outer_idx_val.is_defined or not inner_idx_val.is_defined:
-                return None
-            if name in self.ctx._memory_names:
-                mem_data, _ = self.ctx._memories[name]
-                outer_idx = int(outer_idx_val)
-                if 0 <= outer_idx < len(mem_data):
-                    current = mem_data[outer_idx]
-                    inner_idx = int(inner_idx_val)
-                    return Value(
-                        int((current.val >> inner_idx) & 1), width=1, mask=int((current.mask >> inner_idx) & 1)
-                    )
-            return None
-        if isinstance(lhs, RangeSelect) and isinstance(lhs.target, Identifier):
-            name = lhs.target.name
-            msb_val = self.evaluator.eval(lhs.msb, self.ctx)
-            lsb_val = self.evaluator.eval(lhs.lsb, self.ctx)
-            if msb_val.is_defined and lsb_val.is_defined:
-                current = self.ctx.read_signal(name)
-                msb, lsb = int(msb_val), int(lsb_val)
-                # Adjust for non-zero base
-                base = self.ctx._signal_bases.get(name, 0)
-                msb -= base
-                lsb -= base
-                width = msb - lsb + 1
-                val = (current.val >> lsb) & ((1 << width) - 1)
-                mask = (current.mask >> lsb) & ((1 << width) - 1)
-                return Value(val, width=width, mask=mask)
-            return None
-        if isinstance(lhs, PartSelect):
-            # Indexed continuous targets must participate in change detection
-            # too: otherwise their writes never wake vector/port readers.
-            # Reuse select evaluation for masks, signed/non-zero bases, and
-            # partially out-of-range slices rather than duplicating it here.
+        if isinstance(lhs, (BitSelect, RangeSelect, PartSelect)):
+            # Use the evaluator's recursive select handling for scalar and
+            # memory targets alike, including masks, bases, and bounds.
+            # A target supported by the writer must also participate in
+            # change detection so its downstream readers get scheduled.
             return self.evaluator.eval(lhs, self.ctx)
         if isinstance(lhs, Concatenation):
             # A concat-target LHS (`{a, b} = ...`, e.g. an instance output
@@ -1972,14 +1919,8 @@ def _collect_stmt_reads(stmt, reads: set[str]) -> None:  # noqa: PLR0911, PLR091
 
 def _collect_lhs_index_reads(lhs: Expression, reads: set[str]) -> None:
     """Collect signal reads from LHS index expressions (not the target itself)."""
-    if isinstance(lhs, BitSelect):
-        _walk_expr_reads(lhs.index, reads)
-    elif isinstance(lhs, RangeSelect):
-        _walk_expr_reads(lhs.msb, reads)
-        _walk_expr_reads(lhs.lsb, reads)
-    elif isinstance(lhs, Concatenation):
-        for part in lhs.parts:
-            _collect_lhs_index_reads(part, reads)
+    for index in iter_lhs_indices(lhs):
+        _walk_expr_reads(index, reads)
 
 
 def _collect_stmt_writes(stmt, reads: set[str]) -> None:  # noqa: PLR0911

@@ -63,6 +63,7 @@ from ...model.functions import unranged_return_width
 from ..sv_functions import is_two_state
 from ..severity import WRITE_MARK, severity_display
 from ...semantics import range_width as _range_width
+from ...semantics import iter_lhs_indices
 from ...semantics import var_width as _var_width
 from ..value import Value, signed_literal_width
 from .opcodes import Op, instr
@@ -3562,14 +3563,8 @@ class Compiler:  # cm:8c1e4a
 
     def _collect_lhs_index_signals(self, lhs: Expression, signals: set[int]) -> None:
         """Collect signal reads from LHS index expressions (not target itself)."""
-        if isinstance(lhs, BitSelect):
-            self._walk_expr_signals(lhs.index, signals)
-        elif isinstance(lhs, RangeSelect):
-            self._walk_expr_signals(lhs.msb, signals)
-            self._walk_expr_signals(lhs.lsb, signals)
-        elif isinstance(lhs, Concatenation):
-            for part in lhs.parts:
-                self._collect_lhs_index_signals(part, signals)
+        for index in iter_lhs_indices(lhs):
+            self._walk_expr_signals(index, signals)
 
     def _collect_stmt_writes(self, stmt: Statement, signals: set[int]) -> None:  # noqa: PLR0912, PLR0911
         """Remove signals written by a statement tree from inferred reads."""
