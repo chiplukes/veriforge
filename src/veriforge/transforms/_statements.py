@@ -852,7 +852,7 @@ def _extract_task_enable(
         if isinstance(child, Tree):
             if child.data in ("hierarchical_task_identifier", "hierarchical_identifier"):
                 ident = callbacks.build_hierarchical_identifier(child, source_file)
-                task_name = ident.name
+                task_name = ident.full_name
             elif child.data == "expression":
                 arguments.append(callbacks.build_expression(child, source_file))
         elif isinstance(child, Token) and "IDENTIFIER" in str(child.type):

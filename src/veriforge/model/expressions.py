@@ -43,6 +43,11 @@ class Identifier(Expression):  # cm:1e3f2c
     def __repr__(self) -> str:
         return f"Identifier({self.name!r})"
 
+    @property
+    def full_name(self) -> str:
+        """The complete path, retaining every hierarchical component."""
+        return ".".join([*self.hierarchy, self.name]) if self.hierarchy else self.name
+
     def to_dict(self) -> dict:
         d = super().to_dict()
         d["name"] = self.name

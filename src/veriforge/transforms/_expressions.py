@@ -700,7 +700,7 @@ def _build_const_function_call(
             if child.data == "constant_expression":
                 args.append(_build_const_expr_inner(child, source_file, callbacks))
             elif child.data in ("hierarchical_identifier", "hierarchical_function_identifier"):
-                name = _build_hierarchical_identifier(child, source_file).name
+                name = _build_hierarchical_identifier(child, source_file).full_name
     loc = _loc_from_tree(tree, source_file)
     return FunctionCall(name=name, arguments=args, loc=loc)
 
@@ -1438,7 +1438,7 @@ def _build_function_call(tree: Tree, source_file: str | None, callbacks: _Expres
                 name = str(child)
         elif isinstance(child, Tree):
             if child.data in ("hierarchical_identifier", "hierarchical_function_identifier"):
-                name = _build_hierarchical_identifier(child, source_file).name
+                name = _build_hierarchical_identifier(child, source_file).full_name
             elif child.data == "expression":
                 args.append(callbacks.build_expr_inner(child, source_file))
             elif child.data in ("list_of_arguments",):

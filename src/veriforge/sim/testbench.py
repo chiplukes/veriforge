@@ -17,6 +17,7 @@ from veriforge.model.design import Design, Module
 from veriforge.model.ports import PortDirection
 
 from .elaborate import (
+    _validate_hierarchical_calls,
     check_input_port_init,
     check_signed_declarations,
     expand_array_concat_operands,
@@ -215,6 +216,7 @@ class Simulator:  # cm:a5c8f4
             resolve_sv_imports(module, design)
             _resolve_typedef_widths(module)
             module = flatten_module(module, design=design)
+        _validate_hierarchical_calls(module)
         self._module = module
 
         # Resolve SV package imports on the flattened module (picks up any

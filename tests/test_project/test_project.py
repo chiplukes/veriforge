@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from veriforge import project
 from veriforge.__main__ import main as cli_main
 from veriforge.project import (
     build_testbench,
@@ -16,6 +17,38 @@ from veriforge.project import (
     parse_files,
 )
 from veriforge.sim.bench import AmbiguousDomainError, PlannerOverrides, TestbenchPlan
+
+
+@pytest.mark.parametrize("helper", ["_expressions.py", "_statements.py", "_functions_tasks.py"])
+def test_split_transform_changes_invalidate_saved_parse_cache(tmp_path, monkeypatch, helper):
+    package = tmp_path / "parser_package"
+    transforms = package / "transforms"
+    transforms.mkdir(parents=True)
+    (transforms / "tree_to_model.py").write_text("VERSION = 1\n")
+    helper_path = transforms / helper
+    helper_path.write_text("VERSION = 1\n")
+    monkeypatch.setattr(project, "__file__", str(package / "project.py"))
+    monkeypatch.setattr(project, "_parser_hash_cache", None)
+    source = tmp_path / "top.sv"
+    source.write_text("module top; endmodule")
+    cache = tmp_path / "cache"
+    builds = []
+    build_tree = project.VerilogParser.build_tree
+
+    def record_parse(self, *args, **kwargs):
+        builds.append(1)
+        return build_tree(self, *args, **kwargs)
+
+    monkeypatch.setattr(project.VerilogParser, "build_tree", record_parse)
+    for _ in range(2):
+        assert project.parse_files([source], cache_dir=cache).get_module("top") is not None
+    assert len(builds) == 1
+    old_key = next(cache.glob("*.pickle")).name
+    helper_path.write_text("VERSION = 2\n")
+    monkeypatch.setattr(project, "_parser_hash_cache", None)
+    assert project.parse_files([source], cache_dir=cache).get_module("top") is not None
+    assert len(builds) == 2
+    assert next(cache.glob("*.pickle")).name != old_key
 
 
 # ── Verilog source text for multi-file tests ──────────────────────────

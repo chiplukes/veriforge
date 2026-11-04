@@ -173,6 +173,7 @@ def _c_special(text: str, x: float) -> str:
 
 
 _SCOPE_ATTR = "__vf_scope"
+_LOCAL_SUBPROGRAM_NAME_ATTR = "__vf_local_subprogram_name"
 
 
 def mark_instance_scope(node: object, prefix: str) -> None:
@@ -203,7 +204,9 @@ def _substitute_scope(node: object, named: str, top: str, seen: set[int]) -> Non
     if id(node) in seen:
         return
     seen.add(id(node))
-    if isinstance(node, (FunctionDecl, TaskDecl)) or (isinstance(node, (SeqBlock, ParBlock)) and node.name):
+    if isinstance(node, (FunctionDecl, TaskDecl)):
+        named = f"{named}.{node.attributes.get(_LOCAL_SUBPROGRAM_NAME_ATTR, node.name)}"
+    elif isinstance(node, (SeqBlock, ParBlock)) and node.name:
         named = f"{named}.{node.name}"
     if isinstance(node, SystemTaskCall):
         if node.task_name.lower().rstrip("hbo") in _SCOPE_TASKS:

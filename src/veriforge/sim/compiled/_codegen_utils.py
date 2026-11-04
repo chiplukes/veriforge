@@ -138,6 +138,18 @@ def _safe_ident(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
+def _safe_callable_ident(name: str) -> str:
+    """Injectively encode qualified callables while keeping ordinary names.
+
+    Reserve the encoding prefix by encoding source names that already use it.
+    In particular, u.f, u_f, and an encoding-looking source name stay distinct.
+    """
+    prefix = "_vf_hier_"
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and not name.startswith(prefix):
+        return name
+    return prefix + name.encode("utf-8").hex()
+
+
 def _cy_u64_hex(val: int) -> str:
     """Format a 64-bit chunk as an unsigned C literal."""
     if val == 0:

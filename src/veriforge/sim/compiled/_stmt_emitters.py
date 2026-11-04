@@ -199,8 +199,19 @@ class _StmtEmittersMixin:
             body_copy = copy.deepcopy(task.body)
             local_names = {port.name for port in task.ports}
             self._remap_local_identifiers(body_copy, local_names, prefix)
-            self._record_call_guards(body_copy)
-            lines.extend(self._emit_stmt(body_copy, indent))
+            # These copied nodes die when the expansion returns. Their id()
+            # keys must not remain in caches and alias a later task's nodes.
+            guards = (self._call_guards, self._guard_conds, self._guard_reductions, self._guard_snapping)
+            py_cache = self._py_val_cache, self._py_mask_cache
+            self._call_guards, self._guard_conds = {}, set()
+            self._guard_reductions, self._guard_snapping = {}, set()
+            self._py_val_cache, self._py_mask_cache = {}, {}
+            try:
+                self._record_call_guards(body_copy)
+                lines.extend(self._emit_scoped(body_copy, indent))
+            finally:
+                self._call_guards, self._guard_conds, self._guard_reductions, self._guard_snapping = guards
+                self._py_val_cache, self._py_mask_cache = py_cache
 
         # Copy outputs back
         for local_name, lhs_expr in output_bindings:

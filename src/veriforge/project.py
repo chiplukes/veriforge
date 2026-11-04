@@ -53,7 +53,7 @@ _PARSER_INFRA_GLOBS = [
     "lark_file/verilog.lark",
     "verilog_parser.py",
     "preprocessor.py",
-    "transforms/tree_to_model.py",
+    "transforms/*.py",
     "model/*.py",
 ]
 

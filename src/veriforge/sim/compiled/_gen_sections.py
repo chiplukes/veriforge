@@ -21,7 +21,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _WORD_BITS,
     _PROCESS_LOOP_LIMIT,
     _safe_const_name,
-    _safe_ident,
+    _safe_callable_ident,
     _cy_u64_hex,
     _const_int,
 )
@@ -1469,7 +1469,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         for func in self._function_map.values():
             func: FunctionDecl
             prefix = f"__func_{func.name}"
-            safe_name = _safe_ident(func.name)
+            safe_name = _safe_callable_ident(func.name)
             ret_name = f"{prefix}.{func.name}"
             ret_sid = self._signal_map[ret_name]
             ret_w = self._signal_widths[ret_sid]

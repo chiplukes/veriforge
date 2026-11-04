@@ -52,7 +52,7 @@ from ..model.instances import DefParam, Instance
 from ..model.nets import Net, NetKind
 from ..model.parameters import Parameter
 from ..model.ports import Port, PortDirection
-from ..model.statements import BlockingAssign, ForLoop, IfStatement, ParBlock, SeqBlock
+from ..model.statements import BlockingAssign, ForLoop, IfStatement, ParBlock, SeqBlock, TaskEnable
 from ..model.sv_types import TypedefDecl
 from ..model.variables import Variable, VariableKind
 from ..semantics import const_div, const_mod, const_pow, const_shl
@@ -1287,7 +1287,11 @@ def _resolve_port_for_conn(conn, sub: Module, index: int) -> Port | None:
 
 def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str]) -> None:
     """Deep-copy and rename submodule logic into *flat*."""
+    n_cont = len(flat.continuous_assigns)
     n_always, n_initial = len(flat.always_blocks), len(flat.initial_blocks)
+    n_functions, n_tasks = len(flat.functions), len(flat.tasks)
+    functions = {func.name for func in sub.functions}
+    tasks = {task.name for task in sub.tasks}
     for ca in sub.continuous_assigns:
         # A continuous assign whose LHS is a bare dimensioned identifier
         # (`assign arr = ...;`) used to always be expanded here into N
@@ -1349,13 +1353,14 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
 
     # %m: record this instance's path on the copied display tasks (outer
     # levels prepend theirs; display_format.lower_display_args substitutes).
-    from .display_format import mark_instance_scope  # noqa: PLC0415
+    from .display_format import _LOCAL_SUBPROGRAM_NAME_ATTR, mark_instance_scope  # noqa: PLC0415
 
     for block in [*flat.always_blocks[n_always:], *flat.initial_blocks[n_initial:]]:
         mark_instance_scope(block, prefix)
 
     for func in sub.functions:
         func_copy = copy.deepcopy(func)
+        func_copy.attributes.setdefault(_LOCAL_SUBPROGRAM_NAME_ATTR, func.name)
         # Function-local names that must NOT be prefix-rewritten: the
         # function's own name (used as the return-value identifier in IEEE
         # 1364), its argument ports, and any locally declared variables.
@@ -1370,11 +1375,17 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
         outer_names = sub_signals - local_names
         if func_copy.body is not None and outer_names:
             _prefix_identifiers(func_copy.body, prefix, outer_names)
+        # The return variable has the function's name. Rename it together
+        # with the declaration while preserving its ports and other locals.
+        func_copy.name = f"{prefix}.{func.name}"
+        if func_copy.body is not None:
+            _rename_identifiers(func_copy.body, {func.name: func_copy.name})
         mark_instance_scope(func_copy, prefix)
         flat.functions.append(func_copy)
 
     for task in sub.tasks:
         task_copy = copy.deepcopy(task)
+        task_copy.attributes.setdefault(_LOCAL_SUBPROGRAM_NAME_ATTR, task.name)
         local_names = {task_copy.name}
         for p in task_copy.ports:
             local_names.add(p.name)
@@ -1383,8 +1394,53 @@ def _inline_logic(flat: Module, sub: Module, prefix: str, sub_signals: set[str])
         outer_names = sub_signals - local_names
         if task_copy.body is not None and outer_names:
             _prefix_identifiers(task_copy.body, prefix, outer_names)
+        task_copy.name = f"{prefix}.{task.name}"
         mark_instance_scope(task_copy, prefix)
         flat.tasks.append(task_copy)
+
+    for roots in (
+        flat.continuous_assigns[n_cont:],
+        flat.always_blocks[n_always:],
+        flat.initial_blocks[n_initial:],
+        flat.functions[n_functions:],
+        flat.tasks[n_tasks:],
+    ):
+        for root in roots:
+            _qualify_subprogram_calls(root, prefix, functions, tasks)
+
+
+# cm:d42f83
+def _qualify_subprogram_calls(root: VerilogNode, prefix: str, functions: set[str], tasks: set[str]) -> None:
+    """Bind local and already-flattened child calls to this instance."""
+    for node in _hierarchy_references(root):
+        if isinstance(node, FunctionCall) and node.name in functions:
+            node.name = f"{prefix}.{node.name}"
+        elif isinstance(node, TaskEnable) and node.task_name in tasks:
+            node.task_name = f"{prefix}.{node.task_name}"
+
+
+def _validate_hierarchical_calls(module: Module) -> None:
+    functions = {func.name for func in module.functions}
+    tasks = {task.name for task in module.tasks}
+    for node in _hierarchy_references(module):
+        if isinstance(node, FunctionCall):
+            if node.is_system or node.name.startswith("$"):
+                continue
+            name, declared, kind = node.name, functions, "function"
+        elif isinstance(node, TaskEnable):
+            name, declared, kind = node.task_name, tasks, "task"
+        else:
+            continue
+        if name not in declared and name.startswith(module.name + "."):
+            relative = name[len(module.name) + 1 :]
+            if relative in declared:
+                if isinstance(node, FunctionCall):
+                    node.name = relative
+                else:
+                    node.task_name = relative
+                continue
+        if name not in declared and ("." in name or "[" in name):
+            raise ValueError(f"Unresolved hierarchical {kind} {name!r} in module {module.name!r}")
 
 
 def _merge_typedefs(flat: Module, sub: Module) -> None:
@@ -1558,11 +1614,11 @@ def _fold_scope_indices(text: str, env: dict[str, int | str]) -> str:
     return "".join(parts) + text[cursor:]
 
 
-def _hierarchy_identifiers(root: VerilogNode) -> Iterable[Identifier]:
+def _hierarchy_references(root: VerilogNode) -> Iterable[Identifier | FunctionCall | TaskEnable]:
     pending = [root]
     while pending:
         node = pending.pop()
-        if isinstance(node, Identifier):
+        if isinstance(node, (Identifier, FunctionCall, TaskEnable)):
             yield node
         # Some type declarations expose resolved range descriptors among
         # their children; those are layout data, not expression AST nodes.
@@ -1573,23 +1629,32 @@ def _hierarchy_identifiers(root: VerilogNode) -> Iterable[Identifier]:
 def _resolve_hierarchy_indices(root: VerilogNode, env: dict[str, int | str]) -> VerilogNode:
     """Resolve constant index text without changing the input model.
 
-    Dynamic memory-field indices stay intact. Only roots whose identifiers
+    Dynamic memory-field indices stay intact. Only roots whose reference paths
     change are copied; immutable parsed index ASTs are cached, never values
     that could leak between parameter overrides or generate iterations.
     """
     updates = {}
-    for node in _hierarchy_identifiers(root):
-        name = _fold_scope_indices(node.name, env)
-        hierarchy = [_fold_scope_indices(part, env) for part in node.hierarchy] if node.hierarchy else node.hierarchy
-        if name != node.name or hierarchy != node.hierarchy:
-            updates[(node.name, tuple(node.hierarchy or ()))] = (name, hierarchy)
+    for node in _hierarchy_references(root):
+        original = node.task_name if isinstance(node, TaskEnable) else node.name
+        path = node.hierarchy if isinstance(node, Identifier) else None
+        name = _fold_scope_indices(original, env)
+        hierarchy = [_fold_scope_indices(part, env) for part in path] if path else path
+        if name != original or hierarchy != path:
+            updates[(type(node), original, tuple(path or ()))] = (name, hierarchy)
     if not updates:
         return root
     result = copy.deepcopy(root)
-    for node in _hierarchy_identifiers(result):
-        if update := updates.get((node.name, tuple(node.hierarchy or ()))):
-            node.name, hierarchy = update
-            node.hierarchy = list(hierarchy) if hierarchy is not None else None
+    for node in _hierarchy_references(result):
+        original = node.task_name if isinstance(node, TaskEnable) else node.name
+        path = node.hierarchy if isinstance(node, Identifier) else None
+        if update := updates.get((type(node), original, tuple(path or ()))):
+            name, hierarchy = update
+            if isinstance(node, TaskEnable):
+                node.task_name = name
+            else:
+                node.name = name
+            if isinstance(node, Identifier):
+                node.hierarchy = list(hierarchy) if hierarchy is not None else None
     return result
 
 

@@ -42,7 +42,7 @@ SHA-256 of the concatenated contents of all parser infrastructure files:
 lark_file/verilog.lark        # grammar rules
 verilog_parser.py             # parser wrapper
 preprocessor.py               # macro expansion
-transforms/tree_to_model.py   # tree → model transform
+transforms/*.py              # tree → model transform and split expression/statement helpers
 model/*.py                    # all model classes
 ```
 

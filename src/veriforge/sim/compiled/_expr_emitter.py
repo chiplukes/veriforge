@@ -35,7 +35,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _cy_hex,
     _cy_u64_hex,
     _const_int,
-    _safe_ident,
+    _safe_callable_ident,
     _BINARY_VALUE_OP,
     _COMPARISON_OPS,
     _NATURAL_WIDTH_OPS,
@@ -3352,7 +3352,7 @@ class _ExprEmitterMixin:
             else:
                 args.append(self._emit_expr(a, w))
                 args.append(self._emit_mask_expr(a, w))
-        safe_name = _safe_ident(call.name)
+        safe_name = _safe_callable_ident(call.name)
         return f"_user_func_{safe_name}(c, {', '.join(args)})" if args else f"_user_func_{safe_name}(c)"
 
     # ΓöÇΓöÇ Expression width computation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
