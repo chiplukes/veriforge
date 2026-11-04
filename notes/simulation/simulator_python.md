@@ -312,6 +312,17 @@ assignments with no sensitivity set. Run
 `uv run python benchmarks/reference_propagation.py --assigns 256 --cycles 200`
 to compare sparse and dense reference activity with VM final state.
 
+Continuous-target change detection includes indexed part-selects (`[base +: width]`
+and `[base -: width]`), including those nested in concatenations. The scheduler
+reads their value and X mask before and after each write using the expression
+evaluator, then wakes readers of the base vector. This is required for generated
+slice drivers to propagate into whole-vector assigns, always-combinational
+blocks, and submodule ports; without it, the vector updates while its readers
+can remain at X. Coverage lives in
+[test_partial_assign_fanout.py](../../tests/test_sim/test_partial_assign_fanout.py),
+including the reported HDL fixture, both indexed-select directions, non-zero
+bases, wide values, mask-only changes, and both reference dispatch paths.
+
 ---
 
 ## Testbench API (`testbench.py`)

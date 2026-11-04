@@ -1214,6 +1214,12 @@ class Scheduler:  # cm:9a7f2c
                 mask = (current.mask >> lsb) & ((1 << width) - 1)
                 return Value(val, width=width, mask=mask)
             return None
+        if isinstance(lhs, PartSelect):
+            # Indexed continuous targets must participate in change detection
+            # too: otherwise their writes never wake vector/port readers.
+            # Reuse select evaluation for masks, signed/non-zero bases, and
+            # partially out-of-range slices rather than duplicating it here.
+            return self.evaluator.eval(lhs, self.ctx)
         if isinstance(lhs, Concatenation):
             # A concat-target LHS (`{a, b} = ...`, e.g. an instance output
             # port connected to `{tuser, tlast}`) previously fell through
