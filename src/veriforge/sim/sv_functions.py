@@ -369,7 +369,8 @@ def _declarations(
             atom = {**INTEGER_ATOM_WIDTHS, "time": 64}.get(kind or "")
             if atom is not None:
                 width = Range(Literal(atom - 1, width=32), Literal(0, width=32))
-        dims = _dims(width, list(decl.dimensions), decl.packed_dim_count)
+        packed_count = len(decl.dimensions) if decl.packed_only else decl.packed_dim_count
+        dims = _dims(width, list(decl.dimensions), packed_count)
         pairs = []
         for rng in dims:
             left, right = const_int(rng.msb, env), const_int(rng.lsb, env)
@@ -377,7 +378,7 @@ def _declarations(
                 break
             pairs.append((left, right))
         else:
-            n_unpacked = len(decl.dimensions) - decl.packed_dim_count
+            n_unpacked = len(decl.dimensions) - packed_count
             packed = 1
             for left, right in pairs[n_unpacked:]:
                 packed *= abs(left - right) + 1

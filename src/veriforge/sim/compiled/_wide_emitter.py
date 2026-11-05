@@ -5316,14 +5316,12 @@ class _WideEmitterMixin:
 
         # ── PartSelect (constant or dynamic base) ───────────────────────────
         if et is PartSelect:
-            if not isinstance(expr.target, Identifier):
-                return None
-            tname = self._identifier_name(expr.target)
+            tname = self._identifier_name(expr.target) if isinstance(expr.target, Identifier) else None
             width_v = _const_int(expr.width, self._param_env)
             if width_v is None:
                 return None  # variable part-select width — extremely rare, not supported
             base_v = _const_int(expr.base, self._param_env)
-            sig_base = self._signal_bases.get(tname, 0)
+            sig_base = self._signal_bases.get(tname, 0) if tname is not None else 0
             if base_v is not None:
                 # Static base — compile-time lsb
                 if expr.direction == "+:":
@@ -5340,9 +5338,12 @@ class _WideEmitterMixin:
                     lsb_expr = f"<int>({base_code}) - {adj}" if adj else f"<int>({base_code})"
             src_w = self._expr_width(expr.target)
             n_src = (src_w + 63) // 64
-            n_dst = (width_v + 63) // 64
+            n_dst = min(n_words, (width_v + 63) // 64)
             tslot = self._alloc_scratch()
-            lines = self._emit_wide_expr_to_scratch(expr.target, tslot, n_words, src_w, indent)
+            # A memory word (or another expression) can be wider than this
+            # slice's destination. Populate every source word the extract
+            # helper reads, just as the RangeSelect branch above does.
+            lines = self._emit_wide_expr_to_scratch(expr.target, tslot, n_src, src_w, indent)
             if lines is None:
                 self._free_scratch(tslot)
                 return None

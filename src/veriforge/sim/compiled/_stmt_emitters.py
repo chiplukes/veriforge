@@ -331,6 +331,20 @@ class _StmtEmittersMixin:
                         elem_lhs = BitSelect(target=Identifier(name), index=Literal(k))
                         lines.extend(self._emit_mem_write(elem_lhs, part, indent, is_nba=is_nba))
                     return lines
+                if (
+                    lhs_mid is not None
+                    and self._mem_info[lhs_mid][0] > _WORD_BITS
+                    and not (isinstance(rhs, Literal) and not rhs.is_x and not rhs.is_z)
+                ):
+                    # Evaluate a computed whole-array RHS once at the full
+                    # destination width, then split it into memory words.
+                    # Per-word scalar slicing cannot carry values/masks
+                    # above bit 63, or safely handle overlapping sources.
+                    _elem_w, depth = self._mem_info[lhs_mid]
+                    parts = [BitSelect(Identifier(name), Literal(k)) for k in reversed(range(depth))]
+                    wide_lines = self._emit_concat_lhs_scratch_rhs(Concatenation(parts), rhs, indent, is_nba=is_nba)
+                    if wide_lines is not None:
+                        return wide_lines
                 if lhs_mid is not None and (
                     (isinstance(rhs, Literal) and not rhs.is_x and not rhs.is_z)
                     or self._mem_info[lhs_mid][0] <= _WORD_BITS

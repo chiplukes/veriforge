@@ -31,6 +31,7 @@ The parser uses [Lark](https://github.com/lark-parser/lark), with Verilog 2005 B
 
 ### Testing
 
+- When fixing a bug, investigate whether it belongs to a broader family of bugs. Check related code paths and simulator engines, and expand the fix and regression coverage as needed.
 - Check for related test files in `/tests` when modifying code
 - When running tests, use `uv run pytest <path> --tb=no -q` for pass/fail summary (minimal output)
 - Use verbose flags (`-v`, `--tb=short`) only when debugging specific failures

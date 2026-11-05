@@ -27,6 +27,7 @@ from .elaborate import (
     _resolve_typedef_widths,
 )
 from .ascending import flatten_unpacked_arrays, lower_ascending_ranges, lower_memory_bases, lower_signed_indices
+from .packed import lower_packed_dimensions
 from .scheduler import Scheduler
 from .display_format import lower_display_args
 from .reals import from_bits, lower_reals, to_bits
@@ -181,6 +182,7 @@ class Simulator:  # cm:a5c8f4
         "_memory_lows",
         "_memory_shapes",
         "_module",
+        "_packed_reversals",
         "_pre_step_callbacks",
         "_reals",
         "_run_cycles_clock_ready",
@@ -235,6 +237,8 @@ class Simulator:  # cm:a5c8f4
         # sign-extended (flattening's per-dimension range check used to see the
         # untruncated value and drop a valid write).
         lower_signed_indices(module)
+        self._packed_reversals: dict[str, int] = {}
+        lower_packed_dimensions(module, self._packed_reversals)  # before range/array normalization
         # Every constant packed range becomes [w-1:0] (selects remapped): the
         # engines' own lsb-base handling misread negative indices (`m[i][-1]` of
         # `reg [61:-2] m []`, compiled).
@@ -616,7 +620,8 @@ class Simulator:  # cm:a5c8f4
         lows = self._memory_lows.get(mem)
         shape = self._memory_shapes.get(mem)
         indices = [int(i) for i in _INDEX.findall(match.group(2))]
-        if (lows is None and shape is None) or len(indices) != 1:
+        reversal = self._packed_reversals.get(mem)
+        if (lows is None and shape is None and reversal is None) or len(indices) != 1:
             return name
         if shape is not None:
             flat = indices[0]
@@ -626,13 +631,15 @@ class Simulator:  # cm:a5c8f4
                 indices.insert(0, i)
         if lows is not None and len(lows) == len(indices):
             indices = [i + low for i, low in zip(indices, lows, strict=True)]
+        if reversal is not None:
+            indices[0] = reversal - indices[0]
         return mem + "".join(f"[{i}]" for i in indices)
 
     def _slot_name(self, name: str) -> str:
         """``m[i]`` / ``m[i][j]`` with declared addresses -> the engines' slot
         name, for memories `lower_memory_bases` rebased or
         `flatten_unpacked_arrays` flattened (``m [1:4]``: ``m[4]`` is slot 3)."""
-        if not name.endswith("]") or not (self._memory_lows or self._memory_shapes):
+        if not name.endswith("]") or not (self._memory_lows or self._memory_shapes or self._packed_reversals):
             return name
         match = _ELEMENT_NAME.match(name)
         if match is None:
@@ -640,9 +647,14 @@ class Simulator:  # cm:a5c8f4
         mem = match.group(1)
         lows = self._memory_lows.get(mem)
         shape = self._memory_shapes.get(mem)
-        if lows is None and shape is None:
+        reversal = self._packed_reversals.get(mem)
+        if lows is None and shape is None and reversal is None:
             return name
         indices = [int(i) for i in _INDEX.findall(match.group(2))]
+        if reversal is not None:
+            if len(indices) != 1:
+                return name
+            indices[0] = reversal - indices[0]
         if lows is not None:
             if len(indices) != len(lows):
                 return name

@@ -20,6 +20,9 @@ See also: [simulator_python.md](simulator_python.md),
 for anyone writing custom endpoint or testbench logic.**,
 [cosim.md](cosim.md) — cross-simulator validation against Icarus Verilog.
 
+Packed array indexing and its shared normalization are described in
+[packed_arrays.md](packed_arrays.md).
+
 ## Engine Comparison
 
 | | Reference | VM | VM-Fast | Compiled |

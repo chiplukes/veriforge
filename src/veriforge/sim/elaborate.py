@@ -769,6 +769,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                 signed=net.signed,
                 dimensions=net.dimensions,
                 packed_dim_count=net.packed_dim_count,
+                packed_only=net.packed_only,
                 initial_value=net.initial_value,
             )
         )
@@ -783,6 +784,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                 signed=var.signed,
                 dimensions=var.dimensions,
                 packed_dim_count=var.packed_dim_count,
+                packed_only=var.packed_only,
                 initial_value=var.initial_value,
                 type_name=var.type_name,
             )
@@ -820,6 +822,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                         signed=port.signed,
                         dimensions=port.dimensions,
                         packed_dim_count=port.packed_dim_count,
+                        packed_only=port.packed_only,
                         initial_value=port_initial_value,
                     )
                 )
@@ -832,6 +835,7 @@ def _create_prefixed_signals(flat: Module, sub: Module, prefix: str) -> None:
                     signed=port.signed,
                     dimensions=port.dimensions,
                     packed_dim_count=port.packed_dim_count,
+                    packed_only=port.packed_only,
                     initial_value=port_initial_value,
                 )
             )
@@ -1222,7 +1226,11 @@ def _wire_port_connections(flat: Module, inst: Instance, sub: Module, prefix: st
         child_id = Identifier(f"{prefix}.{port.name}")
         # Deep-copy the parent expression so we don't share AST nodes
         parent_expr = copy.deepcopy(conn.expression)
-        pairs = _expand_port_connection_pairs(child_id, parent_expr, getattr(port, "dimensions", []))
+        # Packed ports connect as a single vector, even when the parent
+        # expression is a slice or uses a different packed shape. Only
+        # genuine unpacked address dimensions connect element by element.
+        unpacked = [] if port.packed_only else port.dimensions[port.packed_dim_count :]
+        pairs = _expand_port_connection_pairs(child_id, parent_expr, unpacked)
 
         if port.direction in (PortDirection.INPUT, PortDirection.INOUT):
             # Parent drives child: assign child = parent_expr
@@ -1537,6 +1545,7 @@ def _flatten_interface_instances(flat: Module, intf_instances: list[tuple[str, o
                     signed=net.signed,
                     dimensions=net.dimensions,
                     packed_dim_count=net.packed_dim_count,
+                    packed_only=net.packed_only,
                 )
             )
         for var in intf.variables:
@@ -1548,6 +1557,7 @@ def _flatten_interface_instances(flat: Module, intf_instances: list[tuple[str, o
                     signed=var.signed,
                     dimensions=var.dimensions,
                     packed_dim_count=var.packed_dim_count,
+                    packed_only=var.packed_only,
                 )
             )
         # Copy continuous assigns with prefixed identifiers
