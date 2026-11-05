@@ -426,21 +426,26 @@ _LEFT_WIDTH_BINARY = frozenset({"<<", ">>", "<<<", ">>>"})
 
 
 # cm:e7ddf7
-def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[str, int] | None = None) -> int:
+def expr_width(
+    expr: Expression,
+    width_of: Callable[[str], int],
+    env: Mapping[str, int] | None = None,
+    *,
+    function_width_of: Callable[[str], int | None] | None = None,
+) -> int:
     """Self-determined bit width of *expr* per IEEE 1364-2005 §5.4.1 / Table 5-22.
 
     ``width_of(name)`` resolves a (possibly hierarchically-prefixed) signal
     name to its declared width — each engine keeps its own symbol table and
     passes the lookup in rather than exposing it to this module.
 
-    Note: multiplication's self-determined width is the *sum* of operand
-    widths (Table 5-22), not `max` — this only matters when `*` is
-    genuinely unconstrained; an enclosing context-determined operator
-    narrows it regardless (that resizing is the caller's responsibility,
-    not this function's — see `sim/evaluator.py:_expr_self_width`'s
-    docstring for the distinction between this rule and the "floor" used
-    when narrowing a multiply feeding a shift).
+    ``function_width_of`` optionally resolves declared user-function return
+    widths. Multiplication uses the maximum operand width (Table 5-22).
     """
+
+    def operand_width(operand: Expression) -> int:
+        return expr_width(operand, width_of, env, function_width_of=function_width_of)
+
     if isinstance(expr, Literal):
         if expr.width is None and expr.signed and isinstance(expr.value, int) and expr.value > 0:
             # An unsized decimal >= 2**31 needs a sign-guard bit (see
@@ -457,26 +462,26 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
     if isinstance(expr, UnaryOp):
         if expr.op in _ONE_BIT_UNARY:
             return 1
-        return expr_width(expr.operand, width_of, env)
+        return operand_width(expr.operand)
     if isinstance(expr, BinaryOp):
         if expr.op in _ONE_BIT_BINARY:
             return 1
         if expr.op in _LEFT_WIDTH_BINARY:
-            return expr_width(expr.left, width_of, env)
-        left_w = expr_width(expr.left, width_of, env)
+            return operand_width(expr.left)
+        left_w = operand_width(expr.left)
         if expr.op == "**":
             return left_w  # Table 5-22: L(i)
         # `*` too is max(L(i), L(j)) -- it used to be the sum, so `a * b` of
         # two 8-bit regs printed 16 bits and `(a * b) >> 4` kept the carry
         # (2026-10-10, Icarus-checked).
-        return max(left_w, expr_width(expr.right, width_of, env))
+        return max(left_w, operand_width(expr.right))
     if isinstance(expr, TernaryOp):
-        return max(expr_width(expr.true_expr, width_of, env), expr_width(expr.false_expr, width_of, env))
+        return max(operand_width(expr.true_expr), operand_width(expr.false_expr))
     if isinstance(expr, Concatenation):
-        return sum(expr_width(p, width_of, env) for p in expr.parts)
+        return sum(operand_width(p) for p in expr.parts)
     if isinstance(expr, Replication):
         count = const_int(expr.count, env)
-        value_w = expr_width(expr.value, width_of, env)
+        value_w = operand_width(expr.value)
         return (count if count is not None else 1) * value_w
     if isinstance(expr, BitSelect):
         return 1
@@ -492,16 +497,20 @@ def expr_width(expr: Expression, width_of: Callable[[str], int], env: Mapping[st
     if isinstance(expr, FunctionCall):
         name = expr.name.lower()
         if name in ("$signed", "$unsigned", "$__2state") and expr.arguments:
-            return expr_width(expr.arguments[0], width_of, env)
+            return operand_width(expr.arguments[0])
         if name == "$__vf_real" and expr.arguments:  # (sim/reals.py)
             op = expr.arguments[0]
             return 1 if isinstance(op, Literal) and op.value in (7, 8, 9) else 64
+        if function_width_of is not None and not expr.name.startswith("$"):
+            declared = function_width_of(expr.name)
+            if declared is not None:
+                return declared
         return 32
     if isinstance(expr, Mintypmax):
-        return expr_width(expr.typ_val, width_of, env)
+        return operand_width(expr.typ_val)
     if isinstance(expr, WidthCast):
         cast_w = const_int(expr.width, env)
-        return cast_w if cast_w is not None else expr_width(expr.operand, width_of, env)
+        return cast_w if cast_w is not None else operand_width(expr.operand)
     return 32
 
 

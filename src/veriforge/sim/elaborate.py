@@ -988,7 +988,11 @@ def _pre_apply_param_overrides(
                 try:
                     val = _eval_const_expr(value, resolve_env)
                     if isinstance(val, int):
-                        literal_width = _resolved_param_literal_width(param, _build_param_env(sub))
+                        literal_width = (
+                            _resolved_param_literal_width(param, _build_param_env(sub))
+                            if param.width is not None
+                            else _constant_expression_width(value, resolve_env)
+                        )
                         value = Literal(int(val), width=literal_width)
                     elif isinstance(val, str):
                         value = StringLiteral(val)
@@ -1021,9 +1025,10 @@ def _resolved_param_literal_width(param: Parameter, env: dict[str, int | str]) -
         # In the parameter's own (flattened instance) scope: an inner
         # `logic [N*8-1:0] P` refers to its instance's `N` (it fell back to
         # the override literal's width -- 47 bits for 48'h6050...).
-        from .scheduler import _scoped_env  # noqa: PLC0415
-
-        scoped = _scoped_env(param.name, env)
+        prefix = param.name.rpartition(".")[0]
+        if prefix:
+            prefix += "."
+        scoped = {**env, **{k[len(prefix) :]: v for k, v in env.items() if prefix and k.startswith(prefix)}}
         try:
             msb_val = _eval_const_expr(param.width.msb, scoped)
             lsb_val = _eval_const_expr(param.width.lsb, scoped)
@@ -1032,9 +1037,58 @@ def _resolved_param_literal_width(param: Parameter, env: dict[str, int | str]) -
         if isinstance(msb_val, int) and isinstance(lsb_val, int):
             return abs(msb_val - lsb_val) + 1
         return None
-    if isinstance(param.default_value, Literal):
-        return param.default_value.width
-    return None
+    if param.default_value is None:
+        return None
+    return _constant_expression_width(param.default_value, env, param.name.rpartition(".")[0])
+
+
+# cm:3e8a91
+def _constant_expression_width(expr: Expression, env: dict[str, int | str], scope: str = "") -> int | None:
+    """Preserve a constant's expression type, including leading zero bits.
+
+    Parameter widths are recorded separately from their integer values so
+    aliases and folded instance bindings retain the original type width.
+    """
+    from ..semantics import const_int, expr_width  # noqa: PLC0415
+
+    prefix = f"{scope}." if scope else ""
+    if prefix and not isinstance(expr, Literal):
+        env = {**env, **{k[len(prefix) :]: v for k, v in env.items() if k.startswith(prefix)}}
+
+    def width_of(name: str) -> int:
+        for candidate in (prefix + name, name) if prefix else (name,):
+            width = env.get(f"$bits:{candidate}")
+            if isinstance(width, int):
+                return width
+        raise ValueError(f"Unresolved constant width: {name}")
+
+    def function_width(name: str) -> int | None:
+        for candidate in (prefix + name, name) if prefix else (name,):
+            width = _user_func_return_width(candidate, env)
+            if width is not None:
+                return width
+        raise ValueError(f"Unresolved constant function width: {name}")
+
+    try:
+        # The general width helper permits approximate sizes for unresolved
+        # bounds. A folded constant must wait for its exact type instead,
+        # including bounds in an unselected ternary branch.
+        for node in expr.walk():
+            bounds = []
+            if isinstance(node, Replication):
+                bounds = [node.count]
+            elif isinstance(node, RangeSelect):
+                bounds = [node.msb, node.lsb]
+            elif isinstance(node, PartSelect):
+                bounds = [node.width]
+            if any(const_int(bound, env) is None for bound in bounds):
+                return None
+        width = expr_width(expr, width_of, env, function_width_of=function_width)
+        if isinstance(expr, Literal) and expr.width is None and isinstance(expr.value, int):
+            width = max(width, expr.value.bit_length())
+        return width
+    except (ValueError, TypeError):
+        return None
 
 
 def parameter_signal_width(param: Parameter, env: dict[str, int | str], value: int | str | None = None) -> int:
@@ -1176,7 +1230,11 @@ def _apply_param_overrides(
             try:
                 val = _eval_const_expr(value, env)
                 if isinstance(val, int):
-                    literal_width = _resolved_param_literal_width(param, sub_env)
+                    literal_width = (
+                        _resolved_param_literal_width(param, sub_env)
+                        if param.width is not None or param.name not in override_map
+                        else _constant_expression_width(value, resolve_env)
+                    )
                     value = Literal(int(val), width=literal_width)
                 elif isinstance(val, str):
                     value = StringLiteral(val)
@@ -1920,8 +1978,16 @@ def _user_func_return_width(func_name: str, env: dict[str, int | str]) -> int | 
     if not isinstance(user_funcs, dict):
         return None
     func = user_funcs.get(func_name)
-    if func is None or func.return_range is None:
+    if func is None:
         return None
+    if func.return_range is None:
+        from ..model.functions import unranged_return_width  # noqa: PLC0415
+
+        return unranged_return_width(func.return_kind)
+    prefix = func.name.rpartition(".")[0]
+    if prefix:
+        prefix += "."
+        env = {**env, **{k[len(prefix) :]: v for k, v in env.items() if k.startswith(prefix)}}
     try:
         msb = _eval_const_expr(func.return_range.msb, env)
         lsb = _eval_const_expr(func.return_range.lsb, env)
@@ -2269,7 +2335,7 @@ def _build_param_env(module: Module, overrides: dict[str, int] | None = None) ->
     if module_funcs:
         env["__functions__"] = {f.name: f for f in module_funcs}
 
-    # Iterate to a fixed point: parameter expressions may forward-reference
+    # Iterate values and widths to a fixed point: parameters may forward-reference
     # later-declared params (e.g. M_ID_WIDTH = S_ID_WIDTH + $clog2(S_COUNT)
     # where S_COUNT is declared after M_ID_WIDTH).  Keep retrying any params
     # that failed to evaluate until no more progress is made.
@@ -2290,11 +2356,22 @@ def _build_param_env(module: Module, overrides: dict[str, int] | None = None) ->
                 for k, v in env.items():
                     if k.startswith(prefix):
                         local_env[k[len(prefix) :]] = v
+                    elif k.startswith(f"$bits:{prefix}"):
+                        local_env[f"$bits:{k[len('$bits:') + len(prefix) :]}"] = v
             else:
                 local_env = env
-            try:
-                env[p.name] = _eval_const_expr(p.default_value, local_env)
+            width = _resolved_param_literal_width(p, env)
+            if width is not None and env.get(f"$bits:{p.name}") != width:
+                env[f"$bits:{p.name}"] = width
+                local_env[f"$bits:{p.name.rsplit('.', 1)[-1]}"] = width
                 progress = True
+            try:
+                value = _eval_const_expr(p.default_value, local_env)
+                if p.name not in env or env[p.name] != value:
+                    env[p.name] = value
+                    progress = True
+                if width is None:
+                    still_pending.append(p)
             except (ValueError, TypeError):
                 # Try evaluating as a struct assignment pattern
                 if isinstance(p.default_value, AssignmentPattern):

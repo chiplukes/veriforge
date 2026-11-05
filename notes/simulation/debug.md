@@ -344,6 +344,31 @@ code then evaluates it in a scope where its dependencies aren't visible and
 falls back to `X` — which propagates through every width expression that
 references it.
 
+Also check the parameter's runtime width, even when its integer value is
+correct. The 4x4 AXI crossbar exposed this with a 128-bit function result
+holding four concatenated 32-bit base addresses. Its highest set bit was
+bit 121, so sizing the parameter from `value.bit_length()` made it 122
+bits. The fourth address select `[96 +: 32]` then read six X bits and
+produced a decode error (`BRESP=3`) for an otherwise valid address.
+
+Constant folding now preserves the expression's width separately from its
+integer value. Shared width inference accepts a function-return lookup;
+the parameter environment records `$bits:name` metadata and resolves value
+and width dependencies together, including forward aliases. Computed
+instance overrides use the binding expression's width unless the receiving
+parameter has an explicit range. Explicit ranges and function return ranges
+resolve in their instance scope, so a top-level `W` cannot replace an inner
+instance's `W`.
+
+[Parameter expression regressions](../../tests/test_sim/test_parameter_expression_width.py)
+cover 16-bit, 96-bit, and 128-bit results, function calls, ternaries,
+replications, operators, forward aliases, nested hierarchy, `$bits`, and
+computed overrides on all simulator modes. The slow 4x4 crossbar bench
+checks the complete write/read path through all 16 routes.
+Independent Icarus comparisons cover 20 width controls. Their declarations
+are ordered by dependency because Icarus rejects forward parameter
+references; the VeriForge regressions exercise forward references directly.
+
 If you find a forward-reference issue (param `B` depends on `A`, but `A` is
 declared after `B`), `_build_param_env` must iterate to a fixed point.
 
