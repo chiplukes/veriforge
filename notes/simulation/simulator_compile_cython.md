@@ -799,9 +799,28 @@ required reads solely because their clocks are idle.
 | `VERIFORGE_COMPILE_SNAPSHOTS` | `needed` | `all` copies every scalar slot and wide signal word at each snapshot |
 | `VERIFORGE_COMPILE_SPLIT` | `0` | `1` enables experimental multi-file generation for sufficiently large designs |
 | `VERIFORGE_COMPILE_JOBS` | `4` | Maximum concurrent C object jobs, also bounded by sources, CPUs, and memory |
+| `VERIFORGE_COMPILE_TIMEOUT` | `3600` | Whole-build timeout in seconds; `0` disables the deadline |
 | `VERIFORGE_COMPILE_WORKER_MEMORY_MB` | `1024` | Estimated memory required per C object job |
 | `VERIFORGE_COMPILE_MEMORY_MB` | Half available RAM | Optional total memory budget for one build; limited by available RAM |
 | `VERIFORGE_COMPILE_SHARE_PROCESSES` | `0` | `1` shares compatible scalar process implementations |
+
+The build deadline covers the compiler subprocess, including Cython
+translation, C compilation, and linking. It uses elapsed monotonic wall
+time and keeps reporting progress while waiting. The former fixed
+600-second limit could stop a healthy cold full-IP build taking about
+35 minutes. For a longer build, set the timeout in the calling shell or
+project launch script; `uv sync` does not overwrite environment settings:
+
+```powershell
+$env:VERIFORGE_COMPILE_TIMEOUT = "7200"
+uv run python your_simulation.py
+```
+
+On a timeout, the build process is killed; on Windows its compiler child
+processes are terminated with it. Timeout changes do not change binary
+cache keys, so increasing the allowance does not discard a successful
+cached build. This setting changes how long a build may run, not its
+compilation speed.
 
 Parallel object scheduling currently supports the Unix compiler loop, including
 GCC/Clang. Custom compile loops such as MSVC retain serial compilation. Cython

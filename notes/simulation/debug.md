@@ -376,6 +376,27 @@ declared after `B`), `_build_param_env` must iterate to a fixed point.
 
 ## 11. Comparing engines
 
+For function-loop mismatches, inspect the declarations of loop and block
+locals as well as their values. In the `bitlen16` repro, the compiled
+engine treated a function's undeclared-at-model-level `for (int i=0; ...)`
+iterator as one bit when emitting `n[i]`. The loop itself reached 16, but
+the select saw `i & 1`, repeatedly testing bits 0 and 1. Inputs
+`0,1,2,3,5,8` therefore produced `0,15,16,16,15,0` instead of
+`0,1,2,2,3,4`.
+
+`materialize_process_locals` now creates explicit scoped declarations for
+function/task loop and block locals too. These remain in the subprogram's
+local declaration list, retaining width and signedness and giving nested
+same-named iterators independent storage. Process locals continue to use
+module declarations. This shared normalization runs before selecting an
+engine, so dynamic reads and writes, arithmetic, and wide function bodies
+use consistent metadata.
+
+[Function-local regressions](../../tests/test_sim/test_function_loop_locals.py)
+include the original memory-backed bit-length example, 96-bit arguments,
+bit/part-select writes, X masks, signed/unsigned arithmetic, lexical
+shadowing, block locals, and task/process controls.
+
 When you're not sure whether a discrepancy is a VM bug or a real RTL bug,
 rerun the same test on the reference engine:
 

@@ -232,13 +232,15 @@ def expand_array_concat_operands(module: Module) -> None:
             stream_concat.parts = expanded
 
 
+# cm:6b2a90
 def materialize_process_locals(module: Module) -> Module:
-    """Create unique module-level temporaries for declared process-local loop vars.
+    """Create scoped declarations for process and subprogram local variables.
 
     SystemVerilog loop headers can declare a process-local iterator
-    (for example ``for (int i = 0; ...)``). The simulator currently models
-    runtime state as module signals, so these locals need unique synthesized
-    names before elaboration to avoid collisions across instances/processes.
+    (for example ``for (int i = 0; ...)``). Locals need unique declarations
+    before engine selection to retain their type and avoid scope collisions.
+    Process locals become module declarations; function/task locals remain
+    in the corresponding subprogram's local declaration list.
     """
     existing_names = _submodule_signal_names(module)
     counter = 0
@@ -248,6 +250,20 @@ def materialize_process_locals(module: Module) -> Module:
 
     for idx, block in enumerate(module.initial_blocks):
         counter = _materialize_stmt_process_locals(module, block.body, f"ib{idx}", existing_names, counter)
+
+    # Keep subprogram locals in their own declarations, not module state.
+    # Besides preserving lexical shadowing, this gives every engine the
+    # iterator's 32-bit width and signedness. An undeclared Cython local
+    # otherwise fell through to a one-bit width when used in n[i].
+    for idx, subprogram in enumerate([*module.functions, *module.tasks]):
+        local_scope = Module(module.name)
+        names = existing_names | {
+            subprogram.name,
+            *(p.name for p in subprogram.ports),
+            *(v.name for v in subprogram.locals),
+        }
+        counter = _materialize_stmt_process_locals(local_scope, subprogram.body, f"tf{idx}", names, counter)
+        subprogram.locals.extend(local_scope.variables)
 
     return module
 

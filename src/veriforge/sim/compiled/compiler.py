@@ -56,6 +56,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import platform
 import shutil
@@ -97,7 +98,25 @@ def _report_progress(message: str) -> None:
 
 
 def _report_build_progress(elapsed: float) -> None:
-    _report_progress(f"  ... still compiling (C compiler), {elapsed:.0f}s elapsed")
+    _report_progress(f"  ... still compiling (Cython/C compiler), {elapsed:.0f}s elapsed")
+
+
+# cm:3d7f4b
+def _build_timeout() -> float:
+    """Whole-build deadline in seconds; zero explicitly disables the deadline.
+
+    Timeout policy does not affect generated code or binary cache identity.
+    """
+    raw = get_env("COMPILE_TIMEOUT", "3600")
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "VERIFORGE_COMPILE_TIMEOUT must be a finite nonnegative number of seconds (0 disables it)"
+        ) from None
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("VERIFORGE_COMPILE_TIMEOUT must be a finite nonnegative number of seconds (0 disables it)")
+    return timeout
 
 
 class _nullctx:
@@ -242,6 +261,9 @@ def _find_extension(directory: str, module_name: str) -> str | None:
 
 class CythonCompiler:  # cm:3d7f4a
     """Compile .pyx source strings to importable Python extension modules.
+
+    Builds have a one-hour wall-clock timeout by default. Set
+    ``VERIFORGE_COMPILE_TIMEOUT`` to seconds, or ``0`` for no timeout.
 
     Args:
         cache_dir: Directory for compiled extension cache.
@@ -679,6 +701,8 @@ if _failure:
 
         cmd = [sys.executable, "setup.py", "build_ext", "--inplace", "--build-temp", "t", "--build-lib", "l"]
         log.debug("Running: %s in %s", cmd, build_dir)
+        total_timeout = _build_timeout()
+        started = time.monotonic()
 
         # On Windows, MSVC (cl.exe) is a child of setup.py and inherits the
         # stdout/stderr pipes.  When subprocess.run's timeout fires it kills
@@ -697,9 +721,7 @@ if _failure:
         except FileNotFoundError:
             raise RuntimeError("Failed to run build command. Ensure Python is accessible.") from None
 
-        total_timeout = 600  # cm:3d7f4b
         poll_interval = 5.0
-        elapsed = 0.0
         try:
             # Poll in short slices instead of one blocking communicate(...,
             # timeout=total_timeout) call, so a large design's build prints
@@ -709,13 +731,16 @@ if _failure:
             # default). communicate() is documented safe to call again after
             # a TimeoutExpired -- it just keeps waiting on the same pipes.
             while True:
-                remaining = total_timeout - elapsed
+                elapsed = time.monotonic() - started
+                remaining = total_timeout - elapsed if total_timeout else poll_interval
+                if total_timeout and remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, total_timeout)
                 try:
                     stdout, stderr = proc.communicate(timeout=min(poll_interval, remaining))
                     break
                 except subprocess.TimeoutExpired:
-                    elapsed += poll_interval
-                    if elapsed >= total_timeout:
+                    elapsed = time.monotonic() - started
+                    if total_timeout and elapsed >= total_timeout:
                         raise
                     _report_build_progress(elapsed)
         except subprocess.TimeoutExpired:
@@ -729,9 +754,9 @@ if _failure:
             proc.kill()
             proc.wait()
             raise RuntimeError(
-                f"Cython compilation timed out after {total_timeout} s in {build_dir}. "
-                "The generated module may be too large for the C compiler. "
-                "Use engine='vm' for complex designs."
+                f"Cython compilation timed out after {total_timeout:g} s in {build_dir}. "
+                "Increase VERIFORGE_COMPILE_TIMEOUT for large designs (0 disables the timeout), "
+                "or use engine='vm-fast'."
             ) from None
 
         if proc.returncode != 0:
