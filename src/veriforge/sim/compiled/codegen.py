@@ -190,6 +190,23 @@ def _memory_shape_layout(
     return elem_width, depth, mem_layout
 
 
+# Memory file tasks: the reference executor runs them and generated code
+# never evaluates their arguments (see `_emit_system_task`).
+_MEMORY_FILE_TASKS = frozenset({"$readmemh", "$readmemb", "$writememh", "$writememb"})
+
+
+def _task_value_arguments(stmt: TaskEnable | SystemTaskCall) -> list[tuple[int, Expression]]:
+    """A task call's ``(index, argument)`` pairs that generated code evaluates.
+
+    None of ``$readmemh(file, mem)``'s: measured as a value, the memory
+    counted as one ``depth * width``-bit vector (32768 bits for a 4096x8
+    RAM), which sized every wide scratch array in the module to match.
+    """
+    if type(stmt) is SystemTaskCall and stmt.task_name.lower() in _MEMORY_FILE_TASKS:
+        return []
+    return list(enumerate(stmt.arguments))
+
+
 class CythonCodegen(
     _GenSectionsMixin, _StmtEmittersMixin, _WideEmitterMixin, _ExprEmitterMixin, _ProcessCompilerMixin
 ):  # cm:b1c5e8
@@ -1491,7 +1508,7 @@ class CythonCodegen(
             return
 
         if stype in {TaskEnable, SystemTaskCall}:
-            for index, arg in enumerate(stmt.arguments):
+            for index, arg in _task_value_arguments(stmt):
                 self._validate_wide_transport_expr(arg, f"{context} argument {index}")
             return
 
@@ -1625,7 +1642,7 @@ class CythonCodegen(
             return
 
         if stype in {TaskEnable, SystemTaskCall}:
-            for arg in stmt.arguments:
+            for _index, arg in _task_value_arguments(stmt):
                 self._note_wide_intermediate(arg)
             return
 

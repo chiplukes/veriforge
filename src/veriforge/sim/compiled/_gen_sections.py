@@ -523,6 +523,54 @@ def _seq_body_to_sv_reads(
     return result
 
 
+_SCRATCH_ZERO_RE = re.compile(r"^(\s*)_sc(\d+)_([vm])\[(\d+)\] = 0$")
+_SCRATCH_ZERO_MIN_RUN = 4
+
+
+def _compact_scratch_zero_stores(body_lines: list[str]) -> list[str]:
+    """Merge runs of per-word scratch zeroing (``_sc3_v[5] = 0``) into ``memset``s.
+
+    The wide emitters zero every word above an operand's own width up to
+    the statement's scratch size, one line per word. With a module whose
+    widest value is hundreds of words, that was most of the generated
+    source and of the C compiler's time. Consecutive zero stores at one
+    indent touch distinct words and read nothing, so they can be grouped
+    per array; contiguous ranges of at least ``_SCRATCH_ZERO_MIN_RUN``
+    words become one ``memset``.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(body_lines)
+    while i < n:
+        m = _SCRATCH_ZERO_RE.match(body_lines[i])
+        if m is None:
+            result.append(body_lines[i])
+            i += 1
+            continue
+        pad = m.group(1)
+        words: dict[tuple[str, str], set[int]] = {}
+        while i < n:
+            m = _SCRATCH_ZERO_RE.match(body_lines[i])
+            if m is None or m.group(1) != pad:
+                break
+            words.setdefault((m.group(2), m.group(3)), set()).add(int(m.group(4)))
+            i += 1
+        for (slot, arr), indices in words.items():
+            ordered = sorted(indices)
+            start = 0
+            while start < len(ordered):
+                end = start
+                while end + 1 < len(ordered) and ordered[end + 1] == ordered[end] + 1:
+                    end += 1
+                lo, count = ordered[start], end - start + 1
+                if count >= _SCRATCH_ZERO_MIN_RUN:
+                    result.append(f"{pad}memset(&_sc{slot}_{arr}[{lo}], 0, {count} * sizeof(unsigned long long))")
+                else:
+                    result.extend(f"{pad}_sc{slot}_{arr}[{k}] = 0" for k in range(lo, lo + count))
+                start = end + 1
+    return result
+
+
 _CDEF_INIT_RE = re.compile(r"^(\s*)cdef\s+((?:unsigned\s+)?(?:long\s+long|int))\s+(\w+)\s*=\s*(.+)$")
 _CDEF_BARE_RE = re.compile(r"^(\s*)cdef\s+((?:unsigned\s+)?(?:long\s+long|int))\s+(\w+)\s*$")
 
@@ -1532,7 +1580,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                 self._et_node_masks = {}
                 self._et_node_vals = {}
                 body_lines = self._emit_stmt(body_copy, indent=1, context="function")
-                hoisted_et_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
+                hoisted_et_cdefs, body_lines = _hoist_inline_cdefs(_compact_scratch_zero_stores(body_lines))
                 joined = "\n".join(body_lines)
                 parts.extend(hoisted_et_cdefs)
                 if any("_cdv" in ln for ln in body_lines):
@@ -1800,7 +1848,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                             body_lines, async_sids, func_internal_sids, external_input_sids
                         )
                         self._snapshot_reads.record(body_lines)
-                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
+                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(_compact_scratch_zero_stores(body_lines))
                     decls.extend(hoisted_cdefs)
                     joined = "\n".join(body_lines)
                     if "_clhs" in joined:
@@ -2894,7 +2942,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             # standalone `cdef ...:` function's body); this call site is
             # nested one level deeper (inside `__init__`), hence the extra
             # 4-space prefix below.
-            hoisted_cdefs, initial_lines = _hoist_inline_cdefs(self._initial_lines)
+            hoisted_cdefs, initial_lines = _hoist_inline_cdefs(_compact_scratch_zero_stores(self._initial_lines))
             lines.extend(f"    {ln}" for ln in hoisted_cdefs)
             if any("_clhs" in ln for ln in initial_lines):
                 lines.append("        cdef long long _clhs")

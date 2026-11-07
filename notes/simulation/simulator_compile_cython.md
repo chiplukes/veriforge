@@ -726,6 +726,25 @@ Result: peak Python heap during `generate_to_file` stays at ~1 MB regardless
 of design size (measured at n=20, 40, 80 registers; previously grew linearly
 with design complexity to 27.5 GB before OOM on a 270-signal design).
 
+### Wide Scratch Arrays
+
+The recursive wide emitter (`_emit_wide_expr_to_scratch`) evaluates into
+`_sc{n}_v`/`_sc{n}_m` stack arrays. Each statement uses
+`max(own width, module max)` words, where the module max is the widest
+signal, memory element, or value measured by `_scan_wide_intermediates`.
+An operand narrower than that is zero-extended word by word, so the module
+max multiplies the size of every wide statement.
+
+- The arguments of `$readmemh`/`$readmemb`/`$writememh`/`$writememb` are
+  not measured (`_task_value_arguments`): the reference executor runs those
+  tasks. A bare memory name there used to count as one `depth * width`-bit
+  value. In the full `axis_pix_correction2` IP, 256 4096x8 LUT RAMs set the
+  module max to 512 words, and per-word zeroing was 63% of a 2.9M-line
+  `.pyx`.
+- `_compact_scratch_zero_stores` turns runs of `_sc{n}_v[k] = 0` stores
+  at one indent into one `memset` per contiguous range. Generated code for
+  that IP dropped from 2.89M lines (112 MB) to 1.06M lines (76 MB).
+
 ---
 
 ## Memory Arrays
