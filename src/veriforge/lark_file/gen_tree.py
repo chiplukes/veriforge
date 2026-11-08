@@ -125,7 +125,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     lark_file = Path(__file__).parent / "verilog.lark"
-    with open(lark_file, mode="r") as f:
+    with open(lark_file, encoding="utf-8") as f:
         vl = f.readlines()
 
     # find all unique rules

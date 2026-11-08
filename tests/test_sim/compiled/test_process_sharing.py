@@ -35,7 +35,7 @@ def test_repeated_sequential_bodies_are_specialized_once(parser, monkeypatch, tm
     assert len(set(groups)) == 3
     path = tmp_path / "generated.pyx"
     CythonCodegen().generate_to_file(flat, str(path))
-    assert path.read_text() == source
+    assert path.read_text(encoding="utf-8") == source
 
 
 @pytest.mark.parametrize("split", ["0", "1"])

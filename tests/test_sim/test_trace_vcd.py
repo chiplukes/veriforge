@@ -6,6 +6,7 @@ and ``$dumpvars(level, scope)``. See notes/plans/vcd_enhancement.md (V1/V2).
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 
@@ -434,7 +435,7 @@ def test_capture_rearms_and_manual_and_callable(tmp_path):
         sim.run(max_time=100)
         cap.trigger("scoreboard says so")
         sim.run(max_time=200)
-    assert [p.rsplit("/", 1)[-1] for p in cap.files] == ["m000.vcd", "m001.vcd"]
+    assert [Path(p).name for p in cap.files] == ["m000.vcd", "m001.vcd"]
     assert cap.triggers[1] == (100, "scoreboard says so")
 
 

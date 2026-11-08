@@ -5,6 +5,7 @@ import time
 
 import pytest
 from setuptools._distutils.ccompiler import new_compiler
+from setuptools._distutils.unixccompiler import UnixCCompiler
 
 from veriforge.sim.compiled import _build
 from veriforge.sim.testbench import Simulator
@@ -19,7 +20,7 @@ def test_source_jobs_overlap_and_restore_compiler_after_error(tmp_path, monkeypa
     monkeypatch.setattr(_build, "_available_memory", lambda: 8 * 1024**3)
     monkeypatch.setattr(_build.os, "cpu_count", lambda: 8)
 
-    class ProbeCompiler(type(new_compiler())):
+    class ProbeCompiler(UnixCCompiler):  # (new_compiler() is MSVC on Windows, which stays serial)
         compiler_type = "unix"
         executables = {}
         src_extensions = [".c"]

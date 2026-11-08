@@ -124,7 +124,7 @@ def test_streaming_selection_and_cache_identity(parser, monkeypatch, tmp_path):
         path = tmp_path / f"{mode}.pyx"
         digest = CythonCodegen().generate_to_file(flat, str(path))
         assert digest == hashlib.sha256(source.encode()).hexdigest()
-        assert path.read_text() == source
+        assert path.read_text(encoding="utf-8") == source
         assert cg._snapshot_reads.full == (mode == "all")
         keys.append((_cache_key("identical source"), _compute_elab_hash(flat, [])))
         if mode == "needed":

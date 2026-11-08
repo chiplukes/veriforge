@@ -72,6 +72,13 @@ class TestVerilogParser:
         assert tree is not None
         assert tree.data == "verilog"
 
+    def test_parse_utf8_file_independent_of_locale(self, parser, tmp_path):
+        """Files are UTF-8 (as in the preprocessor), not the locale encoding:
+        on Windows (cp1252) the `”` (E2 80 9D) below raised UnicodeDecodeError."""
+        path = tmp_path / "utf8.v"
+        path.write_text("// “quoted” — µs\nmodule u(); endmodule\n", encoding="utf-8")
+        assert parser.build_tree(path).data == "verilog"
+
 
 class TestModuleDeclarations:
     """Test module declaration variations."""

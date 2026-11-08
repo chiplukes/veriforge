@@ -116,7 +116,7 @@ def _module_level_imports(path: Path) -> list[tuple[str, int, int]]:
     function or class body (the sanctioned lazy-import pattern) are not
     visited, matching a plain `ast.walk` would over-collect.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     results = []
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -171,7 +171,7 @@ _SEMANTICS_OWNED_NAMES = {"_const_int", "_range_width", "_var_width"}
 
 def _defined_function_names(path: Path) -> list[tuple[str, int]]:
     """Return (name, lineno) for every function def (top-level or nested) in *path*."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return [
         (node.name, node.lineno) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]

@@ -23,7 +23,7 @@ class VerilogParser:
                 "Transformer is only compatible with the LALR parser, which does not support the Verilog EBNF grammar."
             )
 
-        with open(Path(__file__).parent.absolute() / "lark_file" / "verilog.lark") as f:
+        with open(Path(__file__).parent.absolute() / "lark_file" / "verilog.lark", encoding="utf-8") as f:
             if transformer:
                 self.parser = Lark(
                     f,
@@ -47,7 +47,7 @@ class VerilogParser:
     def build_tree(self, text: str | Path | None = None) -> Any:
         """Build AST from *text* (string or file path)."""
         if isinstance(text, Path):
-            with open(file=text, mode="r") as f:
+            with open(file=text, encoding="utf-8") as f:
                 netlist = f.read()
         elif isinstance(text, str):
             netlist = text
