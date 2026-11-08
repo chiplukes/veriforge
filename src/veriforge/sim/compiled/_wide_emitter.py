@@ -558,17 +558,14 @@ class _WideEmitterMixin:
         # emitter (e.g. a FunctionCall argument), which needs its own
         # fresh `_et_pending` scope.
         old_et_pending = self._et_pending
-        old_et_count = self._et_count
         old_et_node_vals = self._et_node_vals
         old_et_node_masks = self._et_node_masks
         self._et_pending = []
-        self._et_count = 0
         self._et_node_vals = {}
         self._et_node_masks = {}
         scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, elem_w, indent)
         et_pending = self._et_pending
         self._et_pending = old_et_pending
-        self._et_count = old_et_count
         self._et_node_vals = old_et_node_vals
         self._et_node_masks = old_et_node_masks
         if scratch_lines is None:
@@ -5864,17 +5861,14 @@ class _WideEmitterMixin:
         # `_emit_wide_reduction_to_value` then silently failed and fell
         # back to the narrow formula, discarding `a5`'s 65th bit.
         old_et_pending = self._et_pending
-        old_et_count = self._et_count
         old_et_node_vals = self._et_node_vals
         old_et_node_masks = self._et_node_masks
         self._et_pending = []
-        self._et_count = 0
         self._et_node_vals = {}
         self._et_node_masks = {}
         lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, lhs_w, indent)
         et_pending = self._et_pending
         self._et_pending = old_et_pending
-        self._et_count = old_et_count
         self._et_node_vals = old_et_node_vals
         self._et_node_masks = old_et_node_masks
         if lines is None:

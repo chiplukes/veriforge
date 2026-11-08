@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass
+import warnings
 
 from lark import Token, Tree
 
@@ -376,14 +377,46 @@ def _extract_statement_from_tree(  # noqa: PLR0911, PLR0912
     return None
 
 
+def _warn_intra_assignment_timing(tree: Tree, source_file: str | None) -> None:
+    """Warn that an intra-assignment delay or event (`b = #5 a`, `q <= #1 d`) is ignored.
+
+    The statement model has no field for it, so the assignment happens
+    immediately in every engine. It used to be dropped without a word.
+    """
+    for child in tree.children:
+        if isinstance(child, Tree) and child.data == "delay_or_event_control":
+            loc = _loc_from_tree(tree, source_file)
+            where = f"{loc.file or '<source>'}:{loc.line}" if loc is not None else "<source>"
+            control = child.children[0] if child.children else None
+            is_event = isinstance(control, Tree) and control.data == "event_control"
+            text = "@(...)" if is_event else f"#{_collect_text(child).strip()}"
+            warnings.warn(
+                f"{where}: intra-assignment timing control '{text}' is not "
+                "supported and is ignored; the assignment takes effect immediately",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+
+
 def _extract_blocking_assignment(
     tree: Tree,
     source_file: str | None,
     callbacks: _StatementCallbacks,
 ) -> BlockingAssign:
-    """Extract BlockingAssign from blocking_assignment tree."""
+    """Extract BlockingAssign from blocking_assignment tree.
+
+    An operator assignment (`cnt += v[i]`) becomes `cnt = cnt + v[i]`. The
+    operator token used to be ignored, so every statement-level `+=`, `-=`,
+    `|=`, `<<=` ... ran as a plain `=` in all engines (a popcount loop
+    counted only its last bit; only `for` steps, via `variable_assignment`,
+    applied it). A `cnt++;`/`++cnt;` statement becomes `cnt = cnt + 1`.
+    """
     lhs: Expression | None = None
     rhs: Expression | None = None
+    has_inc = False
+    has_dec = False
+    compound_op: str | None = None
 
     for child in tree.children:
         if isinstance(child, Tree):
@@ -391,10 +424,15 @@ def _extract_blocking_assignment(
                 lhs = callbacks.build_variable_lvalue(child, source_file)
             elif child.data == "expression":
                 rhs = callbacks.build_expression(child, source_file)
+        elif isinstance(child, Token):
+            has_inc, has_dec, compound_op = _update_assignment_operator_flags(child, has_inc, has_dec, compound_op)
 
+    _warn_intra_assignment_timing(tree, source_file)
     loc = _loc_from_tree(tree, source_file)
+    lhs = lhs or Identifier("?")
+    rhs = _apply_assignment_operator(lhs, rhs, has_inc, has_dec, compound_op)
     return BlockingAssign(
-        lhs=lhs or Identifier("?"),
+        lhs=lhs,
         rhs=rhs or Identifier("?"),
         loc=loc,
     )
@@ -416,6 +454,7 @@ def _extract_nonblocking_assignment(
             elif child.data == "expression":
                 rhs = callbacks.build_expression(child, source_file)
 
+    _warn_intra_assignment_timing(tree, source_file)
     loc = _loc_from_tree(tree, source_file)
     return NonblockingAssign(
         lhs=lhs or Identifier("?"),

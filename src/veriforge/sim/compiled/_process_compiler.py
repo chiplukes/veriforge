@@ -688,19 +688,19 @@ class _ProcessCompilerMixin:
                 self._processes.append((sensitivity, lines))
                 return True
         if base_width > _WORD_BITS and field_width <= _WORD_BITS:
-            rhs_val = self._emit_expr(assign.rhs, field_width)
-            rhs_mask = self._emit_mask_expr(assign.rhs, field_width)
+            setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(assign.rhs, field_width, "    ")
             lines = [
+                *setup,
                 f"    _whole_assign_insert_word(c, {base_sid}, {offset}, {field_width}, <unsigned long long>(({rhs_val}) & wmask({field_width})), <unsigned long long>(({rhs_mask}) & wmask({field_width})))",
             ]
             self._processes.append((sensitivity, lines))
             return True
         field_mask = _cy_lit((1 << field_width) - 1)
         clear_mask = _cy_lit(((1 << base_width) - 1) ^ (((1 << field_width) - 1) << offset))
-        rhs_val = self._emit_expr(assign.rhs, field_width)
-        rhs_mask = self._emit_mask_expr(assign.rhs, field_width)
+        setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(assign.rhs, field_width, "    ")
 
         lines = [
+            *setup,
             f"    cdef long long rval = ({rhs_val}) & {field_mask}",
             f"    cdef long long rmask = ({rhs_mask}) & {field_mask}",
             f"    cdef long long new_val = (c.val[{base_sid}] & {clear_mask}) | ((rval & ~rmask) << {offset})",
@@ -740,10 +740,13 @@ class _ProcessCompilerMixin:
                 if all(self._concat_part_max_width(p) <= _WORD_BITS for p in parts):
                     wide_rhs_source = (sid, base_lsb)
 
+        # Every part's process reads the same RHS text, so each needs the
+        # expression temporaries it names (added below, after the parts).
+        rhs_setup: list[str] = []
+        first_part_process = len(self._processes)
         if wide_rhs_source is None:
             rhs_width = self._expr_width(assign.rhs)
-            rhs_val = self._emit_expr(assign.rhs, rhs_width)
-            mask_expr = self._emit_mask_expr(assign.rhs, rhs_width)
+            rhs_setup, rhs_val, mask_expr = self._emit_scoped_value_mask(assign.rhs, rhs_width, "    ")
         else:
             rhs_val = None
             mask_expr = None
@@ -1345,6 +1348,10 @@ class _ProcessCompilerMixin:
                 f"        mark_dirty(c, {sid})",
             ]
             self._processes.append((sensitivity, lines))
+        if rhs_setup:
+            for index in range(first_part_process, len(self._processes)):
+                part_sensitivity, part_lines = self._processes[index]
+                self._processes[index] = (part_sensitivity, [*rhs_setup, *part_lines])
 
     def _compile_bitselect_cont_assign(self, assign, sensitivity: set[int]) -> None:
         """Compile continuous assign with BitSelect LHS: assign out[idx] = rhs."""
@@ -1497,13 +1504,12 @@ class _ProcessCompilerMixin:
         sig_base = self._signal_bases.get(self._identifier_name(lhs.target), 0)
         if sig_base != 0:
             idx = f"(({idx}) - {sig_base})"
-        rhs_val = self._emit_expr(assign.rhs, 1)
-
-        # Build per-expression mask that tracks x/z through ternaries correctly
-        mask_expr = self._emit_mask_expr(assign.rhs, 1)
+        # (The mask tracks x/z through ternaries correctly.)
+        setup, rhs_val, mask_expr = self._emit_scoped_value_mask(assign.rhs, 1, "    ")
 
         if self._signal_widths[sid] > _WORD_BITS:
             lines = [
+                *setup,
                 f"    _whole_assign_insert_word(c, {sid}, <int>({idx}), 1, <unsigned long long>(({rhs_val}) & 1), <unsigned long long>(({mask_expr}) & 1))",
             ]
             self._processes.append((sensitivity, lines))
@@ -1511,6 +1517,7 @@ class _ProcessCompilerMixin:
 
         sig_w = self._signal_widths[sid]
         lines = [
+            *setup,
             # Out of range (or an x index): no write. It was `& 0x3f`, which
             # wrapped the index onto a real bit.
             f"    cdef long long idx = ({idx})",

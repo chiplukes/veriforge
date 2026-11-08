@@ -104,44 +104,121 @@ endmodule"""
     assert sim.read("y").mask == 1 << 130
 
 
-def _msvc_compiler(monkeypatch):
-    """setuptools' real MSVC compiler, with the Visual Studio lookup stubbed so it initializes anywhere."""
+def _msvc_compiler(monkeypatch, *, host="win-amd64", native_tools=True):
+    """setuptools' real MSVC compiler, with the Visual Studio lookup stubbed so it initializes anywhere.
+
+    Returns the compiler, the commands it would run, and the vcvarsall
+    specs it asked for (``amd64`` is the 64-bit-hosted toolset).
+    """
     msvc = pytest.importorskip("setuptools._distutils.compilers.C.msvc")
-    monkeypatch.setattr(msvc, "_get_vc_env", lambda spec: {"path": "", "include": "", "lib": ""})
+    from setuptools._distutils.errors import DistutilsPlatformError
+
+    specs = []
+
+    def vc_env(spec):
+        specs.append(spec)
+        if spec == "amd64" and not native_tools:
+            raise DistutilsPlatformError("Error executing vcvarsall.bat amd64")
+        return {"path": "", "include": "", "lib": ""}
+
+    monkeypatch.setattr(msvc, "_get_vc_env", vc_env)
     monkeypatch.setattr(msvc, "_find_exe", lambda exe, paths: exe)
+    monkeypatch.setattr(msvc, "get_host_platform", lambda: host)
     compiler = msvc.Compiler()
     commands = []
     compiler.spawn = commands.append
-    return compiler, commands
+    return compiler, commands, specs
 
 
-def test_msvc_builds_without_whole_program_optimization(tmp_path, monkeypatch):
-    """setuptools compiles with ``/GL`` and links with ``/LTCG``: all code
-    generation waits for the link, which holds the whole program's
-    intermediate code in memory. A generated extension is one translation
-    unit, so there is no cross-module inlining to gain."""
-    compiler, commands = _msvc_compiler(monkeypatch)
-    _build.drop_msvc_whole_program_optimization(compiler, "win-amd64")
+def _compile_and_link(compiler, tmp_path):
     source = tmp_path / "m.c"
     source.write_text("int f(void) { return 0; }")
     objects = compiler.compile([str(source)], output_dir=str(tmp_path / "t"))
     compiler.link_shared_object(objects, str(tmp_path / "m.pyd"))
+
+
+def test_msvc_flags_for_generated_extensions(tmp_path, monkeypatch):
+    """setuptools compiles with ``/GL`` and links with ``/LTCG``: all code
+    generation waits for the link, which holds the whole program's
+    intermediate code in memory. A generated extension is one translation
+    unit, so there is no cross-module inlining to gain. ``/bigobj``: a large
+    generated file has more sections than the default object format holds
+    (MSVC error C1128; axis_pix_correction2 needed it, 2026-11-07)."""
+    compiler, commands, _specs = _msvc_compiler(monkeypatch)
+    _build.configure_msvc(compiler, "win-amd64")
+    _compile_and_link(compiler, tmp_path)
     cl, link = commands
-    assert cl[0] == "cl.exe" and "/O2" in cl and "/GL" not in cl
+    assert cl[0] == "cl.exe" and "/O2" in cl and "/bigobj" in cl and "/GL" not in cl
     assert link[0] == "link.exe" and "/DLL" in link and "/LTCG" not in link
 
 
+def test_msvc_uses_the_64_bit_hosted_toolset(monkeypatch):
+    """setuptools always picks the 32-bit-hosted cross compiler
+    (``x86_amd64``), whose cl.exe ran out of heap (C1060) on the full
+    axis_pix_correction2 IP (2026-11-07)."""
+    compiler, _commands, specs = _msvc_compiler(monkeypatch)
+    _build.configure_msvc(compiler, "win-amd64")
+    assert specs == ["amd64"] and compiler.initialized
+
+
+def test_msvc_falls_back_without_64_bit_hosted_tools(monkeypatch):
+    compiler, _commands, specs = _msvc_compiler(monkeypatch, native_tools=False)
+    _build.configure_msvc(compiler, "win-amd64")
+    assert specs == ["amd64", "x86_amd64"] and compiler.initialized
+    assert "/bigobj" in compiler.compile_options and "/GL" not in compiler.compile_options
+
+
+@pytest.mark.parametrize("host, target, spec", [("win-amd64", "win32", "x86"), ("win-arm64", "win-arm64", "arm64")])
+def test_msvc_other_targets_keep_the_setuptools_toolset(monkeypatch, host, target, spec):
+    compiler, _commands, specs = _msvc_compiler(monkeypatch, host=host)
+    _build.configure_msvc(compiler, target)
+    assert specs == [spec]
+
+
 def test_msvc_debug_links_drop_ltcg_too(monkeypatch):
-    compiler, _commands = _msvc_compiler(monkeypatch)
+    compiler, _commands, _specs = _msvc_compiler(monkeypatch)
     compiler.initialize("win-amd64")
     assert "/GL" in compiler.compile_options and "/LTCG" in compiler.ldflags_shared_debug
-    _build.drop_msvc_whole_program_optimization(compiler)
+    _build.configure_msvc(compiler)
     assert all("/LTCG" not in flags for flags in compiler._ldflags.values())
     assert "/GL" not in compiler.compile_options
+    assert compiler.compile_options.count("/bigobj") == 1 and "/bigobj" in compiler.compile_options_debug
 
 
-def test_whole_program_change_leaves_other_compilers_alone():
+def test_msvc_configuration_leaves_other_compilers_alone():
     compiler = new_compiler(compiler="unix")
     before = list(compiler.compiler_so)
-    _build.drop_msvc_whole_program_optimization(compiler)
+    _build.configure_msvc(compiler)
     assert compiler.compiler_so == before
+
+
+def test_split_workers_with_python_integer_code_load(parser, monkeypatch, tmp_path):
+    """Split workers are linked into the main extension, not imported, so
+    their Cython module state was never initialized. Worker code using
+    Python integers (a wide `?:` with a `'0` fill falls back to them) then
+    dereferenced a NULL cached constant: axis_pix_correction2 segfaulted on
+    load with VERIFORGE_COMPILE_SPLIT=1 (2026-11-07)."""
+    from veriforge.sim.compiled.codegen import CythonCodegen
+    from veriforge.sim.elaborate import flatten_module
+
+    monkeypatch.setenv("VERIFORGE_COMPILE_SPLIT", "1")
+    source = """module t(input s, input [127:0] x, output [219:0] y);
+  genvar i;
+  for (i = 0; i < 220; i = i + 1) begin : g
+    wire [127:0] w = s ? (x ^ i) : '0;
+    assign y[i] = ^w;
+  end
+endmodule"""
+    design = tree_to_design(parser.build_tree(source))
+    paths, _digest = CythonCodegen().generate_to_files(flatten_module(design.modules[0], design), str(tmp_path))
+    workers = [path for path in paths if "worker" in path and path.endswith(".pyx")]
+    assert workers and any("_py_bits(c," in open(path, encoding="utf-8").read() for path in workers)
+    results = {}
+    for engine in ("reference", "compiled"):
+        sim = Simulator(design.modules[0], engine=engine)
+        for s, x in ((1, (1 << 127) | 0x1234), (0, 5), (1, (1 << 200) - 1 >> 73)):
+            sim.drive("s", s)
+            sim.drive("x", Value(x, width=128))
+            sim.settle()
+            results.setdefault(engine, []).append(sim.read("y"))
+    assert results["compiled"] == results["reference"]

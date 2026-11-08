@@ -712,6 +712,33 @@ Tested in `TestExpressionTemporaries` (+/- chains), `TestOrChainTemporaries`
 actual gfwx-fpga assign 255 pattern) in
 `tests/test_sim/compiled/test_codegen_basic.py`.
 
+**Scopes everywhere an expression is emitted** (2026-11-07):
+- Temporaries only exist while `_et_pending` is a list (a "scope"). Whole-signal
+  assignments, the continuous-assign fallthrough and `if` conditions opened
+  one; every other target did not. The value and mask formulas of `&&`, `||`
+  and comparisons repeat their operands' text, so without a scope a chain
+  grew 4-5x per term: `hit[i] = a0 && ... && a9` in a loop generated 600 MB
+  of Cython, and an `axis_pix_correction2` loop of this shape gave MSVC a
+  334 MB C file it ran out of heap on.
+- `_expression_temporaries(pad, setup)` (`_stmt_emitters.py`) opens a scope
+  around expressions only, collecting the temporaries' lines into *setup* for
+  the caller to place first. It is used for every `_emit_lhs_write`
+  (bit/range/part-select/memory/concatenation targets and their index
+  expressions), the narrow RHS sites of continuous assigns (a concatenation
+  target's setup goes into each part's process), loop and `repeat`
+  conditions, `case` selectors and items (item bodies stay outside), and
+  `$display`/`$write` arguments. Inside an enclosing scope it adds to that one.
+- A new scope starts a fresh node cache (an entry may name a temporary of
+  another statement or process function). Nested scopes no longer reset
+  `_et_count` to 0, so names are unique within a function and an inner scope
+  cannot overwrite an outer temporary still in use.
+- Mask-first emission: the mask path never hoisted `&&`/`||`/comparisons, so
+  asking for a chain's mask before its value (a `case` selector) re-expanded
+  every level. `_emit_mask_expr` now emits a comparison or logical operand's
+  value first, which hoists and caches both.
+- Tested in `tests/test_sim/compiled/test_logical_chain_codegen.py`: a size
+  bound per context at 9 terms, and cross-engine values with x inputs.
+
 ### Deferred Always-Block Compilation
 
 The remaining scalability bottleneck after the streaming text fix was that
@@ -849,8 +876,15 @@ compilation speed.
 Parallel object scheduling currently supports the Unix compiler loop, including
 GCC/Clang. Custom compile loops such as MSVC retain serial compilation.
 
-On MSVC the build removes setuptools' whole-program optimization flags: `/GL`
-when compiling and `/LTCG` when linking. With `/GL`, `cl` only parses and
+On MSVC the build (`configure_msvc` in `_build.py`) adjusts setuptools'
+defaults. It asks vcvarsall for the 64-bit-hosted toolset (`amd64`) on a
+64-bit host: setuptools always picks the 32-bit-hosted cross compiler
+(`x86_amd64`), whose `cl.exe` ran out of heap (C1060) on the full
+`axis_pix_correction2` IP. If vcvarsall cannot set up `amd64` (a Build Tools
+install without the x64-hosted tools), it falls back to setuptools' choice.
+It adds `/bigobj`, since a large generated file exceeds the default object
+format's section limit (C1128). And it removes the whole-program optimization
+flags: `/GL` when compiling and `/LTCG` when linking. With `/GL`, `cl` only parses and
 all optimization and code generation waits for the link, which holds the
 intermediate code of the whole extension in memory. A generated extension
 is one translation unit (or a few, with `VERIFORGE_COMPILE_SPLIT=1`), and
@@ -866,8 +900,14 @@ resolved parameter values, widths, and signedness remain specialization inputs.
 Each instance retains independent state and its position in event ordering.
 Memories, wide bodies, user functions/tasks, output/system-task bodies, and other
 unsupported patterns use the existing generator. Split worker initializers are
-called explicitly from the main extension; they do not rely on worker Python
-module initialization. Each translation unit's sharing cache holds at most 1,024
+called explicitly from the main extension. Worker files are linked into the
+main extension rather than imported, so their own Cython module
+initialization never runs by itself; the main module creates and executes
+each worker's module from its `PyInit_workerN` definition once at import
+(`_gen_worker_module_init`). Before that, worker module state, including
+the cached Python integer constants used by the Python-integer fallback for
+wide expressions (such as a wide `?:` with a `'0` fill), stayed NULL, and
+`axis_pix_correction2` segfaulted on load with `VERIFORGE_COMPILE_SPLIT=1`. Each translation unit's sharing cache holds at most 1,024
 groups of at most 8 KiB per body.
 
 Use `uv run python benchmarks/compiled_scaling.py --case instances --lanes 64`

@@ -4625,3 +4625,40 @@ it now compares narrow signals in C too (`CyContext.trace_set`/`trace_poll`):
 0.45 ms/cycle. Wide signals and memory elements stay on the Python poller.
 Reference and vm add about 30% to their own (much slower) run time.
 `test_trace_vcd.py::test_vm_fast_uses_c_poll`.
+
+### Operator assignments ran as plain `=` (fixed 2026-11-07)
+
+Statement-level `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
+`<<<=` and `>>>=` lost their operator in `_extract_blocking_assignment`
+(`transforms/_statements.py`), which read both sides and ignored the
+`COMPOUND_ASSIGN` token. All four engines therefore agreed on the wrong
+answer: `cnt = 0; for (...) cnt += v[i];` returned `v[15]`. Only `for` steps
+(`variable_assignment`) applied the operator. Found from an
+`axis_pix_correction2` popcount. `x++;`/`++x;`/`x--;`/`--x;` statements did
+not parse at all; `blocking_assignment` now accepts them as `x = x +/- 1`.
+`tests/test_sim/test_operator_assignment.py`.
+
+### Compiled split build segfaulted on load (fixed 2026-11-07)
+
+With `VERIFORGE_COMPILE_SPLIT=1`, the full `axis_pix_correction2` IP built
+and then crashed (signal 11) in `CompiledSim()`. Split worker files are
+linked into the main extension, never imported, so their Cython module
+initialization never ran and their module state stayed NULL. Worker code
+using Python integers (the fallback for wide expressions such as a 128-bit
+`s ? x : '0`) incremented a NULL cached constant (`__pyx_int_0`). The main
+module now creates and executes each worker module from its `PyInit_workerN`
+definition at import (`_gen_worker_module_init`). This is the likely cause
+of the earlier "traceback-free crash" that kept split mode experimental.
+`test_parallel_build.py::test_split_workers_with_python_integer_code_load`.
+
+### `&&`/`||`/comparison chains generated exponential code (fixed 2026-11-07)
+
+Expression temporaries were only enabled for whole-signal assignments and
+`if` conditions. A chain written to a bit, range, part-select, memory or
+concatenation target, or used as a `case` selector, loop condition,
+`$display` argument or index, repeated each operand's value and mask text
+at every level: 4-5x per term (`hit[i] = a0 && ... && a9` was 600 MB of
+Cython; an `axis_pix_correction2` loop gave MSVC a 334 MB C file and C1060).
+See "Scopes everywhere an expression is emitted" in
+`notes/simulation/simulator_compile_cython.md`;
+`tests/test_sim/compiled/test_logical_chain_codegen.py`.

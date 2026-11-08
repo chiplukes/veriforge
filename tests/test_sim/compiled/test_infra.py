@@ -436,7 +436,7 @@ class TestSetupScriptStackSize:
     stack it got. Run with stand-ins for setuptools/Cython: no C build."""
 
     def _run_script(self, monkeypatch, max_mib, argv=("setup.py", "cythonize"), extra_sources=None):
-        from veriforge.sim.compiled._build import ParallelBuildExt
+        import setuptools
 
         import sys
         import threading
@@ -461,16 +461,17 @@ class TestSetupScriptStackSize:
             return exts
 
         def fake_setup(**kwargs):
-            assert kwargs["cmdclass"]["build_ext"] is ParallelBuildExt
+            build_ext = kwargs["cmdclass"]["build_ext"]
+            # (Loaded from _build.py by path, so not the package's own class object.)
+            assert build_ext.__name__ == "ParallelBuildExt"
+            assert sys.modules[build_ext.__module__].__file__.endswith("_build.py")
             seen["setup_sources"] = [ext[0][1] for ext in kwargs["ext_modules"]]
 
-        setuptools = types.ModuleType("setuptools")
-        setuptools.Extension = lambda *a, **k: (a, k)
-        setuptools.setup = fake_setup
+        monkeypatch.setattr(setuptools, "Extension", lambda *a, **k: (a, k))
+        monkeypatch.setattr(setuptools, "setup", fake_setup)
         cython = types.ModuleType("Cython")
         cython_build = types.ModuleType("Cython.Build")
         cython_build.cythonize = fake_cythonize
-        monkeypatch.setitem(sys.modules, "setuptools", setuptools)
         monkeypatch.setitem(sys.modules, "Cython", cython)
         monkeypatch.setitem(sys.modules, "Cython.Build", cython_build)
         monkeypatch.setattr(threading, "stack_size", fake_stack_size)
@@ -535,6 +536,40 @@ class TestTwoStepBuild:
         with pytest.raises(RuntimeError, match="(?s)Cython step.*undeclared name"):
             compiler.CythonCompiler()._run_build(str(tmp_path))
         assert phases == ["Cython"]
+
+    def test_msvc_heap_exhaustion_reports_memory(self, monkeypatch, tmp_path):
+        pytest.importorskip("Cython")
+        from veriforge.sim.compiled import compiler
+
+        def fake_step(cmd, build_dir, phase, started, total_timeout):
+            if phase == "Cython":
+                return 0, "", ""
+            return 2, "", "main.c(81516): fatal error C1060: compiler is out of heap space"
+
+        monkeypatch.setattr(compiler.CythonCompiler, "_run_build_step", staticmethod(fake_step))
+        with pytest.raises(RuntimeError, match="ran out of memory.*VERIFORGE_COMPILE_SPLIT"):
+            compiler.CythonCompiler()._run_build(str(tmp_path))
+
+    def test_build_helpers_load_without_veriforge(self):
+        """The C step loads _build.py by path: it must not import veriforge
+        (a whole-package import, and any half-edited module in it failed
+        every build's C step)."""
+        import subprocess
+        import sys
+
+        from veriforge.sim.compiled import _build
+
+        script = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('_veriforge_build', {_build.__file__!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "assert module.ParallelBuildExt\n"
+            "print(sorted(name for name in sys.modules if name.split('.')[0] == 'veriforge'))\n"
+        )
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+        assert out.stdout.strip() == "[]"
 
     def test_signal_kill_reports_memory(self, monkeypatch, tmp_path):
         pytest.importorskip("Cython")

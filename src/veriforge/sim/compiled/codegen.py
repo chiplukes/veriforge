@@ -1903,9 +1903,10 @@ class CythonCodegen(
         `_min_funcs_to_split` process functions. Default is off: measured
         speedup on a real large design was real (~35-40% faster wall-clock
         compile) but so was a regression on a medium design (split was
-        SLOWER than unsplit) and an unexplained, traceback-free crash on a
-        subsequent run of that same large design -- not yet trusted enough
-        to enable by default. See the call site in
+        SLOWER than unsplit) and a traceback-free crash on a subsequent run
+        of that same large design (most likely the uninitialized worker
+        module state fixed in `_gen_worker_module_init`) -- not yet trusted
+        enough to enable by default. See the call site in
         `compiled_scheduler.py`/the `split_enabled` local here for the
         exact gating.
 
@@ -1954,10 +1955,10 @@ class CythonCodegen(
         # per-file overhead and duplicated preamble aren't worth it below some
         # design size not yet well characterized), and (b) a run against the
         # large design that exercised it crashed with no Python traceback at
-        # all (consistent with either an OOM under N-way parallel `gcc`
-        # invocations each compiling a large file, or a genuine bug in the
-        # cross-file `cdef public`/`cdef extern from` linkage -- not yet
-        # root-caused). Needs more validation (smarter size threshold, safer
+        # all. A segfault on load of the same kind (worker module state never
+        # initialized, so worker code using Python integers dereferenced NULL)
+        # was root-caused and fixed on 2026-11-07; see
+        # `_gen_worker_module_init`. Needs more validation (smarter size threshold, safer
         # parallelism cap, smaller duplicated preamble) before this is trusted
         # enough to default on.
         split_enabled = get_env("COMPILE_SPLIT", "0") in ("1", "true", "True")
@@ -2098,6 +2099,7 @@ class CythonCodegen(
                 for proto in protos_by_worker[w]:
                     main_write(f"    {proto}\n")
                 main_write("\n")
+            main_write(self._gen_worker_module_init(n_workers))
 
             def route_fn(prefix: str, i: int):
                 w = routing[(prefix, i)]
@@ -2124,6 +2126,63 @@ class CythonCodegen(
             for fh in handles:
                 fh.close()
         return file_paths, finalize_sources(file_paths)
+
+    @staticmethod
+    def _gen_worker_module_init(n_workers: int) -> str:
+        """Main-file code that initializes each split worker's Cython module state.
+
+        A worker is linked into the main extension rather than imported, so
+        its module initialization never ran, and its module state stayed
+        NULL. That includes the cached Python constants (`0`, `1`, `64`) of
+        any code that falls back to Python integers, such as a wide `?:` with
+        a `'0` fill, and its first `Py_INCREF` of one segfaulted while the
+        design loaded (`axis_pix_correction2` with VERIFORGE_COMPILE_SPLIT=1,
+        2026-11-07). This creates and executes each worker's module from its
+        `PyInit_` definition, once, when the main module is imported.
+        """
+        # (Parenthesized: a worker's own header wraps `PyInit_workerN()` in a
+        # function-like macro, a deprecation warning against direct calls.)
+        protos = "\n".join(f"PyMODINIT_FUNC (PyInit_worker{w})(void);" for w in range(n_workers))
+        calls = "\n".join(
+            f'    if (__vf_exec_worker(PyInit_worker{w}, "worker{w}") < 0) return -1;' for w in range(n_workers)
+        )
+        return f'''cdef extern from *:
+    """
+{protos}
+
+static int __vf_exec_worker(PyObject *(*init)(void), const char *name) {{
+    PyObject *def = init();
+    PyObject *machinery, *spec, *module;
+    int status;
+    if (def == NULL) return -1;
+    if (!PyObject_TypeCheck(def, &PyModuleDef_Type)) return 0;  /* (single-phase: init ran) */
+    machinery = PyImport_ImportModule("importlib.machinery");
+    if (machinery == NULL) return -1;
+    spec = PyObject_CallMethod(machinery, "ModuleSpec", "sO", name, Py_None);
+    Py_DECREF(machinery);
+    if (spec == NULL) return -1;
+    module = PyModule_FromDefAndSpec((PyModuleDef *)def, spec);
+    Py_DECREF(spec);
+    if (module == NULL) return -1;
+    status = PyModule_ExecDef(module, (PyModuleDef *)def);
+    /* (The module is kept for the life of the process: its state is.) */
+    return status;
+}}
+
+static int __vf_workers_ready = 0;
+
+static int __vf_init_workers(void) {{
+    if (__vf_workers_ready) return 0;
+{calls}
+    __vf_workers_ready = 1;
+    return 0;
+}}
+    """
+    int __vf_init_workers() except -1
+
+__vf_init_workers()
+
+'''
 
     def _register_signal(self, name: str, width: int, signed: bool = False) -> int:
         if name in self._signal_map:

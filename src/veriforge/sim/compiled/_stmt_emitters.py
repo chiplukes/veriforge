@@ -9,6 +9,7 @@ CythonCodegen inherits from _StmtEmittersMixin.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from veriforge.model.expressions import (
@@ -54,6 +55,8 @@ from veriforge.sim.compiled._codegen_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from veriforge.model.statements import Statement
 
 
@@ -225,7 +228,19 @@ class _StmtEmittersMixin:
 
         return lines
 
-    def _emit_lhs_write(  # noqa: PLR0911, PLR0912
+    def _emit_lhs_write(self, lhs: Expression, rhs: Expression, indent: int, *, is_nba: bool) -> list[str]:
+        """Emit assignment lines for any LHS pattern.
+
+        The whole assignment is one temporaries scope, so a target's index
+        expressions (`hit[a && b && ...] = 1`) get temporaries as well as the
+        RHS; see `_expression_temporaries`.
+        """
+        setup: list[str] = []
+        with self._expression_temporaries("    " * indent, setup):
+            lines = self._emit_lhs_write_lines(lhs, rhs, indent, is_nba=is_nba)
+        return [*setup, *lines]
+
+    def _emit_lhs_write_lines(  # noqa: PLR0911, PLR0912
         self,
         lhs: Expression,
         rhs: Expression,
@@ -233,7 +248,7 @@ class _StmtEmittersMixin:
         *,
         is_nba: bool,
     ) -> list[str]:
-        """Emit assignment lines for any LHS pattern."""
+        """`_emit_lhs_write` inside its temporaries scope."""
         pad = "    " * indent
         lhs_type = type(lhs)
 
@@ -444,17 +459,18 @@ class _StmtEmittersMixin:
                                 indent,
                                 is_nba=is_nba,
                             )
-                    rhs_val = self._emit_expr(rhs, field_width)
-                    rhs_mask = self._emit_mask_expr(rhs, field_width)
+                    setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, field_width, pad)
                     if field_width <= _WORD_BITS:
                         helper = "_whole_stage_insert_word" if is_nba else "_whole_assign_insert_word"
                         return [
+                            *setup,
                             f"{pad}{helper}(c, {base_sid}, {offset}, {field_width}, <unsigned long long>(({rhs_val}) & wmask({field_width})), <unsigned long long>(({rhs_mask}) & wmask({field_width})))",
                         ]
                     fmask = _cy_lit((1 << field_width) - 1)
                     clear_mask = _cy_lit((1 << base_w) - 1 ^ ((1 << field_width) - 1) << offset)
                     if is_nba:
                         return [
+                            *setup,
                             f"{pad}_sfv = ({rhs_val}) & {fmask}",
                             f"{pad}c.nba_val[{base_sid}] = (c.val[{base_sid}] & {clear_mask}) | (_sfv << {offset})",
                             f"{pad}c.nba_mask[{base_sid}] = 0",
@@ -462,6 +478,7 @@ class _StmtEmittersMixin:
                             f"{pad}c.nba_pending = 1",
                         ]
                     return [
+                        *setup,
                         f"{pad}_sfv = ({rhs_val}) & {fmask}",
                         f"{pad}_cdv = (c.val[{base_sid}] & {clear_mask}) | (_sfv << {offset})",
                         f"{pad}if _cdv != c.val[{base_sid}] or c.mask[{base_sid}]:",
@@ -919,8 +936,7 @@ class _StmtEmittersMixin:
                     sid, "_rmw_lsb", "(_rmw_msb - _rmw_lsb + 1)", lhs_w, rhs, indent, is_nba=is_nba
                 ),
             ]
-        rhs_val = self._emit_expr(rhs, lhs_w)
-        rhs_mask = self._emit_mask_expr(rhs, lhs_w)
+        setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, lhs_w, pad)
         # Only the bits within the signal are written (IEEE 1364 5.2.1): a
         # range starting below bit 0 drops the value's low bits, and one
         # entirely outside writes nothing. (A negative lsb used to shift by
@@ -928,6 +944,7 @@ class _StmtEmittersMixin:
         rhs_val = f"<long long>(<unsigned long long>({rhs_val}) >> _rmw_drop)"
         rhs_mask = f"<long long>(<unsigned long long>({rhs_mask}) >> _rmw_drop)"
         return [
+            *setup,
             f"{pad}_rmw_msb = ({msb})",
             f"{pad}_rmw_lsb = ({lsb})",
             f"{pad}_rmw_drop = 0",
@@ -1047,11 +1064,10 @@ class _StmtEmittersMixin:
                 mask_expr = f"((<unsigned long long>c.mem_{rhs_mid}_mask[({rhs_idx})]) >> ({rhs_lsb})) & {sel_mask}"
                 return [f"{pad}{helper}(c, {sid}, {lsb_val}, {sel_w}, {val_expr}, {mask_expr})"]
             return self._emit_wide_range_insert_lines(sid, str(lsb_val), str(sel_w), sel_w, rhs, indent, is_nba=is_nba)
-        rhs_val = self._emit_expr(rhs, sel_w)
-        rhs_mask = self._emit_mask_expr(rhs, sel_w)
+        setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, sel_w, pad)
         range_mask = _cy_hex(((1 << sel_w) - 1) << lsb_val)
         sel_mask = _cy_hex((1 << sel_w) - 1)
-        return self._narrow_partial_write_lines(
+        return setup + self._narrow_partial_write_lines(
             sid, range_mask, f"(({rhs_mask}) & {sel_mask}) << {lsb_val}", rhs_val, sel_mask, str(lsb_val), pad, is_nba
         )
 
@@ -1104,13 +1120,54 @@ class _StmtEmittersMixin:
             f"{pad}    mark_dirty(c, {sid})",
         ]
 
+    @contextmanager
+    def _expression_temporaries(self, pad: str, setup: list[str]) -> Iterator[None]:
+        """Enable expression temporaries for the expressions emitted inside.
+
+        The value and mask formulas of `&&`, `||`, comparisons and `?:`
+        repeat their operands' value and mask text, so without temporaries
+        (`_et_pending` set) a chain of them doubles or worse per term: an
+        8-term `&&` written to `hit[i]` generated 30 MB of Cython, a 10-term
+        one 600 MB. Whole-signal assignments and `if` conditions always had
+        a scope; bit, range, part-select, memory and concatenation targets,
+        loop and `case` expressions and `$display` arguments did not.
+
+        The temporaries' lines are appended to *setup* (indented by *pad*),
+        which the caller places before the code using the expressions. Only
+        open this around expressions, never around nested statements:
+        their temporaries would be hoisted above them. Inside an enclosing
+        scope the temporaries go to it instead. A new scope gets a fresh
+        node cache (an entry may name a temporary of another statement or
+        process function) but keeps the running count, so names stay
+        unique in the function.
+        """
+        if self._et_pending is not None:
+            yield
+            return
+        old_cache = (self._et_node_vals, self._et_node_masks)
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
+        try:
+            yield
+            setup.extend(f"{pad}{line}" for line in self._et_pending)
+        finally:
+            self._et_pending = None
+            self._et_node_vals, self._et_node_masks = old_cache
+
+    def _emit_scoped_value_mask(self, rhs: Expression, width: int, pad: str) -> tuple[list[str], str, str]:
+        """(setup lines, value, mask) of a narrow *rhs*; see `_expression_temporaries`."""
+        setup: list[str] = []
+        with self._expression_temporaries(pad, setup):
+            value = self._emit_expr(rhs, width)
+            mask = self._emit_mask_expr(rhs, width)
+        return setup, value, mask
+
     def _emit_rhs_low_word(self, rhs: Expression, width: int, indent: int) -> tuple[list[str], str, str]:
         """(setup lines, value, mask) of *rhs* at *width* (<= 64) bits. An RHS
         computed above 64 bits inside (`|{<<8{128'd..., {2{c}}}}`) is
         evaluated into scratch first: the narrow emitter can't, and a bit
         write of one stored 0."""
         if not self._rhs_needs_wide_eval(rhs):
-            return [], self._emit_expr(rhs, width), self._emit_mask_expr(rhs, width)
+            return self._emit_scoped_value_mask(rhs, width, "    " * indent)
         pad = "    " * indent
         n_words = max(
             (self._expr_max_internal_width(rhs) + _WORD_BITS - 1) // _WORD_BITS, self._module_max_wide_words(), 1
@@ -1119,13 +1176,13 @@ class _StmtEmittersMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
         old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
         scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, width, indent)
         et_pending = self._et_pending
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
         self._reset_scratch()
         if scratch_lines is None:
-            return [], self._emit_expr(rhs, width), self._emit_mask_expr(rhs, width)
+            return self._emit_scoped_value_mask(rhs, width, pad)
         self._needs_wide_helpers = True
         lines = [f"{pad}{t}" for t in et_pending] + scratch_lines
         return lines, f"<long long>_sc{slot}_v[0]", f"<long long>_sc{slot}_m[0]"
@@ -1159,10 +1216,10 @@ class _StmtEmittersMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
         old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
         scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
         et_pending = self._et_pending
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
         self._reset_scratch()
         if scratch_lines is None:
             raise NotImplementedError(
@@ -1227,10 +1284,10 @@ class _StmtEmittersMixin:
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
         old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
         scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
         et_pending = self._et_pending
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
         self._reset_scratch()
         if scratch_lines is None:
             raise NotImplementedError(
@@ -1355,10 +1412,10 @@ class _StmtEmittersMixin:
             concat_rhs_mask = None
         elif wide_rhs_source is None:
             rhs_width = self._expr_width(rhs)
-            rhs_val = self._emit_expr(rhs, rhs_width)
-            rhs_mask = self._emit_mask_expr(rhs, rhs_width)
+            setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, rhs_width, pad)
             if rhs_width <= _WORD_BITS:
                 lines = [
+                    *setup,
                     f"{pad}cdef unsigned long long _concat_rhs_val = ({rhs_val}) & wmask({rhs_width})",
                     f"{pad}cdef unsigned long long _concat_rhs_mask = ({rhs_mask}) & wmask({rhs_width})",
                     f"{pad}cdef unsigned long long _cacc_val",
@@ -1370,6 +1427,7 @@ class _StmtEmittersMixin:
                 concat_rhs_mask = "_concat_rhs_mask"
             else:
                 lines = [
+                    *setup,
                     f"{pad}cdef unsigned long long _cacc_val",
                     f"{pad}cdef unsigned long long _cacc_mask",
                     f"{pad}cdef unsigned long long _part_mask",
@@ -2112,10 +2170,10 @@ class _StmtEmittersMixin:
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
         old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
         scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, total, indent)
         et_pending = self._et_pending
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
         if scratch_lines is None:
             self._reset_scratch()
             return None
@@ -2537,9 +2595,8 @@ class _StmtEmittersMixin:
                 return self._emit_wide_mem_range_insert_lines(
                     mid, idx, str(lsb_v), str(sel_w), sel_w, rhs, indent, marker_sid=marker_sid, is_nba=is_nba
                 )
-            rhs_val = self._emit_expr(rhs, sel_w)
-            rhs_mask = self._emit_mask_expr(rhs, sel_w)
-            return self._emit_const_mem_range_write_lines(
+            setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, sel_w, "    " * indent)
+            return setup + self._emit_const_mem_range_write_lines(
                 mid,
                 idx,
                 lsb_v,
@@ -2595,9 +2652,8 @@ class _StmtEmittersMixin:
                 return self._emit_wide_mem_range_insert_lines(
                     mid, idx, lsb, str(part_w), part_w, rhs, indent, marker_sid=marker_sid, is_nba=is_nba
                 )
-        rhs_val = self._emit_expr(rhs, elem_w)
-        rhs_mask = self._emit_mask_expr(rhs, elem_w)
-        return self._emit_dynamic_mem_range_write_lines(
+        setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, elem_w, "    " * indent)
+        return setup + self._emit_dynamic_mem_range_write_lines(
             mid,
             idx,
             msb,
@@ -2695,7 +2751,7 @@ class _StmtEmittersMixin:
                 self._free_scratch(cond_slot, truth_slot)
                 return cond_lines, f"_sc{truth_slot}_v[0]", "0"
             self._free_scratch(cond_slot)
-        return [], self._emit_expr(condition, w), self._emit_mask_expr(condition, w)
+        return self._emit_scoped_value_mask(condition, w, pad)
 
     def _emit_if(self, stmt: IfStatement, indent: int, *, context: str = "process") -> list[str]:
         """Emit if/else as Cython if/else."""
@@ -2798,7 +2854,9 @@ class _StmtEmittersMixin:
         # the pattern's definite leading `0`, but Icarus zero-extends it
         # to `001`, correctly matching. Mirrors the identical fix in
         # `_emit_case_wide`.
-        sel = self._emit_expr(stmt.expression, sel_w, signed_override=False)
+        # (Every item test repeats the selector text, and item bodies are
+        # emitted between the tests: only the expressions are scoped.)
+        expr_setup: list[str] = []
         lines: list[str] = []
         default_lines: list[str] = []
         first = True
@@ -2819,13 +2877,17 @@ class _StmtEmittersMixin:
         # previous value-only `==` compared x's conventional "stored as
         # 0" value against the known literal 0 and wrongly matched,
         # instead of falling through to `default` like every other engine.
-        if is_casex:
-            sel_mask = self._emit_expr_mask(stmt.expression)
-        else:
-            sel_mask = self._emit_mask_expr(stmt.expression, sel_w, signed_override=False)
+        with self._expression_temporaries(pad, expr_setup):
+            sel = self._emit_expr(stmt.expression, sel_w, signed_override=False)
+            if is_casex:
+                sel_mask = self._emit_expr_mask(stmt.expression)
+            else:
+                sel_mask = self._emit_mask_expr(stmt.expression, sel_w, signed_override=False)
 
         if any(len(item.values) > _MAX_INLINE_CASE_VALUES for item in stmt.items if not item.is_default):
-            return self._emit_case_narrow_many_values(stmt, indent, sel_w, is_casex, sel, sel_mask, context=context)
+            return expr_setup + self._emit_case_narrow_many_values(
+                stmt, indent, sel_w, is_casex, sel, sel_mask, context=context
+            )
 
         for item in stmt.items:
             if item.is_default:
@@ -2834,16 +2896,17 @@ class _StmtEmittersMixin:
 
             # Build comparison conditions
             conds = []
-            for val_expr in item.values:
-                val = self._emit_expr(val_expr, sel_w, signed_override=False)
-                if is_casex:
-                    val_mask = self._emit_expr_mask(val_expr)
-                    # casex: don't-care bits = x/z in either operand
-                    # match when (sel_val ^ item_val) & ~(sel_mask | item_mask) == 0
-                    conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
-                else:
-                    val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
-                    conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
+            with self._expression_temporaries(pad, expr_setup):
+                for val_expr in item.values:
+                    val = self._emit_expr(val_expr, sel_w, signed_override=False)
+                    if is_casex:
+                        val_mask = self._emit_expr_mask(val_expr)
+                        # casex: don't-care bits = x/z in either operand
+                        # match when (sel_val ^ item_val) & ~(sel_mask | item_mask) == 0
+                        conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
+                    else:
+                        val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
+                        conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
             cond = " or ".join(conds) if conds else "0"
 
             keyword = "if" if first else "elif"
@@ -2871,7 +2934,7 @@ class _StmtEmittersMixin:
         if not lines:
             lines.append(f"{pad}pass  # empty case")
 
-        return lines
+        return [*expr_setup, *lines]
 
     def _emit_case_narrow_many_values(  # noqa: PLR0913
         self,
@@ -2890,6 +2953,7 @@ class _StmtEmittersMixin:
         self._et_count += 1
         done = f"_case_done{n}"
         hit = f"_case_hit{n}"
+        expr_setup: list[str] = []
         lines = [f"{pad}cdef int {done} = 0", f"{pad}cdef int {hit} = 0"]
         default_item = None
 
@@ -2899,14 +2963,15 @@ class _StmtEmittersMixin:
                 continue
 
             conds = []
-            for val_expr in item.values:
-                val = self._emit_expr(val_expr, sel_w, signed_override=False)
-                if is_casex:
-                    val_mask = self._emit_expr_mask(val_expr)
-                    conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
-                else:
-                    val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
-                    conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
+            with self._expression_temporaries(pad, expr_setup):
+                for val_expr in item.values:
+                    val = self._emit_expr(val_expr, sel_w, signed_override=False)
+                    if is_casex:
+                        val_mask = self._emit_expr_mask(val_expr)
+                        conds.append(f"(({sel}) ^ ({val})) & ~(({sel_mask}) | ({val_mask})) == 0")
+                    else:
+                        val_mask = self._emit_mask_expr(val_expr, sel_w, signed_override=False)
+                        conds.append(f"((({sel}) == ({val})) and (({sel_mask}) == ({val_mask})))")
 
             if len(conds) <= _MAX_INLINE_CASE_VALUES:
                 cond = " or ".join(conds) if conds else "0"
@@ -2934,7 +2999,7 @@ class _StmtEmittersMixin:
             )
             lines.extend(default_lines if default_lines else [f"{pad}    pass"])
 
-        return lines
+        return [*expr_setup, *lines]
 
     def _emit_case_wide(
         self, stmt: CaseStatement, indent: int, sel_w: int, is_casex: bool, *, context: str = "process"
@@ -3146,10 +3211,10 @@ class _StmtEmittersMixin:
         count_name = f"_lv_repeat_count_{temp_index}"
         iter_name = f"_lv_repeat_i_{temp_index}"
         count_width = max(self._expr_width(stmt.count), 1)
-        count_expr = self._emit_expr(stmt.count, count_width)
-        count_mask = self._emit_mask_expr(stmt.count, count_width)
+        count_setup, count_expr, count_mask = self._emit_scoped_value_mask(stmt.count, count_width, pad)
 
         lines = [
+            *count_setup,
             f"{pad}{count_name} = 0",
             f"{pad}if ({count_mask}) == 0:",
             f"{inner_pad}{count_name} = ({count_expr})",
@@ -3276,29 +3341,39 @@ class _StmtEmittersMixin:
             return self._emit_finish_lines(pad, name, context)
 
         if name in ("$display", "$write"):
-            lines: list[str] = []
-            if stmt.arguments:
-                first = stmt.arguments[0]
-                if isinstance(first, StringLiteral):
-                    lines = self._emit_format_string(first.value, stmt.arguments[1:], indent)
-                else:
-                    for i, arg in enumerate(stmt.arguments):
-                        if i > 0:
-                            lines.append(f"{pad}_out_char(c, 32)  # space")
-                        if isinstance(arg, StringLiteral) or (
-                            isinstance(arg, TernaryOp)
-                            and (isinstance(arg.true_expr, StringLiteral) or isinstance(arg.false_expr, StringLiteral))
-                        ):
-                            lines.extend(self._emit_string_output(arg, indent))
-                        else:
-                            # (Not reached for a lowered call: see sim/display_format.py.)
-                            lines.extend(self._emit_format_arg(arg, "d", 0, False, False, indent))
+            # (Argument temporaries all go ahead of the output calls.)
+            arg_setup: list[str] = []
+            with self._expression_temporaries(pad, arg_setup):
+                lines = self._emit_display_output(stmt, indent)
+            lines = [*arg_setup, *lines]
             if name == "$display":
                 lines.append(f"{pad}_out_newline(c)")
             return lines
 
         # Unknown system tasks ΓÇö skip silently
         return [f"{pad}pass  # {stmt.task_name} skipped"]
+
+    def _emit_display_output(self, stmt: SystemTaskCall, indent: int) -> list[str]:
+        """The output calls of a `$display`/`$write` (without the newline)."""
+        pad = "    " * indent
+        if not stmt.arguments:
+            return []
+        first = stmt.arguments[0]
+        if isinstance(first, StringLiteral):
+            return self._emit_format_string(first.value, stmt.arguments[1:], indent)
+        lines: list[str] = []
+        for i, arg in enumerate(stmt.arguments):
+            if i > 0:
+                lines.append(f"{pad}_out_char(c, 32)  # space")
+            if isinstance(arg, StringLiteral) or (
+                isinstance(arg, TernaryOp)
+                and (isinstance(arg.true_expr, StringLiteral) or isinstance(arg.false_expr, StringLiteral))
+            ):
+                lines.extend(self._emit_string_output(arg, indent))
+            else:
+                # (Not reached for a lowered call: see sim/display_format.py.)
+                lines.extend(self._emit_format_arg(arg, "d", 0, False, False, indent))
+        return lines
 
     @staticmethod
     def _emit_finish_lines(pad: str, name: str, context: str) -> list[str]:
@@ -3452,10 +3527,10 @@ class _StmtEmittersMixin:
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
         old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = [], 0, {}, {}
+        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
         scratch_lines = self._emit_wide_expr_to_scratch(arg, slot, n_words, w, indent)
         et_pending = self._et_pending
-        self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks = old_et
+        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
         self._reset_scratch()
         if scratch_lines is None and w <= _WORD_BITS:
             val = self._emit_expr(arg, w)

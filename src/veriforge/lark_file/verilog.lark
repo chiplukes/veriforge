@@ -1849,9 +1849,17 @@ always_latch_construct: KW_ALWAYS_LATCH statement
 // SYNTHESIZABLE: YES
 // EXAMPLE: x = a + b
 // EXAMPLE: count += 1
+// EXAMPLE: count++
 // SUPPORT: YES
+// (SystemVerilog inc_or_dec_expression statements `x++`/`++x`/`x--`/`--x`
+// are parsed here too: as statements their value is unused, so each is
+// the operator assignment `x = x +/- 1`.)
 blocking_assignment: variable_lvalue "=" delay_or_event_control? expression
     | variable_lvalue COMPOUND_ASSIGN expression
+    | variable_lvalue OP_INC
+    | variable_lvalue OP_DEC
+    | OP_INC variable_lvalue
+    | OP_DEC variable_lvalue
 COMPOUND_ASSIGN: "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=" | "<<<="
 // BNF: nonblocking_assignment ::= variable_lvalue <= [ delay_or_event_control ] expression
 // PRIORITY: HIGH

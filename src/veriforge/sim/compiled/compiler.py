@@ -612,6 +612,7 @@ class CythonCompiler:  # cm:3d7f4a
         """
         sources = [f"{module_name}.pyx", *(extra_sources or [])]
         sources_repr = ", ".join(f'"{s}"' for s in sources)
+        build_helpers = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build.py")
         # The build runs as two processes (see _run_build): `setup.py
         # cythonize` writes the .c files, then `setup.py build_ext` compiles
         # them in a fresh process. A one-process build kept Cython's
@@ -636,6 +637,7 @@ import threading
 
 _NAME = "{module_name}"
 _SOURCES = [{sources_repr}]
+_BUILD_HELPERS = {build_helpers!r}
 
 
 def _cythonize():
@@ -657,8 +659,16 @@ def _cythonize():
 
 
 def _compile():
+    import importlib.util
+
     from setuptools import Extension, setup
-    from veriforge.sim.compiled._build import ParallelBuildExt
+
+    # (By path: importing it through the veriforge package would import all of veriforge.)
+    spec = importlib.util.spec_from_file_location("_veriforge_build", _BUILD_HELPERS)
+    helpers = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = helpers
+    spec.loader.exec_module(helpers)
+    ParallelBuildExt = helpers.ParallelBuildExt
 
     args = [] if sys.platform == "win32" else ["-g0"]
     c_sources = [source[: -len(".pyx")] + ".c" for source in _SOURCES]
@@ -808,7 +818,7 @@ else:
             raise RuntimeError(
                 f"The {phase} step of the compiled-engine build was killed by signal {-returncode} "
                 f"in {build_dir}, most likely for running out of memory. Try VERIFORGE_COMPILE_SPLIT=1 "
-                "(splits the generated code across smaller files), or engine='vm-fast'."
+                "(experimental: splits the generated code across smaller files), or engine='vm-fast'."
             )
         # Check for missing C compiler
         if "error: Microsoft Visual C++" in stderr or "Unable to find vcvarsall" in stderr:
@@ -818,11 +828,13 @@ else:
             )
         if "gcc" in stderr and ("not found" in stderr or "No such file" in stderr):
             raise RuntimeError("No C compiler (gcc) found. Install gcc or use engine='vm'.")
-        if "Killed signal terminated program" in stderr or "out of memory" in stderr.lower():
+        # (MSVC: "fatal error C1060: compiler is out of heap space".)
+        lowered = stderr.lower()
+        if "Killed signal terminated program" in stderr or "out of memory" in lowered or "out of heap" in lowered:
             raise RuntimeError(
                 "The C compiler ran out of memory building the compiled engine for this design "
-                f"(killed while compiling {build_dir}). Try VERIFORGE_COMPILE_SPLIT=1 (splits the "
-                "generated code across smaller files), or engine='vm-fast'."
+                f"(while compiling {build_dir}). Try VERIFORGE_COMPILE_SPLIT=1 (experimental: splits "
+                "the generated code across smaller files), or engine='vm-fast'."
             )
         raise RuntimeError(
             f"Cython compilation failed in the {phase} step (exit code {returncode}).\n"

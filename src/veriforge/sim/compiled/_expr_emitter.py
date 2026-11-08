@@ -3831,6 +3831,20 @@ class _ExprEmitterMixin:
                 )
             else:
                 mask_override = signed_override
+            if self._et_pending is not None:
+                # A comparison or logical operand's value and mask both go
+                # into this node's formula (`&&` reads each operand's twice).
+                # Its mask alone is not hoisted, so a chain whose mask is
+                # emitted before its value (a `case` selector, a fresh
+                # temporaries scope) re-expanded every level: exponential.
+                # Emitting the value first hoists and caches both.
+                for operand in (expr.left, expr.right):
+                    if (
+                        type(operand) is BinaryOp
+                        and operand.op in _COMPARISON_OPS
+                        and id(operand) not in self._et_node_masks
+                    ):
+                        self._emit_expr(operand, 1)
             lm = self._emit_mask_expr(expr.left, bitwise_op_width, mask_override)
             # The shift COUNT is self-determined -- see the identical note
             # in `_emit_binary`. Most node types' mask handling already

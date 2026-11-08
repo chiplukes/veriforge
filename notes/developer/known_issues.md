@@ -12,6 +12,19 @@
 
 ## Open defects
 
+### Intra-assignment timing controls are ignored (`b = #5 a`, `q <= #1 d`)
+
+**Status**: Open (2026-11-07). `BlockingAssign`/`NonblockingAssign` have no
+field for a `delay_or_event_control`, so `b = #5 a`, `q <= #1 d` and
+`q <= @(posedge c) d` assign immediately in every engine (the right side is
+evaluated at the right time, but the update is not delayed). Parsing now
+warns ("intra-assignment timing control '#1' is not supported and is
+ignored"); before, the control was dropped silently. Zero-delay RTL is
+unaffected; testbench code and RTL written with `<= #1` for waveform
+readability see updates one delay early. Supporting it means a model
+field plus a scheduled update in all four engines.
+`test_operator_assignment.py::test_intra_assignment_timing_warns`.
+
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 
 **Status**: Narrow remaining limit (2026-10-15). Function ports and returns
