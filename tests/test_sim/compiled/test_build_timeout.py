@@ -29,7 +29,8 @@ def test_invalid_timeout_does_not_start_build(monkeypatch, tmp_path, value):
         compiler.CythonCompiler()._run_build(str(tmp_path))
 
 
-def _fake_build(monkeypatch, finish_after):
+def _fake_build(monkeypatch, *durations):
+    """Fake build processes; the i-th one launched takes ``durations[i]`` seconds."""
     pytest.importorskip("Cython")
     clock = [100.0]
     processes = []
@@ -38,7 +39,9 @@ def _fake_build(monkeypatch, finish_after):
         pid = 12345
         returncode = 0
 
-        def __init__(self, *args, **kwargs):
+        def __init__(self, cmd, *args, **kwargs):
+            self.cmd = cmd
+            self.finish_after = durations[len(processes)]
             self.started = clock[0]
             self.killed = False
             self.waited = False
@@ -48,7 +51,7 @@ def _fake_build(monkeypatch, finish_after):
         def communicate(self, timeout):
             assert timeout > 0
             self.polls.append(timeout)
-            remaining = finish_after - (clock[0] - self.started)
+            remaining = self.finish_after - (clock[0] - self.started)
             if remaining <= timeout:
                 clock[0] += remaining
                 return "build output", ""
@@ -67,19 +70,20 @@ def _fake_build(monkeypatch, finish_after):
     return clock, processes
 
 
-@pytest.mark.parametrize("limit, duration", [("3600", 2100), ("7200", 4000), ("0", 8000)])
-def test_long_build_completes_without_real_wait(monkeypatch, tmp_path, limit, duration):
+@pytest.mark.parametrize("limit, cython, cc", [("3600", 300, 1800), ("7200", 1000, 3000), ("0", 2000, 6000)])
+def test_long_build_completes_without_real_wait(monkeypatch, tmp_path, limit, cython, cc):
     monkeypatch.setenv("VERIFORGE_COMPILE_TIMEOUT", limit)
-    clock, processes = _fake_build(monkeypatch, duration)
+    clock, processes = _fake_build(monkeypatch, cython, cc)
     compiler.CythonCompiler()._run_build(str(tmp_path))
-    assert clock[0] == 100 + duration
-    assert not processes[0].killed
+    assert clock[0] == 100 + cython + cc
+    assert [process.cmd[1:3] for process in processes] == [["setup.py", "cythonize"], ["setup.py", "build_ext"]]
+    assert not any(process.killed for process in processes)
 
 
 @pytest.mark.parametrize("system", ["Linux", "Windows"])
 def test_deadline_kills_build_and_reports_configuration(monkeypatch, tmp_path, system):
     monkeypatch.setenv("VERIFORGE_COMPILE_TIMEOUT", "10.5")
-    clock, processes = _fake_build(monkeypatch, 100)
+    clock, processes = _fake_build(monkeypatch, 100, 0)
     monkeypatch.setattr(compiler.platform, "system", lambda: system)
     killed = []
     monkeypatch.setattr(compiler.subprocess, "run", lambda command, **kwargs: killed.append(command))
@@ -88,6 +92,7 @@ def test_deadline_kills_build_and_reports_configuration(monkeypatch, tmp_path, s
     assert clock[0] == 110.5
     assert processes[0].polls == [5, 5, 0.5]
     assert processes[0].killed and processes[0].waited
+    assert len(processes) == 1
     assert bool(killed) == (system == "Windows")
     if killed:
         assert killed == [["taskkill", "/F", "/T", "/PID", "12345"]]
@@ -103,7 +108,7 @@ def test_timeout_policy_does_not_invalidate_binary_cache(monkeypatch):
 def test_deadline_counts_scheduler_delay(monkeypatch, tmp_path):
     monkeypatch.setenv("VERIFORGE_COMPILE_TIMEOUT", "10")
     monkeypatch.setattr(compiler.platform, "system", lambda: "Linux")
-    clock, processes = _fake_build(monkeypatch, 100)
+    clock, processes = _fake_build(monkeypatch, 100, 0)
     process_type = compiler.subprocess.Popen
 
     def delayed_communication(self, timeout):
@@ -115,3 +120,15 @@ def test_deadline_counts_scheduler_delay(monkeypatch, tmp_path):
         compiler.CythonCompiler()._run_build(str(tmp_path))
     assert clock[0] == 111
     assert processes[0].killed and processes[0].waited
+
+
+def test_deadline_spans_both_build_steps(monkeypatch, tmp_path):
+    """Cython's time counts against the deadline the C compiler step gets."""
+    monkeypatch.setenv("VERIFORGE_COMPILE_TIMEOUT", "10.5")
+    monkeypatch.setattr(compiler.platform, "system", lambda: "Linux")
+    clock, processes = _fake_build(monkeypatch, 6, 100)
+    with pytest.raises(RuntimeError, match=r"after 10\.5 s \(C compiler step\)"):
+        compiler.CythonCompiler()._run_build(str(tmp_path))
+    assert clock[0] == 110.5
+    assert processes[1].polls == [4.5]
+    assert not processes[0].killed and processes[1].killed

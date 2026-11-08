@@ -143,27 +143,32 @@ import extensions at runtime. This is the same pattern used by Jupyter's
 ```python
 # Simplified flow (actual implementation in compiler.py)
 def compile_and_import(pyx_source: str, module_name: str, cache_dir: str):
-    pyx_path = os.path.join(cache_dir, f"{module_name}.pyx")
-    write_file(pyx_path, pyx_source)
+    write_file(os.path.join(cache_dir, f"{module_name}.pyx"), pyx_source)
+    write_file(os.path.join(cache_dir, "setup.py"), generated_setup_script)
 
-    ext = Extension(module_name, [pyx_path])
-    cythonize(ext, compiler_directives={
-        "language_level": "3",
-        "boundscheck": False, "wraparound": False,
-        "cdivision": True, "initializedcheck": False,
-        "nonecheck": False,
-    })
-
-    subprocess.check_call(
-        [sys.executable, "setup.py", "build_ext", "--inplace"],
-        cwd=cache_dir,
-    )
+    # Step 1: .pyx -> .c. The script calls cythonize() with
+    # language_level=3, boundscheck/wraparound/initializedcheck/nonecheck
+    # off and cdivision on, on a thread with a large stack.
+    subprocess.run([sys.executable, "setup.py", "cythonize"], cwd=cache_dir)
+    # Step 2: .c -> .so/.pyd, through ParallelBuildExt in a fresh process.
+    subprocess.run([sys.executable, "setup.py", "build_ext", "--inplace"], cwd=cache_dir)
 
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 ```
+
+The two steps are separate processes so that Cython's memory is released
+before the C compiler starts. Python keeps the memory of Cython's parse
+tree after translation finishes, so a single-process build held it
+(about 13 GB for the 1M-line `axis_pix_correction2` design) for the whole C
+compile. For that design under gcc (2026-11-07), the Cython step peaks at
+12.2 GB and `cc1` at 7.7 GB; run one after the other, the build peaks at
+14.0 GB of system memory instead of about 20 GB. Wall time is unchanged
+(19 minutes). Both steps share one deadline (`VERIFORGE_COMPILE_TIMEOUT`).
+A step killed by a signal with no error output (the Linux out-of-memory
+killer) is reported as a likely memory failure, naming the step.
 
 ### Compilation Time
 
@@ -823,8 +828,8 @@ required reads solely because their clocks are idle.
 | `VERIFORGE_COMPILE_MEMORY_MB` | Half available RAM | Optional total memory budget for one build; limited by available RAM |
 | `VERIFORGE_COMPILE_SHARE_PROCESSES` | `0` | `1` shares compatible scalar process implementations |
 
-The build deadline covers the compiler subprocess, including Cython
-translation, C compilation, and linking. It uses elapsed monotonic wall
+The build deadline covers both build subprocesses: Cython translation,
+then C compilation and linking. It uses elapsed monotonic wall
 time and keeps reporting progress while waiting. The former fixed
 600-second limit could stop a healthy cold full-IP build taking about
 35 minutes. For a longer build, set the timeout in the calling shell or
@@ -842,7 +847,15 @@ cached build. This setting changes how long a build may run, not its
 compilation speed.
 
 Parallel object scheduling currently supports the Unix compiler loop, including
-GCC/Clang. Custom compile loops such as MSVC retain serial compilation. Cython
+GCC/Clang. Custom compile loops such as MSVC retain serial compilation.
+
+On MSVC the build removes setuptools' whole-program optimization flags: `/GL`
+when compiling and `/LTCG` when linking. With `/GL`, `cl` only parses and
+all optimization and code generation waits for the link, which holds the
+intermediate code of the whole extension in memory. A generated extension
+is one translation unit (or a few, with `VERIFORGE_COMPILE_SPLIT=1`), and
+calls into the Python DLL cannot be inlined anyway, so link-time code
+generation has almost nothing to optimize across. Cython
 translation remains serial; the independent C object compilations overlap before
 linking one extension. Missing memory information conservatively selects one job
 unless an explicit memory budget is provided. Container memory limits are used

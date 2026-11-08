@@ -84,8 +84,35 @@ def compile_objects(compiler: CCompiler, sources, *args, **kwargs):
     return objects
 
 
+# Whole-program optimization flags setuptools gives MSVC. A generated
+# extension is one translation unit, so cross-module inlining has nothing to
+# work with; ``/GL`` only defers all code generation to a ``/LTCG`` link step
+# that holds the whole program's intermediate code in memory at once.
+_MSVC_WHOLE_PROGRAM_FLAGS = frozenset({"/GL", "/LTCG"})
+
+
+# cm:c519a3
+def drop_msvc_whole_program_optimization(compiler: CCompiler, plat_name: str | None = None) -> None:
+    """Compile and link a generated extension without ``/GL`` and ``/LTCG``.
+
+    MSVC sets its flag lists in ``initialize()``, which otherwise runs lazily
+    on the first compile; run it now so there is something to edit. Other
+    compilers are left alone.
+    """
+    if compiler.compiler_type != "msvc":
+        return
+    if not getattr(compiler, "initialized", True):
+        compiler.initialize(plat_name)
+    ldflags = getattr(compiler, "_ldflags", {})
+    flag_lists = [getattr(compiler, "compile_options", None), getattr(compiler, "compile_options_debug", None)]
+    for flags in [*flag_lists, *ldflags.values()]:
+        if isinstance(flags, list):
+            flags[:] = [flag for flag in flags if flag not in _MSVC_WHOLE_PROGRAM_FLAGS]
+
+
 class ParallelBuildExt(build_ext):
     def build_extensions(self):
+        drop_msvc_whole_program_optimization(self.compiler, self.plat_name)
         original = self.compiler.compile
 
         def compile_sources(sources, *args, **kwargs):

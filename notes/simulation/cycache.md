@@ -92,7 +92,7 @@ restored from JSON — `CythonCodegen.generate()` is skipped entirely.
 ├── <keyed_name>/                         # Layer 1: compiled extension
 │   ├── <keyed_name>.pyx                  # .pyx source (for debugging)
 │   ├── <keyed_name>.c                    # Cython-generated C source
-│   ├── setup.py                          # build script
+│   ├── setup.py                          # build script (`cythonize` step, then `build_ext`)
 │   ├── t/                                # C compiler temp artifacts (--build-temp)
 │   ├── l/                                # build lib temp (--build-lib)
 │   └── <keyed_name>.pyd                  # compiled extension

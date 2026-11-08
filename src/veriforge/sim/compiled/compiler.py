@@ -97,8 +97,8 @@ def _report_progress(message: str) -> None:
         print(f"[veriforge] {message}", file=sys.stderr, flush=True)
 
 
-def _report_build_progress(elapsed: float) -> None:
-    _report_progress(f"  ... still compiling (Cython/C compiler), {elapsed:.0f}s elapsed")
+def _report_build_progress(elapsed: float, phase: str = "Cython/C compiler") -> None:
+    _report_progress(f"  ... still compiling ({phase}), {elapsed:.0f}s elapsed")
 
 
 # cm:3d7f4b
@@ -612,44 +612,59 @@ class CythonCompiler:  # cm:3d7f4a
         """
         sources = [f"{module_name}.pyx", *(extra_sources or [])]
         sources_repr = ", ".join(f'"{s}"' for s in sources)
+        # The build runs as two processes (see _run_build): `setup.py
+        # cythonize` writes the .c files, then `setup.py build_ext` compiles
+        # them in a fresh process. A one-process build kept Cython's
+        # memory (about 13 GB for a 1M-line design, never handed back to the
+        # OS) alive alongside the C compiler.
         # No debug info (-g0, overriding Python's default -g): nobody steps
         # through generated simulator C in a debugger, and for a large design
         # it was ~30% of the C compile time (wide_bench 250 lanes: 14.0 s ->
         # 9.8 s). Optimized code is unchanged. MSVC doesn't take -g0.
         # Cython's parser recurses once per nesting level, so a long
         # associative chain (a 200-input XOR becomes 200 nested parentheses)
-        # hit Python's recursion limit and the build failed. Run the build
-        # on a thread with a big stack and a high recursion limit. The
-        # stack size steps down until the platform accepts one: 512 MiB
-        # raised ValueError on one Windows machine (about 128 MiB was the
-        # most it took), failing every compiled build. The recursion limit
-        # scales with the stack actually granted, so a deep chain still
-        # stops with RecursionError rather than overflowing the C stack.
+        # hit Python's recursion limit and the build failed. Run Cython on a
+        # thread with a big stack and a high recursion limit. The stack size
+        # steps down until the platform accepts one: 512 MiB raised
+        # ValueError on one Windows machine (about 128 MiB was the most it
+        # took), failing every compiled build. The recursion limit scales
+        # with the stack actually granted, so a deep chain still stops with
+        # RecursionError rather than overflowing the C stack.
         return f"""\
 import sys
 import threading
 
-from setuptools import Extension, setup
-from Cython.Build import cythonize
-from veriforge.sim.compiled._build import ParallelBuildExt
-
-_args = [] if sys.platform == "win32" else ["-g0"]
+_NAME = "{module_name}"
+_SOURCES = [{sources_repr}]
 
 
-def _build():
+def _cythonize():
+    from Cython.Build import cythonize
+    from setuptools import Extension
+
+    cythonize(
+        [Extension(_NAME, _SOURCES)],
+        force=True,
+        compiler_directives={{
+            "language_level": "3",
+            "boundscheck": False,
+            "wraparound": False,
+            "cdivision": True,
+            "initializedcheck": False,
+            "nonecheck": False,
+        }},
+    )
+
+
+def _compile():
+    from setuptools import Extension, setup
+    from veriforge.sim.compiled._build import ParallelBuildExt
+
+    args = [] if sys.platform == "win32" else ["-g0"]
+    c_sources = [source[: -len(".pyx")] + ".c" for source in _SOURCES]
     setup(
         cmdclass={{"build_ext": ParallelBuildExt}},
-        ext_modules=cythonize(
-            [Extension("{module_name}", [{sources_repr}], extra_compile_args=_args)],
-            compiler_directives={{
-                "language_level": "3",
-                "boundscheck": False,
-                "wraparound": False,
-                "cdivision": True,
-                "initializedcheck": False,
-                "nonecheck": False,
-            }},
-        ),
+        ext_modules=[Extension(_NAME, c_sources, extra_compile_args=args)],
     )
 
 
@@ -659,30 +674,37 @@ _failure = []
 def _run(limit):
     try:
         sys.setrecursionlimit(limit)
-        _build()
+        _cythonize()
     except BaseException as exc:  # noqa: BLE001 -- re-raised in the main thread
         _failure.append(exc)
 
 
-_thread = None
-for _mib in (512, 256, 128, 64, 32):
-    # (~2.6 KiB of C stack per Python frame: 200000 frames at 512 MiB.)
-    _limit = max(10000, 200000 * _mib // 512)
-    try:
-        threading.stack_size(_mib * 1024 * 1024)
-        _candidate = threading.Thread(target=_run, args=(_limit,))
-        _candidate.start()
-    except (ValueError, RuntimeError, MemoryError):
-        continue  # (this size isn't available here: try a smaller one)
-    _thread = _candidate
-    break
-if _thread is None:
-    # No large stack at all: build on this thread, as plain setuptools would.
-    _run(max(sys.getrecursionlimit(), 10000))
+def _cythonize_on_big_stack():
+    thread = None
+    for mib in (512, 256, 128, 64, 32):
+        # (~2.6 KiB of C stack per Python frame: 200000 frames at 512 MiB.)
+        limit = max(10000, 200000 * mib // 512)
+        try:
+            threading.stack_size(mib * 1024 * 1024)
+            candidate = threading.Thread(target=_run, args=(limit,))
+            candidate.start()
+        except (ValueError, RuntimeError, MemoryError):
+            continue  # (this size isn't available here: try a smaller one)
+        thread = candidate
+        break
+    if thread is None:
+        # No large stack at all: run on this thread.
+        _run(max(sys.getrecursionlimit(), 10000))
+    else:
+        thread.join()
+    if _failure:
+        raise _failure[0]
+
+
+if sys.argv[1:] == ["cythonize"]:
+    _cythonize_on_big_stack()
 else:
-    _thread.join()
-if _failure:
-    raise _failure[0]
+    _compile()
 """
 
     def _run_build(self, build_dir: str, *, n_sources: int = 1) -> None:
@@ -699,11 +721,29 @@ if _failure:
                 "Cython is required for the compiled engine. Install it with: pip install cython"
             ) from None
 
-        cmd = [sys.executable, "setup.py", "build_ext", "--inplace", "--build-temp", "t", "--build-lib", "l"]
-        log.debug("Running: %s in %s", cmd, build_dir)
         total_timeout = _build_timeout()
         started = time.monotonic()
+        steps = (
+            ("Cython", [sys.executable, "setup.py", "cythonize"]),
+            (
+                "C compiler",
+                [sys.executable, "setup.py", "build_ext", "--inplace", "--build-temp", "t", "--build-lib", "l"],
+            ),
+        )
+        for phase, cmd in steps:
+            phase_started = time.monotonic()
+            returncode, stdout, stderr = self._run_build_step(cmd, build_dir, phase, started, total_timeout)
+            if returncode != 0:
+                self._raise_build_failure(returncode, stdout, stderr, build_dir, phase)
+            if phase == "Cython":
+                _report_progress(f"  ... Cython finished in {time.monotonic() - phase_started:.0f}s; compiling the C")
 
+    @staticmethod
+    def _run_build_step(
+        cmd: list[str], build_dir: str, phase: str, started: float, total_timeout: float
+    ) -> tuple[int, str, str]:
+        """Run one build process against the whole build's deadline."""
+        log.debug("Running: %s in %s", cmd, build_dir)
         # On Windows, MSVC (cl.exe) is a child of setup.py and inherits the
         # stdout/stderr pipes.  When subprocess.run's timeout fires it kills
         # setup.py but cl.exe may still hold the pipe handles, causing
@@ -742,7 +782,7 @@ if _failure:
                     elapsed = time.monotonic() - started
                     if total_timeout and elapsed >= total_timeout:
                         raise
-                    _report_build_progress(elapsed)
+                    _report_build_progress(elapsed, phase)
         except subprocess.TimeoutExpired:
             # Kill the full process tree so all pipe handles are closed.
             if platform.system() == "Windows":
@@ -754,33 +794,40 @@ if _failure:
             proc.kill()
             proc.wait()
             raise RuntimeError(
-                f"Cython compilation timed out after {total_timeout:g} s in {build_dir}. "
+                f"Cython compilation timed out after {total_timeout:g} s ({phase} step) in {build_dir}. "
                 "Increase VERIFORGE_COMPILE_TIMEOUT for large designs (0 disables the timeout), "
                 "or use engine='vm-fast'."
             ) from None
+        return proc.returncode, stdout or "", stderr or ""
 
-        if proc.returncode != 0:
-            # Extract the most useful error info
-            stderr = stderr or ""
-            stdout = stdout or ""
-            # Check for missing C compiler
-            if "error: Microsoft Visual C++" in stderr or "Unable to find vcvarsall" in stderr:
-                raise RuntimeError(
-                    "No C compiler found. On Windows, install Visual Studio Build Tools.\n"
-                    "Alternatively, use engine='vm' which does not require a C compiler."
-                )
-            if "gcc" in stderr and ("not found" in stderr or "No such file" in stderr):
-                raise RuntimeError("No C compiler (gcc) found. Install gcc or use engine='vm'.")
-            if "Killed signal terminated program" in stderr or "out of memory" in stderr.lower():
-                raise RuntimeError(
-                    "The C compiler ran out of memory building the compiled engine for this design "
-                    f"(killed while compiling {build_dir}). Try VERIFORGE_COMPILE_SPLIT=1 (splits the "
-                    "generated code across smaller files), or engine='vm-fast'."
-                )
+    @staticmethod
+    def _raise_build_failure(returncode: int, stdout: str, stderr: str, build_dir: str, phase: str) -> None:
+        if returncode < 0 and not stderr.strip():
+            # Killed by a signal with nothing on stderr: on Linux this is
+            # usually the out-of-memory killer (exit -9).
             raise RuntimeError(
-                f"Cython compilation failed (exit code {proc.returncode}).\n"
-                f"stderr: {stderr[-2000:]}\nstdout: {stdout[-2000:]}"
+                f"The {phase} step of the compiled-engine build was killed by signal {-returncode} "
+                f"in {build_dir}, most likely for running out of memory. Try VERIFORGE_COMPILE_SPLIT=1 "
+                "(splits the generated code across smaller files), or engine='vm-fast'."
             )
+        # Check for missing C compiler
+        if "error: Microsoft Visual C++" in stderr or "Unable to find vcvarsall" in stderr:
+            raise RuntimeError(
+                "No C compiler found. On Windows, install Visual Studio Build Tools.\n"
+                "Alternatively, use engine='vm' which does not require a C compiler."
+            )
+        if "gcc" in stderr and ("not found" in stderr or "No such file" in stderr):
+            raise RuntimeError("No C compiler (gcc) found. Install gcc or use engine='vm'.")
+        if "Killed signal terminated program" in stderr or "out of memory" in stderr.lower():
+            raise RuntimeError(
+                "The C compiler ran out of memory building the compiled engine for this design "
+                f"(killed while compiling {build_dir}). Try VERIFORGE_COMPILE_SPLIT=1 (splits the "
+                "generated code across smaller files), or engine='vm-fast'."
+            )
+        raise RuntimeError(
+            f"Cython compilation failed in the {phase} step (exit code {returncode}).\n"
+            f"stderr: {stderr[-2000:]}\nstdout: {stdout[-2000:]}"
+        )
 
     def _import_extension(self, ext_path: str, module_name: str) -> object:
         """Import a compiled extension from a file path."""

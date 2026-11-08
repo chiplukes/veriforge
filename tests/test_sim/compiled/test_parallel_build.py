@@ -102,3 +102,46 @@ endmodule"""
     sim.drive("a", Value(data, mask=1 << 130, width=256))
     sim.settle()
     assert sim.read("y").mask == 1 << 130
+
+
+def _msvc_compiler(monkeypatch):
+    """setuptools' real MSVC compiler, with the Visual Studio lookup stubbed so it initializes anywhere."""
+    msvc = pytest.importorskip("setuptools._distutils.compilers.C.msvc")
+    monkeypatch.setattr(msvc, "_get_vc_env", lambda spec: {"path": "", "include": "", "lib": ""})
+    monkeypatch.setattr(msvc, "_find_exe", lambda exe, paths: exe)
+    compiler = msvc.Compiler()
+    commands = []
+    compiler.spawn = commands.append
+    return compiler, commands
+
+
+def test_msvc_builds_without_whole_program_optimization(tmp_path, monkeypatch):
+    """setuptools compiles with ``/GL`` and links with ``/LTCG``: all code
+    generation waits for the link, which holds the whole program's
+    intermediate code in memory. A generated extension is one translation
+    unit, so there is no cross-module inlining to gain."""
+    compiler, commands = _msvc_compiler(monkeypatch)
+    _build.drop_msvc_whole_program_optimization(compiler, "win-amd64")
+    source = tmp_path / "m.c"
+    source.write_text("int f(void) { return 0; }")
+    objects = compiler.compile([str(source)], output_dir=str(tmp_path / "t"))
+    compiler.link_shared_object(objects, str(tmp_path / "m.pyd"))
+    cl, link = commands
+    assert cl[0] == "cl.exe" and "/O2" in cl and "/GL" not in cl
+    assert link[0] == "link.exe" and "/DLL" in link and "/LTCG" not in link
+
+
+def test_msvc_debug_links_drop_ltcg_too(monkeypatch):
+    compiler, _commands = _msvc_compiler(monkeypatch)
+    compiler.initialize("win-amd64")
+    assert "/GL" in compiler.compile_options and "/LTCG" in compiler.ldflags_shared_debug
+    _build.drop_msvc_whole_program_optimization(compiler)
+    assert all("/LTCG" not in flags for flags in compiler._ldflags.values())
+    assert "/GL" not in compiler.compile_options
+
+
+def test_whole_program_change_leaves_other_compilers_alone():
+    compiler = new_compiler(compiler="unix")
+    before = list(compiler.compiler_so)
+    _build.drop_msvc_whole_program_optimization(compiler)
+    assert compiler.compiler_so == before

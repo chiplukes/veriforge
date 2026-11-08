@@ -428,14 +428,14 @@ class TestTimingDiagnostics:
 
 
 class TestSetupScriptStackSize:
-    """The generated setup.py builds on a thread with a big stack (Cython's
+    """The generated setup.py runs Cython on a thread with a big stack (Cython's
     parser recurses once per nesting level). It asked for 512 MiB outright,
     and `threading.stack_size` raised ValueError on a Windows machine that
     took about 128 MiB at most -- every compiled build failed there
     (2026-10-17). It steps down now, scaling the recursion limit to the
     stack it got. Run with stand-ins for setuptools/Cython: no C build."""
 
-    def _run_script(self, monkeypatch, max_mib):
+    def _run_script(self, monkeypatch, max_mib, argv=("setup.py", "cythonize"), extra_sources=None):
         from veriforge.sim.compiled._build import ParallelBuildExt
 
         import sys
@@ -453,25 +453,31 @@ class TestSetupScriptStackSize:
             current["size"] = size
             return 0
 
-        def fake_setup(**kwargs):
-            assert kwargs["cmdclass"]["build_ext"] is ParallelBuildExt
+        def fake_cythonize(exts, **kwargs):
             seen["stack_mib"] = current["size"] // (1024 * 1024)
             seen["limit"] = sys.getrecursionlimit()
             seen["thread"] = threading.current_thread() is not threading.main_thread()
+            seen["force"] = kwargs.get("force")
+            return exts
+
+        def fake_setup(**kwargs):
+            assert kwargs["cmdclass"]["build_ext"] is ParallelBuildExt
+            seen["setup_sources"] = [ext[0][1] for ext in kwargs["ext_modules"]]
 
         setuptools = types.ModuleType("setuptools")
         setuptools.Extension = lambda *a, **k: (a, k)
         setuptools.setup = fake_setup
         cython = types.ModuleType("Cython")
         cython_build = types.ModuleType("Cython.Build")
-        cython_build.cythonize = lambda exts, **k: exts
+        cython_build.cythonize = fake_cythonize
         monkeypatch.setitem(sys.modules, "setuptools", setuptools)
         monkeypatch.setitem(sys.modules, "Cython", cython)
         monkeypatch.setitem(sys.modules, "Cython.Build", cython_build)
         monkeypatch.setattr(threading, "stack_size", fake_stack_size)
+        monkeypatch.setattr(sys, "argv", list(argv))
         old_limit = sys.getrecursionlimit()
         try:
-            script = CythonCompiler()._generate_setup_py("compiled_t")
+            script = CythonCompiler()._generate_setup_py("compiled_t", extra_sources)
             exec(compile(script, "setup.py", "exec"), {"__name__": "__main__"})  # noqa: S102
         finally:
             sys.setrecursionlimit(old_limit)
@@ -479,12 +485,61 @@ class TestSetupScriptStackSize:
 
     def test_takes_512_mib_when_available(self, monkeypatch):
         seen = self._run_script(monkeypatch, None)
-        assert seen == {"stack_mib": 512, "limit": 200000, "thread": True}
+        assert seen == {"stack_mib": 512, "limit": 200000, "thread": True, "force": True}
 
     def test_steps_down_when_512_mib_is_refused(self, monkeypatch):
         seen = self._run_script(monkeypatch, 128)
-        assert seen == {"stack_mib": 128, "limit": 50000, "thread": True}
+        assert seen == {"stack_mib": 128, "limit": 50000, "thread": True, "force": True}
 
     def test_no_large_stack_at_all_builds_on_the_main_thread(self, monkeypatch):
         seen = self._run_script(monkeypatch, 16)
         assert seen["thread"] is False and seen["limit"] >= 10000
+
+
+class TestTwoStepBuild:
+    """Cython and the C compiler run as separate processes, so Cython's memory
+    (about 13 GB for the 1M-line axis_pix_correction2 design, 2026-11-07) is
+    gone before the C compiler starts."""
+
+    def test_build_ext_step_compiles_the_c_files(self, monkeypatch):
+        seen = TestSetupScriptStackSize()._run_script(
+            monkeypatch, None, argv=("setup.py", "build_ext", "--inplace"), extra_sources=["compiled_t_part1.pyx"]
+        )
+        assert seen == {"setup_sources": [["compiled_t.c", "compiled_t_part1.c"]]}
+
+    def test_build_runs_cython_then_c_compiler(self, monkeypatch, tmp_path):
+        pytest.importorskip("Cython")
+        from veriforge.sim.compiled import compiler
+
+        commands = []
+
+        def fake_step(cmd, build_dir, phase, started, total_timeout):
+            commands.append((phase, cmd[1:3]))
+            return 0, "", ""
+
+        monkeypatch.setattr(compiler.CythonCompiler, "_run_build_step", staticmethod(fake_step))
+        compiler.CythonCompiler()._run_build(str(tmp_path))
+        assert commands == [("Cython", ["setup.py", "cythonize"]), ("C compiler", ["setup.py", "build_ext"])]
+
+    def test_cython_failure_skips_c_compiler(self, monkeypatch, tmp_path):
+        pytest.importorskip("Cython")
+        from veriforge.sim.compiled import compiler
+
+        phases = []
+
+        def fake_step(cmd, build_dir, phase, started, total_timeout):
+            phases.append(phase)
+            return 1, "", "x.pyx:3:4: undeclared name"
+
+        monkeypatch.setattr(compiler.CythonCompiler, "_run_build_step", staticmethod(fake_step))
+        with pytest.raises(RuntimeError, match="(?s)Cython step.*undeclared name"):
+            compiler.CythonCompiler()._run_build(str(tmp_path))
+        assert phases == ["Cython"]
+
+    def test_signal_kill_reports_memory(self, monkeypatch, tmp_path):
+        pytest.importorskip("Cython")
+        from veriforge.sim.compiled import compiler
+
+        monkeypatch.setattr(compiler.CythonCompiler, "_run_build_step", staticmethod(lambda cmd, *args: (-9, "", "")))
+        with pytest.raises(RuntimeError, match="Cython step.*signal 9.*running out of memory"):
+            compiler.CythonCompiler()._run_build(str(tmp_path))
