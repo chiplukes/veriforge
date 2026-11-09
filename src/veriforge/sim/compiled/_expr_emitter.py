@@ -52,6 +52,16 @@ if TYPE_CHECKING:
 
 _CONTEXT_ARITH_OPS = frozenset({"+", "-", "*", "/", "%", "**", "<<", ">>", "<<<", ">>>"})
 
+# Inside a temporaries scope, a node's emitted value or mask text longer than
+# this is assigned to a temporary, and the name is used in its place (see
+# `_emit_expr`).
+_HOIST_TEXT_CHARS = 160
+# Outside a scope nothing bounds the text: this much from one expression is a
+# codegen bug about to exhaust memory (see `_emit_unscoped`).
+_UNSCOPED_TEXT_LIMIT = 4 << 20
+# Emitted the same in every context: never cached or hoisted.
+_LEAF_NODES = (Identifier, Literal)
+
 
 # cm:7399e2
 class _ExprEmitterMixin:
@@ -82,6 +92,121 @@ class _ExprEmitterMixin:
         lines.append(f"        mark_dirty(&self.ctx, {sid})")
 
     # Expression codegen
+
+    # cm:5e81c2
+    def _emit_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:
+        """Return a Cython value expression string for *expr* (see `_emit_expr_node`).
+
+        Value and mask formulas refer to their operands' text more than once
+        (a `?:` repeats its false branch three times, `!x` and `x[i]` read
+        `x`'s value and mask, an index is bounds- and x-checked), so text
+        nested this way grows exponentially with depth: an 8-term `&&` into
+        `hit[i]`, a 16-way select as a memory index (27 GB), an `ibex` CSR
+        comparison chain. Inside a temporaries scope (`_et_pending`) each
+        node is emitted once per (node, width, signedness) -- later
+        requests reuse the text -- and text longer than
+        `_HOIST_TEXT_CHARS` is assigned to a temporary first, so what a
+        parent embeds is short, and code size is linear in the expression
+        for every node type. Outside a scope see `_emit_unscoped`.
+        """
+        pending = self._et_pending
+        if pending is None:
+            return self._emit_unscoped(self._emit_expr_node, expr, width, signed_override)
+        if type(expr) in _LEAF_NODES or id(expr) in self._guard_conds:
+            return self._emit_expr_node(expr, width, signed_override)
+        key = ("v", id(expr), width, signed_override)
+        entry = self._et_node_vals.get(key)
+        if entry is not None and entry[0] is expr:
+            return entry[1]
+        text = self._emit_expr_node(expr, width, signed_override)
+        if len(text) > _HOIST_TEXT_CHARS and self._et_pending is pending:
+            text = self._hoist_text(pending, text, "v")
+        # (The node is kept with its text: a node built during emission and
+        # freed could otherwise pass its id() on to another one.)
+        self._et_node_vals[key] = (expr, text)
+        return text
+
+    def _emit_mask_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:
+        """Return a Cython mask expression string for *expr*; see `_emit_expr`
+        and `_emit_mask_expr_node`."""
+        pending = self._et_pending
+        if pending is None:
+            return self._emit_unscoped(self._emit_mask_expr_node, expr, width, signed_override)
+        if type(expr) in _LEAF_NODES or id(expr) in self._guard_conds:
+            return self._emit_mask_expr_node(expr, width, signed_override)
+        key = ("m", id(expr), width, signed_override)
+        entry = self._et_node_masks.get(key)
+        if entry is not None and entry[0] is expr:
+            return entry[1]
+        text = self._emit_mask_expr_node(expr, width, signed_override)
+        if len(text) > _HOIST_TEXT_CHARS and self._et_pending is pending:
+            text = self._hoist_text(pending, text, "m")
+        # (The node is kept with its text: a node built during emission and
+        # freed could otherwise pass its id() on to another one.)
+        self._et_node_masks[key] = (expr, text)
+        return text
+
+    def _hoist_text(self, pending: list[str], text: str, kind: str) -> str:
+        """Assign *text* to a new temporary of the open scope; return its name."""
+        n = self._et_count
+        self._et_count += 1
+        pending.append(f"cdef long long _et{n}_{kind} = {text}")
+        return f"_et{n}_{kind}"
+
+    def _emit_unscoped(self, emit, expr: Expression, width: int, signed_override: bool | None) -> str:
+        """Emit *expr* with no temporaries scope open: inline, unbounded.
+
+        Every emitter that produces lines opens a scope (`_expression_temporaries`,
+        `_fresh_expression_scope`) for the expressions it emits, and an
+        analysis that only needs to know what an expression refers to must
+        not emit it at all. With ``VERIFORGE_CODEGEN_STRICT=1`` (the test
+        suite sets it) a composite expression emitted outside a scope is an
+        error, so a missing scope shows in any test that reaches it, not
+        only in a design big enough to exhaust memory. Otherwise text past
+        `_UNSCOPED_TEXT_LIMIT` stops codegen with an explanation.
+        """
+        if self._strict_scopes and type(expr) not in _LEAF_NODES:
+            raise AssertionError(
+                f"compiled codegen: {type(expr).__name__} emitted outside a temporaries scope "
+                "(its text is unbounded there; see `_ExprEmitterMixin._emit_unscoped`)"
+            )
+        text = emit(expr, width, signed_override)
+        if len(text) > _UNSCOPED_TEXT_LIMIT:
+            raise NotImplementedError(
+                f"Compiled engine: the generated code for one {type(expr).__name__} expression passed "
+                f"{_UNSCOPED_TEXT_LIMIT >> 20} MB (it grows exponentially with nesting here; a compiled-engine "
+                "codegen bug -- please report it). Work around it by assigning inner subexpressions to "
+                "intermediate wires, or use engine='vm'."
+            )
+        return text
+
+    def _emit_py_expr(self, expr: Expression, width: int) -> str | None:
+        """Python-integer value text for *expr* (see `_emit_py_expr_node`).
+        As `_emit_expr`: with `_py_pending` set, each node once, and long
+        text in a Python temporary (`_pt{n}`, assigned in the `with gil:`
+        block that uses the expression)."""
+        return self._emit_py_cached(self._emit_py_expr_node, self._py_val_cache, "v", expr, width)
+
+    def _emit_py_mask_expr(self, expr: Expression, width: int) -> str | None:
+        """Python-integer mask text for *expr*; see `_emit_py_expr`."""
+        return self._emit_py_cached(self._emit_py_mask_expr_node, self._py_mask_cache, "m", expr, width)
+
+    def _emit_py_cached(self, emit, cache: dict, kind: str, expr: Expression, width: int) -> str | None:
+        pending = self._py_pending
+        if pending is None or type(expr) in _LEAF_NODES:
+            return emit(expr, width)
+        key = (kind, id(expr), width)
+        entry = cache.get(key)
+        if entry is not None and entry[0] is expr:
+            return entry[1]
+        text = emit(expr, width)
+        if text is not None and len(text) > _HOIST_TEXT_CHARS and self._py_pending is pending:
+            n = self._et_count
+            self._et_count += 1
+            pending.append(f"_pt{n}_{kind} = <object>({text})")
+            text = f"_pt{n}_{kind}"
+        cache[key] = (expr, text)  # (kept alive with it; see `_emit_expr`)
+        return text
 
     def _emit_expr_mask(self, expr: Expression) -> str:
         """Return a Cython expression for the x/z mask of expr."""
@@ -250,7 +375,9 @@ class _ExprEmitterMixin:
         del sid, sel_width, context_width
         return val_expr
 
-    def _emit_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911, PLR0912
+    def _emit_expr_node(  # noqa: PLR0911, PLR0912
+        self, expr: Expression, width: int, signed_override: bool | None = None
+    ) -> str:
         """Return a Cython value expression string for *expr*.
 
         *width* is the context width used for masking arithmetic results.
@@ -981,7 +1108,7 @@ class _ExprEmitterMixin:
         mask_expr = f"(({true_mask}) if ({cond_known1}) else (({false_mask}) if {cond_mask_zero} else ({merged_mask})))"
         return value_expr, mask_expr
 
-    def _emit_py_expr(self, expr: Expression, width: int) -> str | None:  # noqa: PLR0911
+    def _emit_py_expr_node(self, expr: Expression, width: int) -> str | None:  # noqa: PLR0911
         etype = type(expr)
 
         if etype is Identifier:
@@ -1249,7 +1376,7 @@ class _ExprEmitterMixin:
 
         return None
 
-    def _emit_py_mask_expr(self, expr: Expression, width: int) -> str | None:  # noqa: PLR0911
+    def _emit_py_mask_expr_node(self, expr: Expression, width: int) -> str | None:  # noqa: PLR0911
         etype = type(expr)
 
         if etype is Identifier:
@@ -3604,7 +3731,9 @@ class _ExprEmitterMixin:
 
     # ΓöÇΓöÇ Mask expression generation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-    def _emit_mask_expr(self, expr: Expression, width: int, signed_override: bool | None = None) -> str:  # noqa: PLR0911, PLR0912
+    def _emit_mask_expr_node(  # noqa: PLR0911, PLR0912
+        self, expr: Expression, width: int, signed_override: bool | None = None
+    ) -> str:
         """Return a Cython mask expression string for *expr*.
 
         Mirrors _emit_expr() but tracks x/z mask propagation.  For ternary
@@ -4740,9 +4869,13 @@ class _ExprEmitterMixin:
                 self._walk_signals(expr.default_value, sigs)
             return
         if etype is BitSelect:
-            mem_access = self._resolve_memory_element_access(expr)
+            # Only the memory and its indices: `_resolve_memory_element_access`
+            # would also emit the flat-index code, unhoisted (no `_et_pending`
+            # here), and an index holding a ternary chain grows 3x per level --
+            # a 16-way `select` in a memory index used 27 GB before.
+            mem_access = self._resolve_memory_element_expr(expr)
             if mem_access is not None:
-                mid, _idx, _name, indices = mem_access
+                mid, _name, indices = mem_access
                 sigs.add(self._mem_marker_sigs[mid])
                 for index_expr in indices:
                     self._walk_signals(index_expr, sigs)

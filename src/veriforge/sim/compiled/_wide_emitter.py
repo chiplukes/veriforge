@@ -557,17 +557,8 @@ class _WideEmitterMixin:
         # recursive scratch emitter can itself recurse into the NARROW
         # emitter (e.g. a FunctionCall argument), which needs its own
         # fresh `_et_pending` scope.
-        old_et_pending = self._et_pending
-        old_et_node_vals = self._et_node_vals
-        old_et_node_masks = self._et_node_masks
-        self._et_pending = []
-        self._et_node_vals = {}
-        self._et_node_masks = {}
-        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, elem_w, indent)
-        et_pending = self._et_pending
-        self._et_pending = old_et_pending
-        self._et_node_vals = old_et_node_vals
-        self._et_node_masks = old_et_node_masks
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, elem_w, indent)
         if scratch_lines is None:
             self._reset_scratch()
             return None
@@ -1865,8 +1856,16 @@ class _WideEmitterMixin:
         if eval_width <= _WORD_BITS:
             return None
 
-        rhs_py = self._emit_py_expr(rhs, eval_width)
-        mask_py = self._emit_py_mask_expr(rhs, eval_width)
+        # Long subexpressions go to Python temporaries assigned first in the
+        # `with gil:` block (see `_emit_py_expr`); narrow parts the Python
+        # emitter delegates to get the C temporaries of a scope.
+        self._py_pending = py_pending = []
+        try:
+            with self._fresh_expression_scope() as et_pending:
+                rhs_py = self._emit_py_expr(rhs, eval_width)
+                mask_py = self._emit_py_mask_expr(rhs, eval_width)
+        finally:
+            self._py_pending = None
         if rhs_py is None or mask_py is None:
             return None
 
@@ -1876,7 +1875,9 @@ class _WideEmitterMixin:
         pad = "    " * indent
         helper = "_whole_stage_py_bits" if is_nba else "_whole_assign_py_bits"
         return [
+            *(f"{pad}{line}" for line in et_pending),
             f"{pad}with gil:",
+            *(f"{pad}    {line}" for line in py_pending),
             f"{pad}    {helper}(c, {dst_sid}, {bits_value}, {bits_mask})",
         ]
 
@@ -3758,6 +3759,36 @@ class _WideEmitterMixin:
         *,
         signed_override: bool | None = None,
     ) -> list[str] | None:
+        """`_emit_wide_expr_to_scratch_node`'s lines, in a temporaries scope.
+
+        The narrow expressions inside (indices, conditions, single bits)
+        need one; with none open (a wide `case` selector or item, a wide
+        loop condition) the outermost call opens its own and puts the
+        temporaries first in its lines.
+        """
+        if self._et_pending is not None:
+            return self._emit_wide_expr_to_scratch_node(
+                expr, slot, n_words, dst_width, indent, signed_override=signed_override
+            )
+        with self._fresh_expression_scope() as pending:
+            lines = self._emit_wide_expr_to_scratch_node(
+                expr, slot, n_words, dst_width, indent, signed_override=signed_override
+            )
+        if lines is None:
+            return None
+        pad = "    " * indent
+        return [*(f"{pad}{line}" for line in pending), *lines]
+
+    def _emit_wide_expr_to_scratch_node(  # noqa: PLR0911, PLR0912
+        self,
+        expr: Expression,
+        slot: int,
+        n_words: int,
+        dst_width: int,
+        indent: int,
+        *,
+        signed_override: bool | None = None,
+    ) -> list[str] | None:
         """Recursively evaluate *expr* into scratch slot *slot*.
 
         Emits Cython lines that write the result into ``_sc{slot}_v`` /
@@ -5236,7 +5267,7 @@ class _WideEmitterMixin:
             # packed-range LSB (`reg [135:8] x;` -> 8), as the narrow emitter
             # does. A whole memory element (`mem[i][119:0]`) loads through
             # the BitSelect case above.
-            if not isinstance(expr.target, Identifier) and self._resolve_memory_element_access(expr.target) is None:
+            if not isinstance(expr.target, Identifier) and self._resolve_memory_element_expr(expr.target) is None:
                 return None
             sel_base = self._select_base(expr.target)
             if isinstance(expr.msb, Literal) and isinstance(expr.lsb, Literal):
@@ -5860,17 +5891,8 @@ class _WideEmitterMixin:
         # the reduction argument's own attempt to hoist through
         # `_emit_wide_reduction_to_value` then silently failed and fell
         # back to the narrow formula, discarding `a5`'s 65th bit.
-        old_et_pending = self._et_pending
-        old_et_node_vals = self._et_node_vals
-        old_et_node_masks = self._et_node_masks
-        self._et_pending = []
-        self._et_node_vals = {}
-        self._et_node_masks = {}
-        lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, lhs_w, indent)
-        et_pending = self._et_pending
-        self._et_pending = old_et_pending
-        self._et_node_vals = old_et_node_vals
-        self._et_node_masks = old_et_node_masks
+        with self._fresh_expression_scope() as et_pending:
+            lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, lhs_w, indent)
         if lines is None:
             self._reset_scratch()
             return None

@@ -168,443 +168,15 @@ class _ProcessCompilerMixin:
                     flush=True,
                 )
 
-            # Concatenation LHS: assign {hi, lo} = x ΓåÆ decompose into multiple simple assigns
-            if isinstance(assign.lhs, Concatenation):
-                self._compile_concat_cont_assign(assign, sensitivity)
-                continue
-
-            # BitSelect LHS: assign out[idx] = rhs ΓåÆ read-modify-write one bit
-            if isinstance(assign.lhs, BitSelect) and (
-                isinstance(assign.lhs.target, Identifier)
-                or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
-            ):
-                self._compile_bitselect_cont_assign(assign, sensitivity)
-                continue
-
-            # RangeSelect LHS: assign out[msb:lsb] = rhs ΓåÆ read-modify-write bit range
-            if isinstance(assign.lhs, RangeSelect) and (
-                isinstance(assign.lhs.target, Identifier)
-                or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
-            ):
-                self._compile_rangeselect_cont_assign(assign, sensitivity)
-                continue
-
-            # PartSelect LHS: assign out[base +: width] = rhs → reuse range-write lowering
-            if isinstance(assign.lhs, PartSelect) and (
-                isinstance(assign.lhs.target, Identifier)
-                or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
-            ):
-                self._compile_partselect_cont_assign(assign, sensitivity)
-                continue
-
-            if self._compile_struct_field_cont_assign(assign, sensitivity):
-                continue
-
-            # Whole-array LHS (2-D packed array assigned as a single flat
-            # vector, e.g. `assign dout = din;`): `assign.lhs.name` isn't
-            # in `_signal_map` at all (it's a memory), so the plain-
-            # Identifier fallback below used to see `lhs_sid is None` and
-            # silently skip the assignment entirely -- no process was
-            # ever generated for it, leaving the destination stuck at its
-            # default X forever. The depth is known at compile time, so
-            # synthesize the equivalent `{dout[depth-1], ..., dout[0]} =
-            # rhs` (highest Verilog index first, matching standard
-            # packed-array bit layout) and reuse the existing
-            # Concatenation-LHS compiler rather than duplicating it.
-            if isinstance(assign.lhs, Identifier):
-                mem_id = self._mem_map.get(assign.lhs.name)
-                if mem_id is not None:
-                    _elem_w, depth = self._mem_info[mem_id]
-                    # Bare-Identifier-to-bare-Identifier memory copy of
-                    # matching shape (typically a hierarchy-flattened
-                    # whole-array PORT CONNECTION, e.g. `.imd_val_q_i
-                    # (imd_val_q_full)`): use a direct per-INDEX copy, not
-                    # the highest-Verilog-index-first Concatenation
-                    # synthesis just below. That reversal is only valid
-                    # SV semantics for a genuine 2-D PACKED array
-                    # reinterpreted as a flat bit vector -- for a plain
-                    # UNPACKED array (this case) it silently swaps element
-                    # order whenever the copy's own index numbering
-                    # doesn't happen to match that packed convention.
-                    # Confirmed wrong against the real `ibex_ex_block`/
-                    # `ibex_alu` RTL bridging an ascending-declared
-                    # `imd_val_q_i[2]` input port between hierarchy
-                    # levels: index 0 and index 1 arrived swapped.
-                    if isinstance(assign.rhs, Identifier):
-                        rhs_mid = self._mem_map.get(assign.rhs.name)
-                        if (
-                            rhs_mid is not None
-                            and self._mem_info[rhs_mid] == (_elem_w, depth)
-                            and self._memory_layout_matches(mem_id, rhs_mid)
-                        ):
-                            marker_sid = self._mem_marker_sigs[mem_id]
-                            lines = self._emit_whole_mem_copy_lines(
-                                mem_id, rhs_mid, marker_sid=marker_sid, indent=1, is_nba=False
-                            )
-                            self._processes.append((sensitivity, lines))
-                            continue
-                    # `arr = cond ? mem_a : mem_b;` whole-memory LHS with a
-                    # TernaryOp RHS whose branches are themselves
-                    # matching-shape memories (e.g. a bypass mux, `assign
-                    # m_axis_tdata = bypass ? s_axis_tdata :
-                    # merged_tdata_wide;`): the generic Concatenation-of-
-                    # BitSelects fallback further below only produces
-                    # correct per-element extraction when the WHOLE RHS
-                    # resolves to a single signal slice via
-                    # `_resolve_signal_slice_source`, which a `TernaryOp`
-                    # never does -- it silently fell back to squeezing the
-                    # entire >64-bit ternary through the scalar-only
-                    # `_emit_expr`, producing garbage for nearly every
-                    # element. Confirmed wrong against the real
-                    # `axis_dg_merge.sv` RTL. See
-                    # `_emit_whole_mem_ternary_lines` (_wide_emitter.py)
-                    # for the fix.
-                    if isinstance(assign.rhs, TernaryOp):
-                        true_mid = (
-                            self._mem_map.get(assign.rhs.true_expr.name)
-                            if isinstance(assign.rhs.true_expr, Identifier)
-                            else None
-                        )
-                        false_mid = (
-                            self._mem_map.get(assign.rhs.false_expr.name)
-                            if isinstance(assign.rhs.false_expr, Identifier)
-                            else None
-                        )
-                        if (
-                            true_mid is not None
-                            and false_mid is not None
-                            and self._mem_info[true_mid] == (_elem_w, depth)
-                            and self._mem_info[false_mid] == (_elem_w, depth)
-                            and self._memory_layout_matches(mem_id, true_mid)
-                            and self._memory_layout_matches(mem_id, false_mid)
-                        ):
-                            marker_sid = self._mem_marker_sigs[mem_id]
-                            cond_expr = self._emit_expr(assign.rhs.condition, 1)
-                            lines = self._emit_whole_mem_ternary_lines(
-                                mem_id,
-                                cond_expr,
-                                true_mid,
-                                false_mid,
-                                marker_sid=marker_sid,
-                                indent=1,
-                                is_nba=False,
-                            )
-                            self._processes.append((sensitivity, lines))
-                            continue
-                    # `arr = '{a, b, ...};` (unkeyed positional assignment
-                    # pattern) whole-memory LHS: reuse `_emit_lhs_write`'s
-                    # own item-by-item AssignmentPattern branch instead of
-                    # the Concatenation-reversal synthesis below, for
-                    # exactly the reasons documented on that branch --
-                    # confirmed wrong for the real `ibex_ex_block` RTL,
-                    # `assign alu_imd_val_q = '{imd_val_q_i[0][31:0],
-                    # imd_val_q_i[1][31:0]};`.
-                    if (
-                        isinstance(assign.rhs, AssignmentPattern)
-                        and assign.rhs.positional
-                        and not assign.rhs.named_pairs
-                        and len(assign.rhs.positional) == depth
-                    ):
-                        lines = self._emit_lhs_write(assign.lhs, assign.rhs, indent=1, is_nba=False)
-                        self._processes.append((sensitivity, lines))
-                        continue
-                    lhs_parts = [
-                        BitSelect(target=Identifier(assign.lhs.name), index=Literal(idx))
-                        for idx in range(depth - 1, -1, -1)
-                    ]
-                    rhs = assign.rhs
-                    if isinstance(rhs, Identifier) and self._mem_map.get(rhs.name) is not None:
-                        # RHS is *also* a bare whole-array reference
-                        # (`assign dout = din;`): rewrite it the same way
-                        # too, into a Concatenation of its own elements,
-                        # rather than leaving a raw memory Identifier for
-                        # the per-part slice extraction below to trip
-                        # over (`_emit_expr`'s Identifier case has no
-                        # memory-reference handling -- it silently
-                        # returns "0"). Concatenation expressions are
-                        # already well-supported throughout this file.
-                        rhs = Concatenation(
-                            parts=[
-                                BitSelect(target=Identifier(rhs.name), index=Literal(idx))
-                                for idx in range(depth - 1, -1, -1)
-                            ]
-                        )
-                    synthetic = ContinuousAssign(lhs=Concatenation(parts=lhs_parts), rhs=rhs)
-                    self._compile_concat_cont_assign(synthetic, sensitivity)
-                    continue
-
-            lhs_sid = self._signal_map.get(assign.lhs.name) if isinstance(assign.lhs, Identifier) else None
-            if lhs_sid is None:
-                continue  # skip unsupported LHS
-            lhs_w = self._signal_widths[lhs_sid]
-
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, Identifier):
-                rhs_name = assign.rhs.name
-                if assign.rhs.hierarchy:
-                    rhs_name = ".".join(assign.rhs.hierarchy) + "." + rhs_name
-                struct_info = self._resolve_struct_access(rhs_name)
-                if struct_info is not None:
-                    base_sid, offset, field_width = struct_info
-                    lines = [f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {offset}, {field_width})"]
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, BitSelect):
-                target = assign.rhs.target
-                if isinstance(target, Identifier):
-                    rhs_name = self._identifier_name(target)
-                    rhs_mid = self._mem_map.get(rhs_name)
-                    if rhs_mid is not None:
-                        rhs_elem_w, _depth = self._mem_info[rhs_mid]
-                        mem_access = self._resolve_memory_element_access(assign.rhs)
-                        # (This copy zero-extends; a signed memory's word
-                        # into a wider net takes the general sign-extending path.)
-                        sign_extends = rhs_elem_w < lhs_w and rhs_name in self._signed_memories
-                        if (
-                            (lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS)
-                            and mem_access is not None
-                            and not sign_extends
-                        ):
-                            # (Bounds-checked: an out-of-range/x address reads
-                            # the x spare slot; it read past the array.)
-                            idx = mem_access[1]
-                            lines = [f"    _whole_assign_mem_elem_{rhs_mid}(c, {lhs_sid}, ({idx}))"]
-                            self._processes.append((sensitivity, lines))
-                            continue
-
-            if isinstance(assign.lhs, Identifier):
-                lines = self._emit_signed_literal_xor_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                lines = self._emit_signed_identifier_xor_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                lines = self._emit_signed_binop_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                lines = self._emit_signed_signal_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                lines = self._emit_wide_const_signal_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, RangeSelect):
-                target = assign.rhs.target
-                if (
-                    isinstance(target, Identifier)
-                    and isinstance(assign.rhs.msb, Literal)
-                    and isinstance(assign.rhs.lsb, Literal)
-                ):
-                    rhs_sid = self._signal_map.get(target.name)
-                    if rhs_sid is not None:
-                        sig_base = self._signal_bases.get(target.name, 0)
-                        rhs_msb = int(assign.rhs.msb.value) - sig_base
-                        rhs_lsb = int(assign.rhs.lsb.value) - sig_base
-                        if rhs_lsb >= 0 and (
-                            lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or rhs_msb >= _WORD_BITS
-                        ):
-                            sel_w = rhs_msb - rhs_lsb + 1
-                            lines = [
-                                f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {rhs_lsb}, {sel_w})"
-                            ]
-                            self._processes.append((sensitivity, lines))
-                            continue
-                    target_name = target.name
-                    if target.hierarchy:
-                        target_name = ".".join(target.hierarchy) + "." + target_name
-                    struct_info = self._resolve_struct_access(target_name)
-                    if struct_info is not None:
-                        base_sid, offset, _field_width = struct_info
-                        sig_base = self._signal_bases.get(target_name, 0)
-                        rhs_msb = int(assign.rhs.msb.value) - sig_base
-                        rhs_lsb = int(assign.rhs.lsb.value) - sig_base
-                        if rhs_lsb >= 0:
-                            sel_w = rhs_msb - rhs_lsb + 1
-                            lines = [
-                                f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {offset + rhs_lsb}, {sel_w})"
-                            ]
-                            self._processes.append((sensitivity, lines))
-                            continue
-
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, PartSelect):
-                target = assign.rhs.target
-                if isinstance(target, Identifier):
-                    rhs_sid = self._signal_map.get(target.name)
-                    part_w = _const_int(assign.rhs.width, self._param_env)
-                    if (
-                        rhs_sid is not None
-                        and part_w is not None
-                        and (lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or part_w > _WORD_BITS)
-                    ):
-                        sig_base = self._signal_bases.get(target.name, 0)
-                        base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
-                        if assign.rhs.direction == "+:":
-                            lsb_expr = f"(({base_expr}) - {sig_base})"
-                        elif assign.rhs.direction == "-:":
-                            lsb_expr = f"(({base_expr}) - {part_w - 1} - {sig_base})"
-                        else:
-                            lsb_expr = None
-                        if lsb_expr is not None:
-                            lines = [
-                                f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {lsb_expr}, {part_w})"
-                            ]
-                            self._processes.append((sensitivity, lines))
-                            continue
-                    target_name = target.name
-                    if target.hierarchy:
-                        target_name = ".".join(target.hierarchy) + "." + target_name
-                    struct_info = self._resolve_struct_access(target_name)
-                    if struct_info is not None:
-                        base_sid, offset, _field_width = struct_info
-                        part_w_expr = (
-                            str(part_w)
-                            if part_w is not None
-                            else self._emit_expr(assign.rhs.width, self._expr_width(assign.rhs.width))
-                        )
-                        base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
-                        if assign.rhs.direction == "+:":
-                            lsb_expr = f"{offset} + ({base_expr})"
-                        elif part_w is not None:
-                            lsb_expr = f"{offset} + ({base_expr}) - {part_w - 1}"
-                        else:
-                            lsb_expr = f"{offset} + ({base_expr}) - ({part_w_expr}) + 1"
-                        lines = [
-                            f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {lsb_expr}, {part_w_expr})"
-                        ]
-                        self._processes.append((sensitivity, lines))
-                        continue
-
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, Concatenation):
-                flat_parts = self._flatten_concat_identifier_parts(assign.rhs)
-                if flat_parts is not None:
-                    total_width = sum(width for _, width, _, _ in flat_parts)
-                    if total_width > _WORD_BITS or lhs_w > _WORD_BITS:
-                        self._processes.append((sensitivity, self._emit_flat_concat_whole_assign(lhs_sid, flat_parts)))
-                        continue
-
-            if (
-                isinstance(assign.lhs, Identifier)
-                and isinstance(assign.rhs, BinaryOp)
-                and isinstance(assign.rhs.left, Concatenation)
-                and isinstance(assign.rhs.right, Literal)
-                and assign.rhs.op in {"<<", ">>"}
-            ):
-                lines = self._emit_wide_flat_concat_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            if (
-                isinstance(assign.lhs, Identifier)
-                and isinstance(assign.rhs, BinaryOp)
-                and isinstance(assign.rhs.left, TernaryOp)
-                and isinstance(assign.rhs.left.condition, Identifier)
-                and isinstance(assign.rhs.left.true_expr, Identifier)
-                and isinstance(assign.rhs.left.false_expr, Identifier)
-                and isinstance(assign.rhs.right, Literal)
-                and assign.rhs.op in {"<<", ">>"}
-            ):
-                lines = self._emit_wide_ternary_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            # Fast path: signal-to-signal copy (no scratch needed)
-            if isinstance(assign.lhs, Identifier):
-                lines = self._emit_wide_signal_copy_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            # Multiply-shift matchers must precede the recursive emitter (double-width semantics)
-            if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, BinaryOp):
-                lines = self._emit_wide_signal_binop_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                lines = self._emit_wide_mul_const_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-                # ! (logical NOT) before shift — not handled by recursive emitter
-                lines = self._emit_wide_lnot_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
-                if lines is not None:
-                    self._processes.append((sensitivity, lines))
-                    continue
-
-            lines = self._emit_wide_lhs_write_new(lhs_sid, assign.rhs, indent=1, is_nba=False)
-            if lines is not None:
-                self._processes.append((sensitivity, lines))
-                continue
-
-            lines = self._emit_wide_py_bits_lines(lhs_sid, assign.rhs, eval_width=lhs_w, indent=1, is_nba=False)
-            if lines is not None:
-                self._processes.append((sensitivity, lines))
-                continue
-
-            # Neither wide emitter (the recursive scratch emitter, nor the
-            # Python-bignum fallback) could handle this RHS -- the code
-            # below is a LAST-RESORT narrow-scalar path that only ever
-            # writes `c.val[lhs_sid]`/`c.mask[lhs_sid]`, which is correct
-            # ONLY when `lhs_w <= _WORD_BITS` (those ARE the signal's real
-            # storage for a narrow destination). For a >64-bit destination,
-            # the real storage is `c.wide_val`/`c.wide_offset`, which this
-            # path never touches -- so the assignment would silently
-            # compile to code that writes nowhere the signal is actually
-            # read from, leaving it stuck at its reset value forever with
-            # no error. Found via the `**` (power) operator, which has
-            # never had wide-emitter support (confirmed by direct tracing:
-            # both calls above return None for it) -- but this guard is
-            # deliberately general, not `**`-specific, since the same
-            # silent-no-op would hit ANY future RHS shape neither wide
-            # emitter learns to handle. Fail loudly instead.
-            if lhs_w > _WORD_BITS:
-                lhs_name = assign.lhs.name if isinstance(assign.lhs, Identifier) else "<expr>"
-                raise NotImplementedError(
-                    f"Compiled engine: continuous assignment to '{lhs_name}' ({lhs_w} bits) "
-                    f"has an RHS shape not yet supported for a destination wider than "
-                    f"{_WORD_BITS} bits. Use engine='vm' or engine='reference' for this design, "
-                    f"or simplify the expression."
-                )
-
-            self._et_count = 0
-            self._et_node_masks = {}
-            self._et_node_vals = {}
-            old_et = self._et_pending
-            self._et_pending = []
-            rhs_val = self._emit_expr(assign.rhs, lhs_w)
-
-            # Build per-expression mask that tracks x/z through ternaries correctly
-            mask_expr = self._emit_mask_expr(assign.rhs, lhs_w)
-
-            et_lines = [f"    {t}" for t in self._et_pending]
-            self._et_pending = old_et
-
-            rhs_w = self._expr_width(assign.rhs)
-            if isinstance(assign.rhs, Identifier) and self._expr_signed(assign.rhs) and lhs_w > rhs_w:
-                v_line = f"    cdef long long v = _sign_ext({rhs_val}, {rhs_w}) & wmask({lhs_w})"
-            else:
-                v_line = f"    cdef long long v = ({rhs_val}) & wmask({lhs_w})"
-
-            lines = [
-                *et_lines,
-                v_line,
-                # (The mask used to be stored unmasked: `wire [0:0] w = r8`
-                # kept r8's upper x bits, visible wherever w was extended.)
-                f"    cdef long long m = ({mask_expr}) & wmask({lhs_w})",
-                "    v = v & ~m",
-                f"    if v != c.val[{lhs_sid}] or m != c.mask[{lhs_sid}]:",
-                f"        c.val[{lhs_sid}] = v",
-                f"        c.mask[{lhs_sid}] = m",
-                f"        mark_dirty(c, {lhs_sid})",
-            ]
-            self._processes.append((sensitivity, lines))
+            # One temporaries scope per assign, for every process it compiles to:
+            # an index, select base or RHS emitted anywhere below has one. (An
+            # attempt that gives up after emitting leaves its temporaries; they
+            # are computed but unused, and the shared node cache hands a hoisted
+            # call to the attempt that succeeds instead of calling it again.)
+            first = len(self._processes)
+            with self._fresh_expression_scope() as pending:
+                self._compile_continuous_assign(assign, sensitivity)
+            self._prepend_process_setup(first, pending)
 
         purity_marks.append((len(self._processes), False, False))  # end sentinel
         for (start, pure, const), (end, _p, _c) in pairwise(purity_marks):
@@ -624,6 +196,452 @@ class _ProcessCompilerMixin:
                 file=sys.stderr,
                 flush=True,
             )
+
+    def _compile_continuous_assign(self, assign, sensitivity: set[int]) -> None:  # noqa: PLR0911, PLR0912, PLR0915
+        """Compile one continuous assign into `self._processes` (inside its
+        temporaries scope; see `_compile_continuous_assigns`)."""
+        # Concatenation LHS: assign {hi, lo} = x ΓåÆ decompose into multiple simple assigns
+        if isinstance(assign.lhs, Concatenation):
+            self._compile_concat_cont_assign(assign, sensitivity)
+            return
+
+        # BitSelect LHS: assign out[idx] = rhs ΓåÆ read-modify-write one bit
+        if isinstance(assign.lhs, BitSelect) and (
+            isinstance(assign.lhs.target, Identifier)
+            or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
+        ):
+            self._compile_bitselect_cont_assign(assign, sensitivity)
+            return
+
+        # RangeSelect LHS: assign out[msb:lsb] = rhs ΓåÆ read-modify-write bit range
+        if isinstance(assign.lhs, RangeSelect) and (
+            isinstance(assign.lhs.target, Identifier)
+            or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
+        ):
+            self._compile_rangeselect_cont_assign(assign, sensitivity)
+            return
+
+        # PartSelect LHS: assign out[base +: width] = rhs → reuse range-write lowering
+        if isinstance(assign.lhs, PartSelect) and (
+            isinstance(assign.lhs.target, Identifier)
+            or (isinstance(assign.lhs.target, BitSelect) and isinstance(assign.lhs.target.target, Identifier))
+        ):
+            self._compile_partselect_cont_assign(assign, sensitivity)
+            return
+
+        if self._compile_struct_field_cont_assign(assign, sensitivity):
+            return
+
+        # Whole-array LHS (2-D packed array assigned as a single flat
+        # vector, e.g. `assign dout = din;`): `assign.lhs.name` isn't
+        # in `_signal_map` at all (it's a memory), so the plain-
+        # Identifier fallback below used to see `lhs_sid is None` and
+        # silently skip the assignment entirely -- no process was
+        # ever generated for it, leaving the destination stuck at its
+        # default X forever. The depth is known at compile time, so
+        # synthesize the equivalent `{dout[depth-1], ..., dout[0]} =
+        # rhs` (highest Verilog index first, matching standard
+        # packed-array bit layout) and reuse the existing
+        # Concatenation-LHS compiler rather than duplicating it.
+        if isinstance(assign.lhs, Identifier):
+            mem_id = self._mem_map.get(assign.lhs.name)
+            if mem_id is not None:
+                _elem_w, depth = self._mem_info[mem_id]
+                # Bare-Identifier-to-bare-Identifier memory copy of
+                # matching shape (typically a hierarchy-flattened
+                # whole-array PORT CONNECTION, e.g. `.imd_val_q_i
+                # (imd_val_q_full)`): use a direct per-INDEX copy, not
+                # the highest-Verilog-index-first Concatenation
+                # synthesis just below. That reversal is only valid
+                # SV semantics for a genuine 2-D PACKED array
+                # reinterpreted as a flat bit vector -- for a plain
+                # UNPACKED array (this case) it silently swaps element
+                # order whenever the copy's own index numbering
+                # doesn't happen to match that packed convention.
+                # Confirmed wrong against the real `ibex_ex_block`/
+                # `ibex_alu` RTL bridging an ascending-declared
+                # `imd_val_q_i[2]` input port between hierarchy
+                # levels: index 0 and index 1 arrived swapped.
+                if isinstance(assign.rhs, Identifier):
+                    rhs_mid = self._mem_map.get(assign.rhs.name)
+                    if (
+                        rhs_mid is not None
+                        and self._mem_info[rhs_mid] == (_elem_w, depth)
+                        and self._memory_layout_matches(mem_id, rhs_mid)
+                    ):
+                        marker_sid = self._mem_marker_sigs[mem_id]
+                        lines = self._emit_whole_mem_copy_lines(
+                            mem_id, rhs_mid, marker_sid=marker_sid, indent=1, is_nba=False
+                        )
+                        self._processes.append((sensitivity, lines))
+                        return
+                # `arr = cond ? mem_a : mem_b;` whole-memory LHS with a
+                # TernaryOp RHS whose branches are themselves
+                # matching-shape memories (e.g. a bypass mux, `assign
+                # m_axis_tdata = bypass ? s_axis_tdata :
+                # merged_tdata_wide;`): the generic Concatenation-of-
+                # BitSelects fallback further below only produces
+                # correct per-element extraction when the WHOLE RHS
+                # resolves to a single signal slice via
+                # `_resolve_signal_slice_source`, which a `TernaryOp`
+                # never does -- it silently fell back to squeezing the
+                # entire >64-bit ternary through the scalar-only
+                # `_emit_expr`, producing garbage for nearly every
+                # element. Confirmed wrong against the real
+                # `axis_dg_merge.sv` RTL. See
+                # `_emit_whole_mem_ternary_lines` (_wide_emitter.py)
+                # for the fix.
+                if isinstance(assign.rhs, TernaryOp):
+                    true_mid = (
+                        self._mem_map.get(assign.rhs.true_expr.name)
+                        if isinstance(assign.rhs.true_expr, Identifier)
+                        else None
+                    )
+                    false_mid = (
+                        self._mem_map.get(assign.rhs.false_expr.name)
+                        if isinstance(assign.rhs.false_expr, Identifier)
+                        else None
+                    )
+                    if (
+                        true_mid is not None
+                        and false_mid is not None
+                        and self._mem_info[true_mid] == (_elem_w, depth)
+                        and self._mem_info[false_mid] == (_elem_w, depth)
+                        and self._memory_layout_matches(mem_id, true_mid)
+                        and self._memory_layout_matches(mem_id, false_mid)
+                    ):
+                        marker_sid = self._mem_marker_sigs[mem_id]
+                        cond_expr = self._emit_expr(assign.rhs.condition, 1)
+                        lines = self._emit_whole_mem_ternary_lines(
+                            mem_id,
+                            cond_expr,
+                            true_mid,
+                            false_mid,
+                            marker_sid=marker_sid,
+                            indent=1,
+                            is_nba=False,
+                        )
+                        self._processes.append((sensitivity, lines))
+                        return
+                # `arr = '{a, b, ...};` (unkeyed positional assignment
+                # pattern) whole-memory LHS: reuse `_emit_lhs_write`'s
+                # own item-by-item AssignmentPattern branch instead of
+                # the Concatenation-reversal synthesis below, for
+                # exactly the reasons documented on that branch --
+                # confirmed wrong for the real `ibex_ex_block` RTL,
+                # `assign alu_imd_val_q = '{imd_val_q_i[0][31:0],
+                # imd_val_q_i[1][31:0]};`.
+                if (
+                    isinstance(assign.rhs, AssignmentPattern)
+                    and assign.rhs.positional
+                    and not assign.rhs.named_pairs
+                    and len(assign.rhs.positional) == depth
+                ):
+                    lines = self._emit_lhs_write(assign.lhs, assign.rhs, indent=1, is_nba=False)
+                    self._processes.append((sensitivity, lines))
+                    return
+                lhs_parts = [
+                    BitSelect(target=Identifier(assign.lhs.name), index=Literal(idx))
+                    for idx in range(depth - 1, -1, -1)
+                ]
+                rhs = assign.rhs
+                if isinstance(rhs, Identifier) and self._mem_map.get(rhs.name) is not None:
+                    # RHS is *also* a bare whole-array reference
+                    # (`assign dout = din;`): rewrite it the same way
+                    # too, into a Concatenation of its own elements,
+                    # rather than leaving a raw memory Identifier for
+                    # the per-part slice extraction below to trip
+                    # over (`_emit_expr`'s Identifier case has no
+                    # memory-reference handling -- it silently
+                    # returns "0"). Concatenation expressions are
+                    # already well-supported throughout this file.
+                    rhs = Concatenation(
+                        parts=[
+                            BitSelect(target=Identifier(rhs.name), index=Literal(idx))
+                            for idx in range(depth - 1, -1, -1)
+                        ]
+                    )
+                synthetic = ContinuousAssign(lhs=Concatenation(parts=lhs_parts), rhs=rhs)
+                self._compile_concat_cont_assign(synthetic, sensitivity)
+                return
+
+        lhs_sid = self._signal_map.get(assign.lhs.name) if isinstance(assign.lhs, Identifier) else None
+        if lhs_sid is None:
+            return  # skip unsupported LHS
+        lhs_w = self._signal_widths[lhs_sid]
+
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, Identifier):
+            rhs_name = assign.rhs.name
+            if assign.rhs.hierarchy:
+                rhs_name = ".".join(assign.rhs.hierarchy) + "." + rhs_name
+            struct_info = self._resolve_struct_access(rhs_name)
+            if struct_info is not None:
+                base_sid, offset, field_width = struct_info
+                lines = [f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {offset}, {field_width})"]
+                self._processes.append((sensitivity, lines))
+                return
+
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, BitSelect):
+            target = assign.rhs.target
+            if isinstance(target, Identifier):
+                rhs_name = self._identifier_name(target)
+                rhs_mid = self._mem_map.get(rhs_name)
+                if rhs_mid is not None:
+                    rhs_elem_w, _depth = self._mem_info[rhs_mid]
+                    # (This copy zero-extends; a signed memory's word
+                    # into a wider net takes the general sign-extending path.)
+                    sign_extends = rhs_elem_w < lhs_w and rhs_name in self._signed_memories
+                    if (
+                        (lhs_w > _WORD_BITS or rhs_elem_w > _WORD_BITS)
+                        and self._resolve_memory_element_expr(assign.rhs) is not None
+                        and not sign_extends
+                    ):
+                        # (Bounds-checked: an out-of-range/x address reads
+                        # the x spare slot; it read past the array.) The
+                        # index is emitted only here, with ternaries hoisted:
+                        # it used to be emitted for every memory read, inline,
+                        # and a 16-way `select` in the index (3x per level)
+                        # used 27 GB.
+                        with self._fresh_expression_scope() as pending:
+                            mem_access = self._resolve_memory_element_access(assign.rhs)
+                        assert mem_access is not None
+                        et_lines = [f"    {t}" for t in pending]
+                        idx = mem_access[1]
+                        lines = [*et_lines, f"    _whole_assign_mem_elem_{rhs_mid}(c, {lhs_sid}, ({idx}))"]
+                        self._processes.append((sensitivity, lines))
+                        return
+
+        if isinstance(assign.lhs, Identifier):
+            lines = self._emit_signed_literal_xor_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            lines = self._emit_signed_identifier_xor_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            lines = self._emit_signed_binop_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            lines = self._emit_signed_signal_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            lines = self._emit_wide_const_signal_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, RangeSelect):
+            target = assign.rhs.target
+            if (
+                isinstance(target, Identifier)
+                and isinstance(assign.rhs.msb, Literal)
+                and isinstance(assign.rhs.lsb, Literal)
+            ):
+                rhs_sid = self._signal_map.get(target.name)
+                if rhs_sid is not None:
+                    sig_base = self._signal_bases.get(target.name, 0)
+                    rhs_msb = int(assign.rhs.msb.value) - sig_base
+                    rhs_lsb = int(assign.rhs.lsb.value) - sig_base
+                    if rhs_lsb >= 0 and (
+                        lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or rhs_msb >= _WORD_BITS
+                    ):
+                        sel_w = rhs_msb - rhs_lsb + 1
+                        lines = [f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {rhs_lsb}, {sel_w})"]
+                        self._processes.append((sensitivity, lines))
+                        return
+                target_name = target.name
+                if target.hierarchy:
+                    target_name = ".".join(target.hierarchy) + "." + target_name
+                struct_info = self._resolve_struct_access(target_name)
+                if struct_info is not None:
+                    base_sid, offset, _field_width = struct_info
+                    sig_base = self._signal_bases.get(target_name, 0)
+                    rhs_msb = int(assign.rhs.msb.value) - sig_base
+                    rhs_lsb = int(assign.rhs.lsb.value) - sig_base
+                    if rhs_lsb >= 0:
+                        sel_w = rhs_msb - rhs_lsb + 1
+                        lines = [
+                            f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {offset + rhs_lsb}, {sel_w})"
+                        ]
+                        self._processes.append((sensitivity, lines))
+                        return
+
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, PartSelect):
+            target = assign.rhs.target
+            if isinstance(target, Identifier):
+                rhs_sid = self._signal_map.get(target.name)
+                part_w = _const_int(assign.rhs.width, self._param_env)
+                if (
+                    rhs_sid is not None
+                    and part_w is not None
+                    and (lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or part_w > _WORD_BITS)
+                ):
+                    sig_base = self._signal_bases.get(target.name, 0)
+                    base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
+                    if assign.rhs.direction == "+:":
+                        lsb_expr = f"(({base_expr}) - {sig_base})"
+                    elif assign.rhs.direction == "-:":
+                        lsb_expr = f"(({base_expr}) - {part_w - 1} - {sig_base})"
+                    else:
+                        lsb_expr = None
+                    if lsb_expr is not None:
+                        lines = [f"    _whole_assign_slice_const_signal(c, {lhs_sid}, {rhs_sid}, {lsb_expr}, {part_w})"]
+                        self._processes.append((sensitivity, lines))
+                        return
+                target_name = target.name
+                if target.hierarchy:
+                    target_name = ".".join(target.hierarchy) + "." + target_name
+                struct_info = self._resolve_struct_access(target_name)
+                if struct_info is not None:
+                    base_sid, offset, _field_width = struct_info
+                    part_w_expr = (
+                        str(part_w)
+                        if part_w is not None
+                        else self._emit_expr(assign.rhs.width, self._expr_width(assign.rhs.width))
+                    )
+                    base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
+                    if assign.rhs.direction == "+:":
+                        lsb_expr = f"{offset} + ({base_expr})"
+                    elif part_w is not None:
+                        lsb_expr = f"{offset} + ({base_expr}) - {part_w - 1}"
+                    else:
+                        lsb_expr = f"{offset} + ({base_expr}) - ({part_w_expr}) + 1"
+                    lines = [
+                        f"    _whole_assign_slice_width_signal(c, {lhs_sid}, {base_sid}, {lsb_expr}, {part_w_expr})"
+                    ]
+                    self._processes.append((sensitivity, lines))
+                    return
+
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, Concatenation):
+            flat_parts = self._flatten_concat_identifier_parts(assign.rhs)
+            if flat_parts is not None:
+                total_width = sum(width for _, width, _, _ in flat_parts)
+                if total_width > _WORD_BITS or lhs_w > _WORD_BITS:
+                    self._processes.append((sensitivity, self._emit_flat_concat_whole_assign(lhs_sid, flat_parts)))
+                    return
+
+        if (
+            isinstance(assign.lhs, Identifier)
+            and isinstance(assign.rhs, BinaryOp)
+            and isinstance(assign.rhs.left, Concatenation)
+            and isinstance(assign.rhs.right, Literal)
+            and assign.rhs.op in {"<<", ">>"}
+        ):
+            lines = self._emit_wide_flat_concat_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+
+        if (
+            isinstance(assign.lhs, Identifier)
+            and isinstance(assign.rhs, BinaryOp)
+            and isinstance(assign.rhs.left, TernaryOp)
+            and isinstance(assign.rhs.left.condition, Identifier)
+            and isinstance(assign.rhs.left.true_expr, Identifier)
+            and isinstance(assign.rhs.left.false_expr, Identifier)
+            and isinstance(assign.rhs.right, Literal)
+            and assign.rhs.op in {"<<", ">>"}
+        ):
+            lines = self._emit_wide_ternary_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+
+        # Fast path: signal-to-signal copy (no scratch needed)
+        if isinstance(assign.lhs, Identifier):
+            lines = self._emit_wide_signal_copy_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+
+        # Multiply-shift matchers must precede the recursive emitter (double-width semantics)
+        if isinstance(assign.lhs, Identifier) and isinstance(assign.rhs, BinaryOp):
+            lines = self._emit_wide_signal_binop_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            lines = self._emit_wide_mul_const_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+            # ! (logical NOT) before shift — not handled by recursive emitter
+            lines = self._emit_wide_lnot_shift_lines(lhs_sid, assign.rhs, indent=1, is_nba=False)
+            if lines is not None:
+                self._processes.append((sensitivity, lines))
+                return
+
+        lines = self._emit_wide_lhs_write_new(lhs_sid, assign.rhs, indent=1, is_nba=False)
+        if lines is not None:
+            self._processes.append((sensitivity, lines))
+            return
+
+        lines = self._emit_wide_py_bits_lines(lhs_sid, assign.rhs, eval_width=lhs_w, indent=1, is_nba=False)
+        if lines is not None:
+            self._processes.append((sensitivity, lines))
+            return
+
+        # Neither wide emitter (the recursive scratch emitter, nor the
+        # Python-bignum fallback) could handle this RHS -- the code
+        # below is a LAST-RESORT narrow-scalar path that only ever
+        # writes `c.val[lhs_sid]`/`c.mask[lhs_sid]`, which is correct
+        # ONLY when `lhs_w <= _WORD_BITS` (those ARE the signal's real
+        # storage for a narrow destination). For a >64-bit destination,
+        # the real storage is `c.wide_val`/`c.wide_offset`, which this
+        # path never touches -- so the assignment would silently
+        # compile to code that writes nowhere the signal is actually
+        # read from, leaving it stuck at its reset value forever with
+        # no error. Found via the `**` (power) operator, which has
+        # never had wide-emitter support (confirmed by direct tracing:
+        # both calls above return None for it) -- but this guard is
+        # deliberately general, not `**`-specific, since the same
+        # silent-no-op would hit ANY future RHS shape neither wide
+        # emitter learns to handle. Fail loudly instead.
+        if lhs_w > _WORD_BITS:
+            lhs_name = assign.lhs.name if isinstance(assign.lhs, Identifier) else "<expr>"
+            raise NotImplementedError(
+                f"Compiled engine: continuous assignment to '{lhs_name}' ({lhs_w} bits) "
+                f"has an RHS shape not yet supported for a destination wider than "
+                f"{_WORD_BITS} bits. Use engine='vm' or engine='reference' for this design, "
+                f"or simplify the expression."
+            )
+
+        with self._fresh_expression_scope() as pending:
+            rhs_val = self._emit_expr(assign.rhs, lhs_w)
+            # Build per-expression mask that tracks x/z through ternaries correctly
+            mask_expr = self._emit_mask_expr(assign.rhs, lhs_w)
+        et_lines = [f"    {t}" for t in pending]
+
+        rhs_w = self._expr_width(assign.rhs)
+        if isinstance(assign.rhs, Identifier) and self._expr_signed(assign.rhs) and lhs_w > rhs_w:
+            v_line = f"    cdef long long v = _sign_ext({rhs_val}, {rhs_w}) & wmask({lhs_w})"
+        else:
+            v_line = f"    cdef long long v = ({rhs_val}) & wmask({lhs_w})"
+
+        lines = [
+            *et_lines,
+            v_line,
+            # (The mask used to be stored unmasked: `wire [0:0] w = r8`
+            # kept r8's upper x bits, visible wherever w was extended.)
+            f"    cdef long long m = ({mask_expr}) & wmask({lhs_w})",
+            "    v = v & ~m",
+            f"    if v != c.val[{lhs_sid}] or m != c.mask[{lhs_sid}]:",
+            f"        c.val[{lhs_sid}] = v",
+            f"        c.mask[{lhs_sid}] = m",
+            f"        mark_dirty(c, {lhs_sid})",
+        ]
+        self._processes.append((sensitivity, lines))
+
+    def _prepend_process_setup(self, first: int, pending: list[str]) -> None:
+        """Put the temporaries' lines *pending* first in each process appended from index *first* on."""
+        if not pending:
+            return
+        setup = [f"    {line}" for line in pending]
+        for i in range(first, len(self._processes)):
+            sensitivity, lines = self._processes[i]
+            self._processes[i] = (sensitivity, [*setup, *lines])
 
     def _compile_struct_field_cont_assign(self, assign, sensitivity: set[int]) -> bool:
         """Compile continuous assign to a packed struct field.

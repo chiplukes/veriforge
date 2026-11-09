@@ -246,6 +246,7 @@ class CythonCodegen(
         "_processes",
         "_pure_conts",
         "_py_mask_cache",
+        "_py_pending",
         "_py_val_cache",
         "_scratch_peak",
         "_scratch_slot_count",
@@ -259,6 +260,7 @@ class CythonCodegen(
         "_signed_memories",
         "_snapshot_reads",
         "_stream_keepalive",
+        "_strict_scopes",
         "_struct_signal_types",
         "_struct_type_map",
         "_task_map",
@@ -314,10 +316,17 @@ class CythonCodegen(
         self._delta_limit: int = 10_000
         self._et_pending: list[str] | None = None
         self._et_count: int = 0
-        self._et_node_masks: dict[int, str] = {}
-        self._et_node_vals: dict[int, str] = {}
-        self._py_val_cache: dict[int, str] = {}
-        self._py_mask_cache: dict[int, str] = {}
+        # Node-identity caches of the open temporaries scope (see `_emit_expr`).
+        self._et_node_masks: dict[object, object] = {}
+        self._et_node_vals: dict[object, object] = {}
+        self._py_val_cache: dict[object, object] = {}
+        self._py_mask_cache: dict[object, object] = {}
+        # Python temporaries of the Python-integer expression being emitted
+        # (see `_emit_py_expr`); None when none is.
+        self._py_pending: list[str] | None = None
+        # Composite expressions emitted outside a temporaries scope are an
+        # error (see `_emit_unscoped`); the test suite sets this.
+        self._strict_scopes: bool = get_env("CODEGEN_STRICT", "") == "1"
         self._needs_wide_helpers: bool = False
         self._dynamic_max_wide_words: int = 0
         # id(user function call) -> the conditions under which it's evaluated
@@ -721,7 +730,7 @@ class CythonCodegen(
         if wide_signal_rhs_source is None or self._concat_part_max_width(part) <= _WORD_BITS:
             return None
 
-        if self._resolve_memory_element_access(part) is not None:
+        if self._resolve_memory_element_expr(part) is not None:
             rhs_sid, rhs_base_lsb = wide_signal_rhs_source
             return rhs_sid, offset_expr if rhs_base_lsb == "0" else f"({rhs_base_lsb}) + ({offset_expr})"
 
@@ -733,7 +742,7 @@ class CythonCodegen(
 
         if target is None:
             return None
-        if self._resolve_memory_element_access(target) is None:
+        if self._resolve_memory_element_expr(target) is None:
             if not isinstance(target, Identifier):
                 return None
             target_name = self._identifier_name(target)

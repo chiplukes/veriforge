@@ -4662,3 +4662,30 @@ Cython; an `axis_pix_correction2` loop gave MSVC a 334 MB C file and C1060).
 See "Scopes everywhere an expression is emitted" in
 `notes/simulation/simulator_compile_cython.md`;
 `tests/test_sim/compiled/test_logical_chain_codegen.py`.
+
+### Exponential codegen for most node types and several contexts (fixed 2026-11-08)
+
+The `&&` fix above was the fourth of its kind (an ibex comparison chain, `?:`
+chains, `&&` chains, then a 16-way select as a memory index: 27 GB in a
+discarded sensitivity-walk emission and the wide memory copy). A scan
+nesting 40 constructs 3/5/7 deep in 39 contexts found 343 of 1,523 pairs
+super-linear and 20 exhausting 3 GB at depth 7. Two causes:
+- Only `?:`, comparisons and `+`/`-`/`|`/`&` chains were hoisted; every other
+  node whose formula reads an operand twice duplicated it, scope or not:
+  `!x` and reductions (12.7x per level), `m[x]` (26x), `v[x]`, `v[x +: 4]`,
+  `a >> x`, `$signed(x) >>> n` (5x), and the Python-integer path's `'0`/`'1`
+  fill ternaries (10-14x).
+- Code with no scope open: the continuous-assign paths other than whole-signal
+  (concatenation parts and slice sources, bit/part-select target indices,
+  part-select sources), the recursive wide emitter under a `case` or loop,
+  and the sensitivity walk.
+
+`_emit_expr`/`_emit_mask_expr` now emit each node once per scope and put
+long text in a temporary, for every node type (`_emit_py_expr` likewise into
+Python temporaries); each continuous assign and each outermost wide-scratch
+emission has a scope; and `VERIFORGE_CODEGEN_STRICT=1` (set by the test
+suite) makes an unscoped emission an error. See "Linear expression codegen"
+in `notes/simulation/simulator_compile_cython.md`;
+`tests/test_sim/compiled/test_codegen_linearity.py`. As a side effect, a
+>64-bit function argument in a `case` selector or item or a `while`
+condition compiles (it needed a statement to bind the argument in).

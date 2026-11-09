@@ -739,6 +739,47 @@ actual gfwx-fpga assign 255 pattern) in
 - Tested in `tests/test_sim/compiled/test_logical_chain_codegen.py`: a size
   bound per context at 9 terms, and cross-engine values with x inputs.
 
+### Linear expression codegen (2026-11-08)
+
+The per-node hoists above covered the node types and contexts that had blown
+up in a real design so far; a scan of 40 constructs in 39 contexts found 343
+more super-linear pairs (`!x`, reductions, `m[x]`, `v[x]`, `v[x +: n]`,
+`a >> x`, `>>>`, wide `'0` fills, and anything in a context without a scope).
+Code size is now linear by construction:
+
+- **Every node, once per scope.** `_emit_expr`/`_emit_mask_expr` are wrappers
+  around `_emit_expr_node`/`_emit_mask_expr_node`. Inside a scope they cache
+  each composite node's text by `(id, width, signed_override)` in
+  `_et_node_vals`/`_et_node_masks` (tuple keys; the older per-node entries use
+  `id()`), and text longer than `_HOIST_TEXT_CHARS` (160) becomes a
+  `cdef long long _et{n}_v`/`_m` temporary. A parent then embeds only short
+  text or names. Identifiers, literals and guard conditions (`_guard_conds`,
+  which have their own snapshot) are not cached. Values are `long long` by
+  the emitter's convention (unsigned operators cast explicitly), so a
+  temporary never changes a parent's semantics.
+- **Python-integer path.** `_emit_py_expr`/`_emit_py_mask_expr` do the same
+  into `_pt{n}_v`/`_m` Python temporaries, which `_emit_wide_py_bits_lines`
+  assigns at the start of its `with gil:` block (`_py_pending`).
+- **Who opens a scope.** A line-producing emitter owns the scope for what it
+  emits: `_emit_lhs_write` per assignment, `_emit_if`/loops/`case` for their
+  conditions, `_compile_continuous_assign` per continuous assign (its
+  temporaries go first in every process it appends, `_prepend_process_setup`),
+  the outermost `_emit_wide_expr_to_scratch` call, and the emitters that may
+  give up after emitting (`_fresh_expression_scope`: their temporaries go with
+  their lines or nowhere). `_expression_temporaries` joins an open scope.
+- **Analysis must not emit.** Code that only needs what an expression refers
+  to uses `_resolve_memory_element_expr` (memory id and index expressions),
+  not `_resolve_memory_element_access` (which also emits the flat index).
+- **Enforcement.** `_emit_unscoped` handles emission with no scope. With
+  `VERIFORGE_CODEGEN_STRICT=1`, which `tests/conftest.py` sets, a composite
+  expression there raises, so a missing scope fails any test that reaches it.
+  Otherwise, text past `_UNSCOPED_TEXT_LIMIT` (4 MB) stops codegen with an
+  explanation instead of exhausting memory.
+- Tested in `tests/test_sim/compiled/test_codegen_linearity.py`: every
+  construct nested 3/5/7 deep in every context, comparing growth of code size
+  and of emitter calls (the latter catches discarded emission). A subset
+  runs by default and the full matrix with `--run-slow`.
+
 ### Deferred Always-Block Compilation
 
 The remaining scalability bottleneck after the streaming text fix was that

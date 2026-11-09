@@ -17,6 +17,10 @@ from veriforge.verilog_parser import verilog_parser
 
 log = logging.getLogger(__name__)
 
+# Compiled codegen: a composite expression emitted outside a temporaries scope
+# is an error, not just unbounded text (see `_ExprEmitterMixin._emit_unscoped`).
+os.environ.setdefault("VERIFORGE_CODEGEN_STRICT", "1")
+
 
 @pytest.fixture(autouse=True)
 def _compile_cache_per_test(tmp_path, monkeypatch):

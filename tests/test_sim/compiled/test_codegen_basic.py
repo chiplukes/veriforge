@@ -1122,13 +1122,15 @@ class TestOrChainTemporaries:
         ~199 chars) dominates until the chain itself grows past that, so
         two very different k values can report an identical max_len purely
         from boilerplate, masking the chain's own growth rate entirely.
-        Isolate the chain's own value line instead (it's the one
-        referencing both the first and last operand) for a clean signal.
+        Isolate the chain's own lines instead: those reading an operand.
+        (Each line used to hold the whole chain; long text now goes to
+        temporaries, see `_emit_expr`, so the chain spans several lines.)
         """
         mod = _make_or_chain_module(k)
         cg = CythonCodegen()
         pyx = cg.generate(mod)
-        matches = [line for line in pyx.split("\n") if "c.val[0]" in line and f"c.val[{k - 1}]" in line]
+        operands = [f"c.val[{i}]" for i in range(k)]
+        matches = [line for line in pyx.split("\n") if any(operand in line for operand in operands)]
         assert matches, f"k={k}: couldn't find the OR-chain's own value line in generated output"
         return max(len(line) for line in matches)
 

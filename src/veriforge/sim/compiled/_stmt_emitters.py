@@ -619,12 +619,10 @@ class _StmtEmittersMixin:
                     f"or engine='reference' for this design, or simplify the expression."
                 )
 
-            old_et = self._et_pending
-            self._et_pending = []
-            rhs_val = self._emit_expr(rhs, assign_width)
-            rhs_mask = self._emit_mask_expr(rhs, assign_width)
-            et_lines = [f"{pad}{t}" for t in self._et_pending]
-            self._et_pending = old_et
+            with self._fresh_expression_scope() as pending:
+                rhs_val = self._emit_expr(rhs, assign_width)
+                rhs_mask = self._emit_mask_expr(rhs, assign_width)
+            et_lines = [f"{pad}{t}" for t in pending]
             assign_rhs = f"({rhs_val}) & wmask({self._signal_widths[sid]})"
             assign_mask = f"({rhs_mask}) & wmask({self._signal_widths[sid]})"
             if is_nba:
@@ -1144,14 +1142,28 @@ class _StmtEmittersMixin:
         if self._et_pending is not None:
             yield
             return
-        old_cache = (self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        try:
+        with self._fresh_expression_scope() as pending:
             yield
-            setup.extend(f"{pad}{line}" for line in self._et_pending)
+            setup.extend(f"{pad}{line}" for line in pending)
+
+    @contextmanager
+    def _fresh_expression_scope(self) -> Iterator[list[str]]:
+        """A new temporaries scope, also inside another one; yields the list
+        its temporaries' lines (unindented) are appended to.
+
+        For an emitter that produces its own lines and may give up (return
+        None) after emitting: its temporaries go with its lines, or nowhere.
+        The node caches start empty and are restored afterwards (an entry
+        names a temporary, or text that uses one, of this scope only); the
+        running `_et_count` is kept, so names stay unique in the function.
+        """
+        saved = (self._et_pending, self._et_node_vals, self._et_node_masks)
+        pending: list[str] = []
+        self._et_pending, self._et_node_vals, self._et_node_masks = pending, {}, {}
+        try:
+            yield pending
         finally:
-            self._et_pending = None
-            self._et_node_vals, self._et_node_masks = old_cache
+            self._et_pending, self._et_node_vals, self._et_node_masks = saved
 
     def _emit_scoped_value_mask(self, rhs: Expression, width: int, pad: str) -> tuple[list[str], str, str]:
         """(setup lines, value, mask) of a narrow *rhs*; see `_expression_temporaries`."""
@@ -1175,11 +1187,8 @@ class _StmtEmittersMixin:
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
         self._reset_scratch()
         slot = self._alloc_scratch()
-        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, width, indent)
-        et_pending = self._et_pending
-        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, width, indent)
         self._reset_scratch()
         if scratch_lines is None:
             return self._emit_scoped_value_mask(rhs, width, pad)
@@ -1215,11 +1224,8 @@ class _StmtEmittersMixin:
         self._dynamic_max_wide_words = max(self._dynamic_max_wide_words, n_words)
         self._reset_scratch()
         slot = self._alloc_scratch()
-        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
-        et_pending = self._et_pending
-        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
         self._reset_scratch()
         if scratch_lines is None:
             raise NotImplementedError(
@@ -1283,11 +1289,8 @@ class _StmtEmittersMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
-        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
-        et_pending = self._et_pending
-        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, max_width, indent)
         self._reset_scratch()
         if scratch_lines is None:
             raise NotImplementedError(
@@ -2169,11 +2172,8 @@ class _StmtEmittersMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
-        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, total, indent)
-        et_pending = self._et_pending
-        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(rhs, slot, n_words, total, indent)
         if scratch_lines is None:
             self._reset_scratch()
             return None
@@ -2756,11 +2756,9 @@ class _StmtEmittersMixin:
     def _emit_if(self, stmt: IfStatement, indent: int, *, context: str = "process") -> list[str]:
         """Emit if/else as Cython if/else."""
         pad = "    " * indent
-        old_et = self._et_pending
-        self._et_pending = []
-        cond_setup, cond, _cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent)
-        et_lines = [f"{pad}{t}" for t in self._et_pending]
-        self._et_pending = old_et
+        with self._fresh_expression_scope() as pending:
+            cond_setup, cond, _cond_mask = self._emit_condition_lines_and_expr(stmt.condition, indent)
+        et_lines = [f"{pad}{t}" for t in pending]
         # `et_lines` (the hoisted `_et{n}_v = ...` declarations for any
         # narrow-enough-to-delegate TernaryOp sub-node the wide condition
         # emitter reached, e.g. `(a3 ? a2 : a6[16])` inside a larger
@@ -3526,11 +3524,8 @@ class _StmtEmittersMixin:
         self._reset_scratch()
         slot = self._alloc_scratch()
         # Fresh `_et_pending` scope: see `_emit_wide_lhs_write_new`.
-        old_et = (self._et_pending, self._et_count, self._et_node_vals, self._et_node_masks)
-        self._et_pending, self._et_node_vals, self._et_node_masks = [], {}, {}
-        scratch_lines = self._emit_wide_expr_to_scratch(arg, slot, n_words, w, indent)
-        et_pending = self._et_pending
-        self._et_pending, _count, self._et_node_vals, self._et_node_masks = old_et
+        with self._fresh_expression_scope() as et_pending:
+            scratch_lines = self._emit_wide_expr_to_scratch(arg, slot, n_words, w, indent)
         self._reset_scratch()
         if scratch_lines is None and w <= _WORD_BITS:
             val = self._emit_expr(arg, w)
