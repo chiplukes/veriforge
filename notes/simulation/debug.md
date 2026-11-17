@@ -409,6 +409,88 @@ If the reference engine *agrees with the buggy VM*, your test is probably
 exposing an RTL or test bug, not a simulator bug. If the reference engine
 *disagrees*, you have a VM bug to localise.
 
+### Locating a divergence
+
+`veriforge.sim.diverge` ([source](../../src/veriforge/sim/diverge.py)) runs a
+design on two engines under the same random stimulus. It records every
+signal, finds the first time each one differs, and walks back through the
+drivers in the flattened design to the earliest process whose inputs all
+still agreed:
+
+```bash
+uv run -m veriforge.sim.diverge examples/serv/rtl/*.v --preprocess --top servile \
+    --reset i_rst=1:3 --cycles 80 --engines reference,compiled
+```
+
+```text
+Trace back (values reference / compiled):
+  ...
+  cpu.ctrl.pc_plus_4_cy    cycle 0 inputs       1'bx / 1'b0   <- assign at examples/serv/rtl/serv_ctrl.v:70
+
+Root: cpu.ctrl.pc_plus_4_cy first diverges at cycle 0 inputs, but every traced input
+of its driver agreed at that time:
+  cpu.ctrl.pc              1'bx
+  ...
+Driver: assign at examples/serv/rtl/serv_ctrl.v:70
+       assign {pc_plus_4_cy,pc_plus_4} = pc+plus_4+pc_plus_4_cy_r_w;
+```
+
+- **Walk rules.** A combinational driver is explained by an input that
+  diverged at the same time or earlier. An edge-triggered driver is
+  explained only by an input that diverged strictly earlier, because the
+  edge sampled the old values. The walk follows the explaining input that
+  diverged first. `--signal NAME` starts the walk from another signal (the
+  default is the first output that diverges). `--ignore-x` treats an x
+  bit as matching anything.
+- **Stimulus.** Inputs are random per (seed, input, cycle). Clocks are
+  detected by name, or set with `--clock`. Hold resets with
+  `--reset NAME=VALUE[:CYCLES]`. Each cycle is driven and settled, with
+  three samples: after inputs, after posedge, after negedge. Time stays at
+  0 after start-up, so `initial` blocks run only up to their first delay.
+- **VCDs from any simulator.** `--vcd A.vcd B.vcd` compares two dumps
+  instead of running engines. The scope prefix (`tb.dut.`) is stripped
+  automatically, and Icarus's aliased port identifiers are kept for every
+  name. Signals missing from a dump (Verilator drops some) are listed as
+  "not in both traces".
+- **Python API.** `record_trace(design, top, engine, Stimulus(...))`,
+  `trace_from_vcd(text)` + `align_trace(trace, names)`,
+  `locate_divergence(a, b, design, top)`; see `tests/test_sim/test_diverge.py`.
+
+### Reducing a failing design
+
+`veriforge.reduce` ([source](../../src/veriforge/reduce/__init__.py)) shrinks a
+design while a failure still reproduces. It works by delta debugging on
+the parsed model: it deletes modules, items, statements and connections,
+replaces statements with their branches, and replaces expressions with
+an operand or `0`. It keeps an edit when the re-emitted text is smaller
+and the failure is still there:
+
+```bash
+# engines disagree on an output (--signal NAME: only that signal counts -- an output, or
+# an internal flattened name such as the root diverge reported: fewer cycles, same bug)
+uv run -m veriforge.reduce design.v --top t --mismatch --engines reference,compiled \
+    -o min.v --test-out test_min.py
+# an error whose "Type: message" matches a regex
+uv run -m veriforge.reduce design.v --top t --error "NotImplementedError: .*wide" -o min.v
+# any external check that exits 0 while the failure reproduces ({file} = candidate)
+uv run -m veriforge.reduce design.v --top t --cmd "python my_check.py {file}" -o min.v
+```
+
+- **Validity guard.** When `iverilog` is installed and accepts the input,
+  every candidate must also compile in Icarus with no implicit nets
+  (`--valid auto`, the default). Without the guard, a reduction drifts
+  into code only veriforge accepts, such as undeclared parameters or
+  implicit nets.
+- **Cheaper checks.** `--mismatch` first cuts the stimulus to end at the
+  cycle of the first divergence.
+- **Timeouts.** Each check runs in a worker process with `--timeout`
+  seconds, because an edit can make a design loop forever.
+- **Errors other than the target.** Any parse, elaboration or run error a
+  predicate is not looking for makes a candidate uninteresting, so the
+  reduction cannot drift into a different bug.
+- **Test skeleton.** `--test-out` writes a pytest skeleton holding the
+  reduced source and stimulus, to adapt into a regression test.
+
 ---
 
 ## 12. Performance triage

@@ -58,6 +58,11 @@ src/veriforge/
 │   ├── _statements.py    # Shared always/initial, event-control, sensitivity, and procedural statement helpers
 │   ├── _tree_utils.py    # Shared parse-tree location/text/cache helpers
 │   └── comment_extractor.py  # Pre-parse comment extraction & attachment
+├── reduce/               # Delta-debugging design reducer (python -m veriforge.reduce)
+│   ├── __init__.py       # Public API, regression_test_source()
+│   ├── __main__.py       # CLI entry point
+│   ├── _reducer.py       # Reducer passes, model traversal, worker-process Checker, parse_text/emit
+│   └── predicates.py     # EngineMismatch, EngineError, Command, IcarusAccepts, AllOf
 ├── refactor/             # Hierarchy/refactor analysis and edit planning
 │   ├── __init__.py
 │   ├── diagnostics.py    # RefactorDiagnostic
@@ -101,6 +106,7 @@ src/veriforge/
 │   ├── testbench.py      # SignalHandle, Triggers, Clock, Simulator (engine selection)
 │   ├── vcd.py            # VCD waveform output (IEEE 1364-2001)
 │   ├── vcd_compare.py    # VCD parser + comparator for cross-sim validation
+│   ├── diverge.py        # First-divergence locator: traces (engines/VCD), driver walk-back, CLI
 │   ├── cosim.py          # Cross-simulator validation (IcarusCosim, record_vcd)
 │   ├── step_harness.py   # step_drive/step_eval_now/step_run_until helpers for stepped simulation on VM/compiled engines
 │   ├── trace.py          # Reusable simulation tracing helpers

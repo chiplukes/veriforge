@@ -1,6 +1,7 @@
 # Simulator reliability plan (2026-11)
 
-**Status**: in progress. Step 2a (construct census) started 2026-11-17.
+**Status**: in progress. Steps 1a/1b (divergence locator, reducer) done,
+and step 2a (construct census) started, on 2026-11-17.
 
 ## Why
 
@@ -205,3 +206,28 @@ chains, generate-if and nested generate with processes and instances,
 - (2026-11-17) Plan written.
 - (2026-11-17) Step 2a: `tools/construct_census.py` (tests:
   `tests/test_fuzz/test_construct_census.py`); first results above.
+- (2026-11-17) Step 1a: `veriforge.sim.diverge` (tests:
+  `tests/test_sim/test_diverge.py`; usage in `notes/simulation/debug.md`).
+  It runs two engines on the same stimulus, or loads two VCDs, and walks
+  back through the drivers of the flattened design. On its first real
+  run (servile SoC, reference vs compiled) it found that compiled drops
+  the carry of `{c, s} = a + b` (`known_issues.md`). vm and vm-fast agree
+  with reference on servile, `axis_skid_buf` and `fifo_v3`.
+- (2026-11-17) Step 1b: `veriforge.reduce` (tests:
+  `tests/test_sim/test_reduce.py`). Passes: delete, statements,
+  expressions. Predicates: engine mismatch, error regex, external
+  command. Validity guard: Icarus. Checks run in a worker process with a
+  timeout. Writes a pytest skeleton.
+
+## Follow-ups found along the way
+
+- The fuzzer's harness (`FuzzRunner._simulate_design`) only calls
+  `settle()` and never `run()`, so `initial` blocks never start. Any
+  generated `initial` would be ignored, which fits the census finding
+  that the fuzzer generates none. `record_trace` runs
+  `run(max_time=0)` first.
+- Reducer ideas not done yet: inline one instance (flatten), narrow
+  widths and parameter values, test candidates in parallel.
+- Locator ideas: walking through memories by address (it walks by array
+  name), and through function and task bodies called from a process
+  (their reads of module variables are not followed).
