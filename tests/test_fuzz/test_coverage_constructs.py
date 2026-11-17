@@ -66,3 +66,39 @@ def test_atom_ports_and_signed_memories_appear():
     assert re.search(r"\b(byte|shortint|int)( unsigned)? mem\d", memory)
     for src in _sources(10):
         assert emit_design(tree_to_design(verilog_parser(start="source_text").build_tree(src))) == src
+
+
+def test_concatenation_targets_and_initial_values_appear():
+    """Added 2026-11-17: nothing generated `{a, b} = rhs` (compiled evaluated
+    such an RHS at its own width -- the carry was always 0) or `initial`
+    blocks (the census found real code uses both widely)."""
+    import re  # noqa: PLC0415
+
+    ff = "\n".join(_sources(60, Strategy.FEEDFORWARD))
+    assert re.search(r"assign \{\w+(, \w+)+\} = ", ff)
+    clocked = "\n".join(_sources(60, Strategy.CLOCKED_SEQUENTIAL))
+    assert re.search(r"\{\w+(, \w+)+\} <= ", clocked)
+    assert "initial" in clocked
+    # A concatenation-driven output is a net, not `output reg`.
+    for src in _sources(60, Strategy.FEEDFORWARD):
+        for m in re.finditer(r"assign \{([\w, ]+)\} = ", src):
+            for name in m.group(1).split(", "):
+                assert not re.search(rf"output reg\b[^;,)]*\b{name}\b", src), name
+
+
+def test_harness_runs_initial_blocks(tmp_path):
+    """The fuzzer's harness only settle()s, which never starts an `initial`
+    block; a design with one gets a time-0 run first."""
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+
+    from veriforge.fuzz._runner import FuzzRunner  # noqa: PLC0415
+    from veriforge.sim.value import Value  # noqa: PLC0415
+
+    src = "module t(input clk, input [3:0] a, output [3:0] y);\n  reg [3:0] r;\n  initial r = 4'd5;\n  assign y = r ^ a;\nendmodule\n"
+    design = tree_to_design(verilog_parser(start="source_text").build_tree(src))
+    with contextlib.redirect_stdout(io.StringIO()):
+        runner = FuzzRunner(output_dir=str(tmp_path), seed=0, engines=["reference"], icarus=False)
+    runner._displays = {}
+    out = runner._simulate_design(design, "reference", [{"a": Value(3, width=4)}, {"a": Value(0, width=4)}])
+    assert [o["y"] for o in out] == [Value(6, width=4), Value(5, width=4)]

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable
 
-from ..model.behavioral import AlwaysBlock, SensitivityType
+from ..model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
 from ..model.design import Design, Module
 from ..model.functions import FunctionDecl, TaskDecl
 from ..model.expressions import (
@@ -52,6 +52,8 @@ from ._statement_gen import StatementGenerator
 
 
 _REAL_PROBABILITY = 0.2  # (feedforward designs with `real` variables)
+_CONCAT_TARGET_PROBABILITY = 0.3  # (a group of 2-3 targets written by one `{a, b} = rhs`)
+_INITIAL_VALUE_PROBABILITY = 0.3  # (clocked registers given an `initial` value)
 
 
 class Strategy(Enum):
@@ -200,13 +202,17 @@ class ModuleGenerator:
             mod.always_blocks.append(ab)
         for ca in ctx.continuous_assigns:
             mod.continuous_assigns.append(ca)
+        mod.initial_blocks.extend(ctx.initial_blocks)
         mod.functions.extend(ctx.functions)
         mod.tasks.extend(ctx.tasks)
 
         # Post-process output port types: if an output is driven ONLY by
         # continuous assigns (not always blocks), drop the "reg" data_type
         # so the emitter produces "output" (wire) instead of "output reg".
-        assign_outputs: set[str] = {str(ca.lhs.name) for ca in ctx.continuous_assigns if hasattr(ca.lhs, "name")}
+        assign_outputs: set[str] = set()
+        for ca in ctx.continuous_assigns:
+            parts = ca.lhs.parts if isinstance(ca.lhs, Concatenation) else [ca.lhs]
+            assign_outputs.update(str(p.name) for p in parts if hasattr(p, "name"))
         always_outputs: set[str] = set()
         for ab in ctx.always_blocks:
             for sig in _collect_assigned_signals(ab.body):
@@ -317,17 +323,68 @@ class ModuleGenerator:
             ctx.add_output(self._rng)
 
         assigns: list[ContinuousAssign] = []
-        for out in ctx.outputs:
-            # exclude=out.name: a continuous assign reading the same signal
-            # it drives (`assign o = f(o);`) is a genuine combinational
-            # feedback loop -- simulator-implementation-defined, not a
-            # well-defined result.
-            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4), exclude=out.name)
-            assigns.append(ContinuousAssign(out.as_identifier(), rhs))
+        for group in self._target_groups(list(ctx.outputs)):
+            if len(group) > 1:
+                concat = self._concat_cont_assign(ctx, expr_gen, group)
+                if concat is not None:
+                    assigns.append(concat)
+                    continue
+            for out in group:
+                # exclude=out.name: a continuous assign reading the same signal
+                # it drives (`assign o = f(o);`) is a genuine combinational
+                # feedback loop -- simulator-implementation-defined, not a
+                # well-defined result.
+                rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4), exclude=out.name)
+                assigns.append(ContinuousAssign(out.as_identifier(), rhs))
 
         ctx.continuous_assigns = assigns
         if self._rng.random() < _REAL_PROBABILITY:
             self._add_reals(ctx)
+
+    # ------------------------------------------------------------------
+    # Concatenation targets: `{a, b} = rhs`
+    # ------------------------------------------------------------------
+
+    def _target_groups(self, targets: list[Signal]) -> list[list[Signal]]:
+        """*targets* as single-signal groups, except (with
+        `_CONCAT_TARGET_PROBABILITY`) one group of 2-3 to be written by one
+        concatenation assignment. Real code writes `{carry, sum} = a + b`;
+        until 2026-11-17 the fuzzer never did, and compiled evaluated such an
+        RHS at its own width (the carry was always 0)."""
+        groups = [[t] for t in targets]
+        if len(targets) >= 2 and self._rng.random() < _CONCAT_TARGET_PROBABILITY:
+            n = self._rng.randint(2, min(3, len(targets)))
+            start = self._rng.randint(0, len(targets) - n)
+            groups[start : start + n] = [targets[start : start + n]]
+        return groups
+
+    def _concat_rhs(self, expr_gen: ExpressionGenerator, *, exclude: str | None) -> Expression:
+        """An RHS for a concatenation target: half the time an arithmetic
+        operation whose result needs the target's (wider) context width."""
+        rng = self._rng
+        if rng.random() < 0.5:
+            op = rng.choice(("+", "-", "*", "+"))
+            return BinaryOp(
+                op,
+                expr_gen.expr(rng, depth=rng.randint(1, 2), exclude=exclude),
+                expr_gen.expr(rng, depth=rng.randint(1, 2), exclude=exclude),
+            )
+        return expr_gen.expr(rng, depth=rng.randint(2, 4), exclude=exclude)
+
+    def _concat_cont_assign(
+        self, ctx: SignalContext, expr_gen: ExpressionGenerator, group: list[Signal]
+    ) -> ContinuousAssign | None:
+        """`assign {g0, g1, ...} = rhs`, or None when the RHS (built excluding
+        g0) reads, or combinationally depends on, another part."""
+        rhs = self._concat_rhs(expr_gen, exclude=group[0].name)
+        reads = {n.name for n in rhs.walk() if isinstance(n, Identifier)}
+        others = [t.name for t in group[1:]]
+        if any(o in reads or any(ctx.comb_reaches(r, o) for r in reads) for o in others):
+            return None
+        for o in others:
+            for r in reads:
+                ctx.record_comb_dep(o, r)
+        return ContinuousAssign(Concatenation([t.as_identifier() for t in group]), rhs)
 
     def _add_reals(self, ctx: SignalContext, *, clocked: bool = False) -> None:  # noqa: PLR0915
         """`real` variables (sim/reals.py) computed in an `always @*` from
@@ -342,7 +399,16 @@ class ModuleGenerator:
         inputs = [s for s in ctx.inputs if s.name != "clk" and s.width <= 16]  # noqa: PLR2004
         # (At most 64 bits: Icarus turns a negative real that rounds to 0
         # into garbage in a wider vector -- known_issues.md.)
-        outputs = [s for s in ctx.outputs if s.width <= 64]  # noqa: PLR2004
+        # (Not an output written as part of a `{a, b} = rhs`: its assign
+        # would stay, a second driver.)
+        concat_written = {
+            part.name
+            for ca in ctx.continuous_assigns
+            if isinstance(ca.lhs, Concatenation)
+            for part in ca.lhs.parts
+            if isinstance(part, Identifier)
+        }
+        outputs = [s for s in ctx.outputs if s.width <= 64 and s.name not in concat_written]  # noqa: PLR2004
         if clocked and inputs:
             outputs = [ctx.add_output(rng, width=rng.choice((8, 16, 32, 64)), signed=rng.random() < 0.5)]
         if not inputs or not outputs:
@@ -570,12 +636,13 @@ class ModuleGenerator:
 
         # All assignments in one posedge clk block
         stmts: list[Statement] = []
-        for reg in ctx.regs:
+        for group in self._target_groups([*ctx.regs, *ctx.outputs]):
+            if len(group) > 1:
+                lhs: Expression = Concatenation([t.as_identifier() for t in group])
+                stmts.append(NonblockingAssign(lhs, self._concat_rhs(expr_gen, exclude=None)))
+                continue
             rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4))
-            stmts.append(NonblockingAssign(reg.as_identifier(), rhs))
-        for out in ctx.outputs:
-            rhs = expr_gen.expr(self._rng, depth=self._rng.randint(2, 4))
-            stmts.append(NonblockingAssign(out.as_identifier(), rhs))
+            stmts.append(NonblockingAssign(group[0].as_identifier(), rhs))
 
         self._rng.shuffle(stmts)
         stmts.extend(self._maybe_display(expr_gen))
@@ -585,6 +652,16 @@ class ModuleGenerator:
             sensitivity_type=SensitivityType.SEQUENTIAL,
         )
         ctx.always_blocks = [ab]
+        if self._rng.random() < _INITIAL_VALUE_PROBABILITY:
+            # `initial r = <literal>;` for some registers (only this posedge
+            # block writes them, so no t=0 race with another process).
+            inits: list[Statement] = [
+                BlockingAssign(reg.as_identifier(), expr_gen.literal(self._rng, width=max(reg.width, 1)))
+                for reg in ctx.regs
+                if self._rng.random() < 0.6
+            ]
+            if inits:
+                ctx.initial_blocks.append(InitialBlock(SeqBlock(inits) if len(inits) > 1 else inits[0]))
         if self._rng.random() < _REAL_PROBABILITY:
             self._add_reals(ctx, clocked=True)
 
@@ -1320,8 +1397,8 @@ def _collect_assigned_signals(stmt: Statement) -> set[str]:
     while stack:
         node = stack.pop()
         if isinstance(node, (BlockingAssign, NonblockingAssign)):
-            if isinstance(node.lhs, Identifier):
-                names.add(node.lhs.name)
+            parts = node.lhs.parts if isinstance(node.lhs, Concatenation) else [node.lhs]
+            names.update(p.name for p in parts if isinstance(p, Identifier))
         if hasattr(node, "statements"):
             stack.extend(node.statements)
         if hasattr(node, "then_body") and node.then_body is not None:

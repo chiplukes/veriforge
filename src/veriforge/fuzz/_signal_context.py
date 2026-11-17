@@ -140,6 +140,7 @@ class SignalContext:
         self._comb_adj: dict[str, set[str]] = {}
         # Populated by ModuleGenerator strategies after assembly
         self.always_blocks: list = []
+        self.initial_blocks: list = []
         self.continuous_assigns: list = []
         self.instances: list = []
         self.functions: list = []

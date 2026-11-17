@@ -65,10 +65,10 @@ favoring simpler shapes:
 
 | Strategy | Description |
 |----------|-------------|
-| **feedforward** | Inputs → continuous assigns → outputs; 20% also compute `real` variables in an `always @*` (narrow inputs, real literals, `+ - *`, comparisons, `?:`, negation) and round one into an output (since 2026-10-16) |
+| **feedforward** | Inputs → continuous assigns → outputs; 30% write a group of 2-3 outputs as one `assign {a, b} = e` (half the time a `+ - *` whose result needs the concatenation's width: compiled once dropped the carry; since 2026-11-17); 20% also compute `real` variables in an `always @*` (narrow inputs, real literals, `+ - *`, comparisons, `?:`, negation) and round one into an output (since 2026-10-16) |
 | **registered** | Inputs → regs → combinational outputs, clocked; sometimes two register updates as one streaming-concatenation target (`{<<n{ra, rb}} <= T'(e)`, checked by Verilator -- Icarus rejects it) |
 | **multi_always** | Multiple `always @*` blocks sharing internal wires/regs |
-| **clocked_sequential** | Single `always @(posedge clk)` with nonblocking assigns |
+| **clocked_sequential** | Single `always @(posedge clk)` with nonblocking assigns; 30% write a group of 2-3 targets as one `{a, b} <= e`, and 30% give some registers an `initial` value (since 2026-11-17) |
 | **nested_blocks** | Deeply nested `begin/end` with local variables |
 | **mixed** | Random mix of assigns + always blocks + internal nets |
 | **hierarchical** | Flat child module + parent module + an `Instance` connecting them |
@@ -209,11 +209,21 @@ two simulators disagree. The divergence may be:
 ```
 1. Fuzzer logs mismatch → fuzz_output/mismatch_00042/
 2. Open module.v — examine the failing Verilog
-3. Reduce to a minimal repro (remove unrelated ports/signals/statements
-   until the mismatch disappears, then back up one step)
+3. Reduce it automatically (notes/simulation/debug.md, "Reducing a failing design"):
+     uv run -m veriforge.reduce fuzz_output/mismatch_00042/module.v --top t \
+         --mismatch --engines reference,vm-fast -o min.v     # engines disagree
+     uv run -m veriforge.reduce .../module.v --top t --error "OverflowError" \
+         --engines vm-fast -o min.v                          # an engine raises
+   and locate the diverging driver with `uv run -m veriforge.sim.diverge`.
 4. Add a deterministic test in tests/test_sim/test_xxx.py
 5. Fix the bug
 ```
+
+**Harness start-up.** The harness drives and `settle()`s without advancing
+time. `settle()` never starts `initial` blocks, so a design that has any
+first gets one `run(max_time=0)` in place of the first `settle()`: the same
+combinational bootstrap, plus the initial blocks (since 2026-11-17). Generated
+initial blocks contain no delays.
 
 ## Relationship to test_differential*.py
 

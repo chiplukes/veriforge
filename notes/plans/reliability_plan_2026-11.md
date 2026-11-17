@@ -1,7 +1,8 @@
 # Simulator reliability plan (2026-11)
 
-**Status**: in progress. Steps 1a/1b (divergence locator, reducer) done,
-and step 2a (construct census) started, on 2026-11-17.
+**Status**: in progress. Steps 1a/1b (divergence locator, reducer), 2c
+(corpus harness) and 5a (memory measurement) done, and step 2a (construct
+census) started, on 2026-11-17.
 
 ## Why
 
@@ -41,6 +42,9 @@ false mismatch that had to be investigated and then filtered out.
    needing no external oracle.
 4. Extend the fuzzer toward structure and scale, ranked by the census
    from step 2.
+5. Treat memory and scale as their own target: measure every engine's time
+   and memory on real designs, test growth against size (not only
+   expression depth), and turn runaways into errors.
 
 Oracles: Verilator is the main oracle for SystemVerilog and structural
 work. Icarus is kept for 4-state (x/z) checks only. All four veriforge
@@ -149,6 +153,86 @@ Choose and order these using the census (2a):
 Code coverage: run `coverage.py` over `src/veriforge/sim/` during fuzz and
 corpus runs. Report code neither reaches, and keep seeds that reach new lines.
 
+## Step 5: Memory and scale (added 2026-11-17)
+
+**Why.** Memory and blow-up problems are the most commonly fixed
+simulation failures, mostly in the compiled engine:
+- generated code growing faster than the design: exponential chain codegen
+  (`65dc2cf`); codegen made linear for every node type (`a4f5e9a`; an
+  8-term `&&` gave 334 MB of C, a 16-way select as a memory index used 27
+  GB); nested streaming concatenations (`311351a`);
+- the C compiler running out of memory (`4526a61`, table-driven dispatch);
+- runtime and build memory: snapshot footprint (`642e8d5`, `69ae120`),
+  scratch arrays sized by `$readmem` arguments (`bbed248`), the build
+  thread's stack (`3872b71`).
+
+On 2026-11-17 one runaway reference-engine check (`serv_rf_ram` with
+invalid default parameters) grew to 29 GB, and the OOM killer took the WSL
+VM down with it.
+
+**Already covered.** Expression nesting: `test_codegen_linearity.py` checks
+40 constructs × 39 contexts for linear growth, and `VERIFORGE_CODEGEN_STRICT`
+plus the 4 MB unscoped-text stop guard emission. Nothing measures sizes
+other than nesting depth, real designs, the C build, or runtime memory.
+
+### 5a. Measure on real designs (done)
+
+`tools/corpus_check.py` runs each engine in its own subprocess under an
+address-space cap (`--mem-limit-gb`, inherited by the C compiler). Per run it
+records peak resident memory of the engine and of its build children,
+setup time (elaboration and build) and run time, and compiled's generated
+code size. A run over time or memory where reference was fine is the
+`engine-resource` outcome. The report ranks the heaviest runs per engine,
+with each as a multiple of reference, and the largest generated code.
+`--compile-cache` with a fresh directory measures every build.
+
+First numbers (serv, 2026-11-17):
+- Every compiled build generates about 2 MB of Cython/C, even for a
+  trivial module, and takes about 4.5 s and 215 MB. A whole core (servile)
+  takes 6.7 MB, 10 s and 330 MB. The floor looks like fixed runtime-helper
+  code repeated in every build.
+- `serv_rf_ram` (invalid defaults): reference and vm use 3.3 GB and 122 s,
+  vm-fast and compiled 120 MB and 0.1 s.
+
+### 5b. Scaling matrix beyond expression depth
+
+Apply `test_codegen_linearity.py`'s method (measure at N, 2N, 4N; linear
+growth gives a ratio of 2) to sizes rather than nesting depth:
+- statements: if/else-if chains, `case` items, nested `begin`/loops,
+  `for` loop bounds;
+- structure: processes per module, continuous-assign chains, instances
+  and generate iterations (each with a process or instance inside),
+  ports, fan-out of one signal to N readers;
+- data: memory depth and word width (64·k bits), number of memories,
+  `$readmem` sizes.
+
+Measure generated code size (codegen only, fast), and for a subset the
+build's peak memory and the runtime memory. Fail on super-linear growth
+where linear is expected.
+
+### 5c. Runtime memory over long runs
+
+Run designs for 1k and 10k cycles on each engine, and check that resident
+memory is flat (snapshot journals, NBA queues, VCD buffers, trace hubs):
+a leak shows as growth with cycles.
+
+### 5d. Guard rails
+
+- Compiled build: an address-space cap on the Cython and C-compiler child
+  processes (configurable, e.g. `VERIFORGE_BUILD_MEMORY_GB`), so a runaway
+  compile fails with an explanation instead of OOM-killing the machine.
+  Estimate the generated C size before invoking the compiler and stop
+  above a budget with the largest processes named.
+- Reference/vm: refuse a select or value of absurd width (the
+  `serv_rf_ram` case) with an error instead of allocating.
+
+### 5e. Build floor
+
+Find what makes up compiled's ~2 MB per build. If it is mostly fixed
+helpers, move them into a shared, precompiled runtime extension, so each
+design's build only compiles its own code. That would cut build time and
+build memory for every design.
+
 ## Census results (2026-11-17, `examples/` only)
 
 Run: `uv run python tools/construct_census.py` (30 s with 8 jobs). Corpus:
@@ -228,13 +312,24 @@ chains, generate-if and nested generate with processes and instances,
   of a signed RHS, and x (`tests/test_sim/test_concat_target_context.py`,
   all engines, >64 bits).
 
+- (2026-11-17) Fuzzer: the harness now starts `initial` blocks with one
+  `run(max_time=0)`, but only for designs that have any, so the Icarus
+  start-up alignment is unchanged. The feedforward and clocked strategies
+  now write `{a, b} = e` targets and give registers `initial` values. The
+  first campaign found a vm-fast start-up crash: any 64-bit memory plus an
+  `initial` block (`sync_mem_from_lists`, signed words; fixed,
+  `tests/test_sim/test_memory64_initial.py`). It also found an Icarus quirk
+  with 2-state concatenation parts, now filtered (`known_issues.md`).
+- (2026-11-17) Step 2c: `tools/corpus_check.py`. Its smoke run found a
+  reference bug: a replication with a parameter count, including 0, was
+  sized as its inner width (`{a, {B{1'b0}}}`, serv_csr). Fixed,
+  `tests/test_sim/test_replication_count.py`.
+
 ## Follow-ups found along the way
 
-- The fuzzer's harness (`FuzzRunner._simulate_design`) only calls
-  `settle()` and never `run()`, so `initial` blocks never start. Any
-  generated `initial` would be ignored, which fits the census finding
-  that the fuzzer generates none. `record_trace` runs
-  `run(max_time=0)` first.
+- Open: reference and vm grow without bound (29 GB, OOM-killed WSL) on selects whose bounds come from invalid
+  default parameters (`serv_rf_ram`, `known_issues.md`). Parser gap:
+  `localparam` in a parameter port list.
 - Reducer ideas not done yet: inline one instance (flatten), narrow
   widths and parameter values, test candidates in parallel.
 - Locator ideas: walking through memories by address (it walks by array

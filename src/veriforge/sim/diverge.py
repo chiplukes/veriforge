@@ -39,6 +39,7 @@ import fnmatch
 import hashlib
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -116,6 +117,8 @@ class Trace:
     labels: dict[int, str] = field(default_factory=dict)
     source: str = ""
     error: str | None = None  # the run stopped with this exception
+    setup_seconds: float = 0.0  # Simulator construction: elaboration, and compiled's build
+    run_seconds: float = 0.0  # stimulus and sampling
 
     def record(self, name: str, time: int, bits: str) -> None:
         ch = self.changes.setdefault(name, [])
@@ -182,8 +185,10 @@ def record_trace(  # noqa: PLR0912
     module = design.get_module(top)
     if module is None:
         raise ValueError(f"no module {top!r} in the design")
+    t_setup = time.perf_counter()
     sim = Simulator(module, engine=engine, design=design)
-    trace = Trace(source=engine)
+    trace = Trace(source=engine, setup_seconds=time.perf_counter() - t_setup)
+    t_run = time.perf_counter()
     all_names = sim.signals()
     if signals is None:
         names = _traced_names(all_names)
@@ -224,6 +229,7 @@ def record_trace(  # noqa: PLR0912
             sample(3 * cycle + 2, f"cycle {cycle} negedge")
     except Exception as exc:  # noqa: BLE001 -- the failure is part of the result
         trace.error = f"{type(exc).__name__}: {exc}"
+    trace.run_seconds = time.perf_counter() - t_run
     return trace
 
 

@@ -32,3 +32,4 @@ examples/ibex/verilator/obj_dir/*
 examples/ibex/verilator/firmware.hex
 .claude/
 census_out/
+corpus_out/

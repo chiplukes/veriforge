@@ -1648,6 +1648,38 @@ class ExpressionEvaluator:  # cm:7e8b5d
 # ── Self-determined width (generic max-rule, incl. for '*') ───────────
 
 
+_COUNT_OPS = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "*": lambda a, b: a * b,
+    "/": lambda a, b: a // b if b else None,
+}
+
+
+def _replication_count(expr: Expression, ctx: EvalContext) -> int | None:
+    """A replication count's value, when known without evaluation: a literal,
+    a parameter (a constant signal in *ctx*), or `+ - * /` of those. A count
+    is a constant expression (IEEE 1800-2017 11.4.12)."""
+    etype = type(expr)
+    if etype is Literal:
+        if expr.is_x or expr.is_z:
+            return None
+        try:
+            return int(expr.value)
+        except (TypeError, ValueError):
+            return None
+    if etype is Identifier and not expr.hierarchy:
+        v = ctx._signals.get(expr.name)
+        return int(v) if v is not None and v.is_defined else None
+    if etype is BinaryOp and expr.op in _COUNT_OPS:
+        left = _replication_count(expr.left, ctx)
+        right = _replication_count(expr.right, ctx)
+        if left is None or right is None:
+            return None
+        return _COUNT_OPS[expr.op](left, right)
+    return None
+
+
 def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
     """Self-determined width of *expr*, using the max-of-operands rule for
     every binary arithmetic operator, INCLUDING multiplication -- not the
@@ -1741,8 +1773,13 @@ def _expr_self_width(expr: Expression, ctx: EvalContext) -> int:
         # Chunk reversal never changes total bit width.
         return sum(_expr_self_width(p, ctx) for p in expr.parts)
     if etype is Replication:
-        if isinstance(expr.count, Literal):
-            return int(expr.count.value) * _expr_self_width(expr.value, ctx)
+        count = _replication_count(expr.count, ctx)
+        if count is not None:
+            # (Including 0: `{a, {B{1'b0}}}` with B = 0 is just `a`. A
+            # parameter count used to fall through to the inner width, so
+            # `{0{x}}` claimed one bit and the evaluator padded its empty
+            # result to a bit of 0 -- serv_csr's `{mcause31, {B{1'b0}}}`.)
+            return count * _expr_self_width(expr.value, ctx)
         return _expr_self_width(expr.value, ctx)
     if etype is BinaryOp:
         if expr.op in ("==", "!=", "===", "!==", "<", "<=", ">", ">=", "&&", "||"):

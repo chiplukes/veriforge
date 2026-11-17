@@ -308,7 +308,11 @@ class FuzzRunner:
         if self._icarus and not has_streaming_concat:
             try:
                 icarus_res = self._simulate_icarus(verilog, vectors, top)
-                diffs = self._compare(oracle, icarus_res, "iverilog", vectors)
+                # (Icarus quirk: see `_mixed_state_concat_outputs`.)
+                quirk = _mixed_state_concat_outputs(top)
+                icarus_oracle = [{k: v for k, v in vec.items() if k not in quirk} for vec in oracle]
+                icarus_res = [{k: v for k, v in vec.items() if k not in quirk} for vec in icarus_res]
+                diffs = self._compare(icarus_oracle, icarus_res, "iverilog", vectors)
                 diffs += _compare_displays(
                     self._displays.get("reference", []), self._displays.get("iverilog", []), "iverilog"
                 )
@@ -446,12 +450,20 @@ class FuzzRunner:
         # reading its own earlier output saw one activation more than in
         # Icarus: fuzz seed 83474.)
         results: list[dict[str, Value]] = []
+        # settle() never starts `initial` blocks (only run() does), so a
+        # design with any gets one time-0 run, in place of the first
+        # settle(): the same one combinational bootstrap, on vector 0's values,
+        # plus the initial blocks -- as at Icarus's t=0. Designs without
+        # initial blocks keep the settle()-only start-up exactly.
+        starts_processes = any(m.initial_blocks for m in design.modules)
 
-        for vec in vectors:
+        for vi, vec in enumerate(vectors):
             for name, value in vec.items():
                 if has_clock and name == "clk":
                     continue  # the harness drives the clock (the Icarus testbench skips it too)
                 sim.drive(name, value)
+            if vi == 0 and starts_processes:
+                sim.run(max_time=0)
 
             if has_clock:
                 sim.settle()
@@ -941,6 +953,30 @@ def _self_reading_comb_outputs(mod: Module) -> set[str]:
         read = {n.name for n in ab.body.walk() if isinstance(n, Identifier) and id(n) not in lhs_ids}
         if read & written:
             out |= written
+    return out
+
+
+def _mixed_state_concat_outputs(mod: Module) -> set[str]:
+    """Signals written through a concatenation target with a 2-state part
+    (`assign {s16, l32} = e;`, `shortint s16`). Icarus then makes the whole RHS
+    2-state, clearing x in the 4-state parts too (`l32` reads 0 where veriforge,
+    per IEEE, keeps x); with every part 4-state it keeps x (fuzz seed 1085,
+    known_issues.md "Icarus: a 2-state part of a concatenation target").
+    Compared across veriforge's engines only."""
+    from ..model.assignments import ContinuousAssign  # noqa: PLC0415
+    from ..model.expressions import Concatenation, Identifier  # noqa: PLC0415
+    from ..model.statements import BlockingAssign, NonblockingAssign  # noqa: PLC0415
+    from ..sim.sv_functions import is_two_state  # noqa: PLC0415
+
+    two_state = {d.name for d in mod.ports if is_two_state(d)} | {d.name for d in mod.variables if is_two_state(d)}
+    out: set[str] = set()
+    for node in mod.walk():
+        if isinstance(node, (ContinuousAssign, BlockingAssign, NonblockingAssign)) and isinstance(
+            node.lhs, Concatenation
+        ):
+            names = {p.name for p in node.lhs.parts if isinstance(p, Identifier)}
+            if names & two_state:
+                out |= names
     return out
 
 

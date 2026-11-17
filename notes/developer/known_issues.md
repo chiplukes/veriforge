@@ -25,6 +25,17 @@ readability see updates one delay early. Supporting it means a model
 field plus a scheduled update in all four engines.
 `test_operator_assignment.py::test_intra_assignment_timing_warns`.
 
+### Reference and vm grow without bound on a select whose bounds come from invalid parameters
+
+**Status**: Open (2026-11-17, `tools/corpus_check.py`). `serv_rf_ram`
+checked as a top with its default `width = 0` (so `depth = 32*36/0`):
+reference and vm evaluate `i_raddr[$clog2(depth)-1:5-$clog2(width)]` with
+enormous bounds and keep allocating. One process reached 29 GB, and the
+OOM killer took the WSL VM down. vm-fast returns at once. A real parent
+always overrides `width`, so this is garbage in, but it should raise an
+error. `corpus_check.py` caps each check's memory (`--mem-limit-gb`) and
+reports it as `memory`.
+
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 
 **Status**: Narrow remaining limit (2026-10-15). Function ports and returns
@@ -111,6 +122,9 @@ simulation unless noted:
   module instances and fail with "Cannot resolve module 'bus_if'". Only a
   hand-built `Module.interface_instances` is flattened.
 - **`.*` port connections** are a parse error.
+- **`localparam` in a parameter port list** (`module m #(parameter W = 8,
+  localparam L = W * 2)`, legal SystemVerilog) is a parse error. Found
+  2026-11-17.
 - **A port with both a net type and a data type** (`input wire logic clk`,
   the style of every taxi `vendor/` module) is a parse error ("No terminal
   matches ..."). Found by `tools/construct_census.py` (2026-11-17): 7 of
@@ -320,6 +334,15 @@ call: `x ? !r8 : f()`, where `f` changes `r8` and `x` is x. Icarus and the
 other engines evaluate left to right. IEEE 1364 5.1.2 leaves the order
 unspecified, so both are legal. The fuzzer doesn't read the impure
 function's counter in the statements that call it.
+
+### Icarus: a 2-state part of a concatenation target makes the whole RHS 2-state
+
+`assign {s16, l32} = e;` with `shortint s16` and `logic [31:0] l32`: Icarus
+clears the x bits of `l32` too (`~(~^x)` with an x bit in `x` gives `...10`,
+not `...1x`). With every part 4-state it keeps x. Per IEEE, each part keeps
+its own type and veriforge keeps x in `l32`. The fuzzer leaves such targets
+out of the Icarus comparison (`_mixed_state_concat_outputs`; fuzz seed 1085
+of the feedforward strategy) and compares them across engines only.
 
 ### Icarus: `integer unsigned` prints as signed
 

@@ -5507,9 +5507,11 @@ cdef class CyContext:
         self.mem_depth = <int *>malloc(n_mems * sizeof(int))
         self.mem_base = <int *>malloc(n_mems * sizeof(int))
 
+        # (Masked to 64 bits first: the lists can hold signed words --
+        # see sync_mem_from_lists.)
         for i in range(total_cells):
-            self.mem_val[i]  = <long long><unsigned long long>mem_val_list[i]
-            self.mem_mask[i] = <long long><unsigned long long>mem_mask_list[i]
+            self.mem_val[i]  = <long long><unsigned long long>(mem_val_list[i] & 0xFFFFFFFFFFFFFFFF)
+            self.mem_mask[i] = <long long><unsigned long long>(mem_mask_list[i] & 0xFFFFFFFFFFFFFFFF)
 
         for i in range(n_mems):
             info = mem_info_list[i]
@@ -5573,11 +5575,18 @@ cdef class CyContext:
             mask_list[i] = self.mem_mask[i]
 
     def sync_mem_from_lists(self, list val_list, list mask_list):
-        """Copy Python lists into C memory arrays."""
+        """Copy Python lists into C memory arrays.
+
+        A word can be negative: `sync_mem_to_lists` stores the C words as
+        signed `long long`, so a 64-bit element with every bit x comes back
+        as mask -1. The unsigned cast of that raised OverflowError -- every
+        design with a 64-bit memory (`real rm [0:3]`, `reg [63:0] m [..]`)
+        and an `initial` block crashed at start-up. Mask to 64 bits first.
+        """
         cdef int i
         for i in range(self.mem_total_cells):
-            self.mem_val[i] = <long long>(<unsigned long long>val_list[i])
-            self.mem_mask[i] = <long long>(<unsigned long long>mask_list[i])
+            self.mem_val[i] = <long long>(<unsigned long long>(val_list[i] & 0xFFFFFFFFFFFFFFFF))
+            self.mem_mask[i] = <long long>(<unsigned long long>(mask_list[i] & 0xFFFFFFFFFFFFFFFF))
 
     # ── Wide signal setup ────────────────────────────────────────
 
