@@ -111,6 +111,11 @@ simulation unless noted:
   module instances and fail with "Cannot resolve module 'bus_if'". Only a
   hand-built `Module.interface_instances` is flattened.
 - **`.*` port connections** are a parse error.
+- **A port with both a net type and a data type** (`input wire logic clk`,
+  the style of every taxi `vendor/` module) is a parse error ("No terminal
+  matches ..."). Found by `tools/construct_census.py` (2026-11-17): 7 of
+  the 25 unique taxi sources fail on it. `examples/taxi/wrappers/` works
+  around it.
 - **`defparam` paths** must go down from the module holding them (or start
   with its own name). Paths through an instance array (`u[0].W`), upward
   beyond the module, or from another module raise a `ValueError`; Icarus
