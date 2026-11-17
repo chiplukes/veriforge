@@ -1414,7 +1414,7 @@ class _StmtEmittersMixin:
             concat_rhs_val = None
             concat_rhs_mask = None
         elif wide_rhs_source is None:
-            rhs_width = self._expr_width(rhs)
+            rhs_width = self._concat_assign_rhs_width(lhs, rhs)
             setup, rhs_val, rhs_mask = self._emit_scoped_value_mask(rhs, rhs_width, pad)
             if rhs_width <= _WORD_BITS:
                 lines = [

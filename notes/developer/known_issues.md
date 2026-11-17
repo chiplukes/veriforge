@@ -25,20 +25,6 @@ readability see updates one delay early. Supporting it means a model
 field plus a scheduled update in all four engines.
 `test_operator_assignment.py::test_intra_assignment_timing_warns`.
 
-### Compiled engine: a concatenation assignment target loses the carry (`{c, s} = a + b`)
-
-**Status**: Open (2026-11-17). Found with `veriforge.sim.diverge` on the
-servile SoC (`examples/serv`, `serv_ctrl.v:70`,
-`assign {pc_plus_4_cy,pc_plus_4} = pc+plus_4+pc_plus_4_cy_r_w;`). On
-compiled, the right-hand side of an assignment to a concatenation is
-evaluated without the concatenation's width as context, so the extra
-high bits (the carry) are always 0. That happens with defined values
-(`8'd200 + 8'd100` gives `c = 0`) and with x. Affected: continuous and
-procedural assignments, narrow and >64-bit operands. Correct on reference,
-vm and vm-fast, and for a plain wider target (`assign v9 = a + b`).
-Untested until now: no test assigns an arithmetic result to a
-concatenation.
-
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 
 **Status**: Narrow remaining limit (2026-10-15). Function ports and returns

@@ -211,13 +211,22 @@ chains, generate-if and nested generate with processes and instances,
   It runs two engines on the same stimulus, or loads two VCDs, and walks
   back through the drivers of the flattened design. On its first real
   run (servile SoC, reference vs compiled) it found that compiled drops
-  the carry of `{c, s} = a + b` (`known_issues.md`). vm and vm-fast agree
+  the carry of `{c, s} = a + b`. vm and vm-fast agree
   with reference on servile, `axis_skid_buf` and `fifo_v3`.
 - (2026-11-17) Step 1b: `veriforge.reduce` (tests:
   `tests/test_sim/test_reduce.py`). Passes: delete, statements,
   expressions. Predicates: engine mismatch, error regex, external
   command. Validity guard: Icarus. Checks run in a worker process with a
-  timeout. Writes a pytest skeleton.
+  timeout. Writes a pytest skeleton. On the full servile SoC, focused on
+  the locator's root signal (`--signal cpu.ctrl.pc_plus_4_cy`), it went
+  from 81,535 to 343 characters in 680 checks (29 min, almost all compiled
+  builds), leaving just the carry assign inside the original hierarchy.
+- (2026-11-17) Fixed the compiled concatenation-target bug: the RHS
+  of `{...} = rhs` is now evaluated at the target's total width
+  (`_concat_assign_rhs_width`, procedural and continuous). Wide continuous
+  targets take the scratch path. The fix covers the carry, sign extension
+  of a signed RHS, and x (`tests/test_sim/test_concat_target_context.py`,
+  all engines, >64 bits).
 
 ## Follow-ups found along the way
 

@@ -758,12 +758,24 @@ class _ProcessCompilerMixin:
                 if all(self._concat_part_max_width(p) <= _WORD_BITS for p in parts):
                     wide_rhs_source = (sid, base_lsb)
 
+        if wide_signal_rhs_source is None:
+            # Above 64 bits (of the RHS or of the target): evaluate the RHS
+            # once into wide scratch at the target's total width, as the
+            # procedural `_emit_concat_lhs` does. The per-part path below
+            # computes one 64-bit value, so `{c, s} = a + b` with 70-bit
+            # operands lost the carry, and a signed RHS into a 72-bit
+            # target lost even its low bits.
+            scratch_lines = self._emit_concat_lhs_scratch_rhs(assign.lhs, assign.rhs, 1, is_nba=False)
+            if scratch_lines is not None:
+                self._processes.append((sensitivity, scratch_lines))
+                return
+
         # Every part's process reads the same RHS text, so each needs the
         # expression temporaries it names (added below, after the parts).
         rhs_setup: list[str] = []
         first_part_process = len(self._processes)
         if wide_rhs_source is None:
-            rhs_width = self._expr_width(assign.rhs)
+            rhs_width = self._concat_assign_rhs_width(assign.lhs, assign.rhs)
             rhs_setup, rhs_val, mask_expr = self._emit_scoped_value_mask(assign.rhs, rhs_width, "    ")
         else:
             rhs_val = None

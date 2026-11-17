@@ -422,6 +422,9 @@ uv run -m veriforge.sim.diverge examples/serv/rtl/*.v --preprocess --top servile
     --reset i_rst=1:3 --cycles 80 --engines reference,compiled
 ```
 
+Output from before the fix for compiled's concatenation-target carry
+(`tests/test_sim/test_concat_target_context.py`):
+
 ```text
 Trace back (values reference / compiled):
   ...

@@ -708,6 +708,25 @@ class CythonCodegen(
             return self._expr_width(part.target)
         return self._expr_width(part)
 
+    def _concat_assign_rhs_width(self, lhs: Concatenation, rhs: Expression) -> int:
+        """Width to evaluate *rhs* at for the narrow (<= 64-bit) ``{...} = rhs`` paths.
+
+        An assignment's RHS is context-determined by the larger of its own
+        width and the target's (IEEE 1800-2017 11.6.1). For a concatenation
+        target that is the parts' total width: ``{c, s} = a + b`` (8-bit
+        ``a``, ``b``, ``s``) keeps the carry, and a signed RHS sign-extends
+        into the high part. Using the RHS's own width dropped both. Only an
+        exact width will do (``(a + b) >> 1`` depends on it): with a part of
+        non-constant width, or a context above 64 bits (the scratch paths'
+        job), this is the RHS's own width.
+        """
+        rhs_width = self._expr_width(rhs)
+        widths = [self._concat_part_width_info(p)[0] for p in lhs.parts]
+        if any(w is None for w in widths):
+            return rhs_width
+        context = max(rhs_width, sum(w for w in widths if w is not None))
+        return context if context <= _WORD_BITS else rhs_width
+
     @staticmethod
     def _concat_width_sum(width_infos: list[tuple[int | None, str]]) -> tuple[int | None, str]:
         if all(width is not None for width, _expr in width_infos):
