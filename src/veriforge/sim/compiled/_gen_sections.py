@@ -3049,6 +3049,24 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         lines.extend(
             [
                 "",
+                # Before start-up: drives so far are starting values, and so
+                # is their continuous fan-out (port wiring). Settled to a fixed
+                # point before the t=0 snapshot; unlike settle_conts_silently
+                # the dirty marks stay, so readers still wake (not as edges).
+                "    cpdef void settle_conts_keep_marks(self):",
+                *(
+                    [
+                        "        cdef int _cont_settle_it, _cont_settle_stable, _cont_settle_sid",
+                        *self._cont_settle_fixpoint_lines("        "),
+                    ]
+                    if self._processes
+                    else ["        pass"]
+                ),
+            ]
+        )
+        lines.extend(
+            [
+                "",
                 "    cpdef void mark_all_dirty(self):",
                 "        cdef int i",
                 "        for i in range(N_SIGS):",

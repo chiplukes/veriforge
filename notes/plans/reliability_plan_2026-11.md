@@ -325,8 +325,19 @@ chains, generate-if and nested generate with processes and instances,
   sized as its inner width (`{a, {B{1'b0}}}`, serv_csr). Fixed,
   `tests/test_sim/test_replication_count.py`.
 
+- (2026-11-17) First full corpus run (247 checks, four engines). 69 of
+  87 mismatches were one start-up inconsistency: a reset driven before
+  start-up and passed through a port fired a submodule's `negedge rst_n`
+  on vm/vm-fast/compiled after `run()` (and on vm/vm-fast after `settle()`),
+  but not on reference. Fixed on every engine: a pre-start drive's
+  continuous fan-out is a starting value too
+  (`tests/test_sim/test_startup_reset_through_port.py`; full `tests/test_sim/`
+  8086 passed).
+
 ## Follow-ups found along the way
 
+- Open: source locations of preprocessed files count preprocessed lines,
+  so an `` `include `` shifts them (known_issues.md).
 - Open: reference and vm grow without bound (29 GB, OOM-killed WSL) on selects whose bounds come from invalid
   default parameters (`serv_rf_ram`, `known_issues.md`). Parser gap:
   `localparam` in a parameter port list.

@@ -25,6 +25,18 @@ readability see updates one delay early. Supporting it means a model
 field plus a scheduled update in all four engines.
 `test_operator_assignment.py::test_intra_assignment_timing_warns`.
 
+### Source locations of preprocessed files are preprocessed-text lines
+
+**Status**: Open (2026-11-17). With `preprocess=True`, every model node's
+`loc.line` counts lines of the preprocessed text, not of the file. An
+`` `include `` (or a multi-line macro) shifts everything after it:
+`ibex_csr.sv`'s `always_ff` on line 28 is reported at line 34 (6 lines of
+`prim_assert.sv`). This affects anything that reports locations: the
+divergence locator's driver text (it printed an `end`), lint, the language
+server, and error messages. The preprocessor emits no `` `line`` markers and
+keeps no line map. A fix needs one, from preprocessed line to (file, line),
+applied in `parse_file`.
+
 ### Reference and vm grow without bound on a select whose bounds come from invalid parameters
 
 **Status**: Open (2026-11-17, `tools/corpus_check.py`). `serv_rf_ram`
@@ -302,6 +314,18 @@ vm-fast fired it on the first `settle()`, though not on the first `run()`;
 compiled never did (its 2026-09-01 fix for a clock that starts high
 double-capturing a skid buffer's first beat). After that, every drive is an
 event as usual.
+
+The drive's continuous fan-out is part of the same starting state: a
+submodule's port net (`u.rst_n = rst_n` after flattening) or a `wire r2 =
+rst_n` is settled before the t=0 edge baseline, so `drive("rst_n", 0)`
+before start-up doesn't fire a submodule's `always @(posedge clk or negedge
+rst_n)`. The reset then applies at the first posedge. Until 2026-11-17 the
+port net's x->0 was a negedge on vm, vm-fast and compiled after
+`run(max_time=0)`, and on vm and vm-fast after `settle()`, but not on
+reference (69 of 87 mismatches in the first `tools/corpus_check.py` run;
+`tests/test_sim/test_startup_reset_through_port.py`). An `initial` block's
+`rst_n = 0` is a t=0 event and does fire it, through ports too, as in Icarus.
+A declaration initializer (`reg rst_n = 0;`) doesn't, also as in Icarus.
 
 One Icarus difference remains: Icarus does wake an `always @*` reading a
 *constant*-driven wire (`wire c = 1'b1;`) at t=0, though not one reading a

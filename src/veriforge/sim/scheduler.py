@@ -1408,8 +1408,19 @@ class Scheduler:  # cm:9a7f2c
         # except before anything has started: a drive then sets a starting
         # value, not an edge (as before the first run(), and on compiled:
         # `drive("clk", 1); settle()` used to fire `@(posedge clk)` here only).
-        if self._settle_snapshot:
-            self._prev_signals = self._snapshot_signals() if starting else self._settle_snapshot
+        if starting:
+            # The drives' continuous fan-out (port wiring: `u.rst_n = rst_n`)
+            # is a starting value too, settled before the baseline: a reset
+            # driven low before start-up used to be a negedge on every
+            # submodule's port net here, though not at the first run()
+            # (vm, vm-fast and compiled fired it on both).
+            for _ in range(self.delta_limit):
+                if not self._run_dirty_continuous_assigns(drive_dirty):
+                    break
+            self._prev_signals = self._snapshot_signals()
+            self._settle_snapshot = {}
+        elif self._settle_snapshot:
+            self._prev_signals = self._settle_snapshot
             self._settle_snapshot = {}
         self._edge_changed.clear()
         self._triggered_seq_procs = set()

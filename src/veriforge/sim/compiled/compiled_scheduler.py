@@ -806,7 +806,11 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             # everything as-is here makes current==previous for every
             # signal, so this pass can run the one-time combinational
             # settle `mark_all_dirty()` exists for without spuriously
-            # tripping any edge-triggered process.
+            # tripping any edge-triggered process. The drives' continuous
+            # fan-out (port wiring) is settled into it first: a starting
+            # value too, not an edge (`negedge rst_n` on a submodule's port
+            # net used to fire here).
+            self._sim.settle_conts_keep_marks()
             self._sim.snapshot()
             self._has_drive_snapshot = True
         if not self._has_drive_snapshot and not first_settle:
@@ -1003,6 +1007,11 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
         # a negedge from x; they used to run at construction, before any
         # snapshot). Then what they wrote, for clocked blocks' right-hand
         # sides (`refresh_data_snapshot` keeps the edge signals' snapshot).
+        # (A drive's continuous fan-out -- port wiring, `u.rst_n = rst_n` --
+        # is a starting value too: settled first, or the first step took the
+        # port net's x->0 for a `negedge rst_n`. Reference doesn't.)
+        if not self._combo_bootstrapped:
+            self._sim.settle_conts_keep_marks()
         self._sim.snapshot()
         self._has_drive_snapshot = True
         self._sim.run_initials()  # (the natively compiled ones, first)

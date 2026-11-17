@@ -639,6 +639,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
     def ensure_bootstrapped(self) -> bool:
         """Execute initial blocks and register timed processes once; report a stop."""
         if not self._bootstrapped:
+            # Drives before start-up are starting values, and so is their
+            # continuous fan-out (port wiring: `u.rst_n = rst_n`): settled
+            # before the baseline below, or `_fire_initial_edges` took the
+            # port net's x->0 for an initial block's edge and fired every
+            # submodule's `negedge rst_n` (reference doesn't).
+            self._settle_starting_values()
             # (The state before them, for the edges they make -- see
             # `_fire_initial_edges`.)
             if self._cy_ctx is not None:
@@ -1811,6 +1817,17 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
 
     # ── Signal access (Scheduler-compatible API) ─────────────────
 
+    def _settle_starting_values(self) -> None:
+        """Before anything has started: propagate the drives made so far
+        through the continuous assigns, so their fan-out is part of the
+        starting state rather than an edge. The fanned-out signals join the
+        drives, so their readers still wake (not as edges)."""
+        if self._combo_bootstrapped or not self._pending_drives or self.interpreter is None:
+            return
+        fanout = set(self._pending_drives)
+        self._propagate_continuous(fanout)
+        self._pending_drives |= fanout
+
     def _pending_drives_snapshot_now(self) -> None:
         """Re-take `_snapshot_before_first_drive`'s edge baseline from the
         current (post-drive) state."""
@@ -2022,6 +2039,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         # which also needed the inter-combo convergence above).
         starting = not self._combo_bootstrapped  # (nothing has run or settled yet)
         bootstrap = starting and bool(self._combo_procs)
+        if starting:
+            self._settle_starting_values()  # (before the flag below: it checks it)
         self._combo_bootstrapped = True
         if bootstrap and not self._pending_drives:
             self._bootstrap_combos()
@@ -2032,7 +2051,8 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
         if starting:
             # Before anything has started a drive sets a starting value, not
             # an edge (as before the first run(), and on compiled): the
-            # edge baseline is the post-drive state. `drive("clk", 1);
+            # edge baseline is the post-drive state, its continuous fan-out
+            # included (`_settle_starting_values`, above). `drive("clk", 1);
             # settle()` used to fire `@(posedge clk)` here only.
             self._pending_drives_snapshot_now()
         changed = set(self._pending_drives)
