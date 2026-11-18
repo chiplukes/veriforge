@@ -5559,13 +5559,19 @@ cdef class CyContext:
                 return (self.mem_val[flat], self.mem_mask[flat])
         return (0, 0)
 
-    def write_mem(self, int mem_id, int addr, long long val, long long mask):
-        """Write a memory element from Python."""
+    def write_mem(self, int mem_id, int addr, object val, object mask):
+        """Write a memory element from Python.
+
+        *val*/*mask* are Python ints, unsigned (a 64-bit element with its top
+        bit set) or signed: masked to 64 bits, as `sync_mem_from_lists` does.
+        Typed `long long`, an unsigned word >= 2**63 raised OverflowError --
+        driving a 2-D packed input port with 64-bit elements (ibex_if_stage).
+        """
         if self._mem_allocated and mem_id < self.mem_count:
             if 0 <= addr < self.mem_depth[mem_id]:
                 flat = self.mem_base[mem_id] + addr
-                self.mem_val[flat] = val
-                self.mem_mask[flat] = mask
+                self.mem_val[flat] = <long long>(<unsigned long long>(val & 0xFFFFFFFFFFFFFFFF))
+                self.mem_mask[flat] = <long long>(<unsigned long long>(mask & 0xFFFFFFFFFFFFFFFF))
 
     def sync_mem_to_lists(self, list val_list, list mask_list):
         """Copy C memory arrays out to Python lists."""

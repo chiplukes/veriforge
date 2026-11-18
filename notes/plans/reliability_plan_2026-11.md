@@ -334,6 +334,28 @@ chains, generate-if and nested generate with processes and instances,
   (`tests/test_sim/test_startup_reset_through_port.py`; full `tests/test_sim/`
   8086 passed).
 
+- (2026-11-17) Triage of the second corpus run's 20 mismatches and 13 engine errors:
+  - compiled: an indexed part-select with an x/z base read data (base taken as 0), and the whole-signal slice helpers read out-of-range bits as a defined 0 (`test_partselect_x_base.py`, verilog-axi crossbar);
+  - compiled: a signed `+ - * / %` re-sign-extended a nested context-determined operand from its static self-width (`x * y + c`, `(x + y) + c`; ibex `mac_res_signed`; `test_signed_nested_arith.py`);
+  - compiled: a continuous assign reading a field of an unpacked array of packed structs lost the x mask (`test_struct_array_field_mask.py`, pulp mailbox wrapper);
+  - reference: `$bits(typedef)` returned 1 (folded to a constant in `lower_sv_functions` for every engine; `test_bits_of_typedef.py`, ibex `cs_registers`);
+  - harness false positives: modules invalid with their default parameters (struct fields on `parameter type t = logic`, zero-width `[N-1:0]` ports) are skipped and listed; clocks are detected by name token (`wb_clk_i`, `src_clk_i`, `aclk`), so they are no longer driven as random data racing other inputs.
+
+- (2026-11-17) Third corpus run: 211 agree, 2 mismatches (from 20), 10 engine errors. Fixed after it:
+  - every engine (elaboration): a generate block's localparam was one shared, unscoped parameter, so an instance override using it (`.ProvideValUpd(Cnt == 10)`, ibex mhpmcounters) saw the last iteration's value; now substituted per iteration, including into typedef widths (`test_generate_loop_scoping.py`; a typedef case found by the pulp axi_lite_dw DSL bench during the change);
+  - every engine (parser): named function arguments (`f(.rs(a), .b(1))`) were dropped; now kept as `FunctionCall.arg_names` and lowered to positional (`test_named_function_args.py`, ibex compressed decoder);
+  - reference: range/part-select writes to a generate-loop signal (`gen[0].c.q[63:40]`) were dropped by a guard meant for unresolved struct-memory names;
+  - reference: a unary `- ~ +` evaluated its operand at the narrower context, truncating a nested shift (`-(a <<< 7)` into 1 bit; fuzz hierarchical seed 5057; `test_unary_context_width.py`);
+  - compiled: `'0`/`'1`/`'x` into a range of a >64-bit signal failed to build (`test_wide_range_fill_literal.py`);
+  - vm-fast: `write_mem` raised OverflowError for a 64-bit element with its top bit set (2-D packed input ports, ibex_if_stage);
+  - harness: type parameters passed down to a struct-using child also mark the parent invalid with its defaults (`axi_to_axi_lite`).
+- (2026-11-17) Re-emitting ibex for the reducer (which re-parses every candidate) found:
+  - every engine: package-qualified values without an `import` (`input [p::W-1:0] a`, `M == p::C`) were never resolved -- 1-bit ports and x values; now resolved on a copy of the design (`test_package_qualified_values.py`);
+  - every engine: a size cast in a parameter value (`32'(!RV32E) << 8`) -- the parser built `!R` as `Identifier("!")` and the constant evaluator had no WidthCast case (`test_const_width_cast.py`);
+  - emitter: `pkg::name` written as `pkg.name`, assignment patterns, select targets of generate-block arrays, port-less functions, `$time()`, generate-block functions/typedefs, and typedef ranges (`[W:-:1:0]`, `$clog2W`) all produced text that doesn't parse (`tests/test_formatter/test_emit_sv_roundtrip.py`); `EnumType`/typedef-alias `_child_nodes` returned a Range, which broke `walk()`.
+- Compiled gaps found on the way (they refuse to build, not silent): a size cast wider than 64 bits (`128'(x[100:0] + 1)`), `$countones` of a >64-bit value, `**` with a variable exponent on a >64-bit base.
+- Still open from the corpus (all loud, not silent): compiled cannot write an unpacked array of structs' field (`addr_map[0].idx`, 4 pulp test wrappers), nor a 128-bit blocking assignment of picorv32's `dbg_ascii_state` shape; `axi_lite_mailbox` is over 6 GB on compiled.
+
 ## Follow-ups found along the way
 
 - Open: source locations of preprocessed files count preprocessed lines,

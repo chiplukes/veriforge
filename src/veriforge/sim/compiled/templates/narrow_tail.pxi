@@ -17,18 +17,11 @@ cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int sr
                 out_v = 0
                 out_m = 0
             else:
-                src_word = (lsb + (i * 64)) >> 6
-                src_shift = (lsb + (i * 64)) & 63
-                lo_v = _sig_word_val(c, src_sid, src_word)
-                lo_m = _sig_word_mask(c, src_sid, src_word)
-                if src_shift == 0:
-                    out_v = lo_v
-                    out_m = lo_m
-                else:
-                    hi_v = _sig_word_val(c, src_sid, src_word + 1)
-                    hi_m = _sig_word_mask(c, src_sid, src_word + 1)
-                    out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
-                    out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+                # (Bits outside the source read x: a base with an x/z bit is
+                # _X_INDEX, and a select partly out of range has x bits. They
+                # used to read as a defined 0 -- `big[sel*W +: W]` with sel x gave data.)
+                out_v = _sig_extract_word_val(c, src_sid, lsb + (i * 64))
+                out_m = _sig_extract_word_mask(c, src_sid, lsb + (i * 64))
                 src_mask = _word_mask64(src_remaining_w)
                 out_v &= src_mask
                 out_m &= src_mask
@@ -47,18 +40,8 @@ cdef inline void _whole_assign_slice_const_signal(SimCtx *c, int dst_sid, int sr
             out_v = 0
             out_m = 0
         else:
-            src_word = lsb >> 6
-            src_shift = lsb & 63
-            lo_v = _sig_word_val(c, src_sid, src_word)
-            lo_m = _sig_word_mask(c, src_sid, src_word)
-            if src_shift == 0:
-                out_v = lo_v
-                out_m = lo_m
-            else:
-                hi_v = _sig_word_val(c, src_sid, src_word + 1)
-                hi_m = _sig_word_mask(c, src_sid, src_word + 1)
-                out_v = (lo_v >> src_shift) | (hi_v << (64 - src_shift))
-                out_m = (lo_m >> src_shift) | (hi_m << (64 - src_shift))
+            out_v = _sig_extract_word_val(c, src_sid, lsb)  # (out of range: x, as above)
+            out_m = _sig_extract_word_mask(c, src_sid, lsb)
             src_mask = _word_mask64(src_width)
             out_v &= src_mask
             out_m &= src_mask

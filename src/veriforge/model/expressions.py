@@ -32,12 +32,22 @@ class Expression(VerilogNode):  # cm:7a5d8b
 class Identifier(Expression):  # cm:1e3f2c
     """A simple or hierarchical identifier: a, a.b.c"""
 
-    __slots__ = ("hierarchy", "name", "resolved")
+    __slots__ = ("hierarchy", "name", "package_scoped", "resolved")
 
-    def __init__(self, name: str, *, hierarchy: list[str] | None = None, loc: SourceLocation | None = None):
+    def __init__(
+        self,
+        name: str,
+        *,
+        hierarchy: list[str] | None = None,
+        package_scoped: bool = False,
+        loc: SourceLocation | None = None,
+    ):
         super().__init__(loc=loc)
         self.name = name
         self.hierarchy = hierarchy
+        # `pkg::name` (vs a hierarchical `inst.name`): both keep the scope in
+        # *hierarchy*; this only tells the emitter to write `::` back.
+        self.package_scoped = package_scoped
         self.resolved: VerilogNode | None = None  # Populated by Layer 3 analysis
 
     def __repr__(self) -> str:
@@ -426,7 +436,7 @@ class PartSelect(Expression):
 class FunctionCall(Expression):
     """foo(a, b) or $clog2(WIDTH)"""
 
-    __slots__ = ("arguments", "is_system", "name")
+    __slots__ = ("arg_names", "arguments", "is_system", "name")
 
     def __init__(
         self,
@@ -434,12 +444,17 @@ class FunctionCall(Expression):
         arguments: list[Expression],
         *,
         is_system: bool = False,
+        arg_names: list[str] | None = None,
         loc: SourceLocation | None = None,
     ):
         super().__init__(loc=loc)
         self.name = name
         self.arguments = arguments
         self.is_system = is_system
+        # Named arguments (`f(.rs(a), .b(1))`): one port name per argument, in
+        # call order. Simulation resolves them to positional order
+        # (`sim.sv_functions.lower_named_arguments`); None for a positional call.
+        self.arg_names = arg_names
 
     def _child_nodes(self) -> list[VerilogNode]:
         return list(self.arguments)
@@ -448,6 +463,8 @@ class FunctionCall(Expression):
         d = super().to_dict()
         d["name"] = self.name
         d["arguments"] = [a.to_dict() for a in self.arguments]
+        if self.arg_names:
+            d["arg_names"] = list(self.arg_names)
         if self.is_system:
             d["is_system"] = True
         return d

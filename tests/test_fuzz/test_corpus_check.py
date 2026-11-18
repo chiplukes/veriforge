@@ -168,3 +168,48 @@ def test_memory_limit_reports_memory_outcome(cc, tmp_path, monkeypatch):
     res = cc._run_job({"kind": "engine"}, 60, mem_limit_gb=1.0)
     assert res["status"] == "memory", res
     assert cc._memory_limiter(0) is None
+
+
+def test_scalar_type_params_used_as_structs(cc):
+    src = """\
+module bad #(parameter type resp_t = logic, parameter type data_t = logic [7:0])
+    (input data_t d, output resp_t resp_o, output data_t q);
+  resp_t r;
+  always_comb begin resp_o.ready = 1'b1; r.b.resp = 2'b00; q = d; end
+endmodule
+module ok #(parameter type dtype = logic [7:0], parameter W = 8) (input dtype d, output dtype q);
+  assign q = d;
+endmodule
+"""
+    design = parse_text(src)
+    assert cc.scalar_type_params_used_as_structs(design.get_module("bad")) == ["r", "resp_o"]
+    assert cc.scalar_type_params_used_as_structs(design.get_module("ok")) == []
+
+
+def test_zero_width_ports_by_default(cc):
+    src = """\
+module needs_override #(parameter N = 0, parameter W = 8) (input [N-1:0] a, input [W-1:0] b, output [0:3] c);
+  assign c = 4'd0;
+endmodule
+module fine #(parameter N = 1) (input [N-1:0] a, output y);
+  assign y = a[0];
+endmodule
+"""
+    design = parse_text(src)
+    assert cc.zero_width_ports_by_default(design.get_module("needs_override")) == ["a"]  # (an ascending [0:3] is fine)
+    assert cc.zero_width_ports_by_default(design.get_module("fine")) == []
+
+
+def test_scalar_type_params_passed_to_a_struct_user(cc):
+    src = """\
+module child #(parameter type resp_t = logic) (output resp_t resp_o);
+  assign resp_o.ready = 1'b1;
+endmodule
+module parent #(parameter type my_resp_t = logic, parameter type other_t = logic) (output my_resp_t r, output other_t o);
+  child #(.resp_t(my_resp_t)) u (.resp_o(r));
+  assign o = 1'b0;
+endmodule
+"""
+    design = parse_text(src)
+    assert cc.scalar_type_params_used_as_structs(design.get_module("parent"), design) == ["u.resp_t"]
+    assert cc.scalar_type_params_used_as_structs(design.get_module("parent")) == []  # (no design: own uses only)

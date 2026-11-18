@@ -46,6 +46,7 @@ from ..model.expressions import (
     StringLiteral,
     TernaryOp,
     UnaryOp,
+    WidthCast,
 )
 from ..model.generate import GenerateCase, GenerateFor, GenerateIf, GenvarDecl
 from ..model.instances import DefParam, Instance
@@ -1885,6 +1886,14 @@ def _eval_const_expr(expr: Expression, env: dict[str, int | str]) -> int | str:
     if isinstance(expr, TernaryOp):
         cond = _eval_const_expr(expr.condition, env)
         return _eval_const_expr(expr.true_expr if cond else expr.false_expr, env)
+    if isinstance(expr, WidthCast):
+        # `N'(e)`: e at N bits (it raised "unsupported", leaving a parameter
+        # such as ibex's `32'(!RV32E) << 8` unresolved on every engine).
+        width = _eval_const_expr(expr.width, env)
+        val = _eval_const_expr(expr.operand, env)
+        if not isinstance(width, int) or not isinstance(val, int) or width <= 0:
+            raise ValueError("Cannot evaluate WidthCast as constant expression")
+        return val & ((1 << width) - 1)
     if isinstance(expr, Concatenation):
         # Single-element concatenation {X} is just X.
         # Multi-element: evaluate each part and combine.
@@ -2654,6 +2663,61 @@ def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: 
                 module.typedefs.append(td)
                 existing_typedefs.add(td.name)
 
+    _resolve_qualified_values(module, pkg_map, existing_params, existing_typedefs)
+
+
+def _resolve_qualified_values(
+    module: Module, pkg_map: dict, existing_params: set[str], existing_typedefs: set[str]
+) -> None:
+    """Package-qualified *values* in expressions (``p::W``, ``p::B`` of a
+    package enum), with no ``import``: copy the parameter (or the enum
+    typedef holding the member) in and refer to it by its plain name, which
+    every engine resolves. They used to stay unresolved: `input [p::W-1:0] a`
+    was 1 bit wide and `M == p::C` read x on every engine. A name the module
+    declares itself (a clash) is left qualified."""
+    from .sv_functions import iter_nodes  # noqa: PLC0415
+
+    own = {s.name for s in module.all_signals()} | {p.name for p in module.ports}
+    refs: list[Identifier] = []
+    for node in iter_nodes(module, set()):
+        if (
+            isinstance(node, Identifier)
+            and node.hierarchy
+            and len(node.hierarchy) == 1
+            and node.hierarchy[0] in pkg_map
+            and (getattr(node, "package_scoped", False) or node.hierarchy[0] not in own)
+        ):
+            refs.append(node)
+    for ident in refs:
+        pkg = pkg_map[ident.hierarchy[0]]
+        name = ident.name
+        param = next((p for p in pkg.parameters if p.name == name), None)
+        enum_td = next(
+            (
+                td
+                for td in pkg.typedefs
+                if getattr(td, "enum_type", None) is not None
+                and any(getattr(m, "name", None) == name for m in td.enum_type.members)
+            ),
+            None,
+        )
+        if param is not None:
+            if name not in existing_params:
+                module.parameters.append(param)
+                existing_params.add(name)
+            elif not any(p is param for p in module.parameters):
+                continue  # (the module's own `name`: keep the qualified reference)
+        elif enum_td is not None:
+            if enum_td.name not in existing_typedefs:
+                module.typedefs.append(enum_td)
+                existing_typedefs.add(enum_td.name)
+        else:
+            continue
+        if name in own:
+            continue
+        ident.hierarchy = None
+        ident.package_scoped = False
+
 
 def _resolve_typedef_widths(module: Module) -> None:
     """Resolve widths for ports/nets/variables whose type is a typedef with a known Range.
@@ -2943,6 +3007,31 @@ def _promote_block_items(  # noqa: PLR0912, PLR0913
         for item in items:
             _substitute_genvar(item, genvar_name, genvar_val)
 
+    # A generate block's own (local)parameters: this iteration's value, into
+    # this iteration's items. They were promoted as plain `Cnt` once per
+    # iteration into one shared env, so an instance override using one
+    # (`.ProvideValUpd(Cnt == 10)` in a `for` -- ibex's mhpmcounters)
+    # saw the last iteration's value in every iteration. Scoped names keep the
+    # iterations' copies apart.
+    if scope:
+        for item in items:
+            if not isinstance(item, Parameter) or item.default_value is None:
+                continue
+            try:
+                value = _eval_const_expr(item.default_value, env)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(value, int):
+                continue
+            env[item.name] = value
+            width = parameter_signal_width(item, env, value)
+            signed = item.signed or item.param_type in ("int", "integer") or (item.width is None and value < 0)
+            lit = Literal(value & ((1 << width) - 1), width=width, signed=signed, original_text=str(value))
+            for other in items:
+                if other is not item:
+                    _substitute_genvar(other, item.name, value, lit)
+            item.name = f"{scope}.{item.name}"
+
     # Collect local signal names declared in the block (need scope prefix)
     local_signals: set[str] = set()
     local_instances: set[str] = set()
@@ -3032,8 +3121,14 @@ def _genvar_literal(value: int) -> Literal:
     return Literal(value & 0xFFFFFFFF, width=32, signed=True, original_text=str(value) if value >= 0 else "")
 
 
-def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int) -> None:
-    """Replace ``Identifier(genvar_name)`` with ``Literal(value)`` throughout the subtree."""
+def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int, literal: Literal | None = None) -> None:
+    """Replace ``Identifier(genvar_name)`` with ``Literal(value)`` throughout the subtree
+    (*literal*, copied at each use, instead of the genvar's 32-bit signed one: a
+    generate block's localparam -- `_promote_block_items`)."""
+
+    def make() -> Literal:
+        return copy.copy(literal) if literal is not None else _genvar_literal(value)
+
     index_pattern = re.compile(rf"\[\s*{re.escape(genvar_name)}\s*\]")
 
     def _replace_embedded_index(text: str) -> str:
@@ -3044,20 +3139,22 @@ def _substitute_genvar(root: VerilogNode, genvar_name: str, value: int) -> None:
         if attr is None:
             continue
         if isinstance(attr, Identifier) and attr.name == genvar_name:
-            setattr(root, slot, _genvar_literal(value))
+            setattr(root, slot, make())
         elif isinstance(attr, Identifier):
             attr.name = _replace_embedded_index(attr.name)
             if attr.hierarchy:
                 attr.hierarchy = [_replace_embedded_index(part) for part in attr.hierarchy]
-        elif isinstance(attr, VerilogNode):
-            _substitute_genvar(attr, genvar_name, value)
+        elif isinstance(attr, (VerilogNode, Range)):
+            # (A Range too: `typedef logic [SelWidth-1:0] sel_t;` in the block --
+            # its width kept naming the localparam after it was renamed.)
+            _substitute_genvar(attr, genvar_name, value, literal)
         elif isinstance(attr, list):
             for i, item in enumerate(attr):
                 if isinstance(item, Identifier) and item.name == genvar_name:
-                    attr[i] = _genvar_literal(value)
+                    attr[i] = make()
                 elif isinstance(item, Identifier):
                     item.name = _replace_embedded_index(item.name)
                     if item.hierarchy:
                         item.hierarchy = [_replace_embedded_index(part) for part in item.hierarchy]
-                elif isinstance(item, VerilogNode):
-                    _substitute_genvar(item, genvar_name, value)
+                elif isinstance(item, (VerilogNode, Range)):
+                    _substitute_genvar(item, genvar_name, value, literal)

@@ -105,6 +105,95 @@ def param_variants(module, n: int, rng: random.Random) -> list[dict[str, int]]:
     return variants
 
 
+_SCALAR_TYPES = {"logic", "bit", "reg", "byte", "shortint", "int", "longint", "integer", "wire"}
+
+
+def _struct_type_params(module, design, memo: dict) -> dict[str, set[str]]:
+    """``{type parameter: {why...}}`` for *module*'s type parameters that default to a
+    built-in scalar and are used as a struct: a signal of that type with a field
+    access, or passed (`.req_t(req_t)`) to a child's such parameter."""
+    from veriforge.model.expressions import BitSelect, Identifier, RangeSelect
+
+    if id(module) in memo:
+        return memo[id(module)]
+    memo[id(module)] = {}  # (cycle guard)
+
+    def scalar_default(expr) -> bool:
+        while isinstance(expr, (RangeSelect, BitSelect)):
+            expr = expr.target
+        return isinstance(expr, Identifier) and not expr.hierarchy and expr.name in _SCALAR_TYPES
+
+    tparams = {p.name for p in module.parameters if scalar_default(p.default_value)}
+    found: dict[str, set[str]] = {}
+    if tparams:
+        sig_type = {p.name: p.data_type for p in module.ports if getattr(p, "data_type", None) in tparams}
+        sig_type |= {v.name: v.type_name for v in module.variables if getattr(v, "type_name", None) in tparams}
+        for node in module.walk():
+            if not isinstance(node, Identifier):
+                continue
+            dotted = ".".join([*(node.hierarchy or ()), node.name])
+            if "." in dotted:
+                base = dotted.split(".", 1)[0].split("[", 1)[0]
+                if base in sig_type:
+                    found.setdefault(sig_type[base], set()).add(base)
+        if design is not None:
+            for inst in module.instances:
+                child = design.get_module(inst.module_name)
+                if child is None:
+                    continue
+                child_found = _struct_type_params(child, design, memo)
+                for binding in inst.parameter_bindings or ():
+                    value = binding.value
+                    if (
+                        binding.name in child_found
+                        and isinstance(value, Identifier)
+                        and not value.hierarchy
+                        and value.name in tparams
+                    ):
+                        found.setdefault(value.name, set()).add(f"{inst.instance_name}.{binding.name}")
+    memo[id(module)] = found
+    return found
+
+
+def scalar_type_params_used_as_structs(module, design=None) -> list[str]:
+    """Where *module* uses a type parameter that defaults to a built-in scalar
+    (``parameter type resp_t = logic``) as a struct: its signals with a field
+    access (``resp_o.aw_ready``), or ``instance.param`` for one passed down to a
+    child that does (pulp's ``axi_to_axi_lite`` -> ``..._id_reflect``).
+
+    With its defaults such a module is not a valid design -- a field of a
+    1-bit `logic` -- and only its parents (which pass real struct types)
+    can be checked: pulp's axi modules, where compiled refused with "cannot
+    resolve LHS identifier" and reference silently accepted it.
+    """
+    return sorted(set().union(*_struct_type_params(module, design, {}).values()))
+
+
+def zero_width_ports_by_default(module) -> list[str]:
+    """Ports whose range is empty with the default parameters (`[N-1:0]`,
+    N = 0): the module needs a parent's override to be a design at all
+    (serv_rf_ram's `width = 0`, which then divides by zero; pulp's
+    `stream_join` with `N_INP = 0`, which replicates `{0{1'b1}}`)."""
+    from veriforge.sim.elaborate import _build_param_env, _eval_const_expr
+
+    try:
+        env = _build_param_env(module)
+    except Exception:  # noqa: BLE001 -- an environment we can't build: leave it to the check
+        return []
+    empty = []
+    for port in module.ports:
+        rng = getattr(port, "width", None)
+        if rng is None:
+            continue
+        try:
+            msb, lsb = _eval_const_expr(rng.msb, env), _eval_const_expr(rng.lsb, env)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(msb, int) and isinstance(lsb, int) and msb == lsb - 1:
+            empty.append(port.name)
+    return empty
+
+
 def apply_params(design, top: str, overrides: dict[str, int]) -> None:
     from veriforge.model.expressions import Literal
 
@@ -483,6 +572,12 @@ def build_report(results: list[dict], parse_failures: dict[str, dict[str, str]],
         if rs:
             lines.append(f"## Reference over the limit: {outcome} ({len(rs)}, {title} each)\n")
             lines.append(", ".join(sorted(where(r) for r in rs)) + "\n")
+    invalid = [r for r in results if r["outcome"] == "skipped" and r.get("reason", "no ports") != "no ports"]
+    if invalid:
+        lines.append(f"## Skipped: not a valid design with its default parameters ({len(invalid)})\n")
+        lines.append("Checked only within their parents.\n")
+        lines.extend(f"- {where(r)}: {r['reason']}" for r in sorted(invalid, key=where))
+        lines.append("")
     lines.extend(_resource_report(results, args))
     if any(parse_failures.values()):
         lines.append("## Parse failures\n")
@@ -561,9 +656,23 @@ def main() -> int:  # noqa: PLR0912, PLR0915
         for module in design.modules:
             if args.module and module.name not in args.module:
                 continue
+            reason = None
             if not module.ports:
+                reason = "no ports"
+            elif structs := scalar_type_params_used_as_structs(module, design):
+                reason = f"struct fields of type-parameter signals that default to a scalar ({', '.join(structs[:4])})"
+            elif empty := zero_width_ports_by_default(module):
+                reason = f"zero-width ports with the default parameters ({', '.join(empty[:4])})"
+            if reason:
                 skipped.append(
-                    {"project": proj, "module": module.name, "seed": 0, "params": None, "outcome": "skipped"}
+                    {
+                        "project": proj,
+                        "module": module.name,
+                        "seed": 0,
+                        "params": None,
+                        "outcome": "skipped",
+                        "reason": reason,
+                    }
                 )
                 continue
             n_mod += 1

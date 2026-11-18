@@ -213,7 +213,11 @@ endmodule"""
     design = tree_to_design(parser.build_tree(source))
     paths, _digest = CythonCodegen().generate_to_files(flatten_module(design.modules[0], design), str(tmp_path))
     workers = [path for path in paths if "worker" in path and path.endswith(".pyx")]
-    assert workers and any("_py_bits(c," in open(path, encoding="utf-8").read() for path in workers)
+    # (Split into workers. The `'0` fill no longer falls back to Python
+    # integers -- the wide scratch path fills it natively since 2026-11-17,
+    # and no continuous-assign shape found still does -- so this now checks
+    # that split workers load and agree, whatever code they hold.)
+    assert workers
     results = {}
     for engine in ("reference", "compiled"):
         sim = Simulator(design.modules[0], engine=engine)

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from veriforge.model.base import VerilogNode
 from veriforge.model.expressions import (
+    AssignmentPattern,
     BinaryOp,
     BitSelect,
     Concatenation,
@@ -71,6 +72,18 @@ def lower_sv_functions(module: Module) -> Module:
         name = expr.name.lower()
         if name in _RANGE_QUERIES:
             return _fold_range_query(name, expr, decls, env)
+        if name == "$bits" and len(expr.arguments) == 1:
+            # `$bits(type_t)` of a typedef: its width, as a constant on every
+            # engine. Reference evaluated the type name as an (unknown)
+            # signal and returned 1, so ibex's
+            # `cpu_ctrl_sts_part_t'(csr_wdata_int[$bits(cpu_ctrl_sts_part_t)-1:0])`
+            # sliced one bit (vm/compiled read the elaboration env).
+            arg = expr.arguments[0]
+            if isinstance(arg, Identifier) and not arg.hierarchy and arg.name not in decls:
+                bits = env.get(f"$bits:{arg.name}")
+                if isinstance(bits, int):
+                    return Literal(bits, width=32, original_text=f"32'd{bits}")
+            return None
         if name in _BIT_FUNCS and len(expr.arguments) == 1:
             arg = expr.arguments[0]
             if name == "$isunknown":
@@ -83,6 +96,91 @@ def lower_sv_functions(module: Module) -> Module:
             op = "==" if name == "$onehot" else "<="
             return BinaryOp(op, count, Literal(1, width=32, original_text="32'd1"))
         return None
+
+    _rewrite(module, lower, set())
+    return module
+
+
+def lower_struct_param_fields(module: Module) -> Module:
+    """Fold every field read of a struct-valued parameter (``Nm.lower_cause``
+    of ``localparam c_t Nm = '{irq_int: 1'b1, lower_cause: 5'd31}``) to a
+    constant, in place, for every engine.
+
+    The parameter itself evaluates to its packed value, but a parameter is not
+    a struct-typed signal, so a field select read x (reference, vm, vm-fast) or
+    0 (compiled): ibex's `irq_vec = ExcCauseIrqNm.lower_cause`, found by
+    tools/corpus_check.py. The layout comes from the assignment pattern's field
+    names, as for the value (the declared type isn't kept).
+    """
+    from .elaborate import _build_param_env, _build_struct_env, match_assignment_pattern_layout  # noqa: PLC0415
+
+    patterned = [
+        p for p in module.parameters if isinstance(p.default_value, AssignmentPattern) and p.default_value.named_pairs
+    ]
+    if not patterned:
+        return module
+    type_map, _signal_map = _build_struct_env(module)
+    env = _build_param_env(module)
+    layouts = {}
+    for param in patterned:
+        value = env.get(param.name)
+        pattern = param.default_value
+        assert isinstance(pattern, AssignmentPattern)  # (filtered above)
+        layout = match_assignment_pattern_layout(pattern, type_map)
+        if isinstance(value, int) and layout is not None:
+            layouts[param.name] = (layout, value)
+    if not layouts:
+        return module
+
+    def lower(expr: Expression) -> Expression | None:
+        if not isinstance(expr, Identifier):
+            return None
+        parts = [*(expr.hierarchy or ()), expr.name]
+        if len(parts) == 1:
+            parts = expr.name.split(".")
+        for k in range(1, len(parts)):
+            hit = layouts.get(".".join(parts[:k]))
+            if hit is None:
+                continue
+            layout, value = hit
+            spec = layout.fields.get(".".join(parts[k:]))
+            if spec is None:
+                return None
+            offset, width = spec
+            field = (value >> offset) & ((1 << width) - 1)
+            return Literal(field, width=width, original_text=f"{width}'d{field}")
+        return None
+
+    _rewrite(module, lower, set())
+    return module
+
+
+def lower_named_arguments(module: Module) -> Module:
+    """Rewrite every named-argument user-function call (``f(.rs(a), .b(1))``)
+    in *module* to positional order, from the function's declared ports, in
+    place -- so no engine sees argument names. A call naming an unknown port,
+    or leaving a port out, is an error (default argument values aren't
+    modeled)."""
+    functions = {f.name: f for f in module.functions}
+
+    def lower(expr: Expression) -> Expression | None:
+        if not isinstance(expr, FunctionCall) or not expr.arg_names:
+            return None
+        func = functions.get(expr.name)
+        if func is None:
+            raise ValueError(f"named arguments in a call of unknown function {expr.name!r}")
+        by_name = dict(zip(expr.arg_names, expr.arguments, strict=True))
+        order = [p.name for p in func.ports]
+        unknown = sorted(set(by_name) - set(order))
+        missing = [n for n in order if n not in by_name]
+        if unknown or missing:
+            raise ValueError(
+                f"call of {expr.name!r}: "
+                + (f"no port {', '.join(unknown)}" if unknown else f"no argument for {', '.join(missing)}")
+            )
+        expr.arguments = [by_name[n] for n in order]
+        expr.arg_names = None
+        return None  # (rewritten in place)
 
     _rewrite(module, lower, set())
     return module
@@ -295,7 +393,7 @@ def _replace_statements(obj: object, replacements: dict[int, object], seen: set[
 
 def _mentions(module: Module) -> bool:
     return any(
-        isinstance(call, FunctionCall) and call.name.lower() in _RANGE_QUERIES | _BIT_FUNCS
+        isinstance(call, FunctionCall) and call.name.lower() in _RANGE_QUERIES | _BIT_FUNCS | {"$bits"}
         for call in iter_nodes(module, set())
     )
 

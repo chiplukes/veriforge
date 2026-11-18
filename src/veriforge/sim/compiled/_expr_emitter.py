@@ -64,6 +64,23 @@ _LEAF_NODES = (Identifier, Literal)
 
 
 # cm:7399e2
+
+_CONTEXT_OPS = frozenset({"+", "-", "*", "/", "%", "&", "|", "^", "~^", "^~", "<<", ">>", "<<<", ">>>"})
+
+
+def _at_context_width(expr: Expression) -> bool:
+    """Whether the narrow emitter computes *expr* at its context's width (a
+    context-determined operator, IEEE 1364-2005 5.4.1), rather than at its
+    own width -- so its value is already right at that width and must not be
+    re-sign-extended from its static self-width. `**` keeps its own
+    handling (see the `pow_base` branch)."""
+    if isinstance(expr, BinaryOp):
+        return expr.op in _CONTEXT_OPS
+    if isinstance(expr, UnaryOp):
+        return expr.op in ("-", "~", "+")
+    return isinstance(expr, TernaryOp)
+
+
 class _ExprEmitterMixin:
     """Mixin providing expression and signal-walk emitters for CythonCodegen."""
 
@@ -1982,16 +1999,32 @@ class _ExprEmitterMixin:
         # block's `lw=1` (the `-` node's own static self-width) then
         # `_sign_ext`'d that already-32-bit value as if bit 0 were its
         # sign bit, corrupting `1` into a huge all-ones magnitude.
+        #
+        # The same holds for an arithmetic operand: `x * y + c`, `(x + y) + c`
+        # and `(x << 4) + c` with 17-bit signed x, y and a 35-bit target were
+        # sign-extended from bit 16 of the already-35-bit product/sum (ibex's
+        # `mac_res_signed`, tools/corpus_check.py). An operand computed at
+        # `op_width` (`_at_context_width`) needs no extension for `+ - *`
+        # (modular: the low `op_width` bits are already right), and for
+        # `/ %` -- which need the true signed value in the C register -- it
+        # extends from `op_width`, not from its own static width.
         if expr.op in ("+", "-", "*", "/", "%"):
             left_signed = combined_override if combined_override is not None else self._expr_signed(expr.left)
             right_signed = combined_override if combined_override is not None else self._expr_signed(expr.right)
+            divide = expr.op in ("/", "%")
             if left_signed:
                 lw = self._expr_width(expr.left)
-                if op_width > lw or expr.op in ("/", "%"):
+                if _at_context_width(expr.left):
+                    if divide:
+                        left = f"_sign_ext({left}, {op_width})"
+                elif op_width > lw or divide:
                     left = f"_sign_ext({left}, {lw})"
             if right_signed:
                 rw = self._expr_width(expr.right)
-                if op_width > rw or expr.op in ("/", "%"):
+                if _at_context_width(expr.right):
+                    if divide:
+                        right = f"_sign_ext({right}, {op_width})"
+                elif op_width > rw or divide:
                     right = f"_sign_ext({right}, {rw})"
 
         if expr.op in {"+", "-"}:
@@ -3800,6 +3833,34 @@ class _ExprEmitterMixin:
                     return self._emit_signal_slice_expr(base_sid, str(offset), field_width, mask=True)
                 wmask_val = _cy_lit((1 << field_width) - 1)
                 return f"((c.mask[{base_sid}] >> {offset}) & {wmask_val})"
+            # A field of a struct stored in a memory element (`arr[0].a`,
+            # an unpacked array of packed structs): the mask of the value
+            # path's slice. It fell through to "0", so an x element read as
+            # a defined 0 in a continuous assign (pulp's `slv_resps[0].ar_ready`).
+            storage_info = self._resolve_struct_storage_access(name)
+            if storage_info is not None:
+                if storage_info[0] == "signal":
+                    base_sid, offset, field_width = storage_info[1], storage_info[3], storage_info[4]
+                    extract_width = (
+                        field_width
+                        if field_width <= _WORD_BITS
+                        else min(field_width, width if 0 < width <= _WORD_BITS else _WORD_BITS)
+                    )
+                    if offset >= _WORD_BITS or offset + field_width > _WORD_BITS:
+                        return self._emit_signal_slice_expr(base_sid, str(offset), extract_width, mask=True)
+                    wmask_val = _cy_lit((1 << extract_width) - 1)
+                    return f"((c.mask[{base_sid}] >> {offset}) & {wmask_val})"
+                index_expr = self._emit_struct_storage_index_expr(storage_info[2])
+                if index_expr is None:
+                    return "0"
+                return self._emit_mem_slice_expr(
+                    storage_info[1],
+                    index_expr,
+                    storage_info[3],
+                    storage_info[4],
+                    mask=True,
+                    elem_width=self._mem_info[storage_info[1]][0],
+                )
             mem_id = self._mem_map.get(name)
             if mem_id is not None:
                 # Whole-array reference -- see the identical fallback (and

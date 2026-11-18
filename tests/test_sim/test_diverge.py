@@ -132,6 +132,9 @@ def test_value_bits_and_stimulus():
     assert xv.mask
     assert xv.val == Stimulus(seed=5).value("a", 130, 3).val & ~xv.mask
     assert Stimulus().clock_names(["clk", "rst", "sys_clk", "d"]) == ["clk", "sys_clk"]
+    # By name token: wb_clk_i (picorv32_wb) and aclk count, clock-named controls don't.
+    names = ["wb_clk_i", "s_aclk", "clk0", "clk_en", "clk_gate", "click", "clkdiv_o"]
+    assert Stimulus().clock_names(names) == ["wb_clk_i", "s_aclk", "clk0"]
 
 
 _VCD = """\

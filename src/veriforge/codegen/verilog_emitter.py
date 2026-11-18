@@ -26,6 +26,7 @@ from ..model.base import Comment, VerilogNode
 from ..model.behavioral import AlwaysBlock, InitialBlock, SensitivityType
 from ..model.design import Design, Module
 from ..model.expressions import (
+    AssignmentPattern,
     BinaryOp,
     BitSelect,
     Concatenation,
@@ -144,6 +145,20 @@ class _Scope:
 
 _SCOPE: ContextVar[_Scope | None] = ContextVar("verilog_emit_scope", default=None)
 _DIALECT: ContextVar[str] = ContextVar("verilog_emit_dialect", default="sv")
+# Emitting an assignment target: selects are written as they are. The
+# "select of an expression as a shift" rewrite (`_legal_select`) is a value,
+# not an lvalue -- `m[2*i+1][1] = x` of an array declared in a generate block
+# became `1'(m[2*i+1] >> 1) = x`, which doesn't parse (ibex_alu).
+_LHS: ContextVar[bool] = ContextVar("verilog_emit_lhs", default=False)
+
+
+def emit_lhs(expr: Expression) -> str:
+    """`emit_expression` for an assignment target (see `_LHS`)."""
+    token = _LHS.set(True)
+    try:
+        return emit_expression(expr)
+    finally:
+        _LHS.reset(token)
 
 
 @contextmanager
@@ -826,7 +841,7 @@ def _emit_range(r: Range) -> str:
 
 def _emit_continuous_assign(ca: ContinuousAssign, indent: str) -> str:
     """Emit a continuous assignment: assign lhs = rhs;"""
-    return f"{indent}assign {emit_expression(ca.lhs)} = {emit_expression(ca.rhs)};"
+    return f"{indent}assign {emit_lhs(ca.lhs)} = {emit_expression(ca.rhs)};"
 
 
 def _emit_defparam(dp: DefParam, indent: str) -> str:
@@ -981,7 +996,7 @@ def _legal_select(expr: BitSelect | RangeSelect | PartSelect) -> Expression | No
     (`a[3]`); anything else selects the target's value bits by a shift:
     `$unsigned(1'((a + b) >> 7))`."""
     target = expr.target
-    if isinstance(target, Identifier):
+    if isinstance(target, Identifier) or _LHS.get():
         return None
     if isinstance(target, (BitSelect, RangeSelect, PartSelect)):
         scope = _SCOPE.get()
@@ -1182,7 +1197,10 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         return _emit_literal(expr)
     if isinstance(expr, Identifier):
         if expr.hierarchy:
-            return ".".join(expr.hierarchy) + "." + expr.name
+            # (`pkg::name` was written back as `pkg.name`: the formatter and
+            # the reducer produced text that doesn't parse -- ibex_pkg.)
+            sep = "::" if getattr(expr, "package_scoped", False) else "."
+            return sep.join(expr.hierarchy) + sep + expr.name
         return expr.name
     if isinstance(expr, UnaryOp):
         operand_str = emit_expression(expr.operand)
@@ -1267,13 +1285,28 @@ def emit_expression(expr: Expression) -> str:  # noqa: PLR0911, PLR0912
         width = emit_expression(expr.width)
         return f"{emit_expression(expr.target)}[{base} {expr.direction} {width}]"
     if isinstance(expr, FunctionCall):
-        args = ", ".join(emit_expression(a) for a in expr.arguments)
+        if not expr.arguments and expr.name.startswith("$"):
+            return expr.name  # (`$time`, not `$time()`, which doesn't parse)
+        if expr.arg_names and len(expr.arg_names) == len(expr.arguments):
+            args = ", ".join(f".{n}({emit_expression(a)})" for n, a in zip(expr.arg_names, expr.arguments, strict=True))
+        else:
+            args = ", ".join(emit_expression(a) for a in expr.arguments)
         return f"{expr.name}({args})"
     if isinstance(expr, StringLiteral):
         return f'"{expr.value}"'
     if isinstance(expr, Mintypmax):
         return f"{emit_expression(expr.min_val)}:{emit_expression(expr.typ_val)}:{emit_expression(expr.max_val)}"
 
+    if isinstance(expr, AssignmentPattern):
+        # `'{a: x, default: 0}` / `'{x, y}` (they used to be written as
+        # `/* unknown expression */`, which doesn't parse -- ibex_alu).
+        if expr.positional:
+            items = [emit_expression(e) for e in expr.positional]
+        else:
+            items = [f"{name}: {emit_expression(value)}" for name, value in expr.named_pairs]
+            if expr.default_value is not None:
+                items.append(f"default: {emit_expression(expr.default_value)}")
+        return "'{" + ", ".join(items) + "}"
     return "/* unknown expression */"
 
 
@@ -1397,9 +1430,9 @@ def _emit_statement(  # noqa: PLR0911, PLR0912
     elif isinstance(stmt, ParBlock):
         return _emit_par_block(stmt, indent, current_indent, prefix)
     elif isinstance(stmt, BlockingAssign):
-        return f"{prefix}{emit_expression(stmt.lhs)} = {emit_expression(stmt.rhs)};"
+        return f"{prefix}{emit_lhs(stmt.lhs)} = {emit_expression(stmt.rhs)};"
     elif isinstance(stmt, NonblockingAssign):
-        return f"{prefix}{emit_expression(stmt.lhs)} <= {emit_expression(stmt.rhs)};"
+        return f"{prefix}{emit_lhs(stmt.lhs)} <= {emit_expression(stmt.rhs)};"
     elif isinstance(stmt, IfStatement):
         return _emit_if_statement(stmt, indent, current_indent, prefix)
     elif isinstance(stmt, CaseStatement):
@@ -1595,13 +1628,13 @@ def _emit_for_loop(stmt: ForLoop, indent: str, current_indent: str, prefix: str)
         loop.declares_var = False
         var = Variable(stmt.init.lhs.name, VariableKind.INT, signed=stmt.signed_var)
         return _emit_seq_block(SeqBlock([loop], local_vars=[var]), indent, current_indent, prefix)
-    init = f"{emit_expression(stmt.init.lhs)} = {emit_expression(stmt.init.rhs)}"
+    init = f"{emit_lhs(stmt.init.lhs)} = {emit_expression(stmt.init.rhs)}"
     if stmt.declares_var:
         # `for (int i = ...)`: the loop's own variable. It used to be dropped,
         # so the loop used an outer `i` (or an undeclared one).
         init = f"{'int' if stmt.signed_var else 'int unsigned'} {init}"
     cond = emit_expression(stmt.condition)
-    update = f"{emit_expression(stmt.update.lhs)} = {emit_expression(stmt.update.rhs)}"
+    update = f"{emit_lhs(stmt.update.lhs)} = {emit_expression(stmt.update.rhs)}"
     inner_indent = current_indent + indent
 
     lines = [f"{prefix}for ({init}; {cond}; {update})"]
@@ -1735,8 +1768,10 @@ def _emit_function_decl(fn: FunctionDecl, indent: str, current_indent: str) -> s
         header = " ".join(parts)
         lines.append(f"{header} ({', '.join(port_strs)});")
     else:
-        # Old-style: function name;
-        lines.append(" ".join(parts) + ";")
+        # No ports: `name();` (SystemVerilog). The old-style `name;` with no
+        # input declarations isn't Verilog-2001 and didn't re-parse (ibex's
+        # `cm_zero_a0()`).
+        lines.append(" ".join(parts) + "();")
 
     lines.extend(_emit_tf_locals(fn.locals, inner_indent))
     if fn.body:
@@ -2038,6 +2073,14 @@ def _emit_generate_block_item(item: VerilogNode, indent: str, current_indent: st
         return _emit_initial_block(item, indent, current_indent)
     elif isinstance(item, (GenerateFor, GenerateIf, GenerateCase, GenvarDecl)):
         return _emit_generate_construct(item, indent, current_indent)
+    # (Functions, tasks and typedefs declared in a generate block used to be
+    # written as `/* unknown generate item */;` -- ibex_core, ibex_multdiv_fast.)
+    elif isinstance(item, FunctionDecl):
+        return _emit_function_decl(item, indent, current_indent)
+    elif isinstance(item, TaskDecl):
+        return _emit_task_decl(item, indent, current_indent)
+    elif isinstance(item, TypedefDecl):
+        return _emit_typedef(item, current_indent)
     return f"{current_indent}/* unknown generate item */;"
 
 

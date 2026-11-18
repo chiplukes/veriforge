@@ -56,6 +56,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # `codegen`, and simulates them via `sim` (cross-engine + Icarus
     # comparison); `lark_file` supplies grammar metadata for generation.
     "fuzz": {"model", "codegen", "sim", "lark_file"},
+    "reduce": {"model", "codegen", "sim", "analysis", "transforms", "verilog_parser"},
 }
 
 # File-level exceptions for the sim <-> dsl boundary, which the coarse

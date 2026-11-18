@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import fnmatch
 import hashlib
 import re
 import sys
@@ -49,7 +48,19 @@ from .value import Value
 if TYPE_CHECKING:
     from ..model.design import Design, Module
 
-_CLOCK_PATTERNS = ("clk", "clock", "clk_i", "clk_in", "i_clk", "*_clk", "clk_*")
+# (A clock-named input that is really a control: `clk_en`, `clk_gate`, `clk_div`, `clk_sel`.)
+_NOT_CLOCK_TOKENS = {"en", "ena", "enable", "gate", "gated", "div", "sel", "cnt", "count", "req", "ack", "stop", "rst"}
+
+
+def is_clock_name(name: str) -> bool:
+    """A clock by its name: a ``_``-separated token that is or ends in ``clk``
+    (``clk``, ``wb_clk_i``, ``aclk``, ``clk0``) or is ``clock``, and no token
+    naming a control (``clk_en``). `wb_clk_i` used to be driven as random data,
+    its "edges" racing other inputs changed in the same step."""
+    tokens = name.lower().split("_")
+    if _NOT_CLOCK_TOKENS & set(tokens):
+        return False
+    return any(t == "clock" or re.fullmatch(r"[a-z]*clk\d*|clock\d*", t) for t in tokens)
 
 
 # ── Stimulus ─────────────────────────────────────────────────────────
@@ -67,8 +78,8 @@ class Stimulus:
     Attributes:
         cycles: Number of clock cycles.
         seed: Random seed.
-        clocks: Clock input names; ``None`` detects them by name (``clk``,
-            ``clock``, ``*_clk``...). A design without a clock is still
+        clocks: Clock input names; ``None`` detects them by name
+            (``is_clock_name``: ``clk``, ``wb_clk_i``, ``aclk``...). A design without a clock is still
             sampled once per "cycle".
         resets: ``{name: (active_value, cycles)}`` -- hold *name* at
             *active_value* for the first *cycles* cycles, then at its inverse
@@ -85,7 +96,7 @@ class Stimulus:
     def clock_names(self, inputs: list[str]) -> list[str]:
         if self.clocks is not None:
             return [c for c in self.clocks if c in inputs]
-        return [n for n in inputs if any(fnmatch.fnmatchcase(n.lower(), p) for p in _CLOCK_PATTERNS)]
+        return [n for n in inputs if is_clock_name(n)]
 
     def value(self, name: str, width: int, cycle: int) -> Value:
         if name in self.resets:

@@ -8,6 +8,8 @@ Provides:
 
 from __future__ import annotations
 
+import copy
+
 import functools
 import re
 from typing import TYPE_CHECKING
@@ -35,6 +37,8 @@ from .sv_functions import (
     is_two_state,
     lower_event_expressions,
     lower_streaming_targets,
+    lower_named_arguments,
+    lower_struct_param_fields,
     lower_sv_functions,
     lower_two_state,
     lower_width_casts,
@@ -159,6 +163,20 @@ class Clock:  # cm:4d1b6e
 # ── Simulator ────────────────────────────────────────────────────────
 
 
+def _has_package_qualified_values(design: Design) -> bool:
+    """Whether any module refers to a package value as ``pkg::name``."""
+    from ..model.expressions import Identifier  # noqa: PLC0415
+    from .sv_functions import iter_nodes  # noqa: PLC0415
+
+    if not design.packages:
+        return False
+    return any(
+        isinstance(node, Identifier) and getattr(node, "package_scoped", False)
+        for m in design.modules
+        for node in iter_nodes(m, set())
+    )
+
+
 class Simulator:  # cm:a5c8f4
     """Top-level simulation entry point.
 
@@ -211,6 +229,14 @@ class Simulator:  # cm:a5c8f4
         self._pre_step_callbacks: list[Callable[[], None]] = []
         self._run_cycles_clock_ready = False
 
+        # Package-qualified values (`p::W`) in every module, before flattening
+        # sizes the children's ports from them -- on a copy of the design, so
+        # the caller's model keeps its `p::W` (resolving rewrites it to `W`).
+        if design is not None and _has_package_qualified_values(design):
+            design = copy.deepcopy(design)
+            module = design.get_module(module.name) or module
+            for other in design.modules:
+                resolve_sv_imports(other, design)
         # Flatten hierarchy if instances or generate blocks are present
         if module.generate_blocks or module.instances:
             # Resolve SV package imports before flattening so that package
@@ -225,6 +251,8 @@ class Simulator:  # cm:a5c8f4
         # remaining imports from inlined submodules).
         resolve_sv_imports(module, design)
         _resolve_typedef_widths(module)
+        lower_named_arguments(module)  # (first: every later pass sees positional calls)
+        lower_struct_param_fields(module)
         materialize_process_locals(module)
         materialize_task_locals(module)
         expand_array_concat_operands(module)

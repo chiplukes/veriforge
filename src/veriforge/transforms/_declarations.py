@@ -678,7 +678,7 @@ def _extract_typedef_declaration(
             elif child.data == "union_declaration":
                 union_type = _extract_union_type(child, source_file, build_constant_expression)
             elif child.data == "enum_base_type":
-                type_ref = _extract_base_type_string(child)
+                type_ref = _extract_base_type_string(child, source_file, build_constant_expression)
                 typedef_width = _extract_typedef_width(child, source_file, build_constant_expression)
 
     if name:
@@ -1029,15 +1029,24 @@ def _parse_enum_base_type(
     return base_type, width, signed
 
 
-def _extract_base_type_string(tree: Tree) -> str:
+def _extract_base_type_string(tree: Tree, source_file: str | None = None, build_constant_expression=None) -> str:
     """Build a type string from an enum_base_type node for type alias typedefs."""
+    from ..codegen.verilog_emitter import emit_expression  # noqa: PLC0415 -- (no import cycle at call time)
+
     parts: list[str] = []
     for child in tree.children:
         if isinstance(child, Token):
             parts.append(str(child))
         elif isinstance(child, Tree) and child.data == "range":
-            tokens = [str(token) for token in child.scan_values(lambda token: True)]
-            parts.append("[" + ":".join(tokens) + "]")
+            # Each range rebuilt as expressions and printed: joining the
+            # tokens lost what the tree doesn't keep -- `[W-1:0]` read back
+            # as `[W:-:1:0]`, `$clog2(W)` as `$clog2W` (ibex_pkg typedefs).
+            rng = _build_range(child, source_file, build_constant_expression) if build_constant_expression else None
+            if rng is not None:
+                parts.append(f"[{emit_expression(rng.msb)}:{emit_expression(rng.lsb)}]")
+            else:
+                tokens = [str(token) for token in child.scan_values(lambda token: True)]
+                parts.append("[" + ":".join(tokens) + "]")
     return " ".join(parts)
 
 

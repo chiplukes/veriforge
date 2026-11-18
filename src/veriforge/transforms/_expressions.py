@@ -531,7 +531,7 @@ def _build_scoped_identifier(tree: Tree, source_file: str | None) -> Identifier:
     tokens = [str(c) for c in tree.children if isinstance(c, Token)]
     loc = _loc_from_tree(tree, source_file)
     if len(tokens) == _SCOPED_IDENTIFIER_TOKEN_COUNT:
-        return Identifier(name=tokens[1], hierarchy=[tokens[0]], loc=loc)
+        return Identifier(name=tokens[1], hierarchy=[tokens[0]], package_scoped=True, loc=loc)
     return Identifier(name="::".join(tokens) if tokens else "?", loc=loc)
 
 
@@ -770,13 +770,22 @@ def _build_constant_width_cast(
         if child.data == "unsigned_number" and width is None:
             digits = "".join(str(tok) for tok in child.scan_values(lambda v: isinstance(v, Token))).replace("_", "")
             width = Literal(int(digits), original_text=digits)
-        elif child.data in ("expression", "constant_expression", "constant_mintypmax_expression"):
+        elif child.data == "expression":
+            # (A cast's operand is a full `expression` even in a constant
+            # context: the constant builder read `32'(!R)` as `Identifier("!")`,
+            # so ibex's MISA-style parameters had the wrong value on every engine.)
+            operand = _build_expression(child, source_file, callbacks)
+        elif child.data in ("constant_expression", "constant_mintypmax_expression"):
             operand = _build_constant_expression(child, source_file, callbacks)
     if operand is None:
         tree_children = [child for child in tree.children if isinstance(child, Tree)]
         if len(tree_children) < 2:  # noqa: PLR2004
             return Identifier("?")
-        operand = _build_constant_expression(tree_children[-1], source_file, callbacks)
+        last = tree_children[-1]
+        if last.data == "expression":
+            operand = _build_expression(last, source_file, callbacks)
+        else:
+            operand = _build_constant_expression(last, source_file, callbacks)
     if width is None:
         return operand
     return WidthCast(width, operand, loc=_loc_from_tree(tree, source_file))
@@ -1430,6 +1439,7 @@ def _build_function_call(tree: Tree, source_file: str | None, callbacks: _Expres
     """Build a FunctionCall from a function_call or system_function_call tree."""
     name = ""
     args: list[Expression] = []
+    arg_names: list[str] = []
     for child in tree.children:
         if isinstance(child, Token):
             if child.type in ("SYSTEM_TF_IDENTIFIER", "SIMPLE_IDENTIFIER"):
@@ -1445,5 +1455,13 @@ def _build_function_call(tree: Tree, source_file: str | None, callbacks: _Expres
                 for arg_child in child.children:
                     if isinstance(arg_child, Tree) and arg_child.data == "expression":
                         args.append(callbacks.build_expr_inner(arg_child, source_file))
+            elif child.data == "named_function_arg":
+                # `.port(expr)` -- these used to be dropped: `f(.a(x))` was a
+                # call with no arguments (ibex's compressed decoder).
+                port = next((str(t) for t in child.children if isinstance(t, Token)), "")
+                expr_tree = next((t for t in child.children if isinstance(t, Tree)), None)
+                if expr_tree is not None:
+                    arg_names.append(port)
+                    args.append(callbacks.build_expr_inner(expr_tree, source_file))
     loc = _loc_from_tree(tree, source_file)
-    return FunctionCall(name=name, arguments=args, loc=loc)
+    return FunctionCall(name=name, arguments=args, arg_names=arg_names or None, loc=loc)

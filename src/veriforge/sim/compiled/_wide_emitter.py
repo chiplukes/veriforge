@@ -3944,6 +3944,24 @@ class _WideEmitterMixin:
 
         # ── Literal ─────────────────────────────────────────────────────────
         if et is Literal:
+            fill = (expr.original_text or "").strip().lower()
+            if fill in ("'0", "'1", "'x", "'z"):
+                # An unbased unsized fill (IEEE 1800-2017 5.7.1): every bit of
+                # the destination. `Value.from_verilog` doesn't read these, so
+                # `q[99:70] = '0;` into a wide signal used to stop the build
+                # with "RHS shape not yet supported".
+                full = (1 << dst_width) - 1
+                val_int = full if fill == "'1" else 0
+                mask_int = full if fill in ("'x", "'z") else 0
+                lines = []
+                for wi in range(n_words):
+                    lines.append(
+                        f"{pad}_sc{slot}_v[{wi}] = {_cy_u64_hex((val_int >> (wi * 64)) & 0xFFFF_FFFF_FFFF_FFFF)}"
+                    )
+                    lines.append(
+                        f"{pad}_sc{slot}_m[{wi}] = {_cy_u64_hex((mask_int >> (wi * 64)) & 0xFFFF_FFFF_FFFF_FFFF)}"
+                    )
+                return lines
             words = self._literal_wide_words(expr, n_words)
             if words is None:
                 return None

@@ -708,8 +708,10 @@ class TestStructEdgeCases:
         w = Range(Literal("7"), Literal("0"))
         f = StructField("data", "logic", width=w)
         children = f._child_nodes()
-        assert len(children) == 1
-        assert children[0] is w
+        # The range's bounds (nodes), not the Range itself: `walk()` called
+        # `.walk()` on every child, and a Range has none (ibex_multdiv_fast).
+        assert children == [w.msb, w.lsb]
+        assert list(f.walk())
 
     def test_struct_field_to_dict_full(self):
         w = Range(Literal("7"), Literal("0"))

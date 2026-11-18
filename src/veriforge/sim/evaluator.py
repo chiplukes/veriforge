@@ -956,9 +956,14 @@ class ExpressionEvaluator:  # cm:7e8b5d
                 # the 1-bit `1` to get `1'b0`, THEN zero-extend to
                 # `16'h0000`). `~` now simply falls through to the same
                 # context-determined path as `+`/`-` below.
-                operand = self.eval(expr.operand, ctx, width, signed_override)
-                if width and operand.width != width:
-                    target = max(width, _expr_self_width(expr.operand, ctx))
+                # (The operand at `max(context, its own width)` from the start,
+                # as the BinaryOp branches do: evaluated at a narrower context
+                # first, a nested shift truncated its operand before shifting --
+                # `-(a <<< 7)` into a 1-bit target read 0 where every other
+                # engine and Icarus read x, fuzz seed 5057.)
+                target = max(width, _expr_self_width(expr.operand, ctx)) if width else 0
+                operand = self.eval(expr.operand, ctx, target, signed_override)
+                if width and operand.width != target:
                     eff_signed = signed_override if signed_override is not None else _expr_signed(expr.operand, ctx)
                     operand = operand.sign_extend(target) if eff_signed else operand.resize(target)
             else:

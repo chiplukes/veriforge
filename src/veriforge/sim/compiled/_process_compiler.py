@@ -480,7 +480,7 @@ class _ProcessCompilerMixin:
                     and (lhs_w > _WORD_BITS or self._signal_widths[rhs_sid] > _WORD_BITS or part_w > _WORD_BITS)
                 ):
                     sig_base = self._signal_bases.get(target.name, 0)
-                    base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
+                    base_expr = self._emit_select_base(assign.rhs.base)  # (x/z base: _X_INDEX, reads x)
                     if assign.rhs.direction == "+:":
                         lsb_expr = f"(({base_expr}) - {sig_base})"
                     elif assign.rhs.direction == "-:":
@@ -502,7 +502,7 @@ class _ProcessCompilerMixin:
                         if part_w is not None
                         else self._emit_expr(assign.rhs.width, self._expr_width(assign.rhs.width))
                     )
-                    base_expr = self._emit_expr(assign.rhs.base, self._expr_width(assign.rhs.base))
+                    base_expr = self._emit_select_base(assign.rhs.base)  # (x/z base: _X_INDEX, reads x)
                     if assign.rhs.direction == "+:":
                         lsb_expr = f"{offset} + ({base_expr})"
                     elif part_w is not None:
@@ -1629,7 +1629,7 @@ class _ProcessCompilerMixin:
                 if sid is None:
                     return False
                 sig_base = self._signal_bases.get(name, 0)
-                base_expr = self._emit_expr(node.base, self._expr_width(node.base))
+                base_expr = self._emit_select_base(node.base)  # (x/z base: _X_INDEX, reads x)
                 if node.direction == "+:":
                     src_lsb = f"(({base_expr}) - {sig_base})"
                 elif node.direction == "-:":

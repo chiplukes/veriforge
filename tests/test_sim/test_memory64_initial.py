@@ -55,3 +55,26 @@ def test_memory64_with_initial_block(engine):
     sim.drive("clk", Value(1))
     sim.settle()
     assert sim.read("y") == Value(0x8000_0000_0000_0000, width=64)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_drive_2d_packed_port_with_64bit_elements(engine):
+    # A 2-D packed input port is a memory; driving it with a 64-bit element
+    # whose top bit is set raised OverflowError on vm-fast (`write_mem` took a
+    # signed `long long`): ibex_if_stage, found by tools/corpus_check.py.
+    src = """module t(input logic [3:0][63:0] p, input [1:0] i, output [63:0] y, output [63:0] y3);
+  assign y = p[i];
+  assign y3 = p[3];
+endmodule
+"""
+    design = parse_text(src)
+    sim = Simulator(design.get_module("t"), engine=engine, design=design)
+    sim.run(max_time=0)
+    sim.drive("p", Value(((1 << 256) - 1) ^ (0x5 << 192), width=256))
+    sim.drive("i", Value(3, width=2))
+    sim.settle()
+    assert sim.read("y") == Value(0xFFFF_FFFF_FFFF_FFFA, width=64)
+    sim.drive("i", Value(0, width=2))
+    sim.settle()
+    assert sim.read("y") == Value((1 << 64) - 1, width=64)
+    assert sim.read("y3") == Value(0xFFFF_FFFF_FFFF_FFFA, width=64)

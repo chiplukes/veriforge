@@ -1003,7 +1003,10 @@ class StatementExecutor:  # cm:c2f9a1
                             else:
                                 self.nba_queue.append(MemRangeNbaEntry(base_name, base_index, m, l, wval))
                     return
-                if "[" in name:
+                # (An unresolved struct-memory access, `mem[x].f[3:0]`: dropped.
+                # A generate-loop signal has a `[` too -- `gen[0].c.q[63:40]`
+                # used to be dropped as well, leaving the port x on reference.)
+                if "[" in name and name not in ctx._signals:
                     return
                 if msb_val.is_defined and lsb_val.is_defined:
                     m, l = int(msb_val), int(lsb_val)
@@ -1085,7 +1088,7 @@ class StatementExecutor:  # cm:c2f9a1
                             else:
                                 self.nba_queue.append(MemRangeNbaEntry(base_name, base_index, abs_m, abs_l, wval))
                     return
-                if "[" in name:
+                if "[" in name and name not in ctx._signals:  # (see the RangeSelect case)
                     return
                 if base_val.is_defined and width_val.is_defined:
                     base_i = self._select_base_value(lhs.base, base_val, ctx)

@@ -84,7 +84,8 @@ class EnumType(VerilogNode):
     def _child_nodes(self) -> list[VerilogNode]:
         children: list[VerilogNode] = list(self.members)
         if self.width is not None:
-            children.append(self.width)  # type: ignore[arg-type]
+            # (The bounds, not the Range: `walk()` called `.walk()` on a Range.)
+            children.extend((self.width.msb, self.width.lsb))
         return children
 
     def __repr__(self) -> str:
@@ -124,7 +125,7 @@ class StructField(VerilogNode):
 
     def _child_nodes(self) -> list[VerilogNode]:
         if self.width is not None:
-            return [self.width]  # type: ignore[list-item]
+            return [self.width.msb, self.width.lsb]  # (see EnumType._child_nodes)
         return []
 
     def __repr__(self) -> str:
