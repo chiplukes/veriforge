@@ -34,6 +34,7 @@ from veriforge.sim.compiled._gen_narrow_assign import _gen_narrow_assign_code
 from veriforge.sim.compiled._gen_narrow_tail import _gen_narrow_tail_code
 from veriforge.sim.compiled._gen_wide_section import _GenWideSectionsMixin
 from veriforge.sim.compiled._helpers import HELPERS_BEGIN, HELPERS_END
+from veriforge.sim.compiled._families import ProcessFamilies, family_min
 from veriforge.sim.compiled._sharing import ProcessSharing, sharing_enabled
 from veriforge.sim.compiled._snapshots import SnapshotReads, copy_spans
 
@@ -1768,9 +1769,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _gen_process_functions_to(self, write_fn, *, route_fn=None) -> None:
         """Stream process functions one at a time via *write_fn*.
 
-        Produces byte-for-byte identical output to ``_gen_process_functions()``
-        but never accumulates more than one process function's body lines in
-        memory simultaneously.  Suitable for designs where the total process
+        Produces byte-for-byte identical output to ``_gen_process_functions()``.
+        Without process families (``VERIFORGE_COMPILE_FAMILY_MIN=0``, the split
+        build, or address sharing) it never accumulates more than one process
+        function's body lines in memory simultaneously; with them it holds each
+        distinct function template once (see ``_families``).  Suitable for designs where the total process
         function section would otherwise require tens of GB to build as a
         single string.
 
@@ -1826,6 +1829,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
         self._shared_initializers = []
         sharing: dict[int, ProcessSharing] = {}
         share = sharing_enabled()
+        # (Families of processes differing only in constants -- a generate loop's
+        # iterations -- share one body: see _families. Not with the opt-in
+        # split build or address sharing, which manage functions themselves.)
+        minimum = family_min()
+        families = ProcessFamilies(minimum) if minimum and route_fn is None and not share else None
         for prefix, body_groups, emit_pass_when_empty, use_sv in process_groups:
             for i, body_lines in enumerate(body_groups):
                 routed = route_fn(prefix, i) if route_fn is not None else None
@@ -1842,13 +1850,18 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
 
                 if body_lines:
                     decls: list[str] = []
+                    # (Compacted first: uncompacted, a body holds a zero store per
+                    # scratch word -- O(widest signal) lines -- and the sv rewrite
+                    # and snapshot scan below were quadratic in a generate loop
+                    # over one wide vector. Zero stores read no signal.)
+                    body_lines = _compact_scratch_zero_stores(body_lines)
                     if use_sv:
                         async_sids = seq_negedge_sids[i] if prefix == "seq" else None
                         body_lines = _seq_body_to_sv_reads(
                             body_lines, async_sids, func_internal_sids, external_input_sids
                         )
                         self._snapshot_reads.record(body_lines)
-                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(_compact_scratch_zero_stores(body_lines))
+                    hoisted_cdefs, body_lines = _hoist_inline_cdefs(body_lines)
                     decls.extend(hoisted_cdefs)
                     joined = "\n".join(body_lines)
                     if "_clhs" in joined:
@@ -1889,6 +1902,9 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     func_parts.append("    pass")
 
                 func_parts.append("")  # trailing blank line (matches _gen_process_functions)
+                if families is not None:
+                    families.add(func_parts, prefix, use_sv)
+                    continue
                 chunk = "\n".join(func_parts)
                 # Between functions: write a leading \n so that the trailing \n
                 # from the previous chunk and this \n together form the blank line
@@ -1913,6 +1929,14 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
                     first_func_seen.add(stream_key)
                 else:
                     target_write_fn("\n" + chunk)
+        if families is not None:
+            first = [True]
+
+            def write(chunk: str) -> None:
+                write_fn(chunk if first[0] else "\n" + chunk)
+                first[0] = False
+
+            families.emit(write)
 
     # ── delta_loop ──────────────────────────────────────────────────────
     #

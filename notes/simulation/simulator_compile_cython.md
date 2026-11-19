@@ -895,6 +895,7 @@ required reads solely because their clocks are idle.
 | `VERIFORGE_COMPILE_WORKER_MEMORY_MB` | `1024` | Estimated memory required per C object job |
 | `VERIFORGE_COMPILE_MEMORY_MB` | Half available RAM | Optional total memory budget for one build; limited by available RAM |
 | `VERIFORGE_COMPILE_SHARE_PROCESSES` | `0` | `1` shares compatible scalar process implementations |
+| `VERIFORGE_COMPILE_FAMILY_MIN` | `64` | at least this many processes differing only in integer constants (a generate loop's iterations) share one generated body; `0` disables. Not with `COMPILE_SPLIT` or `COMPILE_SHARE_PROCESSES` |
 
 The build deadline covers both build subprocesses: Cython translation,
 then C compilation and linking. It uses elapsed monotonic wall

@@ -162,6 +162,7 @@ def _platform_tag() -> str:
 def _build_configuration() -> bytes:
     """Fingerprint effective codegen/build options for both cache layers."""
     from ._codegen_utils import delta_engine_mode
+    from ._families import family_min
     from ._helpers import helper_mode
     from ._sharing import sharing_enabled
     from ._snapshots import snapshot_mode
@@ -179,6 +180,7 @@ def _build_configuration() -> bytes:
         "helpers": helper_mode(),
         "snapshots": snapshot_mode(),
         "share_processes": sharing_enabled(),
+        "family_min": family_min(),
         "compile_jobs": positive_option("COMPILE_JOBS", 4),
         "compile_memory_mb": positive_option("COMPILE_MEMORY_MB", None),
         "compile_worker_memory_mb": positive_option("COMPILE_WORKER_MEMORY_MB", 1024),
