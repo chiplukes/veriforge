@@ -560,3 +560,7 @@ construct outright, a different reason for the same treatment). **Do not
 attempt to make veriforge match Verilator here** -- veriforge's existing
 behavior is the one that matches the independently-hand-derived LRM
 algorithm.
+
+## Compiled code size grows with generate-loop iterations
+
+Each process in each generate-loop iteration becomes its own generated function (about 19 lines of Cython each), and Cython needs about 13 GB per million generated lines. A reducer candidate of ibex whose loop bound fell back to 2**16 produced 65,536 sequential processes (1.3M lines); an earlier candidate produced 2.7M. Reference and vm handle the same design without trouble. Possible fix: emit one function per process shape, parameterized by the loop index, instead of one per iteration. The reducer now caps each check's memory (`--mem-limit-gb`, default 8) and kills a timed-out check's whole process group, so such a candidate fails instead of exhausting the machine.

@@ -47,7 +47,18 @@ def main(argv: list[str] | None = None) -> int:
         help="keep every candidate valid for Icarus (auto: when iverilog is installed and accepts the input)",
     )
     ap.add_argument("--timeout", type=float, default=120.0, help="seconds per check (default 120)")
-    ap.add_argument("-o", "--output", default="reduced.v", help="reduced design (default reduced.v)")
+    ap.add_argument(
+        "--mem-limit-gb",
+        type=float,
+        default=8.0,
+        help="address-space cap per check, inherited by the compiled build (POSIX; 0 for none; default 8)",
+    )
+    ap.add_argument(
+        "-o",
+        "--output",
+        default="reduced.v",
+        help="reduced design, rewritten after every improvement (default reduced.v)",
+    )
     ap.add_argument("--test-out", help="also write a pytest skeleton reproducing the failure")
     args = ap.parse_args(argv)
 
@@ -90,7 +101,13 @@ def main(argv: list[str] | None = None) -> int:
             print("[reduce] iverilog rejects the input design: candidates are not checked for validity")
 
     try:
-        text = Reducer(check, timeout=args.timeout).reduce(design)
+        # (Written after every improvement: a stopped run resumes with -o's file as its input.)
+        text = Reducer(
+            check,
+            timeout=args.timeout,
+            mem_limit_gb=args.mem_limit_gb,
+            checkpoint=lambda best: Path(args.output).write_text(best, encoding="utf-8"),
+        ).reduce(design)
     except ReduceError as exc:
         print(f"[reduce] {exc}", file=sys.stderr)
         return 2

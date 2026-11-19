@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
 import re
+import signal
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -206,12 +210,49 @@ def _call(predicate: Callable[[str], bool], text: str) -> bool:
     return bool(predicate(text))
 
 
-class Checker:
-    """Runs a picklable predicate in a worker process, killing it on timeout."""
+def _init_worker(mem_limit: int, timeout: float | None) -> None:
+    """Worker set-up: own process group, address-space cap, build deadline.
 
-    def __init__(self, predicate: Callable[[str], bool], timeout: float | None) -> None:
+    A deletion can leave a design whose compiled build is enormous (ibex: a
+    generate loop whose bound fell back to 2**16 became 65536 processes, 1.3M
+    lines of Cython at about 13 GB per million lines). Uncapped, and with a
+    timed-out worker's build left running beside the next check's, that took
+    the whole WSL VM down. The cap is inherited by the build's Cython and C
+    compiler processes; the process group lets a timeout kill all of them.
+    """
+    if timeout:
+        # (The compiled build gives up by itself at the check's deadline.)
+        os.environ["VERIFORGE_COMPILE_TIMEOUT"] = str(timeout)
+    if sys.platform == "win32":
+        return
+    os.setpgrp()
+    if mem_limit:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
+
+
+def _kill_tree(pid: int) -> None:
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False)  # noqa: S603, S607
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+class Checker:
+    """Runs a picklable predicate in a worker process, killing it on timeout.
+
+    *mem_limit_gb* caps each worker's address space (POSIX; 0 for none): a
+    check that runs out fails with MemoryError and counts as not interesting.
+    """
+
+    def __init__(self, predicate: Callable[[str], bool], timeout: float | None, mem_limit_gb: float = 0) -> None:
         self.predicate = predicate
         self.timeout = timeout
+        self.mem_limit = int(mem_limit_gb * (1 << 30))
         self.timeouts = 0
         self._pool: ProcessPoolExecutor | None = None
 
@@ -223,7 +264,12 @@ class Checker:
                 return False
         if self._pool is None:
             # (spawn everywhere: what Windows does anyway, and no fork of a threaded parent.)
-            self._pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+            self._pool = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_init_worker,
+                initargs=(self.mem_limit, self.timeout),
+            )
         fut = self._pool.submit(_call, self.predicate, text)
         try:
             return fut.result(timeout=self.timeout)
@@ -240,7 +286,10 @@ class Checker:
         pool, self._pool = self._pool, None
         if pool is None:
             return
+        # (The whole group: a worker killed alone left its compiler running.)
         for proc in list(getattr(pool, "_processes", {}).values()):
+            if proc.pid is not None:
+                _kill_tree(proc.pid)
             proc.kill()
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -264,6 +313,9 @@ class Reducer:
         timeout: Seconds per check (run in a worker process); ``None`` runs
             checks in-process with no timeout.
         log: Progress sink (default: print, flushed -- logs are often redirected to a file).
+        mem_limit_gb: Address-space cap per check (POSIX; 0 for none).
+        checkpoint: Called with the smallest interesting text after each
+            improvement, so a long run that is stopped can resume from it.
     """
 
     def __init__(
@@ -272,9 +324,12 @@ class Reducer:
         *,
         timeout: float | None = 120.0,
         log: Callable[[str], None] | None = None,
+        mem_limit_gb: float = 0,
+        checkpoint: Callable[[str], object] | None = None,
     ) -> None:
-        self.check = Checker(predicate, timeout)
+        self.check = Checker(predicate, timeout, mem_limit_gb)
         self.log = log or _print_flush
+        self.checkpoint = checkpoint
         self.checks = 0
         self.successes = 0
         self._tried: set[str] = set()
@@ -337,6 +392,8 @@ class Reducer:
         if self.check(text):
             self._text = text
             self.successes += 1
+            if self.checkpoint is not None:
+                self.checkpoint(text)
             return True
         return False
 

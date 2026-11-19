@@ -4,6 +4,7 @@ worker-process timeouts, and the generated regression-test source.
 
 from __future__ import annotations
 
+import itertools
 import shutil
 import sys
 
@@ -22,7 +23,7 @@ from veriforge.reduce import (
     regression_test_source,
 )
 from veriforge.reduce.__main__ import main
-from veriforge.reduce._reducer import Checker
+from veriforge.reduce._reducer import Checker, size_of
 from veriforge.sim.diverge import Stimulus, first_divergences, record_trace
 
 _BIG = """\
@@ -143,3 +144,58 @@ def test_checker_timeout_kills_the_worker():
         assert check("module m; endmodule") is True
     finally:
         check.close()
+
+
+def _alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/status", encoding="ascii") as f:
+            return "\nState:\tZ" not in f.read()  # (a zombie is dead, just not yet reaped)
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_checker_timeout_kills_what_the_check_started(tmp_path):
+    """A timed-out check's own children die with it. Killing only the worker
+    left the compiled build's Cython/C compiler running beside the next
+    check's build; on ibex that stacked builds until WSL ran out of memory."""
+    import time
+
+    pidfile = tmp_path / "pid"
+    script = tmp_path / "spawn.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    check = Checker(Command(f'"{sys.executable}" "{script}"'), timeout=3.0)
+    try:
+        assert check("module m; endmodule") is False
+    finally:
+        check.close()
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 10
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _alive(pid)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_AS is POSIX")
+def test_checker_memory_cap_fails_the_check():
+    """A check that outgrows the cap fails (MemoryError) instead of taking the machine down."""
+    hog = Command(f'"{sys.executable}" -c "b = bytearray(6 << 30)"')
+    check = Checker(hog, timeout=60.0, mem_limit_gb=2)
+    try:
+        assert check("module m; endmodule") is False
+        check.predicate = Command(f'"{sys.executable}" -c "pass"')
+        assert check("module m; endmodule") is True  # (the cap leaves normal checks alone)
+    finally:
+        check.close()
+
+
+def test_checkpoint_gets_every_improvement():
+    seen: list[str] = []
+    text = Reducer(_fault_visible, timeout=None, log=_quiet, checkpoint=seen.append).reduce(parse_text(_BIG))
+    assert seen and seen[-1] == text
+    assert all(size_of(a) > size_of(b) for a, b in itertools.pairwise(seen))  # (characters, then identifiers)
