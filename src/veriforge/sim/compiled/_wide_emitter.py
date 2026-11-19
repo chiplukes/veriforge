@@ -22,6 +22,7 @@ from veriforge.model.expressions import (
     RangeSelect,
     Replication,
     StreamingConcatenation,
+    StringLiteral,
     TernaryOp,
     UnaryOp,
 )
@@ -3942,6 +3943,22 @@ class _WideEmitterMixin:
 
             return None  # local var — not yet handled
 
+        # ── StringLiteral ───────────────────────────────────────────────────
+        if et is StringLiteral:
+            # 8 bits per character, the last one lowest (as every engine's
+            # narrow path). Longer than 8 characters, or into a wide
+            # destination, used to stop the build (picorv32's 128-bit
+            # `dbg_ascii_state = "ld_rs1"`).
+            val_int = 0
+            for ch in expr.value:
+                val_int = (val_int << 8) | ord(ch)
+            val_int &= (1 << dst_width) - 1
+            lines = []
+            for wi in range(n_words):
+                lines.append(f"{pad}_sc{slot}_v[{wi}] = {_cy_u64_hex((val_int >> (wi * 64)) & 0xFFFF_FFFF_FFFF_FFFF)}")
+                lines.append(f"{pad}_sc{slot}_m[{wi}] = 0")
+            return lines
+
         # ── Literal ─────────────────────────────────────────────────────────
         if et is Literal:
             fill = (expr.original_text or "").strip().lower()
@@ -4554,8 +4571,7 @@ class _WideEmitterMixin:
                 # Context-determined base at the destination width, self-
                 # determined exponent (<= 64 bits); see wide_pow.
                 exp_w = self._expr_width(expr.right)
-                if exp_w > _WORD_BITS or self._expr_max_internal_width(expr.right) > _WORD_BITS:
-                    return None
+                exp_peak = max(exp_w, self._expr_max_internal_width(expr.right))
                 both_signed = (
                     signed_override
                     if signed_override is not None
@@ -4575,17 +4591,43 @@ class _WideEmitterMixin:
                 if blines is None:
                     self._free_scratch(bslot)
                     return None
-                exp_v = self._emit_expr(expr.right, exp_w, both_signed)
-                exp_m = self._emit_mask_expr(expr.right, exp_w)
-                if both_signed:
-                    exp_v = f"_sign_ext({exp_v}, {exp_w})"
                 self._needs_wide_helpers = True
-                lines = [
-                    *blines,
-                    f"{pad}wide_pow(_sc{slot}_v, _sc{slot}_m, _sc{bslot}_v, _sc{bslot}_m,"
-                    f" <long long>({exp_v}), 1 if (({exp_m}) & wmask({exp_w})) else 0,"
-                    f" {1 if both_signed else 0}, {n_words}, {pow_w})",
-                ]
+                if exp_peak <= _WORD_BITS:
+                    exp_v = self._emit_expr(expr.right, exp_w, both_signed)
+                    exp_m = self._emit_mask_expr(expr.right, exp_w)
+                    if both_signed:
+                        exp_v = f"_sign_ext({exp_v}, {exp_w})"
+                    pow_lines = [
+                        f"{pad}wide_pow(_sc{slot}_v, _sc{slot}_m, _sc{bslot}_v, _sc{bslot}_m,"
+                        f" <long long>({exp_v}), 1 if (({exp_m}) & wmask({exp_w})) else 0,"
+                        f" {1 if both_signed else 0}, {n_words}, {pow_w})",
+                    ]
+                else:
+                    # An exponent wider than 64 bits, or one reading a wide
+                    # value (`x ** x[3:0]`): evaluated into scratch words at
+                    # its own (self-determined) width and passed as words.
+                    e_n = (exp_peak + _WORD_BITS - 1) // _WORD_BITS
+                    eslot = self._alloc_scratch()
+                    elines = self._emit_wide_expr_to_scratch(expr.right, eslot, e_n, exp_w, indent)
+                    if elines is None:
+                        self._free_scratch(eslot, bslot)
+                        return None
+                    e_words = (exp_w + _WORD_BITS - 1) // _WORD_BITS
+                    top_wi, top_bit = (exp_w - 1) // _WORD_BITS, (exp_w - 1) % _WORD_BITS
+                    e_x = " | ".join(f"_sc{eslot}_m[{wi}]" for wi in range(e_words))
+                    e_neg = f"(_sc{eslot}_v[{top_wi}] >> {top_bit}) & 1" if both_signed else "0"
+                    pow_lines = [
+                        *elines,
+                        *(
+                            f"{pad}_sc{eslot}_{vm}[{wi}] &= _word_mask64({exp_w - wi * _WORD_BITS})"
+                            for wi in range(e_words)
+                            for vm in "vm"
+                        ),
+                        f"{pad}wide_pow_w(_sc{slot}_v, _sc{slot}_m, _sc{bslot}_v, _sc{bslot}_m,"
+                        f" _sc{eslot}_v, {e_words}, {e_neg}, 1 if ({e_x}) else 0, {n_words}, {pow_w})",
+                    ]
+                    self._free_scratch(eslot)
+                lines = [*blines, *pow_lines]
                 if pow_w > dst_width:
                     # Back down to the destination width.
                     for wi in range(n_words):

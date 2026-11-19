@@ -5,9 +5,12 @@ them the same way:
 - ``$size``/``$high``/``$low``/``$left``/``$right`` (IEEE 1800 20.7) fold to
   integer literals from the declarations (optional dimension argument; the
   unpacked dimensions come first, then the packed ones).
-- ``$countones``/``$onehot``/``$onehot0``/``$isunknown`` (20.9) become
-  ordinary expressions with Icarus's x semantics: x/z bits are not counted
-  as ones (``x === 1'b1`` per bit), and ``$isunknown`` is ``(^e) === 1'bx``.
+- ``$countones``/``$onehot``/``$onehot0``/``$isunknown``/``$countbits``
+  (20.9) become ordinary expressions with Icarus's x semantics: x/z bits are
+  not counted as ones (``x === 1'b1`` per bit), and ``$isunknown`` is
+  ``(^e) === 1'bx``. ``$countbits(e, c, ...)`` counts the bits equal (``===``)
+  to any of its constant control bits; x and z share one representation in
+  this simulator, so a ``'x`` or ``'z`` control counts both.
 
 Before this, no engine implemented them: reference returned x and compiled
 silently 0.
@@ -48,7 +51,7 @@ if TYPE_CHECKING:
     from veriforge.model.variables import Variable
 
 _RANGE_QUERIES = {"$size", "$high", "$low", "$left", "$right"}
-_BIT_FUNCS = {"$countones", "$onehot", "$onehot0", "$isunknown"}
+_BIT_FUNCS = {"$countones", "$onehot", "$onehot0", "$isunknown", "$countbits"}
 _SKIP_SLOTS = {"_parse_tree", "attributes", "comments", "loc", "parent", "drivers", "loads"}
 
 
@@ -84,13 +87,16 @@ def lower_sv_functions(module: Module) -> Module:
                 if isinstance(bits, int):
                     return Literal(bits, width=32, original_text=f"32'd{bits}")
             return None
+        if name == "$countbits" and len(expr.arguments) >= 2:
+            controls = [_control_bit(c, env) for c in expr.arguments[1:]]
+            if None in controls:
+                raise ValueError("$countbits: each control bit must be a constant ('0, '1, 'x or 'z)")
+            return _count_bits(expr.arguments[0], decls, env, width_of, sorted(set(controls)))  # type: ignore[arg-type]
         if name in _BIT_FUNCS and len(expr.arguments) == 1:
             arg = expr.arguments[0]
             if name == "$isunknown":
                 return BinaryOp("===", UnaryOp("^", arg), Literal(0, width=1, is_x=True, original_text="1'bx"))
-            count = _count_ones(arg, decls, env, width_of)
-            if count is None:
-                return None
+            count = _count_bits(arg, decls, env, width_of, ["1"])
             if name == "$countones":
                 return count
             op = "==" if name == "$onehot" else "<="
@@ -516,9 +522,38 @@ def _fold_range_query(name: str, call: FunctionCall, decls, env) -> Expression |
     return Literal(value, original_text=str(value))
 
 
-def _count_ones(arg: Expression, decls, env, width_of) -> Expression | None:
-    """``32'd0 + (bit === 1'b1) + ...`` over every bit of *arg*."""
-    one = Literal(1, width=1, original_text="1'b1")
+_CONTROL_LITERALS = {
+    "0": lambda: Literal(0, width=1, original_text="1'b0"),
+    "1": lambda: Literal(1, width=1, original_text="1'b1"),
+    "x": lambda: Literal(0, width=1, is_x=True, original_text="1'bx"),
+}
+
+
+def _control_bit(arg: Expression, env) -> str | None:
+    """A ``$countbits`` control argument's bit: "0", "1" or "x" (z is x
+    here), or None if it isn't a constant. Its least significant bit counts
+    (IEEE 1800 20.9)."""
+    if isinstance(arg, Literal):
+        text = (arg.original_text or "").strip().lower().replace("_", "")
+        if text in ("'0", "'1", "'x", "'z"):
+            return {"z": "x"}.get(text[1], text[1])
+        if arg.is_x or arg.is_z:
+            return "x"
+        if text:
+            from veriforge.sim.value import Value  # noqa: PLC0415
+
+            try:
+                lit = Value.from_verilog(text)
+            except ValueError:
+                lit = None
+            if lit is not None:
+                return "x" if lit.mask & 1 else str(lit.val & 1)
+    value = const_int(arg, env)
+    return None if value is None else str(value & 1)
+
+
+def _count_bits(arg: Expression, decls, env, width_of, controls: list[str]) -> Expression:
+    """``32'd0 + (bit === c0 || bit === c1 ...) + ...`` over every bit of *arg*."""
     bits: list[Expression] = []
     name = _arg_name(arg)
     decl = decls.get(name or "")
@@ -541,7 +576,12 @@ def _count_ones(arg: Expression, decls, env, width_of) -> Expression | None:
         bits = [BinaryOp("&", BinaryOp(">>", arg, Literal(i, width=32)), Literal(1, width=1)) for i in range(w)]
     total: Expression = Literal(0, width=32, original_text="32'd0")
     for bit in bits:
-        total = BinaryOp("+", total, BinaryOp("===", bit, one))
+        match: Expression | None = None
+        for control in controls:
+            test = BinaryOp("===", bit, _CONTROL_LITERALS[control]())
+            match = test if match is None else BinaryOp("||", match, test)
+        assert match is not None  # (at least one control)
+        total = BinaryOp("+", total, match)
     return total
 
 

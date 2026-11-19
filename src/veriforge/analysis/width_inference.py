@@ -81,6 +81,7 @@ _SYSTEM_FUNC_WIDTHS: dict[str, int] = {
     "$bits": 32,
     "$size": 32,
     "$countones": 32,
+    "$countbits": 32,
     "$onehot": 1,
     "$onehot0": 1,
     "$isunknown": 1,

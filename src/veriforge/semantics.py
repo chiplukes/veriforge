@@ -597,6 +597,7 @@ _PURE_SYSTEM_FUNCTIONS = frozenset(
         "$bits",
         "$size",
         "$countones",
+        "$countbits",
         "$onehot",
         "$onehot0",
         "$isunknown",
