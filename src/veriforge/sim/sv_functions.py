@@ -116,16 +116,25 @@ def lower_struct_param_fields(module: Module) -> Module:
     a struct-typed signal, so a field select read x (reference, vm, vm-fast) or
     0 (compiled): ibex's `irq_vec = ExcCauseIrqNm.lower_cause`, found by
     tools/corpus_check.py. The layout comes from the assignment pattern's field
-    names, as for the value (the declared type isn't kept).
+    names, as for the value, or else from the parameter's declared struct type:
+    a `parameter cfg_t Cfg = '0` (pulp's axi_lite_xbar) also read its fields as
+    x on reference/vm/vm-fast.
     """
     from .elaborate import _build_param_env, _build_struct_env, match_assignment_pattern_layout  # noqa: PLC0415
+
+    def declared_type(param) -> str | None:
+        name = param.param_type if isinstance(param.param_type, str) else None
+        return name.rsplit("::", 1)[-1] if name else None
 
     patterned = [
         p for p in module.parameters if isinstance(p.default_value, AssignmentPattern) and p.default_value.named_pairs
     ]
-    if not patterned:
+    if not patterned and not any(declared_type(p) for p in module.parameters):
         return module
     type_map, _signal_map = _build_struct_env(module)
+    typed = [p for p in module.parameters if p not in patterned and declared_type(p) in type_map]
+    if not patterned and not typed:
+        return module
     env = _build_param_env(module)
     layouts = {}
     for param in patterned:
@@ -135,6 +144,14 @@ def lower_struct_param_fields(module: Module) -> Module:
         layout = match_assignment_pattern_layout(pattern, type_map)
         if isinstance(value, int) and layout is not None:
             layouts[param.name] = (layout, value)
+    for param in typed:
+        layout = type_map[declared_type(param)]  # type: ignore[index]
+        value = env.get(param.name)
+        fill = getattr(param.default_value, "original_text", None) if isinstance(param.default_value, Literal) else None
+        if fill in ("'0", "'1"):
+            value = 0 if fill == "'0" else (1 << layout.total_width) - 1
+        if isinstance(value, int):
+            layouts[param.name] = (layout, value & ((1 << layout.total_width) - 1))
     if not layouts:
         return module
 
@@ -159,6 +176,134 @@ def lower_struct_param_fields(module: Module) -> Module:
 
     _rewrite(module, lower, set())
     return module
+
+
+# cm:6d2e91
+def lower_struct_array_fields(module: Module) -> Module:
+    """Rewrite a field of an indexed struct array element whose index is an
+    expression (``m[k ^ 1].f``, ``m[j].f.g[3:0]``) as a part-select of the
+    element, ``m[k ^ 1][hi:lo]``, in place, for every engine.
+
+    The parser keeps such an access as an Identifier whose hierarchy holds
+    the index as text (``hierarchy=["m[k[0]]"]``); each engine re-read that
+    text as a signal name, which only worked for a plain name in the top
+    module: reference read and wrote nothing (silently),
+    vm/vm-fast raised, and compiled raised or used the wrong element. In a
+    submodule even a plain name failed -- flattening prefixed the array
+    (``u.m[j]``) but not the text's ``j``. The Simulator runs this on every
+    module before flattening, so the index is an expression that flattening
+    and generate elaboration rename like any other. A numeric index goes
+    the same way (compiled could not resolve one in a submodule:
+    ``i_tb.addr_map[0].idx``, the corpus's pulp xbar test benches). A
+    constant select of the field is folded into the part-select.
+    """
+    from .elaborate import _build_param_env, _build_struct_env  # noqa: PLC0415
+
+    if not any(
+        isinstance(n, Identifier) and "[" in n.name + "".join(n.hierarchy or ()) for n in iter_nodes(module, set())
+    ):
+        return module
+    _type_map, layouts = _build_struct_env(module)
+    if not layouts:
+        return module
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    field_lsbs = _struct_field_lsbs(module, env)
+    lowered: dict[int, tuple[Expression, int, int, int | None]] = {}  # id(select) -> (element, offset, width, lsb)
+
+    def lower(expr: Expression) -> Expression | None:
+        if isinstance(expr, Identifier):
+            hit = _struct_array_field(expr, layouts, field_lsbs)
+            if hit is None:
+                return None
+            element, offset, width, lsb = hit
+            new = RangeSelect(element, Literal(offset + width - 1, width=32), Literal(offset, width=32))
+            lowered[id(new)] = (element, offset, width, lsb)
+            return new
+        if isinstance(expr, (BitSelect, RangeSelect)) and id(expr.target) in lowered:
+            element, offset, width, lsb = lowered[id(expr.target)]
+            if lsb is None:
+                return None
+            if isinstance(expr, BitSelect):
+                bounds = (const_int(expr.index, env),) * 2
+            else:
+                bounds = (const_int(expr.msb, env), const_int(expr.lsb, env))
+            if None in bounds:
+                return None
+            hi, lo = (b - lsb for b in bounds)  # type: ignore[operator]
+            if not 0 <= lo <= hi < width:
+                return None  # (out of range or descending: the engines' select rules)
+            return RangeSelect(element, Literal(offset + hi, width=32), Literal(offset + lo, width=32))
+        return None
+
+    _rewrite(module, lower, set())
+    return module
+
+
+def _split_path(path: str) -> list[str]:
+    """*path* split at the dots outside brackets."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(path):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        elif ch == "." and depth == 0:
+            parts.append(path[start:i])
+            start = i + 1
+    parts.append(path[start:])
+    return parts
+
+
+def _struct_array_field(expr: Identifier, layouts, field_lsbs) -> tuple[Expression, int, int, int | None] | None:
+    """(element select, field offset, width, field's declared lsb) of a
+    ``base[index].field...`` access with an expression index, else None."""
+    from veriforge.transforms.tree_to_model import _build_expression  # noqa: PLC0415
+    from veriforge.verilog_parser import verilog_parser  # noqa: PLC0415
+
+    parts = _split_path(".".join([*(expr.hierarchy or ()), expr.name]))
+    for k, part in enumerate(parts[:-1]):
+        bracket = part.find("[")
+        if bracket <= 0 or not part.endswith("]"):
+            continue
+        index_text = part[bracket + 1 : -1].strip()
+        base = ".".join([*parts[:k], part[:bracket]])
+        current = base
+        offset, width, lsb = 0, 0, None
+        for field_name in parts[k + 1 :]:
+            layout = layouts.get(current)
+            info = layout.fields.get(field_name) if layout is not None else None
+            if info is None:
+                return None
+            field_offset, width = info
+            offset += field_offset
+            lsb = field_lsbs.get((layout.name, field_name))
+            current = f"{current}.{field_name}"
+        try:
+            index = _build_expression(verilog_parser(start="expression").build_tree(index_text), None)
+        except Exception:  # noqa: BLE001  (not an expression: leave the access as it was)
+            return None
+        return BitSelect(Identifier(base), index), offset, width, lsb
+    return None
+
+
+def _struct_field_lsbs(module: Module, env) -> dict[tuple[str, str], int]:
+    """(struct typedef, field) -> the field's declared constant lsb, for
+    fields declared descending (``logic [7:4] f`` -> 4); the others are left
+    out (a select of them is not folded)."""
+    out: dict[tuple[str, str], int] = {}
+    for td in getattr(module, "typedefs", None) or ():
+        st = getattr(td, "struct_type", None)
+        if st is None:
+            continue
+        for fld in st.fields:
+            rng = getattr(fld, "width", None)
+            if rng is None:
+                out[(td.name, fld.name)] = 0
+                continue
+            msb, lsb = const_int(rng.msb, env), const_int(rng.lsb, env)
+            if msb is not None and lsb is not None and msb >= lsb:
+                out[(td.name, fld.name)] = lsb
+    return out
 
 
 def lower_named_arguments(module: Module) -> Module:

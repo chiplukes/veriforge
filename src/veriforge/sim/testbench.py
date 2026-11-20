@@ -38,6 +38,7 @@ from .sv_functions import (
     lower_event_expressions,
     lower_streaming_targets,
     lower_named_arguments,
+    lower_struct_array_fields,
     lower_struct_param_fields,
     lower_sv_functions,
     lower_two_state,
@@ -237,6 +238,11 @@ class Simulator:  # cm:a5c8f4
             module = design.get_module(module.name) or module
             for other in design.modules:
                 resolve_sv_imports(other, design)
+        # `m[k].f` with a variable index, as an element part-select in every
+        # module before flattening renames the index (sv_functions).
+        for each in design.modules if design is not None else [module]:
+            resolve_sv_imports(each, design)
+            lower_struct_array_fields(each)
         # Flatten hierarchy if instances or generate blocks are present
         if module.generate_blocks or module.instances:
             # Resolve SV package imports before flattening so that package
@@ -253,6 +259,7 @@ class Simulator:  # cm:a5c8f4
         _resolve_typedef_widths(module)
         lower_named_arguments(module)  # (first: every later pass sees positional calls)
         lower_struct_param_fields(module)
+        lower_struct_array_fields(module)  # (before lower_packed_dimensions: makes element selects)
         materialize_process_locals(module)
         materialize_task_locals(module)
         expand_array_concat_operands(module)

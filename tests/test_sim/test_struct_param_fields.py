@@ -63,3 +63,48 @@ def test_struct_parameter_field_reads(engine):
     sim.drive("sel", Value(1))
     sim.settle()
     assert sim.read("y1") == Value(7, width=5)
+
+
+# A struct-typed parameter written as a value, not a pattern (pulp's
+# axi_lite_xbar: `parameter axi_pkg::xbar_cfg_t Cfg = '0`, no `import`), found
+# 2026-11-19. Its fields read x on reference/vm/vm-fast and 0 on compiled
+# (even for `'1`): the typedef was not brought in for a package-qualified
+# parameter type, nor the package's own field types with it, and the layout
+# came only from a pattern. `$bits(Cfg)` was the `'0`'s 32, not the type's 43.
+_TYPED = """\
+package q;
+  typedef enum logic [9:0] { A = 10'd0, B = 10'h3e0 } lat_e;
+  typedef struct packed { logic [31:0] n; logic f; lat_e l; } cfg_t;
+endpackage
+module c #(parameter q::cfg_t Cfg = '0, parameter q::cfg_t K = '1, parameter q::cfg_t L = 43'h5_0000_0003) (
+    input t, output o1, output o2, output [31:0] o3, output [9:0] o4, output [31:0] o5, output [31:0] o6,
+    output [85:0] o7);
+  assign o1 = t ^ (^Cfg.n) ^ Cfg.f;
+  assign o2 = ^Cfg.l;
+  assign o3 = K.n;
+  assign o4 = L.l;
+  assign o5 = L.n;
+  assign o6 = $bits(Cfg);
+  assign o7 = {Cfg, L};
+endmodule
+module t(input t, output o1, output o2, output [31:0] o3, output [9:0] o4, output [31:0] o5, output [31:0] o6,
+    output [85:0] o7);
+  c #(.L(43'h7ff_ffff_ff0e)) u(.t(t), .o1(o1), .o2(o2), .o3(o3), .o4(o4), .o5(o5), .o6(o6), .o7(o7));
+endmodule
+"""
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize(("top", "l_value"), [("c", 0x5_0000_0003), ("t", 0x7FF_FFFF_FF0E)])
+def test_typed_struct_parameter_without_pattern(engine, top, l_value):
+    design = parse_text(_TYPED)
+    sim = Simulator(design.get_module(top), engine=engine, design=design)
+    sim.drive("t", 1)
+    sim.settle()
+    assert sim.read("o1") == Value(1, width=1)
+    assert sim.read("o2") == Value(0, width=1)
+    assert sim.read("o3") == Value(0xFFFF_FFFF, width=32)
+    assert sim.read("o4") == Value(l_value & 0x3FF, width=10)
+    assert sim.read("o5") == Value((l_value >> 11) & 0xFFFF_FFFF, width=32)
+    assert sim.read("o6") == Value(43, width=32)
+    assert sim.read("o7") == Value(l_value, width=86)

@@ -1054,6 +1054,12 @@ def _resolved_param_literal_width(param: Parameter, env: dict[str, int | str]) -
         if isinstance(msb_val, int) and isinstance(lsb_val, int):
             return abs(msb_val - lsb_val) + 1
         return None
+    if isinstance(param.param_type, str):
+        # A typedef'd parameter (`parameter p::cfg_t Cfg = '0`) is its type's
+        # width, not its value's (`$bits(Cfg)` was 32, the `'0`'s).
+        type_width = env.get(f"$bits:{param.param_type.rsplit('::', 1)[-1]}")
+        if isinstance(type_width, int):
+            return type_width
     if param.default_value is None:
         return None
     return _constant_expression_width(param.default_value, env, param.name.rpartition(".")[0])
@@ -2635,6 +2641,9 @@ def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: 
 
         for port in module.ports:
             yield from _yield_ref(getattr(port, "data_type", None))
+        for param in module.parameters:
+            # (`parameter p::cfg_t Cfg = '0`: its fields' layout; pulp's axi_lite_xbar)
+            yield from _yield_ref(getattr(param, "param_type", None))
         for net in module.nets:
             yield from _yield_ref(getattr(net, "type_name", None))
             yield from _yield_ref(getattr(net, "data_type", None))
@@ -2650,7 +2659,9 @@ def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: 
             if et is not None:
                 yield from _yield_ref(getattr(et, "base_type", None))
 
-    for pkg_name, item_name in _iter_qualified_type_refs():
+    pending = list(_iter_qualified_type_refs())
+    while pending:
+        pkg_name, item_name = pending.pop()
         pkg = pkg_map.get(pkg_name)
         if pkg is None:
             continue
@@ -2662,6 +2673,12 @@ def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: 
             if td.name == item_name and td.name not in existing_typedefs:
                 module.typedefs.append(td)
                 existing_typedefs.add(td.name)
+                # The package's own types this one uses unqualified (a struct
+                # field `xbar_latency_e LatencyMode`, an enum's base type).
+                st, et = getattr(td, "struct_type", None), getattr(td, "enum_type", None)
+                used = [getattr(f, "data_type", None) for f in getattr(st, "fields", None) or ()]
+                used.append(getattr(et, "base_type", None))
+                pending.extend((pkg_name, u) for u in used if isinstance(u, str) and "::" not in u)
 
     _resolve_qualified_values(module, pkg_map, existing_params, existing_typedefs)
 
