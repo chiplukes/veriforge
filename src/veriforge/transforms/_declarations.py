@@ -995,7 +995,8 @@ def _extract_parameter_type(
         if isinstance(child, Token):
             if child.type == "KW_SIGNED":
                 signed = True
-            elif child.type in _PARAMETER_TYPE_TOKEN_KINDS:
+            elif child.type in _PARAMETER_TYPE_TOKEN_KINDS or child.type == "IDENTIFIER":
+                # (IDENTIFIER: a typedef name, `parameter m_t On = ...`)
                 param_type = str(child)
         elif isinstance(child, Tree):
             if child.data == "range":

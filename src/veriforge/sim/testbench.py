@@ -39,6 +39,7 @@ from .sv_functions import (
     lower_streaming_targets,
     lower_named_arguments,
     lower_struct_array_fields,
+    lower_struct_patterns,
     lower_struct_param_fields,
     lower_sv_functions,
     lower_two_state,
@@ -260,6 +261,7 @@ class Simulator:  # cm:a5c8f4
         lower_named_arguments(module)  # (first: every later pass sees positional calls)
         lower_struct_param_fields(module)
         lower_struct_array_fields(module)  # (before lower_packed_dimensions: makes element selects)
+        lower_struct_patterns(module)  # (before lower_width_casts: makes casts)
         materialize_process_locals(module)
         materialize_task_locals(module)
         expand_array_concat_operands(module)

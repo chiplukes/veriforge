@@ -1262,7 +1262,12 @@ def _build_assignment_pattern(
     index = 0
     while index < len(children):
         child = children[index]
-        if isinstance(child, Token) and child.type == "KW_DEFAULT":
+        if isinstance(child, Token) and (
+            child.type == "KW_DEFAULT" or (child.type == "IDENTIFIER" and str(child) == "default")
+        ):
+            # (After a named field, `'{b: 1, default: 0}`, the keyword lexes
+            # as an IDENTIFIER: it was a field named "default", so no struct
+            # matched and the pattern was not folded.)
             index, default_value = _consume_pattern_value(children, index + 1, source_file, callbacks)
         elif isinstance(child, Token) and child.type == "IDENTIFIER":
             field_name = str(child)

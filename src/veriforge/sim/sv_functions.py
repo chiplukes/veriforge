@@ -34,6 +34,7 @@ from veriforge.model.expressions import (
     Identifier,
     Literal,
     Range,
+    PartSelect,
     RangeSelect,
     StreamingConcatenation,
     UnaryOp,
@@ -178,6 +179,117 @@ def lower_struct_param_fields(module: Module) -> Module:
     return module
 
 
+# cm:a83c5f
+def lower_struct_patterns(module: Module) -> Module:
+    """Rewrite an assignment pattern assigned to a packed-struct target
+    (``s = '{b: 1, default: '1}``, ``m[k] = '{a, b}``, ``n_t s = '{...}``) as a
+    concatenation of its fields, each cast to the field's width, in place, for
+    every engine; a nested pattern takes the field's own type.
+
+    Each engine picked the struct by the pattern's field names alone, so two
+    typedefs sharing field names packed with the wrong layout, and compiled
+    packed only the ``default:`` of a mixed pattern (``'{b: 1, default: 0}``,
+    which the parser used to keep as a field named "default", so every engine
+    raised). A cast inside a pattern (``'{a: 4'(k)}``) also reached the
+    engines unlowered. Patterns elsewhere (operands, arguments) keep the
+    engines' field-name match.
+    """
+    from .elaborate import _build_param_env, _build_struct_env  # noqa: PLC0415
+
+    targets = [
+        node
+        for node in iter_nodes(module, set())
+        if isinstance(getattr(node, "rhs", None), AssignmentPattern)
+        or isinstance(getattr(node, "initial_value", None), AssignmentPattern)
+    ]
+    if not targets:
+        return module
+    _type_map, signal_map = _build_struct_env(module)
+    if not signal_map:
+        return module
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    decls = _declarations(module, env)
+
+    def width_of(name: str) -> int:
+        d = decls.get(name)
+        return d[2] if d is not None else 1
+
+    def target_type(lhs: Expression) -> str | None:
+        if isinstance(lhs, Identifier):
+            name = ".".join([*lhs.hierarchy, lhs.name]) if lhs.hierarchy else lhs.name
+            d = decls.get(name)
+            layout = signal_map.get(name)
+            # (A packed array of structs, `n_t [1:0] m`, is not one struct.)
+            if layout is not None and d is not None and (d[1] or d[2] != layout.total_width):
+                return None
+            return name
+        if isinstance(lhs, BitSelect) and isinstance(lhs.target, Identifier) and not lhs.target.hierarchy:
+            # One element of an array of structs (`m[k] = '{...}`).
+            d = decls.get(lhs.target.name)
+            layout = signal_map.get(lhs.target.name)
+            if layout is not None and d is not None and d[1] + (d[2] != layout.total_width) == 1:
+                return lhs.target.name
+        return None
+
+    def fit(value: Expression, width: int) -> Expression:
+        text = getattr(value, "original_text", None) if isinstance(value, Literal) else None
+        if text in ("'0", "'1", "'x", "'X", "'z", "'Z"):
+            bit = text[1].lower()
+            if bit in "01":
+                fill = 0 if bit == "0" else (1 << width) - 1
+                return Literal(fill, width=width, original_text=f"{width}'h{fill:x}")
+            return Literal(0, width=width, is_x=bit == "x", is_z=bit == "z", original_text=f"{width}'b{bit}")
+        try:
+            if expr_width(value, width_of, env) == width:
+                return value
+        except (ValueError, TypeError, KeyError):
+            pass
+        return WidthCast(Literal(width, width=32, original_text=f"32'd{width}"), value)
+
+    def build(pattern: AssignmentPattern, path: str) -> Expression | None:
+        layout = signal_map.get(path)
+        if layout is None:
+            return None
+        fields = sorted(layout.fields.items(), key=lambda item: item[1][0], reverse=True)
+        if pattern.positional:
+            if pattern.named_pairs or len(pattern.positional) != len(fields):
+                return None
+            values = dict(zip((name for name, _ in fields), pattern.positional, strict=True))
+        else:
+            values = dict(pattern.named_pairs)
+            if not set(values) <= set(layout.fields):
+                return None
+        parts: list[Expression] = []
+        for name, (_offset, width) in fields:
+            value = values.get(name, pattern.default_value)
+            sub = f"{path}.{name}"
+            if value is None:
+                parts.append(Literal(0, width=width, original_text=f"{width}'d0"))
+            elif isinstance(value, AssignmentPattern):
+                nested = build(value, sub)
+                parts.append(nested if nested is not None else fit(value, width))
+            elif name not in values and sub in signal_map:
+                # (`default:` reaches each member of a nested struct.)
+                nested = build(AssignmentPattern(default_value=value), sub)
+                parts.append(nested if nested is not None else fit(value, width))
+            else:
+                parts.append(fit(value, width))
+        return Concatenation(parts=parts)
+
+    for node in targets:
+        slot = "rhs" if isinstance(getattr(node, "rhs", None), AssignmentPattern) else "initial_value"
+        if slot == "rhs":
+            path = target_type(node.lhs)  # type: ignore[attr-defined]
+        else:
+            path = node.name if not getattr(node, "dimensions", None) else None  # type: ignore[attr-defined]
+        if path is None:
+            continue
+        new = build(getattr(node, slot), path)
+        if new is not None:
+            setattr(node, slot, new)
+    return module
+
+
 # cm:6d2e91
 def lower_struct_array_fields(module: Module) -> Module:
     """Rewrite a field of an indexed struct array element whose index is an
@@ -208,7 +320,8 @@ def lower_struct_array_fields(module: Module) -> Module:
         return module
     env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
     field_lsbs = _struct_field_lsbs(module, env)
-    lowered: dict[int, tuple[Expression, int, int, int | None]] = {}  # id(select) -> (element, offset, width, lsb)
+    # id(select) -> (element, offset, width, lsb, the access as parsed)
+    lowered: dict[int, tuple[Expression, int, int, int | None, Identifier]] = {}
 
     def lower(expr: Expression) -> Expression | None:
         if isinstance(expr, Identifier):
@@ -217,26 +330,46 @@ def lower_struct_array_fields(module: Module) -> Module:
                 return None
             element, offset, width, lsb = hit
             new = RangeSelect(element, Literal(offset + width - 1, width=32), Literal(offset, width=32))
-            lowered[id(new)] = (element, offset, width, lsb)
+            lowered[id(new)] = (element, offset, width, lsb, expr)
             return new
-        if isinstance(expr, (BitSelect, RangeSelect)) and id(expr.target) in lowered:
-            element, offset, width, lsb = lowered[id(expr.target)]
-            if lsb is None:
-                return None
-            if isinstance(expr, BitSelect):
-                bounds = (const_int(expr.index, env),) * 2
-            else:
-                bounds = (const_int(expr.msb, env), const_int(expr.lsb, env))
-            if None in bounds:
-                return None
-            hi, lo = (b - lsb for b in bounds)  # type: ignore[operator]
-            if not 0 <= lo <= hi < width:
-                return None  # (out of range or descending: the engines' select rules)
-            return RangeSelect(element, Literal(offset + hi, width=32), Literal(offset + lo, width=32))
+        if isinstance(expr, (BitSelect, RangeSelect, PartSelect)) and id(expr.target) in lowered:
+            element, offset, width, lsb, original = lowered[id(expr.target)]
+            folded = _fold_field_select(expr, element, offset, width, lsb, env)
+            if folded is None and isinstance(element, BitSelect) and isinstance(element.index, (Literal, Identifier)):
+                # (A dynamic select of a field indexed by a number or a plain
+                # name: keep the access as parsed, which the engines resolve
+                # in the top module. Lowered, it was a select of a select,
+                # which compiled could not write and reference/vm read wrong.)
+                expr.target = original
+            return folded
         return None
 
     _rewrite(module, lower, set())
     return module
+
+
+def _fold_field_select(expr, element, offset: int, width: int, lsb: int | None, env) -> Expression | None:
+    """*expr*, a constant bit, range or part select of a lowered struct
+    field, as a range select of the array element; else None."""
+    if lsb is None:
+        return None
+    msb_bit: int | None
+    lsb_bit: int | None
+    if isinstance(expr, PartSelect):
+        base, span = const_int(expr.base, env), const_int(expr.width, env)
+        if base is None or span is None or span <= 0:
+            return None
+        msb_bit, lsb_bit = (base + span - 1, base) if expr.direction == "+:" else (base, base - span + 1)
+    elif isinstance(expr, BitSelect):
+        msb_bit = lsb_bit = const_int(expr.index, env)
+    else:
+        msb_bit, lsb_bit = const_int(expr.msb, env), const_int(expr.lsb, env)
+    if msb_bit is None or lsb_bit is None:
+        return None
+    hi, lo = msb_bit - lsb, lsb_bit - lsb
+    if not 0 <= lo <= hi < width:
+        return None  # (out of range or descending: the engines' select rules)
+    return RangeSelect(element, Literal(offset + hi, width=32), Literal(offset + lo, width=32))
 
 
 def _split_path(path: str) -> list[str]:
@@ -566,6 +699,10 @@ def iter_nodes(obj: object, seen: set[int]) -> Iterator[object]:
             for item in items:
                 if isinstance(item, (VerilogNode, Range)):
                     yield from iter_nodes(item, seen)
+                elif isinstance(item, tuple):  # (an assignment pattern's `(field, value)` pairs)
+                    for part in item:
+                        if isinstance(part, (VerilogNode, Range)):
+                            yield from iter_nodes(part, seen)
 
 
 def _rewrite(obj: object, fn, seen: set[int]) -> None:
@@ -593,6 +730,18 @@ def _rewrite(obj: object, fn, seen: set[int]) -> None:
                         new = fn(item)
                         if new is not None:
                             value[i] = new
+                elif isinstance(item, tuple) and any(isinstance(x, Expression) for x in item):
+                    # (An assignment pattern's `(field, value)` pairs: a cast
+                    # or $bits in `'{a: 4'(k)}` was left for the engines,
+                    # which raised.)
+                    parts = list(item)
+                    for j, part in enumerate(parts):
+                        if isinstance(part, Expression):
+                            _rewrite(part, fn, seen)
+                            new = fn(part)
+                            if new is not None:
+                                parts[j] = new
+                    value[i] = tuple(parts)
 
 
 def _dims(width: Range | None, dimensions: list[Range], packed_count: int) -> list[Range]:

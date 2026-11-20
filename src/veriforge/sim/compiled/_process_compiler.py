@@ -1179,7 +1179,7 @@ class _ProcessCompilerMixin:
                                 f"    cdef long long new_val = (c.val[{sid}] & ~(1LL << idx)) | (rval << idx)",
                                 f"    cdef long long new_mask = c.mask[{sid}] & ~(1LL << idx)",
                                 "    if m:",
-                                f"        new_val = c.val[{sid}]",
+                                f"        new_val = c.val[{sid}] & ~(1LL << idx)",  # (canonical x: value bit 0)
                                 f"        new_mask = c.mask[{sid}] | (1LL << idx)",
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
@@ -1206,7 +1206,7 @@ class _ProcessCompilerMixin:
                                 f"    cdef long long new_val = (c.val[{sid}] & ~(1LL << idx)) | (rval << idx)",
                                 f"    cdef long long new_mask = c.mask[{sid}] & ~(1LL << idx)",
                                 "    if m:",
-                                f"        new_val = c.val[{sid}]",
+                                f"        new_val = c.val[{sid}] & ~(1LL << idx)",  # (canonical x: value bit 0)
                                 f"        new_mask = c.mask[{sid}] | (1LL << idx)",
                                 f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
                                 f"        c.val[{sid}] = new_val",
@@ -1558,7 +1558,7 @@ class _ProcessCompilerMixin:
             f"    cdef long long new_val = (c.val[{sid}] & ~(1LL << idx)) | (rval << idx)",
             f"    cdef long long new_mask = c.mask[{sid}] & ~(1LL << idx)",
             "    if m:",
-            f"        new_val = c.val[{sid}]",
+            f"        new_val = c.val[{sid}] & ~(1LL << idx)",  # (canonical x: value bit 0)
             f"        new_mask = c.mask[{sid}] | (1LL << idx)",
             f"    if new_val != c.val[{sid}] or new_mask != c.mask[{sid}]:",
             f"        c.val[{sid}] = new_val",

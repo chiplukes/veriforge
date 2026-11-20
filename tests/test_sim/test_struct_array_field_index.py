@@ -174,3 +174,48 @@ def test_loop_and_genvar_indices(engine):
             h[e * 2 + (k & 1)] = nib[e] << 3
             h[e * 2 + 1 - (k & 1)] = 127
         assert sim.read("g") == sum(v << (7 * i) for i, v in enumerate(h))
+
+
+_UNFOLDED = """\
+module t(input [63:0] d, input [5:0] lo, input [5:0] b, input a, output [63:0] q, output [70:0] w,
+    output [70:0] y0, output [70:0] y1);
+  typedef struct packed { logic [69:0] data; logic v; } wide_t;
+  p::rule_t m [0:1];
+  wide_t x [0:1], y [0:1];
+  always_comb begin
+    y[0] = '0; y[1] = '0;
+    y[a].data[66 -: 3] = 3'd5;
+    y[a].data[b +: 8] = d[31:24];
+    m[0] = '0; x[1] = '0;
+    m[0].start_addr[lo + 6'd7 : lo] = d[7:0];
+    m[0].end_addr[b +: 8] = d[15:8];
+    x[1].data[b +: 8] = d[23:16];
+    x[1].v = 1'b1;
+  end
+  assign q = m[0].start_addr[lo + 6'd7 : lo] | (m[0].end_addr[b +: 8] << 8);
+  assign w = x[1];
+  assign y0 = y[0];
+  assign y1 = y[1];
+endmodule
+"""
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_unfolded_select_of_an_indexed_field(engine):
+    """A dynamic range or part select, or a constant part select, of a
+    field indexed by a number or a plain name (fixed 2026-11-20): lowered,
+    it was a select of a select, which compiled could not write and
+    reference/vm read wrong (the slow external-I/O matrix)."""
+    sim = _sim(_UNFOLDED, engine)
+    rng = random.Random(4)
+    for _ in range(6):
+        d, lo, b, a = rng.getrandbits(64), rng.randrange(57), rng.randrange(57), rng.getrandbits(1)
+        sim.drive("a", a)
+        sim.drive("d", d)
+        sim.drive("lo", lo)
+        sim.drive("b", b)
+        sim.settle()
+        assert sim.read("q") == d & 0xFFFF
+        assert sim.read("w") == (((d >> 16) & 0xFF) << (b + 1)) | 1
+        y = ((5 << 64) | (((d >> 24) & 0xFF) << b)) << 1
+        assert (sim.read("y0"), sim.read("y1")) == ((0, y) if a else (y, 0))
