@@ -38,6 +38,7 @@ from .sv_functions import (
     lower_event_expressions,
     lower_streaming_targets,
     lower_named_arguments,
+    lower_parameter_arrays,
     lower_struct_array_fields,
     lower_struct_patterns,
     lower_struct_param_fields,
@@ -243,6 +244,7 @@ class Simulator:  # cm:a5c8f4
         # module before flattening renames the index (sv_functions).
         for each in design.modules if design is not None else [module]:
             resolve_sv_imports(each, design)
+            lower_parameter_arrays(each)  # (before lower_struct_array_fields: `A[i].f` of a parameter)
             lower_struct_array_fields(each)
         # Flatten hierarchy if instances or generate blocks are present
         if module.generate_blocks or module.instances:

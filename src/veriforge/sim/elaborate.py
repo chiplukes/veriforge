@@ -1861,6 +1861,24 @@ _BINARY_OPS: dict[str, object] = {
 
 
 # cm:a94064
+def _const_concat_part_width(part: Expression, env: dict[str, int | str]) -> int | None:
+    """Width of a part of a constant concatenation, None when unknown: a
+    sized literal, a size cast, a nested concatenation of such parts (a
+    parameter array of structs, `lower_parameter_arrays`), a function call."""
+    width = getattr(part, "inferred_width", None)
+    if width is None and isinstance(part, Literal):
+        width = part.width
+    if width is None and isinstance(part, WidthCast):
+        cast = _eval_const_expr(part.width, env)
+        width = cast if isinstance(cast, int) and cast > 0 else None
+    if width is None and isinstance(part, Concatenation):
+        widths = [_const_concat_part_width(sub, env) for sub in part.parts]
+        width = None if None in widths else sum(widths)  # type: ignore[arg-type]
+    if width is None and isinstance(part, FunctionCall):
+        width = _user_func_return_width(part.name, env)
+    return width
+
+
 def _eval_const_expr(expr: Expression, env: dict[str, int | str]) -> int | str:
     """Evaluate a constant expression given genvar/parameter values in *env*."""
     if isinstance(expr, StringLiteral):
@@ -1910,11 +1928,7 @@ def _eval_const_expr(expr: Expression, env: dict[str, int | str]) -> int | str:
             part_val = _eval_const_expr(part, env)
             if not isinstance(part_val, int):
                 raise ValueError("Cannot evaluate non-integer Concatenation part")
-            part_width = getattr(part, "inferred_width", None)
-            if part_width is None and isinstance(part, Literal):
-                part_width = part.width
-            if part_width is None and isinstance(part, FunctionCall):
-                part_width = _user_func_return_width(part.name, env)
+            part_width = _const_concat_part_width(part, env)
             if part_width is None:
                 raise ValueError("Cannot evaluate multi-element Concatenation without width info")
             result = (result << part_width) | (part_val & ((1 << part_width) - 1))

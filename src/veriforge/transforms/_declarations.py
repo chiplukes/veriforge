@@ -367,9 +367,15 @@ def _extract_parameters(
         if node.data == "param_assignment":
             name = ""
             default_value: Expression | None = None
+            dimensions: list[Range] = []
             for child in node.children:
                 if isinstance(child, Token) and child.type == "PARAMETER_IDENTIFIER":
                     name = str(child)
+                elif isinstance(child, Tree) and child.data == "dimension":
+                    # (Unpacked: `parameter t_t A [4] = '{...}`; it was dropped.)
+                    dim = _build_dimension(child, source_file, build_constant_expression)
+                    if dim is not None:
+                        dimensions.append(dim)
                 elif isinstance(child, Tree) and child.data == "constant_mintypmax_expression":
                     default_value = build_constant_expression(child, source_file)
 
@@ -383,6 +389,7 @@ def _extract_parameters(
                         signed=signed,
                         default_value=default_value,
                         is_local=is_local,
+                        dimensions=dimensions,
                         loc=loc,
                     )
                 )

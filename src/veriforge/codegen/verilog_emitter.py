@@ -198,20 +198,46 @@ def emit_design(design: Design, *, indent: str = "    ", emit_comments: bool = T
     Returns:
         Complete Verilog source text.
     """
-    parts: list[str] = []
-    for i, module in enumerate(design.modules):
-        if i > 0:
-            parts.append("")  # blank line between modules
-        parts.append(emit_module(module, indent=indent, emit_comments=emit_comments, dialect=dialect))
-    for iface in design.interfaces:
-        if parts:
-            parts.append("")
-        parts.append(emit_interface(iface, indent=indent))
-    for pkg in design.packages:
-        if parts:
-            parts.append("")
-        parts.append(emit_package(pkg, indent=indent))
-    return "\n".join(parts) + "\n"
+    # Packages first, each after the packages it uses: a package must be
+    # declared before a module, interface or package refers to it (Icarus
+    # rejected emitted ibex, whose package came after the modules).
+    texts = [
+        *_packages_in_dependency_order([(pkg.name, emit_package(pkg, indent=indent)) for pkg in design.packages]),
+        *(
+            emit_module(module, indent=indent, emit_comments=emit_comments, dialect=dialect)
+            for module in design.modules
+        ),
+        *(emit_interface(iface, indent=indent) for iface in design.interfaces),
+    ]
+    return "\n\n".join(texts) + "\n"
+
+
+def _packages_in_dependency_order(packages: list[tuple[str, str]]) -> list[str]:
+    """Emitted package texts, each after the packages its text names
+    (``import q::*;``, ``q::T``); otherwise in the design's order."""
+    names = {name for name, _ in packages}
+    deps = {
+        name: {m for m in re.findall(r"\b([A-Za-z_]\w*)\s*::", text) if m in names and m != name}
+        for name, text in packages
+    }
+    out: list[str] = []
+    done: set[str] = set()
+    visiting: set[str] = set()
+    by_name = dict(packages)
+
+    def visit(name: str) -> None:
+        if name in done or name in visiting:
+            return  # (a cycle: left in the design's order)
+        visiting.add(name)
+        for dep in sorted(deps[name], key=list(by_name).index):
+            visit(dep)
+        visiting.discard(name)
+        done.add(name)
+        out.append(by_name[name])
+
+    for name, _ in packages:
+        visit(name)
+    return out
 
 
 def emit_module(
@@ -564,34 +590,26 @@ def emit_package(pkg: Package, *, indent: str = "    ") -> str:
     lines: list[str] = []
     lines.append(f"package {pkg.name};")
 
-    body: list[str] = []
-
-    # Parameters (non-local first, then localparams)
-    for p in pkg.parameters:
-        if not p.is_local:
-            body.append(_emit_parameter_body(p, indent))
-
-    for p in pkg.parameters:
-        if p.is_local:
-            body.append(_emit_localparam(p, indent))
-
-    # Imports within the package
+    # Items in source order where the parser recorded it (a typedef may use
+    # a parameter and a parameter a typedef: ibex_pkg's `pmp_cfg_t` uses
+    # PMP_MAX_REGIONS and `PmpCfgRst` is a `pmp_cfg_t`); items without a
+    # source line (built in Python) keep the order imports, parameters,
+    # localparams, typedefs, functions, tasks.
+    items: list[tuple[int, int, list[str]]] = []
     for imp in pkg.imports:
-        body.append(_emit_import(imp, indent))
-
-    # Typedefs
+        items.append((_source_line(imp), len(items), [_emit_import(imp, indent)]))
+    for prm in (*(q for q in pkg.parameters if not q.is_local), *(q for q in pkg.parameters if q.is_local)):
+        text = _emit_localparam(prm, indent) if prm.is_local else _emit_parameter_body(prm, indent)
+        items.append((_source_line(prm), len(items), [text]))
     for td in pkg.typedefs:
-        body.append(_emit_typedef(td, indent))
-
-    # Functions
+        items.append((_source_line(td), len(items), [_emit_typedef(td, indent)]))
     for fn in pkg.functions:
-        body.append("")
-        body.append(_emit_function_decl(fn, indent, indent))
-
-    # Tasks
+        items.append((_source_line(fn), len(items), ["", _emit_function_decl(fn, indent, indent)]))
     for tk in pkg.tasks:
-        body.append("")
-        body.append(_emit_task_decl(tk, indent, indent))
+        items.append((_source_line(tk), len(items), ["", _emit_task_decl(tk, indent, indent)]))
+    if all(line for line, _, _ in items):
+        items.sort()
+    body = [text for _, _, texts in items for text in texts]
 
     if body:
         lines.append("")
@@ -600,6 +618,12 @@ def emit_package(pkg: Package, *, indent: str = "    ") -> str:
     lines.append("")
     lines.append("endpackage")
     return "\n".join(lines)
+
+
+def _source_line(node) -> int:
+    """*node*'s source line, 0 when it has none."""
+    loc = getattr(node, "loc", None)
+    return getattr(loc, "line", 0) or 0
 
 
 def _emit_import(imp: ImportDecl, indent: str) -> str:
@@ -616,7 +640,7 @@ def _emit_parameter_body(param: Parameter, indent: str) -> str:
         parts.append("signed")
     if param.width:
         parts.append(_emit_range(param.width))
-    parts.append(param.name)
+    parts.append(param.name + _emit_unpacked_dims(param.dimensions))
     if param.default_value:
         parts.append("=")
         parts.append(emit_expression(param.default_value))
@@ -632,7 +656,7 @@ def _emit_parameter_port(param: Parameter) -> str:
         parts.append("signed")
     if param.width:
         parts.append(_emit_range(param.width))
-    parts.append(param.name)
+    parts.append(param.name + _emit_unpacked_dims(param.dimensions))
     if param.default_value:
         parts.append("=")
         parts.append(emit_expression(param.default_value))
@@ -648,7 +672,7 @@ def _emit_localparam(param: Parameter, indent: str) -> str:
         parts.append("signed")
     if param.width:
         parts.append(_emit_range(param.width))
-    parts.append(param.name)
+    parts.append(param.name + _emit_unpacked_dims(param.dimensions))
     if param.default_value:
         parts.append("=")
         parts.append(emit_expression(param.default_value))
@@ -837,6 +861,11 @@ def split_dimensions(decl: object) -> tuple[list[Range], list[Range]]:
 def _emit_range(r: Range) -> str:
     """Emit a range expression [msb:lsb]."""
     return f"[{emit_expression(r.msb)}:{emit_expression(r.lsb)}]"
+
+
+def _emit_unpacked_dims(dims) -> str:
+    """A parameter's unpacked dimensions, `` [0:3]`` (none: empty)."""
+    return "".join(" " + _emit_range(d) for d in dims or ())
 
 
 def _emit_continuous_assign(ca: ContinuousAssign, indent: str) -> str:

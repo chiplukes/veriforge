@@ -9,7 +9,7 @@ from .expressions import Expression, Range
 class Parameter(VerilogNode):
     """A parameter or localparam declaration."""
 
-    __slots__ = ("default_value", "is_local", "name", "param_type", "signed", "width")
+    __slots__ = ("default_value", "dimensions", "is_local", "name", "param_type", "signed", "width")
 
     def __init__(
         self,
@@ -20,6 +20,7 @@ class Parameter(VerilogNode):
         signed: bool = False,
         default_value: Expression | None = None,
         is_local: bool = False,
+        dimensions: list[Range] | None = None,
         loc: SourceLocation | None = None,
     ):
         super().__init__(loc=loc)
@@ -29,6 +30,7 @@ class Parameter(VerilogNode):
         self.signed = signed
         self.default_value = default_value
         self.is_local = is_local
+        self.dimensions = dimensions or []  # unpacked: `parameter t_t A [4] = '{...}`
 
     def __repr__(self) -> str:
         kw = "localparam" if self.is_local else "parameter"
@@ -39,6 +41,8 @@ class Parameter(VerilogNode):
         if self.width:
             nodes.append(self.width.msb)
             nodes.append(self.width.lsb)
+        for dim in self.dimensions:
+            nodes.extend((dim.msb, dim.lsb))
         if self.default_value:
             nodes.append(self.default_value)
         return nodes
@@ -54,6 +58,8 @@ class Parameter(VerilogNode):
             d["width"] = self.width.to_dict()
         if self.signed:
             d["signed"] = True
+        if self.dimensions:
+            d["dimensions"] = [dim.to_dict() for dim in self.dimensions]
         if self.default_value:
             d["default_value"] = self.default_value.to_dict()
         return d

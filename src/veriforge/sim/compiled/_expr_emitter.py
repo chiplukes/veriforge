@@ -225,6 +225,14 @@ class _ExprEmitterMixin:
         cache[key] = (expr, text)  # (kept alive with it; see `_emit_expr`)
         return text
 
+    def _unresolved_name_mask(self, expr: Identifier) -> str:
+        """Mask of a name no signal, struct field or memory resolves: a
+        local loop variable is known, anything else (an undeclared name)
+        reads as a 1-bit x, as on reference/vm/vm-fast (its value is 0, the
+        canonical x value). It read as 0, so a reducer that deleted a
+        declaration (`err_q[i] <= err_d`) made a divergence of its own."""
+        return "0" if expr.name in self._local_vars else "1"
+
     def _emit_expr_mask(self, expr: Expression) -> str:
         """Return a Cython expression for the x/z mask of expr."""
         from veriforge.sim.value import Value as _Value  # noqa: PLC0415
@@ -277,7 +285,7 @@ class _ExprEmitterMixin:
                 parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
                 synthetic = Concatenation(parts=parts)
                 return self._emit_mask_expr(synthetic, _elem_w * depth)
-            return "0"
+            return self._unresolved_name_mask(expr)
         if etype is Literal:
             if expr.original_text:
                 v = _Value.from_verilog(expr.original_text)
@@ -1165,7 +1173,7 @@ class _ExprEmitterMixin:
                 parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
                 synthetic = Concatenation(parts=parts)
                 return self._emit_py_expr(synthetic, width)
-            return None
+            return self._local_vars.get(expr.name, "0")  # (undeclared: x, value 0; `_unresolved_name_mask`)
 
         if etype is Literal:
             lit_val = 0
@@ -1413,7 +1421,7 @@ class _ExprEmitterMixin:
                 return self._emit_py_mask_expr(synthetic, width)
             struct_info = self._resolve_struct_storage_access(name)
             if struct_info is None:
-                return None
+                return self._unresolved_name_mask(expr)
             if struct_info[0] == "signal":
                 base_sid, offset, field_width = struct_info[1], struct_info[3], struct_info[4]
                 if offset >= _WORD_BITS or offset + field_width > _WORD_BITS:
@@ -3869,7 +3877,7 @@ class _ExprEmitterMixin:
                 parts = [BitSelect(target=Identifier(name), index=Literal(idx)) for idx in range(depth - 1, -1, -1)]
                 synthetic = Concatenation(parts=parts)
                 return self._emit_mask_expr(synthetic, width, signed_override)
-            return "0"
+            return self._unresolved_name_mask(expr)
 
         if etype is Literal:
             # The literal's own per-bit x/z mask, zero-extended to `width`:

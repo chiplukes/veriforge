@@ -41,6 +41,7 @@ from veriforge.model.expressions import (
     WidthCast,
 )
 from veriforge.model.functions import FunctionDecl, TaskDecl
+from veriforge.model.parameters import Parameter
 from veriforge.model.ports import Port, PortDirection
 from veriforge.model.statements import BlockingAssign
 from veriforge.model.variables import INTEGER_ATOM_WIDTHS
@@ -231,50 +232,8 @@ def lower_struct_patterns(module: Module) -> Module:
                 return lhs.target.name
         return None
 
-    def fit(value: Expression, width: int) -> Expression:
-        text = getattr(value, "original_text", None) if isinstance(value, Literal) else None
-        if text in ("'0", "'1", "'x", "'X", "'z", "'Z"):
-            bit = text[1].lower()
-            if bit in "01":
-                fill = 0 if bit == "0" else (1 << width) - 1
-                return Literal(fill, width=width, original_text=f"{width}'h{fill:x}")
-            return Literal(0, width=width, is_x=bit == "x", is_z=bit == "z", original_text=f"{width}'b{bit}")
-        try:
-            if expr_width(value, width_of, env) == width:
-                return value
-        except (ValueError, TypeError, KeyError):
-            pass
-        return WidthCast(Literal(width, width=32, original_text=f"32'd{width}"), value)
-
     def build(pattern: AssignmentPattern, path: str) -> Expression | None:
-        layout = signal_map.get(path)
-        if layout is None:
-            return None
-        fields = sorted(layout.fields.items(), key=lambda item: item[1][0], reverse=True)
-        if pattern.positional:
-            if pattern.named_pairs or len(pattern.positional) != len(fields):
-                return None
-            values = dict(zip((name for name, _ in fields), pattern.positional, strict=True))
-        else:
-            values = dict(pattern.named_pairs)
-            if not set(values) <= set(layout.fields):
-                return None
-        parts: list[Expression] = []
-        for name, (_offset, width) in fields:
-            value = values.get(name, pattern.default_value)
-            sub = f"{path}.{name}"
-            if value is None:
-                parts.append(Literal(0, width=width, original_text=f"{width}'d0"))
-            elif isinstance(value, AssignmentPattern):
-                nested = build(value, sub)
-                parts.append(nested if nested is not None else fit(value, width))
-            elif name not in values and sub in signal_map:
-                # (`default:` reaches each member of a nested struct.)
-                nested = build(AssignmentPattern(default_value=value), sub)
-                parts.append(nested if nested is not None else fit(value, width))
-            else:
-                parts.append(fit(value, width))
-        return Concatenation(parts=parts)
+        return _pack_struct_pattern(pattern, path, signal_map.get, lambda v, w: _fit_width(v, w, width_of, env))
 
     for node in targets:
         slot = "rhs" if isinstance(getattr(node, "rhs", None), AssignmentPattern) else "initial_value"
@@ -287,6 +246,237 @@ def lower_struct_patterns(module: Module) -> Module:
         new = build(getattr(node, slot), path)
         if new is not None:
             setattr(node, slot, new)
+    return module
+
+
+def _fit_width(value: Expression, width: int, width_of, env) -> Expression:
+    """*value* at *width* bits: a fill literal (``'0``, ``'1``, ``'x``) sized,
+    a value of another width cast, else *value* itself."""
+    text = getattr(value, "original_text", None) if isinstance(value, Literal) else None
+    if text in ("'0", "'1", "'x", "'X", "'z", "'Z"):
+        bit = text[1].lower()
+        if bit in "01":
+            fill = 0 if bit == "0" else (1 << width) - 1
+            return Literal(fill, width=width, original_text=f"{width}'h{fill:x}")
+        return Literal(0, width=width, is_x=bit == "x", is_z=bit == "z", original_text=f"{width}'b{bit}")
+    try:
+        if expr_width(value, width_of, env) == width:
+            return value
+    except (ValueError, TypeError, KeyError):
+        pass
+    return WidthCast(Literal(width, width=32, original_text=f"32'd{width}"), value)
+
+
+def _pack_struct_pattern(pattern: AssignmentPattern, path: str, layout_of, fit) -> Expression | None:
+    """*pattern* as a concatenation of the fields of the struct
+    ``layout_of(path)``, MSB first, each ``fit(value, width)``; a nested
+    pattern or a ``default:`` reaching a nested struct takes
+    ``layout_of(f"{path}.{field}")``. None when the pattern does not fit."""
+    layout = layout_of(path)
+    if layout is None:
+        return None
+    fields = sorted(layout.fields.items(), key=lambda item: item[1][0], reverse=True)
+    if pattern.positional:
+        if pattern.named_pairs or len(pattern.positional) != len(fields):
+            return None
+        values = dict(zip((name for name, _ in fields), pattern.positional, strict=True))
+    else:
+        values = dict(pattern.named_pairs)
+        if not set(values) <= set(layout.fields):
+            return None
+    parts: list[Expression] = []
+    for name, (_offset, width) in fields:
+        value = values.get(name, pattern.default_value)
+        sub = f"{path}.{name}"
+        if value is None:
+            parts.append(Literal(0, width=width, original_text=f"{width}'d0"))
+        elif isinstance(value, AssignmentPattern):
+            nested = _pack_struct_pattern(value, sub, layout_of, fit)
+            parts.append(nested if nested is not None else fit(value, width))
+        elif name not in values and layout_of(sub) is not None:
+            # (`default:` reaches each member of a nested struct.)
+            nested = _pack_struct_pattern(AssignmentPattern(default_value=value), sub, layout_of, fit)
+            parts.append(nested if nested is not None else fit(value, width))
+        else:
+            parts.append(fit(value, width))
+    return Concatenation(parts=parts)
+
+
+# cm:9e4b17
+def lower_parameter_arrays(module: Module) -> Module:
+    """Rewrite each parameter with an unpacked dimension (``parameter t_t
+    A [N] = '{e0, e1, ...}``) as a packed parameter of N elements, element
+    ``i`` at bits ``(i - low) * W``, and each read of an element (``A[i]``,
+    ``A[i][3:0]``, ``A[i].f``) as a select of it, in place, for every engine.
+
+    The parser dropped the dimension, so every engine took the pattern as one
+    value and read every element as 0 (ibex_pkg's ``PmpCfgRst`` and
+    ``PmpAddrRst``, passed down as ``ibex_cs_registers``' ``PMPRstCfg[i]``).
+    The Simulator runs this on every module before flattening, so a whole
+    array passed as a parameter override is the packed value and an index
+    that is a genvar is renamed like any other. A package's parameter is
+    lowered as the module's own copy (the package keeps its dimension).
+    """
+    from .elaborate import _build_param_env, _build_struct_env  # noqa: PLC0415
+
+    arrays = [prm for prm in module.parameters if len(getattr(prm, "dimensions", None) or ()) == 1]
+    if not arrays:
+        return module
+    raw_env = _build_param_env(module)
+    env = {k: v for k, v in raw_env.items() if isinstance(v, int)}
+    type_map, _signal_map = _build_struct_env(module)
+    field_types = {
+        (td.name, fld.name): (fld.data_type or "").rsplit("::", 1)[-1]
+        for td in getattr(module, "typedefs", None) or ()
+        if getattr(td, "struct_type", None) is not None
+        for fld in td.struct_type.fields
+    }
+
+    def element_type(prm) -> str | None:
+        name = prm.param_type.rsplit("::", 1)[-1] if isinstance(prm.param_type, str) else None
+        return name if name in type_map else None
+
+    def element_width(prm) -> int | None:
+        if prm.width is not None:
+            msb, lsb = const_int(prm.width.msb, env), const_int(prm.width.lsb, env)
+            return abs(msb - lsb) + 1 if msb is not None and lsb is not None else None
+        kind = prm.param_type.rsplit("::", 1)[-1] if isinstance(prm.param_type, str) else None
+        if kind is None or kind in ("bit", "logic", "reg"):
+            return 1 if kind else None
+        if kind in INTEGER_ATOM_WIDTHS:
+            return INTEGER_ATOM_WIDTHS[kind]
+        if kind in type_map:
+            return type_map[kind].total_width
+        width = raw_env.get(f"$bits:{kind}")
+        return width if isinstance(width, int) else None
+
+    def layout_path(type_name: str):
+        def layout_of(path: str):
+            current = type_name
+            for part in path.split(".")[1:]:
+                current = field_types.get((current, part), "")
+            return type_map.get(current)
+
+        return layout_of
+
+    def element_value(item: Expression, prm, width: int) -> Expression:
+        type_name = element_type(prm)
+        if isinstance(item, AssignmentPattern) and type_name is not None:
+            fit = lambda v, w: _fit_width(v, w, lambda _n: 1, env)  # noqa: E731
+            packed = _pack_struct_pattern(item, type_name, layout_path(type_name), fit)
+            if packed is not None:
+                return packed
+        return _fit_width(item, width, lambda _n: 1, env)
+
+    # name -> (low index, count, element width, element type, element's declared lsb)
+    shapes: dict[str, tuple[int, int, int, str | None, int | None]] = {}
+    replaced: dict[int, Parameter] = {}
+    for prm in arrays:
+        dim = prm.dimensions[0]
+        left, right = const_int(dim.msb, env), const_int(dim.lsb, env)
+        width = element_width(prm)
+        if left is None or right is None or width is None:
+            continue
+        low, count = min(left, right), abs(left - right) + 1
+        step = 1 if left <= right else -1
+        value = prm.default_value
+        if isinstance(value, AssignmentPattern):
+            by_index: dict[int, Expression] = {}
+            if value.positional:
+                if len(value.positional) != count:
+                    continue
+                by_index = {left + k * step: item for k, item in enumerate(value.positional)}
+            for key, item in value.named_pairs:
+                index = int(key) if str(key).lstrip("-").isdigit() else None
+                if index is None:
+                    break
+                by_index[index] = item
+            else:
+                for index in range(low, low + count):
+                    if index not in by_index:
+                        if value.default_value is None:
+                            break
+                        by_index[index] = value.default_value
+                else:
+                    parts = [element_value(by_index[i], prm, width) for i in range(low + count - 1, low - 1, -1)]
+                    value = Concatenation(parts=parts)
+            if isinstance(value, AssignmentPattern):
+                continue  # (a pattern this does not read: left as it was)
+        new = copy.copy(prm)
+        new.dimensions = []
+        new.width = Range(Literal(count * width - 1, width=32), Literal(0, width=32))
+        new.param_type = None
+        new.signed = False
+        new.default_value = value
+        replaced[id(prm)] = new
+        elem_lsb: int | None = 0
+        if prm.width is not None:
+            msb, lsb = const_int(prm.width.msb, env), const_int(prm.width.lsb, env)
+            elem_lsb = lsb if msb is not None and lsb is not None and msb >= lsb else None
+        shapes[prm.name] = (low, count, width, element_type(prm), elem_lsb)
+    if not shapes:
+        return module
+    module.parameters = [replaced.get(id(prm), prm) for prm in module.parameters]
+
+    def element_select(name: str, index: Expression, offset: int, width: int) -> Expression:
+        low, _count, elem_width, _type, _lsb = shapes[name]
+        position = const_int(index, env)
+        if position is not None:
+            lsb = (position - low) * elem_width + offset
+            return RangeSelect(Identifier(name), Literal(lsb + width - 1, width=32), Literal(lsb, width=32))
+        base: Expression = BinaryOp("*", BinaryOp("-", index, Literal(low, width=32)), Literal(elem_width, width=32))
+        if offset:
+            base = BinaryOp("+", base, Literal(offset, width=32))
+        return PartSelect(Identifier(name), base, Literal(width, width=32), "+:")
+
+    field_layouts = {name: type_map[shape[3]] for name, shape in shapes.items() if shape[3] is not None}
+    for name, (_lo, _n, _w, t, _l) in shapes.items():
+        if t is not None:
+            stack = [(name, t)]
+            while stack:
+                path, tname = stack.pop()
+                for (owner, fld), ftype in field_types.items():
+                    if owner == tname and ftype in type_map:
+                        field_layouts[f"{path}.{fld}"] = type_map[ftype]
+                        stack.append((f"{path}.{fld}", ftype))
+    field_lsbs = _struct_field_lsbs(module, env)
+    lowered: dict[int, tuple[int, int, int | None]] = {}  # id(select) -> (element offset, width, lsb)
+
+    def lower(expr: Expression) -> Expression | None:
+        if (
+            isinstance(expr, BitSelect)
+            and isinstance(expr.target, Identifier)
+            and not expr.target.hierarchy
+            and expr.target.name in shapes
+        ):
+            width, elem_lsb = shapes[expr.target.name][2], shapes[expr.target.name][4]
+            new = element_select(expr.target.name, expr.index, 0, width)
+            lowered[id(new)] = (0, width, elem_lsb)
+            return new
+        if isinstance(expr, Identifier) and field_layouts:
+            hit = _struct_array_field(expr, field_layouts, field_lsbs)
+            if hit is None:
+                return None
+            element, offset, width, lsb = hit
+            if not (isinstance(element, BitSelect) and isinstance(element.target, Identifier)):
+                return None
+            if element.target.name not in shapes:
+                return None
+            new = element_select(element.target.name, element.index, offset, width)
+            lowered[id(new)] = (offset, width, lsb)
+            return new
+        if isinstance(expr, (BitSelect, RangeSelect, PartSelect)) and id(expr.target) in lowered:
+            target = expr.target
+            offset, width, lsb = lowered[id(target)]
+            if not isinstance(target, RangeSelect):
+                return None  # (a variable index: the select stays a select of a select)
+            start = const_int(target.lsb, env)
+            if start is None or not isinstance(target.target, Identifier):
+                return None
+            return _fold_field_select(expr, Identifier(target.target.name), start, width, lsb, env)
+        return None
+
+    _rewrite(module, lower, set())
     return module
 
 
