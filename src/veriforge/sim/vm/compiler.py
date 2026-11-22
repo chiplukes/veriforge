@@ -56,7 +56,7 @@ from veriforge.model.statements import (
 )
 
 from ...semantics import const_int as _const_int
-from ...semantics import has_impure_call, signed_memory_names
+from ...semantics import INTEGER_SYSTEM_FUNCTIONS, has_impure_call, signed_memory_names
 from ..evaluator import evaluate_constant
 from ..readmem import BASE_ARG
 from ...model.functions import unranged_return_width
@@ -1710,11 +1710,14 @@ class Compiler:  # cm:8c1e4a
         # -- RangeSelect --
         if etype is RangeSelect:
             # Same signed_override reasoning as BitSelect above.
+            # (Bounds as signed 64-bit positions, like a `+:` base: a negative
+            # signed bound, `[$clog2(1)-1:0]`, read as about 2**32, so the
+            # select allocated billions of bits.)
             self._compile_expr(expr.target, program)
-            self._compile_expr(expr.msb, program)
+            self._compile_select_base(expr.msb, program)
             base = self._select_base(expr.target)
             self._append_base_adjust(program, base)
-            self._compile_expr(expr.lsb, program)
+            self._compile_select_base(expr.lsb, program)
             self._append_base_adjust(program, base)
             program.append(instr(Op.RANGE_SELECT))
             if width:
@@ -2930,6 +2933,8 @@ class Compiler:  # cm:8c1e4a
                 result = False
             elif name == "$__2state" and expr.arguments:
                 result = self._expr_signed(expr.arguments[0], cache)
+            elif name in INTEGER_SYSTEM_FUNCTIONS:
+                result = True
             else:
                 # A user function call's own signedness is its declared
                 # return type's signedness, NOT unconditionally False --
@@ -3146,9 +3151,9 @@ class Compiler:  # cm:8c1e4a
                     encoded_arg = mid | (marker_sid << 16)
                     base = self._memory_bases.get(tname, 0)
                     self._compile_expr(lhs.target.index, program)
-                    self._compile_expr(lhs.msb, program)
+                    self._compile_select_base(lhs.msb, program)
                     self._append_base_adjust(program, base)
-                    self._compile_expr(lhs.lsb, program)
+                    self._compile_select_base(lhs.lsb, program)
                     self._append_base_adjust(program, base)
                     if immediate:
                         program.append(instr(Op.STORE_MEM_RANGE, encoded_arg))
@@ -3166,7 +3171,7 @@ class Compiler:  # cm:8c1e4a
                         encoded_arg = storage_id | (marker_sid << 16)
                         if not self._compile_struct_storage_index(storage_index, program):
                             raise ValueError(f"Unsupported dynamic memory struct index: {tname!r}")
-                    self._compile_expr(lhs.msb, program)
+                    self._compile_select_base(lhs.msb, program)
                     if select_base != 0:
                         cid = self._add_int_const(select_base, 32)
                         program.append(instr(Op.LOAD_CONST, cid))
@@ -3175,7 +3180,7 @@ class Compiler:  # cm:8c1e4a
                         cid = self._add_int_const(offset, 32)
                         program.append(instr(Op.LOAD_CONST, cid))
                         program.append(instr(Op.ADD))
-                    self._compile_expr(lhs.lsb, program)
+                    self._compile_select_base(lhs.lsb, program)
                     if select_base != 0:
                         cid = self._add_int_const(select_base, 32)
                         program.append(instr(Op.LOAD_CONST, cid))
@@ -3197,12 +3202,12 @@ class Compiler:  # cm:8c1e4a
                     return
                 sid = self._get_signal_id(tname)
                 base = self._signal_bases.get(tname, 0)
-                self._compile_expr(lhs.msb, program)
+                self._compile_select_base(lhs.msb, program)
                 if base != 0:
                     cid = self._add_int_const(base, 32)
                     program.append(instr(Op.LOAD_CONST, cid))
                     program.append(instr(Op.SUB))
-                self._compile_expr(lhs.lsb, program)
+                self._compile_select_base(lhs.lsb, program)
                 if base != 0:
                     cid = self._add_int_const(base, 32)
                     program.append(instr(Op.LOAD_CONST, cid))

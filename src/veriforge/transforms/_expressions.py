@@ -1038,6 +1038,9 @@ def _build_primary(tree: Tree, source_file: str | None, callbacks: _ExpressionCa
 
     if first.data == "hierarchical_identifier":
         return _build_hierarchical_primary(tree, first, children[1:], source_file, callbacks)
+    if first.data == "scoped_identifier" and len(children) > 1:  # `pkg::A[i]`
+        scoped = _build_scoped_identifier(first, source_file)
+        return _build_selects(tree, scoped, children[1:], source_file, callbacks)
 
     special = _build_primary_special(first, source_file, callbacks)
     if special is not None:
@@ -1053,7 +1056,16 @@ def _build_hierarchical_primary(
     source_file: str | None,
     callbacks: _ExpressionCallbacks,
 ) -> Expression:
-    base: Expression = _build_hierarchical_identifier(first, source_file)
+    return _build_selects(tree, _build_hierarchical_identifier(first, source_file), siblings, source_file, callbacks)
+
+
+def _build_selects(
+    tree: Tree,
+    base: Expression,
+    siblings: list[Tree],
+    source_file: str | None,
+    callbacks: _ExpressionCallbacks,
+) -> Expression:
     for sibling in siblings:
         if sibling.data == "range_expression":
             return _build_range_select(base, sibling, source_file, callbacks)
@@ -1269,8 +1281,8 @@ def _build_assignment_pattern(
             # as an IDENTIFIER: it was a field named "default", so no struct
             # matched and the pattern was not folded.)
             index, default_value = _consume_pattern_value(children, index + 1, source_file, callbacks)
-        elif isinstance(child, Token) and child.type == "IDENTIFIER":
-            field_name = str(child)
+        elif isinstance(child, Token) and child.type in ("IDENTIFIER", "PATTERN_INDEX_KEY"):
+            field_name = str(child).replace("_", "") if child.type == "PATTERN_INDEX_KEY" else str(child)
             index, expr = _consume_pattern_value(children, index + 1, source_file, callbacks)
             if expr is not None:
                 named_pairs.append((field_name, expr))

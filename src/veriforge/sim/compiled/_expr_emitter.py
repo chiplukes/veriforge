@@ -42,6 +42,7 @@ from veriforge.sim.compiled._codegen_utils import (
     _UNARY_PREFIX,
     _REDUCTION_OPS,
 )
+from veriforge.semantics import INTEGER_SYSTEM_FUNCTIONS
 from veriforge.sim.value import Value, signed_literal_width
 
 if TYPE_CHECKING:
@@ -3727,6 +3728,8 @@ class _ExprEmitterMixin:
                 result = False
             elif name == "$__2state" and expr.arguments:
                 result = self._expr_signed(expr.arguments[0])
+            elif name in INTEGER_SYSTEM_FUNCTIONS:
+                result = True
             else:
                 # A user function call's own signedness is its declared
                 # return type's signedness, NOT unconditionally False --

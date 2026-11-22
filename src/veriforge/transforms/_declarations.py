@@ -336,6 +336,8 @@ def _extract_parameters(
                         build_constant_expression=build_constant_expression,
                     )
                 )
+        for param in params:
+            param.in_port_list = True
         return params
 
     params = []
@@ -611,7 +613,7 @@ def _extract_sv_type_declaration(
     declared_dims: list[Range] = []
 
     for child in tree.children:
-        if isinstance(child, Token) and child.type == "IDENTIFIER" and not type_name:
+        if isinstance(child, Token) and child.type in ("IDENTIFIER", "SV_TYPE_NAME") and not type_name:
             type_name = str(child)
         elif isinstance(child, Tree):
             if child.data == "scoped_identifier":
@@ -655,6 +657,7 @@ def _extract_sv_type_variable(
         name=name,
         kind=VariableKind.LOGIC,
         dimensions=[*ctx.declared_dims, *dims],
+        initial_value=_extract_variable_initial_value(tree, ctx.source_file, ctx.build_constant_expression),
         loc=ctx.loc,
         type_name=ctx.type_name,
     )

@@ -9,7 +9,7 @@ from .expressions import Expression, Range
 class Parameter(VerilogNode):
     """A parameter or localparam declaration."""
 
-    __slots__ = ("default_value", "dimensions", "is_local", "name", "param_type", "signed", "width")
+    __slots__ = ("default_value", "dimensions", "in_port_list", "is_local", "name", "param_type", "signed", "width")
 
     def __init__(
         self,
@@ -21,6 +21,7 @@ class Parameter(VerilogNode):
         default_value: Expression | None = None,
         is_local: bool = False,
         dimensions: list[Range] | None = None,
+        in_port_list: bool = False,
         loc: SourceLocation | None = None,
     ):
         super().__init__(loc=loc)
@@ -31,6 +32,8 @@ class Parameter(VerilogNode):
         self.default_value = default_value
         self.is_local = is_local
         self.dimensions = dimensions or []  # unpacked: `parameter t_t A [4] = '{...}`
+        # Declared in the `#(...)` list: a `localparam` there stays in the header.
+        self.in_port_list = in_port_list
 
     def __repr__(self) -> str:
         kw = "localparam" if self.is_local else "parameter"
@@ -52,6 +55,8 @@ class Parameter(VerilogNode):
         d["name"] = self.name
         if self.is_local:
             d["is_local"] = True
+        if self.in_port_list:
+            d["in_port_list"] = True
         if self.param_type:
             d["param_type"] = self.param_type
         if self.width:

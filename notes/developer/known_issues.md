@@ -37,16 +37,19 @@ server, and error messages. The preprocessor emits no `` `line`` markers and
 keeps no line map. A fix needs one, from preprocessed line to (file, line),
 applied in `parse_file`.
 
-### Reference and vm grow without bound on a select whose bounds come from invalid parameters
+### A constant division by zero is 0, not x
 
-**Status**: Open (2026-11-17, `tools/corpus_check.py`). `serv_rf_ram`
-checked as a top with its default `width = 0` (so `depth = 32*36/0`):
-reference and vm evaluate `i_raddr[$clog2(depth)-1:5-$clog2(width)]` with
-enormous bounds and keep allocating. One process reached 29 GB, and the
-OOM killer took the WSL VM down. vm-fast returns at once. A real parent
-always overrides `width`, so this is garbage in, but it should raise an
-error. `corpus_check.py` caps each check's memory (`--mem-limit-gb`) and
-reports it as `memory`.
+**Status**: Open (2026-11-21). IEEE 1364 5.1.5 makes `a / 0` x, but every
+engine's parameter evaluation gives 0: `serv_rf_ram`'s default
+`depth = 32*(32+csr_regs)/width` with `width = 0` is 0. An x parameter
+in a width or bound is itself an error, so this probably wants an elaboration
+error naming the parameter rather than an x.
+
+### `$dimensions` and `$increment`
+
+**Status**: Open (2026-11-21). vm and vm-fast raise on `$dimensions`
+("unknown function"); reference reads it as x and compiled as 0. `$increment`
+reads x on reference and compiled. Neither appears in the corpus.
 
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 

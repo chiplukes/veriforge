@@ -962,7 +962,10 @@ class StatementExecutor:  # cm:c2f9a1
                         mem_data, elem_w = ctx._memories[name]
                         if 0 <= idx < len(mem_data):
                             base = ctx._memory_bases.get(name, 0)
-                            msb_i, lsb_i = int(msb_val) - base, int(lsb_val) - base
+                            msb_i, lsb_i = (
+                                self._select_base_value(lhs.msb, msb_val, ctx) - base,
+                                self._select_base_value(lhs.lsb, lsb_val, ctx) - base,
+                            )
                             rng_w = msb_i - lsb_i + 1
                             wval = value.resize(rng_w) if value.width != rng_w else value
                             if immediate:
@@ -984,8 +987,8 @@ class StatementExecutor:  # cm:c2f9a1
                     if msb_val.is_defined and lsb_val.is_defined:
                         base_name, base_index, _field_msb, field_lsb, base_val = struct_target
                         select_base = ctx._signal_bases.get(name, 0)
-                        m = field_lsb + (int(msb_val) - select_base)
-                        l = field_lsb + (int(lsb_val) - select_base)
+                        m = field_lsb + (self._select_base_value(lhs.msb, msb_val, ctx) - select_base)
+                        l = field_lsb + (self._select_base_value(lhs.lsb, lsb_val, ctx) - select_base)
                         wval = value.resize(m - l + 1) if value.width != (m - l + 1) else value
                         if immediate:
                             updated = base_val.set_range(m, l, wval)
@@ -1009,7 +1012,10 @@ class StatementExecutor:  # cm:c2f9a1
                 if "[" in name and name not in ctx._signals:
                     return
                 if msb_val.is_defined and lsb_val.is_defined:
-                    m, l = int(msb_val), int(lsb_val)
+                    m, l = (
+                        self._select_base_value(lhs.msb, msb_val, ctx),
+                        self._select_base_value(lhs.lsb, lsb_val, ctx),
+                    )
                     # Adjust for non-zero base offset
                     base = ctx._signal_bases.get(name, 0)
                     m -= base

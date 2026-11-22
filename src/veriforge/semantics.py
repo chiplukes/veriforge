@@ -576,7 +576,7 @@ def expr_signed(
         if name == "$__2state" and expr.arguments:
             return expr_signed(expr.arguments[0], signed_of, function_signed, signed_memories)
         if name.startswith("$"):
-            return name == "$signed"
+            return name == "$signed" or name in INTEGER_SYSTEM_FUNCTIONS
         return function_signed(expr.name) if function_signed is not None else False
     if isinstance(expr, WidthCast):
         return expr_signed(expr.operand, signed_of, function_signed, signed_memories)
@@ -607,6 +607,29 @@ _PURE_SYSTEM_FUNCTIONS = frozenset(
         "$right",
     }
 )
+
+
+# cm:5c81d2
+INTEGER_SYSTEM_FUNCTIONS = frozenset(
+    {
+        "$clog2",
+        "$bits",
+        "$size",
+        "$left",
+        "$right",
+        "$low",
+        "$high",
+        "$increment",
+        "$dimensions",
+        "$unpacked_dimensions",
+        "$countones",
+        "$countbits",
+    }
+)
+"""System functions that return `integer` or `int`, a signed 32-bit type (IEEE 1800
+20.6-20.9): `$clog2(0) - 1 < 0` is true. Every engine read them as unsigned, so
+`i_raddr[$clog2(depth)-1:5-$clog2(width)]` of a `serv_rf_ram` with `width = 0`
+selected about 2**32 bits on reference and vm."""
 
 
 def signed_memory_names(module: object) -> frozenset[str]:

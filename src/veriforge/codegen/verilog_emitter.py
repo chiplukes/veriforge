@@ -274,7 +274,7 @@ def _emit_module(module: Module, *, indent: str, emit_comments: bool) -> str:  #
     header = f"module {module.name}"
 
     # Parameter port list
-    param_ports = [p for p in module.parameters if not p.is_local]
+    param_ports = [p for p in module.parameters if not p.is_local or p.in_port_list]
     if param_ports:
         header += " #("
         param_strs = [_emit_parameter_port(p) for p in param_ports]
@@ -327,7 +327,7 @@ def _emit_module(module: Module, *, indent: str, emit_comments: bool) -> str:  #
 
     # Localparams (from parameter list with is_local=True)
     for p in module.parameters:
-        if p.is_local:
+        if p.is_local and not p.in_port_list:
             if emit_comments:
                 body_items.extend(_emit_leading_comments(p, indent))
             item = _emit_localparam(p, indent)
@@ -523,7 +523,7 @@ def emit_interface(iface: Interface, *, indent: str = "    ") -> str:  # noqa: P
     header = f"interface {iface.name}"
 
     # Parameters
-    param_ports = [p for p in iface.parameters if not p.is_local]
+    param_ports = [p for p in iface.parameters if not p.is_local or p.in_port_list]
     if param_ports:
         header += " #("
         param_strs = [_emit_parameter_port(p) for p in param_ports]
@@ -543,7 +543,7 @@ def emit_interface(iface: Interface, *, indent: str = "    ") -> str:  # noqa: P
 
     # Localparams
     for p in iface.parameters:
-        if p.is_local:
+        if p.is_local and not p.in_port_list:
             body.append(_emit_localparam(p, indent))
 
     # Typedefs
@@ -649,7 +649,7 @@ def _emit_parameter_body(param: Parameter, indent: str) -> str:
 
 def _emit_parameter_port(param: Parameter) -> str:
     """Emit a parameter in a parameter port list."""
-    parts = ["parameter"]
+    parts = ["localparam" if param.is_local else "parameter"]
     if param.param_type:
         parts.append(param.param_type)
     if param.signed:

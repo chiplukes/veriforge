@@ -34,6 +34,8 @@ from veriforge.model.expressions import (
 from .elaborate import match_assignment_pattern_layout
 from veriforge.model.functions import unranged_return_width
 
+from veriforge.semantics import INTEGER_SYSTEM_FUNCTIONS
+
 from .value import Value, _verilog_pow, signed_literal_width
 
 if TYPE_CHECKING:
@@ -1973,6 +1975,8 @@ def _expr_signed(expr: Expression, ctx: EvalContext, cache: dict[Expression, boo
             result = False
         elif name == "$__2state" and expr.arguments:
             result = _expr_signed(expr.arguments[0], ctx, cache)
+        elif name in INTEGER_SYSTEM_FUNCTIONS:
+            result = True
         else:
             func = ctx._functions.get(expr.name)
             # A user function call's own signedness is its declared return

@@ -119,6 +119,10 @@ def _verilog_pow(base: int, exp: int, width: int | None = None) -> int | None:
     return 0
 
 
+MAX_SELECT_BITS = 1 << 28
+"""The widest range select a Value allows (256M bits)."""
+
+
 class Value:  # cm:c8a1e6
     """4-state bit-vector value for Verilog simulation.
 
@@ -372,6 +376,10 @@ class Value:  # cm:c8a1e6
             if msb < lsb:
                 msb, lsb = lsb, msb
             w = msb - lsb + 1
+            if w > MAX_SELECT_BITS:
+                # (Garbage bounds, from an invalid parameter value, used to
+                # allocate until the OOM killer took the machine down.)
+                raise ValueError(f"select [{msb}:{lsb}] is {w} bits wide (more than {MAX_SELECT_BITS})")
             full = (1 << w) - 1
             if lsb >= 0:
                 v, m = self.val >> lsb, self.mask >> lsb

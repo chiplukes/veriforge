@@ -87,20 +87,20 @@ def lower_sv_functions(module: Module) -> Module:
             if isinstance(arg, Identifier) and not arg.hierarchy and arg.name not in decls:
                 bits = env.get(f"$bits:{arg.name}")
                 if isinstance(bits, int):
-                    return Literal(bits, width=32, original_text=f"32'd{bits}")
+                    return _integer_literal(bits)
             return None
         if name == "$countbits" and len(expr.arguments) >= 2:
             controls = [_control_bit(c, env) for c in expr.arguments[1:]]
             if None in controls:
                 raise ValueError("$countbits: each control bit must be a constant ('0, '1, 'x or 'z)")
-            return _count_bits(expr.arguments[0], decls, env, width_of, sorted(set(controls)))  # type: ignore[arg-type]
+            return _as_int(_count_bits(expr.arguments[0], decls, env, width_of, sorted(set(controls))))  # type: ignore[arg-type]
         if name in _BIT_FUNCS and len(expr.arguments) == 1:
             arg = expr.arguments[0]
             if name == "$isunknown":
                 return BinaryOp("===", UnaryOp("^", arg), Literal(0, width=1, is_x=True, original_text="1'bx"))
             count = _count_bits(arg, decls, env, width_of, ["1"])
             if name == "$countones":
-                return count
+                return _as_int(count)
             op = "==" if name == "$onehot" else "<="
             return BinaryOp(op, count, Literal(1, width=32, original_text="32'd1"))
         return None
@@ -1003,7 +1003,19 @@ def _fold_range_query(name: str, call: FunctionCall, decls, env) -> Expression |
         "$low": min(left, right),
         "$size": abs(left - right) + 1,
     }[name]
-    return Literal(value, original_text=str(value))
+    return _integer_literal(value)
+
+
+def _integer_literal(value: int) -> Literal:
+    """A folded `$bits`/`$size`/`$left`/... value: these return `integer`, a
+    signed 32-bit type (IEEE 1800 20.6, 20.7), so `$size(m) - 5 < 0` is true for
+    a 4-element `m` (it was unsigned on every engine)."""
+    return Literal(value, width=32, signed=True, original_text=str(value))
+
+
+def _as_int(count: Expression) -> Expression:
+    """`$countones`/`$countbits` return `int`, signed 32-bit (IEEE 1800 20.9)."""
+    return FunctionCall("$signed", [count])
 
 
 _CONTROL_LITERALS = {

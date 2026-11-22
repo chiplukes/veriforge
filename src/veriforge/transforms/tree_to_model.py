@@ -502,7 +502,7 @@ def _extract_sv_type_declaration(tree: Tree, source_file: str | None) -> list[Va
     Grammar:
         sv_type_declaration: IDENTIFIER sv_type_var_id ("," sv_type_var_id)* ";"
             | scoped_identifier sv_type_var_id ("," sv_type_var_id)* ";"
-        sv_type_var_id: VARIABLE_IDENTIFIER dimension*
+        sv_type_var_id: VARIABLE_IDENTIFIER dimension* ("=" constant_expression)?
     """
     return _extract_sv_type_declaration_from_tree(tree, source_file, _build_constant_expression)
 
