@@ -668,6 +668,12 @@ class VMScheduler(EventQueueMixin, CoroutineMixin):  # cm:6d8a2f
             # as their marker signals -- see `_fire_initial_edges`.)
             if self._pre_initial is not None and self.interpreter is not None:
                 self._initial_dirty = set(self.interpreter.dirty)
+            # A nonblocking assignment of a timing-free initial block
+            # (`initial q <= 0;`) waits for the event loop's NBA region, which
+            # only runs for an event: it was never applied in a design with
+            # no later event. An empty event at t=0 runs that region.
+            if self.interpreter is not None and (self.interpreter.nba_queue or self.interpreter.nba_mem_queue):
+                self._schedule_event(0, ("nba_flush",))
             # Schedule always blocks with timing controls as reference coroutines.
             # These cannot be compiled to bytecode (e.g. "always #5 clk=~clk;").
             for proc in self.compiler.processes:

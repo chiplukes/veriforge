@@ -131,14 +131,10 @@ simulation unless noted:
   module instances and fail with "Cannot resolve module 'bus_if'". Only a
   hand-built `Module.interface_instances` is flattened.
 - **`.*` port connections** are a parse error.
-- **`localparam` in a parameter port list** (`module m #(parameter W = 8,
-  localparam L = W * 2)`, legal SystemVerilog) is a parse error. Found
-  2026-11-17.
-- **A port with both a net type and a data type** (`input wire logic clk`,
-  the style of every taxi `vendor/` module) is a parse error ("No terminal
-  matches ..."). Found by `tools/construct_census.py` (2026-11-17): 7 of
-  the 25 unique taxi sources fail on it. `examples/taxi/wrappers/` works
-  around it.
+- **Interface ports with a modport** (`taxi_axis_if.snk s_axis` in an ANSI
+  port list) are a parse error: 5 of the 25 unique taxi sources fail on it
+  (`examples/taxi/wrappers/` works around it). Their `input wire logic clk`
+  ports parse since 2026-11-22.
 - **`defparam` paths** must go down from the module holding them (or start
   with its own name). Paths through an instance array (`u[0].W`), upward
   beyond the module, or from another module raise a `ValueError`; Icarus

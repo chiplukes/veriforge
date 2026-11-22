@@ -25,6 +25,7 @@ from ..display_format import (
 )
 from .. import readmem
 from ..value import Value, _mask_for_width, _verilog_pow
+from ...semantics import ieee_random
 from .opcodes import Op
 
 import random as _random
@@ -838,6 +839,12 @@ class Interpreter:  # cm:e3f1b4
                     s_append(Value(result, width=32))
                 else:
                     s_append(Value.x(32))
+                continue
+
+            if op == Op.FUNC_IEEE_RANDOM:
+                a = s_pop()
+                value, next_seed = ieee_random(a.val & ~a.mask)  # (an x seed bit reads 0, as in Icarus)
+                s_append(Value((next_seed if arg1 else value) & 0xFFFFFFFF, width=32))
                 continue
 
             if op == Op.CMP_CASEX:

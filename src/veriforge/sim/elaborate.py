@@ -2605,6 +2605,48 @@ def _build_struct_env(module: Module) -> tuple[dict[str, StructLayout], dict[str
 
 
 # cm:488174
+# cm:2e9d4b
+def declare_implicit_nets(module: Module) -> None:
+    """Declare each undeclared name a port connection or a continuous
+    assignment's target uses as a 1-bit wire (IEEE 1364-2005 4.5, an implicit
+    net), in place. Run after ``resolve_sv_imports`` (package names count as
+    declared). Compiled had no signal for one and read x; reference kept the
+    port's full width (an implicit net is a scalar whatever it connects to).
+    Names inside generate blocks are left alone.
+    """
+    declared = {
+        *(p.name for p in module.ports),
+        *(n.name for n in module.nets),
+        *(v.name for v in module.variables),
+        *(p.name for p in module.parameters),
+        *(f.name for f in module.functions),
+        *(t.name for t in module.tasks),
+        *(i.instance_name for i in module.instances),
+        *(name for name, _iface in module.interface_instances),
+    }
+    for td in module.typedefs or ():
+        enum = getattr(td, "enum_type", None)
+        declared.update(m.name for m in getattr(enum, "members", None) or ())
+
+    def bare_names(expr: object) -> list[str]:
+        if isinstance(expr, Identifier) and not expr.hierarchy:
+            return [expr.name]
+        if isinstance(expr, Concatenation):
+            return [n for part in expr.parts for n in bare_names(part)]
+        return []
+
+    used: list[str] = []
+    for inst in module.instances:
+        for conn in inst.port_connections:
+            used.extend(bare_names(conn.expression))
+    for assign in module.continuous_assigns:
+        used.extend(bare_names(assign.lhs))
+    for name in dict.fromkeys(used):
+        if name not in declared:
+            module.nets.append(Net(name, kind=NetKind.WIRE))
+            declared.add(name)
+
+
 def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: PLR0912
     """Copy package symbols into module scope based on import declarations.
 
@@ -2664,6 +2706,14 @@ def resolve_sv_imports(module: Module, design: Design | None) -> None:  # noqa: 
         for var in module.variables:
             yield from _yield_ref(getattr(var, "type_name", None))
             yield from _yield_ref(getattr(var, "data_type", None))
+        for tf in [*getattr(module, "functions", []), *getattr(module, "tasks", [])]:
+            # (`function automatic p::wide_t f(...)`: its return was 1 bit)
+            yield from _yield_ref(getattr(tf, "return_type", None))
+            for port in tf.ports:
+                yield from _yield_ref(getattr(port, "data_type", None))
+            for local in tf.locals:
+                yield from _yield_ref(getattr(local, "type_name", None))
+                yield from _yield_ref(getattr(local, "data_type", None))
         for td in getattr(module, "typedefs", []) or []:
             st = getattr(td, "struct_type", None)
             if st is not None:
@@ -2849,6 +2899,9 @@ def _resolve_typedef_widths(module: Module) -> None:
 
         # Resolve function/task port widths
         for func in getattr(module, "functions", []):
+            ret = getattr(func, "return_type", None)
+            if ret is not None and ret.rsplit("::", 1)[-1] == td_name and func.return_range is None:
+                func.return_range = resolved_range  # (a typedef return type: it returned 1 bit)
             for port in func.ports:
                 if port.data_type is None:
                     continue

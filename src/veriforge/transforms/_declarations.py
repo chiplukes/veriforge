@@ -931,7 +931,7 @@ def _extract_port_declaration(  # noqa: PLR0912
                     elif item.type in ("IDENTIFIER", "PORT_TYPE_IDENTIFIER"):
                         data_type = str(item)
                 elif isinstance(item, Tree):
-                    if item.data == "net_type":
+                    if item.data in ("net_type", "net_type_true"):  # (`net_type_true`: `input wire logic a`)
                         # `input`/`output`/`inout` may carry an explicit
                         # net_type (`wire`, `logic`, `tri`, ...) -- without
                         # this branch it was silently dropped, so a port

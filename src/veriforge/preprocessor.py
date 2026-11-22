@@ -4,7 +4,7 @@ Handles compiler directives before the Lark parser sees the source:
   `define, `undef, `ifdef, `ifndef, `else, `elsif, `endif,
   `include, `timescale, `resetall, `default_nettype, `pragma,
   `line, `celldefine, `endcelldefine, `nounconnected_drive,
-  `unconnected_drive
+  `unconnected_drive, `begin_keywords, `end_keywords, `__FILE__, `__LINE__
 
 Usage::
 
@@ -68,6 +68,8 @@ _HANDLED_DIRECTIVES = frozenset(
         "endcelldefine",
         "unconnected_drive",
         "nounconnected_drive",
+        "begin_keywords",
+        "end_keywords",
     }
 )
 
@@ -84,6 +86,8 @@ _PARSER_BLOCKING_DIRECTIVES = frozenset(
         "endcelldefine",
         "unconnected_drive",
         "nounconnected_drive",
+        "begin_keywords",
+        "end_keywords",
     }
 )
 
@@ -215,7 +219,7 @@ def strip_parser_blocking_directives(source: str) -> str:
 class _PreprocessContext:
     """Mutable state carried through preprocessing."""
 
-    __slots__ = ("defines", "depth", "include_paths", "parent_files", "source_file")
+    __slots__ = ("defines", "depth", "include_paths", "lineno", "parent_files", "source_file")
 
     def __init__(
         self,
@@ -230,6 +234,7 @@ class _PreprocessContext:
         self.source_file = source_file
         self.depth = depth
         self.parent_files = parent_files
+        self.lineno = 0  # the line being expanded, for `__LINE__
 
 
 def _process_source(source: str, ctx: _PreprocessContext) -> str:  # noqa: PLR0912, PLR0915
@@ -255,6 +260,7 @@ def _process_source(source: str, ctx: _PreprocessContext) -> str:  # noqa: PLR09
             full_line = full_line.rstrip()[:-1] + "\n" + lines[i]
 
         lineno = i + 1  # 1-based for error messages
+        ctx.lineno = lineno
 
         # Check if this line has a directive
         directive, directive_name, directive_args = _parse_directive(full_line)
@@ -355,6 +361,8 @@ def _process_source(source: str, ctx: _PreprocessContext) -> str:  # noqa: PLR09
                 "endcelldefine",
                 "unconnected_drive",
                 "nounconnected_drive",
+                "begin_keywords",
+                "end_keywords",
             ):
                 # Strip these directives — emit blank to preserve line numbers
                 output_lines.append("")
@@ -619,6 +627,14 @@ def _expand_macros_once(line: str, ctx: _PreprocessContext) -> str:
 
             if name in _HANDLED_DIRECTIVES:
                 result.append(line[i:j])
+                i = j
+                continue
+            if name == "__FILE__" and name not in ctx.defines:  # (IEEE 1800 22.13)
+                result.append('"' + (ctx.source_file or "").replace("\\", "/") + '"')
+                i = j
+                continue
+            if name == "__LINE__" and name not in ctx.defines:
+                result.append(str(ctx.lineno))
                 i = j
                 continue
 

@@ -426,7 +426,7 @@ def _parse_verilog_number(  # noqa: PLR0911, PLR0912
         return (num_val, None, None, False, False, False)
     except ValueError:
         try:
-            num_val = float(text)
+            num_val = float(text.replace("_", ""))  # (`236.123_763_e-12`: Python rejects `_e`)
             return (num_val, None, None, False, False, False)
         except ValueError:
             return (text, None, None, False, False, False)
@@ -449,7 +449,7 @@ def _build_number(tree: Tree, source_file: str | None) -> Literal:  # noqa: PLR0
             elif child.data == "real_number":
                 text = _collect_real_number_text(child)
                 try:
-                    return Literal(value=float(text), original_text=text, loc=loc)
+                    return Literal(value=float(text.replace("_", "")), original_text=text, loc=loc)
                 except ValueError:
                     return Literal(value=text, original_text=text, loc=loc)
             elif child.data == "sv_fill_literal":
@@ -479,7 +479,7 @@ def _token_to_expression(token: Token, source_file: str | None) -> Expression:
 
     if kind == "REAL_NUMBER":
         try:
-            return Literal(value=float(text), original_text=text)
+            return Literal(value=float(text.replace("_", "")), original_text=text)
         except ValueError:
             pass
 

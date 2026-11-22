@@ -1508,6 +1508,13 @@ class ExpressionEvaluator:  # cm:7e8b5d
 
             return Value(random.getrandbits(32), width=32)
 
+        if name in ("$__vf_random", "$__vf_random_seed") and args:  # (sv_functions.lower_random)
+            from veriforge.semantics import ieee_random
+
+            seed = args[0].val & ~args[0].mask  # (an x seed bit reads 0, as in Icarus)
+            value, next_seed = ieee_random(seed)
+            return Value((value if name == "$__vf_random" else next_seed) & 0xFFFFFFFF, width=32)
+
         if name == "$__vf_real" and len(args) == 3:  # (sim/reals.py)
             from .reals import real_op
 

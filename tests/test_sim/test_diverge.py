@@ -18,6 +18,7 @@ from veriforge.sim.diverge import (
     first_divergences,
     locate_divergence,
     main,
+    record_testbench_trace,
     record_trace,
     trace_from_vcd,
     value_bits,
@@ -200,3 +201,26 @@ def test_cli_engines_agree(tmp_path, capsys):
     rc = main([str(tmp_path / "a.v"), "--top", "top", "--engines", "reference,vm", "--cycles", "4"])
     assert rc == 0
     assert "No divergence" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_record_testbench_trace(engine):
+    """A closed testbench runs through time: delays, a clock generator and
+    `$finish`; the `$display` output is kept."""
+    src = """\
+module tb;
+  reg clk = 0;
+  reg [69:0] q = 0;
+  always #5 clk = ~clk;
+  always @(posedge clk) q <= q + 70'h2_0000_0000_0000_0001;
+  initial begin
+    #22 $display("q=%h", q);
+    #10 $finish;
+  end
+endmodule
+"""
+    trace = record_testbench_trace(parse_text(src), "tb", engine, max_time=1000)
+    assert trace.error is None
+    assert trace.display == ["q=040000000000000002"]  # (70 bits: 18 hex digits; posedges at 5 and 15)
+    assert trace.value_at("q", 22) == format((4 << 64) | 2, "070b")
+    assert max(t for ch in trace.changes.values() for t, _ in ch) <= 32

@@ -153,6 +153,9 @@ class Op(IntEnum):  # cm:5b3d7f
     FUNC_REAL1 = auto()  # (FUNC_REAL1, op | b << 8, 0): [a] -> [op(a, b)] (itor: b = a's width; rtoi/trunc)
     FUNC_REAL2 = auto()  # (FUNC_REAL2, op, 0): [a, b] -> [op(a, b)]
 
+    # ── $random (`$__vf_random(seed)`, sv_functions.lower_random) ─────────
+    FUNC_IEEE_RANDOM = auto()  # (FUNC_IEEE_RANDOM, 0 value | 1 next seed, 0): [seed] -> [semantics.ieee_random]
+
 
 # ── Instruction constructor helpers ──────────────────────────────────
 
@@ -188,6 +191,7 @@ _STACK_EFFECT: dict[int, tuple[int, int]] = {
             Op.RED_NOR,
             Op.RED_XNOR,
             Op.FUNC_CLOG2,
+            Op.FUNC_IEEE_RANDOM,
             Op.LOAD_MEM,
             Op.SYS_FEOF,
         ),

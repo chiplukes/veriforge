@@ -3271,6 +3271,11 @@ class _ExprEmitterMixin:
                 arg = self._emit_expr(call.arguments[0], 32)
                 return f"_clog2({arg})"
             return "0"
+        if name in ("$__vf_random", "$__vf_random_seed") and call.arguments:  # (sv_functions.lower_random)
+            seed = call.arguments[0]
+            v, m = self._emit_expr(seed, 32), self._emit_mask_expr(seed, 32)
+            which = 1 if name == "$__vf_random_seed" else 0
+            return f"_vf_ieee_random(<long long>(({v}) & ~({m})), {which})"  # (an x seed bit reads 0)
         if name == "$__vf_real" and len(call.arguments) == 3:  # (sim/reals.py; templates/real_ops.pxi)
             from veriforge.sim.reals import ITOR_S, ITOR_U, RTOI, TRUNC  # noqa: PLC0415
 
@@ -4755,7 +4760,7 @@ class _ExprEmitterMixin:
             fname = expr.name.lower()
             if fname == "$__2state":
                 return "0"  # 2-state: never x/z (see _emit_func_call)
-            if fname in ("$bits", "$time", "$realtime", "$stime", "$__vf_real"):
+            if fname in ("$bits", "$time", "$realtime", "$stime", "$__vf_real", "$__vf_random", "$__vf_random_seed"):
                 # Never x: `$bits(a)` of an x `a` used to fall to the
                 # argument-mask fallback below and print x.
                 return "0"

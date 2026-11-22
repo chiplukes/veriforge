@@ -42,7 +42,10 @@ include_statement: KW_INCLUDE FILE_PATH_SPEC ";"
 // SUPPORT: YES
 // PRIORITY: HIGH
 // EXAMPLE: module foo(); endmodule module bar(); endmodule
-source_text: description*
+source_text: (description | _TIMEUNITS)*
+// `timeunit 1ns / 1ps;`, `timeprecision 1ps;` (IEEE 1800 3.14.2): time units are
+// not modeled (`timescale is stripped too), so they are filtered out of the tree.
+_TIMEUNITS: /(timeunit|timeprecision)(?![a-zA-Z0-9_$])[^;]*;/
 // BNF: description ::=
 //     module_declaration
 //     | udp_declaration
@@ -66,8 +69,8 @@ description: module_declaration
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: module adder #(parameter W=8) (input [W-1:0] a, b, output [W-1:0] sum); assign sum = a + b; endmodule
-module_declaration: attribute_instance* KW_MODULE MODULE_IDENTIFIER package_import_declaration* module_parameter_port_list? list_of_ports ";" module_item* KW_ENDMODULE
-    | attribute_instance* KW_MODULE MODULE_IDENTIFIER package_import_declaration* module_parameter_port_list? list_of_port_declarations? ";" non_port_module_item* KW_ENDMODULE
+module_declaration: attribute_instance* KW_MODULE MODULE_IDENTIFIER package_import_declaration* module_parameter_port_list? list_of_ports ";" _TIMEUNITS* module_item* KW_ENDMODULE _END_LABEL?
+    | attribute_instance* KW_MODULE MODULE_IDENTIFIER package_import_declaration* module_parameter_port_list? list_of_port_declarations? ";" _TIMEUNITS* non_port_module_item* KW_ENDMODULE _END_LABEL?
 
 // SV: package_import_declaration ::= import package_import_item { , package_import_item } ;
 // SV: package_import_item ::= package_identifier :: identifier | package_identifier :: *
@@ -92,7 +95,7 @@ package_import_item: IDENTIFIER "::" "*"
 // SYNTHESIZABLE: YES
 // EXAMPLE: interface my_bus; logic [7:0] data; modport master(output data); endinterface
 // SUPPORT: YES
-interface_declaration: attribute_instance* KW_INTERFACE MODULE_IDENTIFIER module_parameter_port_list? list_of_port_declarations? ";" interface_item* KW_ENDINTERFACE
+interface_declaration: attribute_instance* KW_INTERFACE MODULE_IDENTIFIER module_parameter_port_list? list_of_port_declarations? ";" _TIMEUNITS* interface_item* KW_ENDINTERFACE _END_LABEL?
 
 // SV: interface_item ::= module_or_generate_item | modport_declaration
 // PRIORITY: HIGH
@@ -122,7 +125,7 @@ modport_port_declaration: (KW_INPUT | KW_OUTPUT | KW_INOUT) MODULE_IDENTIFIER
 // SYNTHESIZABLE: YES
 // EXAMPLE: package my_pkg; localparam WIDTH = 8; endpackage
 // SUPPORT: YES
-package_declaration: KW_PACKAGE MODULE_IDENTIFIER ";" package_item* KW_ENDPACKAGE
+package_declaration: KW_PACKAGE MODULE_IDENTIFIER ";" _TIMEUNITS* package_item* KW_ENDPACKAGE _END_LABEL?
 
 // SV: package_item ::= parameter_declaration | localparam | typedef | function | task | import
 // PRIORITY: HIGH
@@ -437,8 +440,8 @@ specparam_declaration: KW_SPECPARAM range? list_of_specparam_assignments ";"
 // EXAMPLE: integer
 // SUPPORT: YES
 parameter_type: KW_INTEGER _signing? | KW_REAL | KW_REALTIME | KW_TIME
-    | KW_LOGIC KW_SIGNED? range?
-    | KW_BIT KW_SIGNED? range?
+    | KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range?
+    | KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range?
     | KW_INT _signing?
     | KW_BYTE _signing?
     | KW_SHORTINT _signing?
@@ -454,7 +457,7 @@ parameter_type: KW_INTEGER _signing? | KW_REAL | KW_REALTIME | KW_TIME
 // SYNTHESIZABLE: YES
 // EXAMPLE: inout wire signed [7:0] data
 // SUPPORT: YES
-inout_declaration: KW_INOUT net_type? KW_SIGNED? range* list_of_port_identifiers
+inout_declaration: KW_INOUT _port_net_type? (KW_SIGNED | _KW_UNSIGNED)? range* list_of_port_identifiers
     | KW_INOUT net_type? _port_atom_type _signing? list_of_port_identifiers
     | KW_INOUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INOUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
@@ -464,7 +467,7 @@ inout_declaration: KW_INOUT net_type? KW_SIGNED? range* list_of_port_identifiers
 // SYNTHESIZABLE: YES
 // EXAMPLE: input wire signed [7:0] data
 // SUPPORT: YES
-input_declaration: KW_INPUT net_type? KW_SIGNED? range* list_of_port_identifiers
+input_declaration: KW_INPUT _port_net_type? (KW_SIGNED | _KW_UNSIGNED)? range* list_of_port_identifiers
     | KW_INPUT net_type? _port_atom_type _signing? list_of_port_identifiers
     | KW_INPUT scoped_identifier dimension* list_of_port_identifiers
     | KW_INPUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
@@ -481,11 +484,16 @@ input_declaration: KW_INPUT net_type? KW_SIGNED? range* list_of_port_identifiers
 // EXAMPLE: output wire [3:0] data
 // EXAMPLE: output integer count
 // SUPPORT: YES
-output_declaration: KW_OUTPUT net_type? KW_SIGNED? range* list_of_port_identifiers
-| KW_OUTPUT KW_REG KW_SIGNED? range* list_of_variable_port_identifiers
+output_declaration: KW_OUTPUT _port_net_type? (KW_SIGNED | _KW_UNSIGNED)? range* list_of_port_identifiers
+| KW_OUTPUT KW_REG (KW_SIGNED | _KW_UNSIGNED)? range* list_of_variable_port_identifiers
 | KW_OUTPUT net_type? _port_atom_type _signing? list_of_variable_port_identifiers
 | KW_OUTPUT scoped_identifier dimension* list_of_port_identifiers
 | KW_OUTPUT PORT_TYPE_IDENTIFIER dimension* list_of_port_identifiers
+
+// `input wire logic clk` (a net type with its data type, IEEE 1800 23.2.2.3): a
+// 4-state `wire`, so the `logic` is filtered out of the tree.
+_port_net_type: net_type | net_type_true _KW_LOGIC
+_KW_LOGIC: /logic(?![a-zA-Z0-9_$])/
 
 // Integer atom types (and `time`) on a module port: `input byte unsigned a`
 // didn't parse, and `input byte a` only parsed with `byte` as a type name.
@@ -534,14 +542,14 @@ _integer_atom_type: KW_BYTE | KW_SHORTINT | KW_INT | KW_LONGINT | KW_INTEGER
 // EXAMPLE: tri signed [3:0] bus;
 // EXAMPLE: trireg (small) [7:0] mem;
 // SUPPORT: YES
-net_declaration: net_type KW_SIGNED? delay3? list_of_net_identifiers ";"
-    | net_type_true drive_strength? KW_SIGNED?  delay3? list_of_net_decl_assignments ";"
-    | net_type ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_identifiers ";"
-    | net_type_true drive_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range+ delay3? list_of_net_decl_assignments ";"
-    | KW_TRIREG charge_strength? KW_SIGNED? delay3? list_of_net_identifiers ";"
-    | KW_TRIREG drive_strength? KW_SIGNED? delay3? list_of_net_decl_assignments ";"
-    | KW_TRIREG charge_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range delay3? list_of_net_identifiers ";"
-    | KW_TRIREG drive_strength? ( KW_VECTORED | KW_SCALARED )? KW_SIGNED? range delay3? list_of_net_decl_assignments ";"
+net_declaration: net_type (KW_SIGNED | _KW_UNSIGNED)? delay3? list_of_net_identifiers ";"
+    | net_type_true drive_strength? (KW_SIGNED | _KW_UNSIGNED)?  delay3? list_of_net_decl_assignments ";"
+    | net_type ( KW_VECTORED | KW_SCALARED )? (KW_SIGNED | _KW_UNSIGNED)? range+ delay3? list_of_net_identifiers ";"
+    | net_type_true drive_strength? ( KW_VECTORED | KW_SCALARED )? (KW_SIGNED | _KW_UNSIGNED)? range+ delay3? list_of_net_decl_assignments ";"
+    | KW_TRIREG charge_strength? (KW_SIGNED | _KW_UNSIGNED)? delay3? list_of_net_identifiers ";"
+    | KW_TRIREG drive_strength? (KW_SIGNED | _KW_UNSIGNED)? delay3? list_of_net_decl_assignments ";"
+    | KW_TRIREG charge_strength? ( KW_VECTORED | KW_SCALARED )? (KW_SIGNED | _KW_UNSIGNED)? range delay3? list_of_net_identifiers ";"
+    | KW_TRIREG drive_strength? ( KW_VECTORED | KW_SCALARED )? (KW_SIGNED | _KW_UNSIGNED)? range delay3? list_of_net_decl_assignments ";"
 // BNF: real_declaration ::= real list_of_real_identifiers ;
 // PRIORITY: LOW
 // SYNTHESIZABLE: NO
@@ -560,19 +568,19 @@ realtime_declaration: KW_REALTIME list_of_real_identifiers ";"
 // SYNTHESIZABLE: YES
 // EXAMPLE: reg [7:0] counter;
 // SUPPORT: YES
-reg_declaration: KW_REG KW_SIGNED? range* list_of_variable_identifiers ";"
+reg_declaration: KW_REG (KW_SIGNED | _KW_UNSIGNED)? range* list_of_variable_identifiers ";"
 // SV: logic_declaration ::= logic [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [7:0] data;
 // SUPPORT: YES
-logic_declaration: KW_LOGIC KW_SIGNED? range* list_of_variable_identifiers ";"
+logic_declaration: KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range* list_of_variable_identifiers ";"
 // SV: bit_declaration ::= bit [ signed ] [ range ] list_of_variable_identifiers ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: bit [3:0] nibble;
 // SUPPORT: YES
-bit_declaration: KW_BIT KW_SIGNED? range* list_of_variable_identifiers ";"
+bit_declaration: KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range* list_of_variable_identifiers ";"
 // SV: byte_declaration ::= byte [ signed ] list_of_variable_identifiers ;
 // PRIORITY: MEDIUM
 // SYNTHESIZABLE: YES
@@ -621,7 +629,7 @@ enum_declaration: KW_ENUM enum_base_type? "{" enum_name_declaration ("," enum_na
 // SYNTHESIZABLE: YES
 // EXAMPLE: logic [1:0]
 // SUPPORT: YES
-enum_base_type: (KW_LOGIC | KW_BIT | KW_REG) KW_SIGNED? range*
+enum_base_type: (KW_LOGIC | KW_BIT | KW_REG) (KW_SIGNED | _KW_UNSIGNED)? range*
     | (KW_INT | KW_INTEGER | KW_SHORTINT | KW_LONGINT | KW_BYTE) _signing?
 // SV: enum_name_declaration ::= IDENTIFIER [ = constant_expression ]
 // PRIORITY: HIGH
@@ -634,13 +642,13 @@ enum_name_declaration: VARIABLE_IDENTIFIER ("=" constant_expression)?
 // SYNTHESIZABLE: YES
 // EXAMPLE: struct packed { logic [7:0] data; logic valid; }
 // SUPPORT: YES
-struct_declaration: KW_STRUCT KW_PACKED? KW_SIGNED? "{" struct_member+ "}"
+struct_declaration: KW_STRUCT KW_PACKED? (KW_SIGNED | _KW_UNSIGNED)? "{" struct_member+ "}"
 // SV: union_declaration ::= union [ packed [ signed ] ] { struct_member+ }
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: union packed { logic [31:0] word; logic [7:0] byte_val; }
 // SUPPORT: YES
-union_declaration: KW_UNION KW_PACKED? KW_SIGNED? "{" struct_member+ "}"
+union_declaration: KW_UNION KW_PACKED? (KW_SIGNED | _KW_UNSIGNED)? "{" struct_member+ "}"
 // SV: struct_member ::= data_type identifier ;
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
@@ -730,7 +738,7 @@ real_type: REAL_IDENTIFIER dimension*
 // EXAMPLE: count = 0
 // SUPPORT: YES
 variable_type: VARIABLE_IDENTIFIER dimension*
-    | VARIABLE_IDENTIFIER "=" constant_expression
+    | VARIABLE_IDENTIFIER dimension* "=" constant_expression  // (`logic [7:0] m [3] = '{...};` too)
 
 // SECTION: A.2.2.2 Strengths
 // BNF: drive_strength ::=
@@ -966,8 +974,8 @@ range: "[" msb_constant_expression ":" lsb_constant_expression "]"
 // SYNTHESIZABLE: YES
 // EXAMPLE: function automatic [7:0] add; input [7:0] a, b; begin add = a + b; end endfunction
 // SUPPORT: YES
-function_declaration: KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER ";" function_item_declaration function_item_declaration* function_statement+ KW_ENDFUNCTION
-    | KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER "(" function_port_list? ")" ";" block_item_declaration* function_statement+ KW_ENDFUNCTION
+function_declaration: KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER ";" function_item_declaration function_item_declaration* function_statement* KW_ENDFUNCTION _END_LABEL?
+    | KW_FUNCTION KW_AUTOMATIC? function_range_or_type? FUNCTION_IDENTIFIER "(" function_port_list? ")" ";" block_item_declaration* function_statement* KW_ENDFUNCTION _END_LABEL?
 
 // BNF: function_item_declaration ::=
 //     block_item_declaration
@@ -991,15 +999,16 @@ function_port_list: attribute_instance* sv_function_port ( "," attribute_instanc
 // SUPPORT: YES
 sv_function_port: tf_input_declaration
     | tf_output_declaration
-    | KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
-    | KW_REG KW_SIGNED? range? list_of_port_identifiers
-    | KW_BIT KW_SIGNED? range? list_of_port_identifiers
+    | KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
+    | KW_REG (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
+    | KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_INT _signing? list_of_port_identifiers
     | KW_BYTE _signing? list_of_port_identifiers
     | KW_SHORTINT _signing? list_of_port_identifiers
     | KW_LONGINT _signing? list_of_port_identifiers
     | IDENTIFIER list_of_port_identifiers
     | scoped_identifier list_of_port_identifiers
+    | task_port_type list_of_port_identifiers  // `integer a, b`, `real r`, `time t`
 
 // BNF: function_range_or_type ::=
 //     [ signed ] [ range ]
@@ -1011,13 +1020,13 @@ sv_function_port: tf_input_declaration
 // SYNTHESIZABLE: YES
 // EXAMPLE: [7:0]
 // SUPPORT: YES
-function_range_or_type: KW_SIGNED? range?
+function_range_or_type: (KW_SIGNED | _KW_UNSIGNED)? range?
     | KW_INTEGER _signing?
     | KW_REAL
     | KW_REALTIME
     | KW_TIME
-    | KW_LOGIC KW_SIGNED? range?
-    | KW_BIT KW_SIGNED? range?
+    | KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range?
+    | KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range?
     | KW_INT _signing?
     | KW_BYTE _signing?
     | KW_SHORTINT _signing?
@@ -1041,8 +1050,8 @@ function_range_or_type: KW_SIGNED? range?
 // EXAMPLE: task automatic delay_10; #10; endtask
 // SUPPORT: YES
 // SV (IEEE 1800 13.3): any number of statements, no begin/end needed.
-task_declaration: KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER ";" task_item_declaration* statement_or_null+ KW_ENDTASK
-    | KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER "(" task_port_list? ")" ";" block_item_declaration* statement_or_null+ KW_ENDTASK
+task_declaration: KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER ";" task_item_declaration* statement_or_null* KW_ENDTASK _END_LABEL?
+    | KW_TASK KW_AUTOMATIC? TASK_IDENTIFIER "(" task_port_list? ")" ";" block_item_declaration* statement_or_null* KW_ENDTASK _END_LABEL?
 
 // BNF: task_item_declaration ::=
 //     block_item_declaration
@@ -1075,6 +1084,7 @@ task_port_list: task_port_item ( "," task_port_item )*
 task_port_item: attribute_instance* tf_input_declaration
     | attribute_instance* tf_output_declaration
     | attribute_instance* tf_inout_declaration
+    | attribute_instance* sv_function_port  // no direction: the previous port's, else input (IEEE 1800 13.3)
 
 // BNF: tf_input_declaration ::=
 //     input [ reg ] [ signed ] [ range ] list_of_port_identifiers
@@ -1084,9 +1094,9 @@ task_port_item: attribute_instance* tf_input_declaration
 // EXAMPLE: input [7:0] data
 // EXAMPLE: input integer count
 // SUPPORT: YES
-tf_input_declaration: KW_INPUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
+tf_input_declaration: KW_INPUT KW_REG? (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_INPUT task_port_type list_of_port_identifiers
-    | KW_INPUT KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
+    | KW_INPUT KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_INPUT _integer_atom_type _signing list_of_port_identifiers
     | KW_INPUT scoped_identifier list_of_port_identifiers
     | KW_INPUT IDENTIFIER list_of_port_identifiers
@@ -1099,10 +1109,10 @@ tf_input_declaration: KW_INPUT KW_REG? KW_SIGNED? range? list_of_port_identifier
 // EXAMPLE: output [7:0] result
 // EXAMPLE: output integer count
 // SUPPORT: YES
-tf_output_declaration: KW_OUTPUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
+tf_output_declaration: KW_OUTPUT KW_REG? (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_OUTPUT task_port_type list_of_port_identifiers
-    | KW_OUTPUT KW_LOGIC KW_SIGNED? range? list_of_port_identifiers
-    | KW_OUTPUT KW_BIT KW_SIGNED? range? list_of_port_identifiers
+    | KW_OUTPUT KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
+    | KW_OUTPUT KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_OUTPUT _integer_atom_type _signing list_of_port_identifiers
     | KW_OUTPUT scoped_identifier list_of_port_identifiers
     | KW_OUTPUT IDENTIFIER list_of_port_identifiers
@@ -1114,7 +1124,7 @@ tf_output_declaration: KW_OUTPUT KW_REG? KW_SIGNED? range? list_of_port_identifi
 // SYNTHESIZABLE: NO
 // EXAMPLE: inout [7:0] bus
 // SUPPORT: YES
-tf_inout_declaration: KW_INOUT KW_REG? KW_SIGNED? range? list_of_port_identifiers
+tf_inout_declaration: KW_INOUT KW_REG? (KW_SIGNED | _KW_UNSIGNED)? range? list_of_port_identifiers
     | KW_INOUT task_port_type list_of_port_identifiers
 
 // BNF: task_port_type ::=
@@ -1141,7 +1151,7 @@ task_port_type: KW_INTEGER | KW_REAL | KW_REALTIME | KW_TIME
 // EXAMPLE: reg signed [7:0] temp;
 // EXAMPLE: integer count;
 // SUPPORT: YES
-block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_block_variable_identifiers ";"
+block_item_declaration: attribute_instance* KW_REG (KW_SIGNED | _KW_UNSIGNED)? range? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_INTEGER _signing? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_TIME list_of_block_variable_identifiers ";"
     | attribute_instance* KW_REAL list_of_block_real_identifiers ";"
@@ -1149,8 +1159,8 @@ block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_blo
     | attribute_instance* event_declaration
     | attribute_instance* local_parameter_declaration ";"
     | attribute_instance* parameter_declaration ";"
-    | attribute_instance* KW_LOGIC KW_SIGNED? range? list_of_block_variable_identifiers ";"
-    | attribute_instance* KW_BIT KW_SIGNED? range? list_of_block_variable_identifiers ";"
+    | attribute_instance* KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range? list_of_block_variable_identifiers ";"
+    | attribute_instance* KW_BIT (KW_SIGNED | _KW_UNSIGNED)? range? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_INT _signing? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_BYTE _signing? list_of_block_variable_identifiers ";"
     | attribute_instance* KW_SHORTINT _signing? list_of_block_variable_identifiers ";"
@@ -1158,10 +1168,11 @@ block_item_declaration: attribute_instance* KW_REG KW_SIGNED? range? list_of_blo
     | attribute_instance* TYPE_IDENTIFIER list_of_block_variable_identifiers ";"
     | attribute_instance* scoped_identifier list_of_block_variable_identifiers ";"
 
-// A user-defined type name in a block declaration -- never a port direction:
-// with a plain IDENTIFIER, a function's scalar `input j;` also parsed as a
-// local variable `j` of "type" `input`, so the argument was never bound.
-TYPE_IDENTIFIER: /(?!(?:input|output|inout|ref)(?![a-zA-Z0-9_$]))[a-zA-Z_][a-zA-Z0-9_$]*/
+// A user-defined type name in a block declaration -- never a keyword: with a
+// plain IDENTIFIER, a function's scalar `input j;` also parsed as a local
+// variable `j` of "type" `input`, so the argument was never bound, and (once
+// a function body could be empty) `return x;` as a variable `x` of type `return`.
+TYPE_IDENTIFIER: /(?!(?:ref|const|var|pulsestyle_ondetect|pulsestyle_onevent|noshowcancelled|showcancelled|always_latch|endinterface|endprimitive|always_comb|endfunction|endgenerate|macromodule|endpackage|endspecify|localparam|always_ff|automatic|endconfig|endmodule|interface|kw_notif1|parameter|primitive|specparam|deassign|defparam|endtable|function|generate|instance|priority|pulldown|realtime|rtranif0|rtranif1|scalared|shortint|unsigned|vectored|default|disable|endcase|endtask|forever|include|initial|integer|liblist|library|longint|modport|negedge|package|posedge|release|specify|strong0|strong1|supply0|supply1|tranif0|tranif1|typedef|unique0|always|assign|bufif0|bufif1|config|design|export|genvar|highz0|highz1|ifnone|import|inside|medium|module|notif0|output|packed|pullup|repeat|return|signed|struct|triand|trireg|unique|begin|casex|casez|event|force|inout|input|large|logic|pull0|pull1|rcmos|rnmos|rpmos|rtran|small|table|trior|union|uwire|weak0|weak1|while|byte|case|cell|cmos|edge|else|enum|fork|join|nand|nmos|pmos|real|task|time|tran|tri0|tri1|void|wait|wand|wire|xnor|and|bit|buf|end|for|int|nor|not|reg|tri|use|wor|xor|if|or)(?![a-zA-Z0-9_$]))[a-zA-Z_][a-zA-Z0-9_$]*/
 
 // BNF: list_of_block_variable_identifiers ::= block_variable_type { , block_variable_type }
 // PRIORITY: HIGH
@@ -1600,7 +1611,7 @@ case_generate_item: constant_expression ( "," constant_expression )* ":" generat
 // EXAMPLE: begin : blk wire x; end
 // SUPPORT: YES
 generate_block: module_or_generate_item
-    | KW_BEGIN ( ":" GENERATE_BLOCK_IDENTIFIER )? module_or_generate_item* KW_END
+    | KW_BEGIN ( ":" GENERATE_BLOCK_IDENTIFIER )? module_or_generate_item* KW_END _END_LABEL?
 
 // BNF: generate_block_or_null ::=
 //     generate_block
@@ -1901,6 +1912,8 @@ variable_assignment: variable_lvalue "=" expression
     | variable_lvalue COMPOUND_ASSIGN expression
     | variable_lvalue OP_INC
     | variable_lvalue OP_DEC
+    | OP_INC variable_lvalue  // (a `for` step `++i`)
+    | OP_DEC variable_lvalue
 
 // SECTION: A.6.3 Parallel and sequential blocks
 // BNF: par_block ::= fork [ : block_identifier
@@ -1909,14 +1922,17 @@ variable_assignment: variable_lvalue "=" expression
 // SYNTHESIZABLE: NO
 // EXAMPLE: fork : par_blk #10 a = 1; #20 b = 2; join
 // SUPPORT: YES
-par_block: KW_FORK ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_JOIN
+par_block: KW_FORK ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_JOIN _END_LABEL?
 // BNF: seq_block ::= begin [ : block_identifier
 //     { block_item_declaration } ] { statement } end
 // PRIORITY: HIGH
 // SYNTHESIZABLE: YES
 // EXAMPLE: begin : blk reg [7:0] temp; x = 1; y = 2; end
 // SUPPORT: YES
-seq_block: KW_BEGIN ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_END
+// An end label (`end : name`, `endmodule : top`, IEEE 1800 9.3.4); filtered
+// out of the tree (a leading underscore), so builders never see it.
+_END_LABEL: /:\s*[a-zA-Z_][a-zA-Z0-9_$]*/
+seq_block: KW_BEGIN ( ":" BLOCK_IDENTIFIER )? block_item_declaration* statement* KW_END _END_LABEL?
 
 // SECTION: A.6.4 Statements
 // BNF: statement ::=
@@ -2194,24 +2210,24 @@ case_item: expression ( "," expression )* ":" statement_or_null
 // EXAMPLE: forever #10 clk = ~clk;
 // EXAMPLE: while (count > 0) count = count - 1;
 // SUPPORT: YES
-loop_statement: KW_FOREVER statement
-    | KW_REPEAT "(" expression ")" statement
-    | KW_WHILE "(" expression ")" statement
-    | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" statement
-    | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" statement
+loop_statement: KW_FOREVER statement_or_null
+    | KW_REPEAT "(" expression ")" statement_or_null
+    | KW_WHILE "(" expression ")" statement_or_null
+    | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" statement_or_null
+    | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" statement_or_null
 // Matched variant (see "Dangling-else disambiguation" above
 // `statement_or_null`) for use as an if-then-branch.
-matched_loop_statement: KW_FOREVER matched_statement
-    | KW_REPEAT "(" expression ")" matched_statement
-    | KW_WHILE "(" expression ")" matched_statement
-    | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" matched_statement
-    | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" matched_statement
+matched_loop_statement: KW_FOREVER matched_statement_or_null
+    | KW_REPEAT "(" expression ")" matched_statement_or_null
+    | KW_WHILE "(" expression ")" matched_statement_or_null
+    | KW_FOR "(" variable_assignment ";" expression ";" variable_assignment ")" matched_statement_or_null
+    | KW_FOR "(" for_variable_declaration ";" expression ";" variable_assignment ")" matched_statement_or_null
 // SV: for-loop with inline variable declaration
 // EXAMPLE: int unsigned i = 0
 // SUPPORT: YES
 for_variable_declaration: KW_INT _signing? VARIABLE_IDENTIFIER "=" expression
     | KW_INTEGER _signing? VARIABLE_IDENTIFIER "=" expression
-    | KW_LOGIC KW_SIGNED? range? VARIABLE_IDENTIFIER "=" expression
+    | KW_LOGIC (KW_SIGNED | _KW_UNSIGNED)? range? VARIABLE_IDENTIFIER "=" expression
 
 // SECTION: A.6.9 Task enable statements
 // BNF: system_task_enable ::= system_task_identifier [ ( [ expression ] { , [ expression ] } ) ] ;
@@ -2226,7 +2242,7 @@ system_task_enable: SYSTEM_TASK_IDENTIFIER ( "(" expression? ( "," expression? )
 // SYNTHESIZABLE: NO
 // EXAMPLE: my_task(arg1, arg2);
 // SUPPORT: YES
-task_enable: hierarchical_task_identifier ( "(" expression ( "," expression )* ")" )? ";"
+task_enable: hierarchical_task_identifier ( "(" ( expression ( "," expression )* )? ")" )? ";"  // (`t();` too)
 
 // SECTION: A.7 Specify section
 // SECTION: A.7.1 Specify block declaration
@@ -3880,6 +3896,9 @@ KW_TRIAND: /triand(?![a-zA-Z0-9_$])/
 KW_TRIOR: /trior(?![a-zA-Z0-9_$])/
 KW_TRIREG: /trireg(?![a-zA-Z0-9_$])/
 KW_UNSIGNED: /unsigned(?![a-zA-Z0-9_$])/  // not used?
+// `bit unsigned [7:0] b`, `reg unsigned`, `output logic unsigned`: unsigned is
+// those types' default, so the keyword is filtered out of the tree.
+_KW_UNSIGNED: /unsigned(?![a-zA-Z0-9_$])/
 KW_UNIQUE: /unique(?![a-zA-Z0-9_$])/
 KW_UNIQUE0: /unique0(?![a-zA-Z0-9_$])/
 KW_USE: /use(?![a-zA-Z0-9_$])/

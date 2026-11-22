@@ -47,7 +47,17 @@ def unranged_return_width(return_kind: str | None) -> int:
 class FunctionDecl(VerilogNode):
     """A Verilog function declaration."""
 
-    __slots__ = ("body", "is_automatic", "locals", "name", "ports", "return_kind", "return_range", "signed")
+    __slots__ = (
+        "body",
+        "is_automatic",
+        "locals",
+        "name",
+        "ports",
+        "return_kind",
+        "return_range",
+        "return_type",
+        "signed",
+    )
 
     def __init__(  # noqa: PLR0913
         self,
@@ -55,6 +65,7 @@ class FunctionDecl(VerilogNode):
         *,
         return_range: Range | None = None,
         return_kind: str | None = None,
+        return_type: str | None = None,
         signed: bool = False,
         is_automatic: bool = False,
         ports: list[Port] | None = None,
@@ -66,6 +77,7 @@ class FunctionDecl(VerilogNode):
         self.name = name
         self.return_range = return_range
         self.return_kind = return_kind
+        self.return_type = return_type  # a typedef name; its width is set into return_range at elaboration
         self.signed = signed
         self.is_automatic = is_automatic
         self.ports = ports or []
@@ -106,6 +118,8 @@ class FunctionDecl(VerilogNode):
             d["signed"] = self.signed
         if self.return_kind:
             d["return_kind"] = self.return_kind
+        if self.return_type:
+            d["return_type"] = self.return_type
         if self.return_range:
             d["return_range"] = {
                 "msb": self.return_range.msb.to_dict() if self.return_range.msb else None,

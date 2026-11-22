@@ -66,6 +66,7 @@ _PURE_EXPRESSION_OPS = frozenset(
         Op.TERNARY,
         Op.STREAM_REVERSE,
         Op.FUNC_CLOG2,
+        Op.FUNC_IEEE_RANDOM,
     }
 )
 _SIGNAL_WRITES = frozenset({Op.STORE_SIG, Op.STORE_BIT, Op.STORE_RANGE, Op.NBA_SIG, Op.NBA_BIT, Op.NBA_RANGE})

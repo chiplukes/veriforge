@@ -622,6 +622,16 @@ def _normalize_default_case_item(
     return is_default, expressions
 
 
+# A loop's body: a statement, or (`for (...) ;`, `while (busy) ;`) a null one,
+# an empty block (it did not parse).
+_LOOP_BODY_KINDS = ("statement", "matched_statement", "statement_or_null", "matched_statement_or_null")
+
+
+def _loop_body(tree: Tree, source_file: str | None, callbacks: _StatementCallbacks) -> Statement:
+    body = _extract_statement_from_tree(tree, source_file, callbacks)
+    return body if body is not None else SeqBlock(statements=[], loc=_loc_from_tree(tree, source_file))
+
+
 def _extract_loop_statement(
     tree: Tree,
     source_file: str | None,
@@ -674,8 +684,8 @@ def _extract_for_loop(
                 var_assignments.extend(_extract_for_step_assignments(child, source_file, callbacks))
             elif child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data in ("statement", "matched_statement"):
-                body = _extract_statement_from_tree(child, source_file, callbacks)
+            elif child.data in _LOOP_BODY_KINDS:
+                body = _loop_body(child, source_file, callbacks)
 
     init = var_assignments[0] if var_assignments else BlockingAssign(Identifier("?"), Identifier("?"))
     update = (
@@ -814,8 +824,8 @@ def _extract_while_loop(
         if isinstance(child, Tree):
             if child.data == "expression" and condition is None:
                 condition = callbacks.build_expression(child, source_file)
-            elif child.data in ("statement", "matched_statement"):
-                body = _extract_statement_from_tree(child, source_file, callbacks)
+            elif child.data in _LOOP_BODY_KINDS:
+                body = _loop_body(child, source_file, callbacks)
 
     return WhileLoop(condition=condition or Identifier("?"), body=body, loc=loc)
 
@@ -830,8 +840,8 @@ def _extract_forever_loop(
     body: Statement | None = None
 
     for child in tree.children:
-        if isinstance(child, Tree) and child.data in ("statement", "matched_statement"):
-            body = _extract_statement_from_tree(child, source_file, callbacks)
+        if isinstance(child, Tree) and child.data in _LOOP_BODY_KINDS:
+            body = _loop_body(child, source_file, callbacks)
 
     return ForeverLoop(body=body, loc=loc)
 
@@ -850,8 +860,8 @@ def _extract_repeat_loop(
         if isinstance(child, Tree):
             if child.data == "expression" and count is None:
                 count = callbacks.build_expression(child, source_file)
-            elif child.data in ("statement", "matched_statement"):
-                body = _extract_statement_from_tree(child, source_file, callbacks)
+            elif child.data in _LOOP_BODY_KINDS:
+                body = _loop_body(child, source_file, callbacks)
 
     return RepeatLoop(count=count or Identifier("?"), body=body, loc=loc)
 
@@ -1032,7 +1042,7 @@ def _build_delay_value(
             if child.type == "REAL_NUMBER":
                 text = str(child)
                 loc = _loc_from_tree(tree, source_file)
-                return Literal(value=float(text), original_text=text, loc=loc)
+                return Literal(value=float(text.replace("_", "")), original_text=text, loc=loc)
             return callbacks.token_to_expression(child, source_file)
 
     text = _collect_text(tree)
@@ -1052,7 +1062,7 @@ def _build_real_delay_literal(tree: Tree, source_file: str | None) -> Literal:
     text = _collect_real_number_text(tree)
     loc = _loc_from_tree(tree, source_file)
     try:
-        return Literal(value=float(text), original_text=text, loc=loc)
+        return Literal(value=float(text.replace("_", "")), original_text=text, loc=loc)
     except ValueError:
         return Literal(value=text, original_text=text, loc=loc)
 

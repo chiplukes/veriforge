@@ -76,6 +76,7 @@ class _FunctionContext:
     is_automatic: bool = False
     return_range: Range | None = None
     return_kind: str | None = None
+    return_type: str | None = None  # a typedef name (`function automatic b_t f(...)`)
     signed: bool = False
     ports: list[Port] = field(default_factory=list)
     local_vars: list[Variable] = field(default_factory=list)
@@ -126,6 +127,7 @@ def _extract_function_declaration(
         name=ctx.name,
         return_range=ctx.return_range,
         return_kind=ctx.return_kind,
+        return_type=ctx.return_type,
         signed=ctx.signed,
         is_automatic=ctx.is_automatic,
         ports=ctx.ports,
@@ -145,6 +147,7 @@ def _update_function_context(
 ) -> None:
     if child.data == "function_range_or_type":
         ctx.return_range, ctx.return_kind, ctx.signed = _extract_function_range_or_type(child, source_file, callbacks)
+        ctx.return_type = _function_return_type_name(child)
     elif child.data == "function_port_list":
         ctx.ports.extend(_extract_tf_ports(child, source_file, callbacks))
     elif child.data == "function_item_declaration":
@@ -177,9 +180,8 @@ def _extend_block_items(
 def _combine_function_body(body_statements: list[Statement], loc) -> Statement | None:
     if len(body_statements) == 1:
         return body_statements[0]
-    if body_statements:
-        return SeqBlock(statements=body_statements, loc=loc)
-    return None
+    # (An empty body is an empty block: engines walk a task's body.)
+    return SeqBlock(statements=body_statements, loc=loc)
 
 
 def _attach_function_children(
@@ -194,6 +196,17 @@ def _attach_function_children(
         variable.parent = func
     if body:
         body.parent = func
+
+
+def _function_return_type_name(tree: Tree) -> str | None:
+    """A typedef return type's name (`b_t`, `pkg::b_t`), or None. It was
+    dropped, so the function returned 1 bit on every engine."""
+    for child in tree.children:
+        if isinstance(child, Token) and child.type == "IDENTIFIER":
+            return str(child)
+        if isinstance(child, Tree) and child.data == "scoped_identifier":
+            return "::".join(str(t) for t in child.children if isinstance(t, Token))
+    return None
 
 
 def _extract_function_range_or_type(
@@ -404,11 +417,15 @@ def _extract_tf_ports(
 ) -> list[Port]:
     """Extract ports from task/function declaration nodes."""
     ports: list[Port] = []
-    for node in tree.iter_subtrees():
+    direction = PortDirection.INPUT
+    for node in tree.iter_subtrees_topdown():
         if node.data in _DIRECTION_MAP:
+            direction = _DIRECTION_MAP[node.data]
             ports.extend(_extract_tf_direction_ports(node, source_file, callbacks))
         elif node.data == "sv_function_port":
-            ports.extend(_extract_sv_function_ports(node, source_file, callbacks))
+            # (No direction: the previous port's, IEEE 1800 13.3 -- it was
+            # always input, so `f(output int a, int b)` read `b` as an input.)
+            ports.extend(_extract_sv_function_ports(node, source_file, callbacks, direction))
     return ports
 
 
@@ -447,8 +464,9 @@ def _extract_sv_function_ports(
     node: Tree,
     source_file: str | None,
     callbacks: _FunctionTaskCallbacks,
+    direction: PortDirection = PortDirection.INPUT,
 ) -> list[Port]:
-    spec = _TfPortSpec(direction=PortDirection.INPUT)
+    spec = _TfPortSpec(direction=direction)
     loc = _loc_from_tree(node, source_file)
 
     for child in node.children:
@@ -461,6 +479,8 @@ def _extract_sv_function_ports(
                 spec.data_type = _ATOM_TYPE_TOKENS[child.type]
             elif child.type in {"KW_LOGIC", "KW_BIT"}:
                 spec.data_type = str(child).lower().replace("kw_", "")
+            elif child.type == "IDENTIFIER" and spec.data_type is None:
+                spec.data_type = str(child)  # (a typedef'd port, `f(idx_t i)`: its type was dropped)
         elif isinstance(child, Tree):
             if child.data == "range":
                 spec.width = callbacks.build_range(child, source_file)
@@ -469,6 +489,8 @@ def _extract_sv_function_ports(
                 spec.data_type = "::".join([*ident.hierarchy, ident.name]) if ident.hierarchy else ident.name
             elif child.data == "list_of_port_identifiers":
                 spec.names.extend(callbacks.extract_identifiers(child))
+            elif child.data == "task_port_type":
+                spec.data_type = _extract_task_port_type(child)
 
     return _ports_from_spec(spec, loc)
 

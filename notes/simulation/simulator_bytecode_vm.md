@@ -354,9 +354,9 @@ Backward `JUMP` instructions are guarded by a loop counter (default limit
 | `SYS_FWRITE` | n_args\|fmt<<16 | fd, args → | $fwrite |
 | `SYS_FEOF` | | fd → 0/1 | $feof |
 
-### Built-in Functions (2 opcodes)
+### Built-in Functions (3 opcodes)
 
-`FUNC_CLOG2` ($clog2), `FUNC_RANDOM` ($random).
+`FUNC_CLOG2` ($clog2), `FUNC_RANDOM` (an unlowered `$random`), `FUNC_IEEE_RANDOM` (`$__vf_random(seed)` / `$__vf_random_seed(seed)`, arg1 0 / 1: `sv_functions.lower_random` turns every procedural `$random` into these, `semantics.ieee_random`).
 
 ### Process Management (1 opcode)
 

@@ -772,3 +772,16 @@ class TestDarkRISCVPatterns:
         assert "reg [31:0] REGS [0:32-1];" in out  # RV32I (32 regs)
         assert "integer i;" in out  # SIMULATION enabled via __ICARUS__
         assert "for(i=0;i!=32;i=i+1)" in out
+
+
+def test_keyword_set_directives_and_file_line_macros():
+    """`begin_keywords/`end_keywords are stripped (62 ivtest files failed on
+    them), and `__FILE__/`__LINE__ expand (IEEE 1800 22.13)."""
+    src = (
+        '`begin_keywords "1364-2005"\nmodule m;\n  initial $display(`__FILE__, `__LINE__);\nendmodule\n`end_keywords\n'
+    )
+    out = preprocess(src, source_file="dir/a.v").split("\n")
+    assert out[0] == "" and out[4] == ""
+    assert out[2] == '  initial $display("dir/a.v", 3);'
+    # (A user macro of that name still wins.)
+    assert "7" in preprocess("`define __LINE__ 7\n`__LINE__\n")

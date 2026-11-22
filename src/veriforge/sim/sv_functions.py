@@ -21,7 +21,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from veriforge.model.base import VerilogNode
 from veriforge.model.expressions import (
@@ -1317,3 +1317,361 @@ def _lhs_base_name(lhs: Expression) -> str | None:
 
 def _is_two_state_call(expr: Expression) -> bool:
     return isinstance(expr, FunctionCall) and expr.name == TWO_STATE_CALL
+
+
+class _Holder:
+    """One expression slot, so ``_rewrite`` can replace an expression root."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Expression) -> None:
+        self.value = value
+
+
+# cm:4d7a19
+def lower_function_outputs(module: Module) -> Module:
+    """Run every user function with an ``output``/``inout`` port as a task, in
+    place, so its outputs are written back on every engine: they were
+    dropped (``two(p, q)`` of ``function void two(output int a, b)`` left
+    ``p`` and ``q`` unchanged).
+
+    The function's copy as a task, ``<f>__vf_out``, has its ports plus an
+    output for the return value (``<f>__vf_ret``, which the body's
+    assignments to ``<f>`` now write). A call statement (``f(a, b);``) calls
+    it, its return value going to ``<f>__vf_discard``; a call in an
+    assignment's right-hand side, an ``if`` condition, a ``case``
+    expression or a call's argument runs as a task call just before the
+    statement, its value read from a ``<f>__vf_r<k>`` variable. A call in a
+    loop condition is left as it was (hoisting would evaluate it once).
+    """
+    from veriforge.model.functions import unranged_return_width  # noqa: PLC0415
+    from veriforge.model.statements import Statement, TaskEnable  # noqa: PLC0415
+    from veriforge.model.variables import Variable, VariableKind  # noqa: PLC0415
+
+    task_names = {t.name for t in module.tasks}
+    outs = {
+        f.name: f
+        for f in module.functions
+        if f.name not in task_names and any(p.direction in (PortDirection.OUTPUT, PortDirection.INOUT) for p in f.ports)
+    }
+    if not outs:
+        return module
+
+    def ret_range(func: FunctionDecl) -> Range:
+        if func.return_range is not None:
+            return func.return_range
+        width = unranged_return_width(func.return_kind)
+        return Range(Literal(width - 1, width=32), Literal(0, width=32))
+
+    def is_void(func: FunctionDecl) -> bool:
+        return (func.return_type or func.return_kind) == "void"
+
+    tasks: dict[str, str] = {}
+    counter = [0]
+    for func in outs.values():
+        tname = f"{func.name}__vf_out"
+        ret = f"{func.name}__vf_ret"
+        body = copy.deepcopy(func.body)
+        if body is not None:
+            for node in body.walk():
+                if isinstance(node, Identifier) and node.name == func.name and not node.hierarchy:
+                    node.name = ret
+        ports = [copy.copy(p) for p in func.ports]
+        if not is_void(func):
+            ports.append(Port(ret, direction=PortDirection.OUTPUT, width=ret_range(func), signed=func.signed))
+        module.tasks.append(
+            TaskDecl(
+                tname,
+                is_automatic=func.is_automatic,
+                ports=ports,
+                local_vars=copy.deepcopy(func.locals),
+                body=body,
+                loc=func.loc,
+            )
+        )
+        tasks[func.name] = tname
+        if not is_void(func):
+            module.variables.append(
+                Variable(f"{func.name}__vf_discard", kind=VariableKind.LOGIC, width=ret_range(func), signed=func.signed)
+            )
+
+    def hoist(expr: Expression, before: list[Statement]) -> Expression:
+        """*expr* with each call of an output function replaced by a fresh
+        variable, its task call appended to *before*."""
+
+        def lower(node: Expression) -> Expression | None:
+            if not isinstance(node, FunctionCall) or node.name not in outs:
+                return None
+            func = outs[node.name]
+            if is_void(func):
+                raise ValueError(f"void function {func.name!r} called in an expression")
+            counter[0] += 1
+            tmp = f"{func.name}__vf_r{counter[0]}"
+            module.variables.append(Variable(tmp, kind=VariableKind.LOGIC, width=ret_range(func), signed=func.signed))
+            before.append(TaskEnable(tasks[func.name], [*node.arguments, Identifier(tmp)], loc=node.loc))
+            return Identifier(tmp, loc=node.loc)
+
+        holder = _Holder(expr)
+        _rewrite(holder, lower, set())
+        return holder.value
+
+    def rewrite_call(stmt: Statement, before: list[Statement]) -> bool:
+        if not (isinstance(stmt, TaskEnable) and stmt.task_name in tasks):
+            return False
+        func = outs[stmt.task_name]
+        stmt.arguments = [hoist(a, before) for a in stmt.arguments]
+        stmt.task_name = tasks[func.name]
+        if not is_void(func):
+            stmt.arguments.append(Identifier(f"{func.name}__vf_discard"))
+        return True
+
+    _hoist_in_statements(module, hoist, rewrite_call)
+    return module
+
+
+def _hoist_in_statements(
+    module: Module,
+    hoist: Callable[[Expression, list], Expression],
+    rewrite: Callable[[Any, list], bool] | None = None,
+) -> None:
+    """Run *hoist* on the expressions of every statement in *module*'s
+    processes, tasks and functions -- an assignment's right-hand side, an
+    ``if`` condition, a ``case`` expression, a task or system task call's
+    arguments -- in place; the statements it appends to its *before* list run
+    just before that statement (the two become a ``begin``/``end``). Loop
+    conditions are left alone (hoisting would evaluate them once). *rewrite*,
+    when given, handles a statement itself first (returning True)."""
+    from veriforge.model.statements import (  # noqa: PLC0415
+        CaseStatement,
+        IfStatement,
+        NonblockingAssign,
+        SeqBlock,
+        Statement,
+        SystemTaskCall,
+        TaskEnable,
+    )
+
+    def fix(stmt: Statement | None) -> Statement | None:
+        if stmt is None:
+            return None
+        # Nested statements first.
+        for slot in ("body", "then_body", "else_body"):
+            if hasattr(stmt, slot) and isinstance(getattr(stmt, slot), Statement):
+                setattr(stmt, slot, fix(getattr(stmt, slot)))
+        if isinstance(stmt, SeqBlock) or type(stmt).__name__ == "ParBlock":
+            stmt.statements = [fix(s) for s in stmt.statements]  # type: ignore[attr-defined]
+        if isinstance(stmt, CaseStatement):
+            for item in stmt.items:
+                item.body = fix(item.body)
+        before: list[Statement] = []
+        if rewrite is not None and rewrite(stmt, before):
+            pass
+        elif isinstance(stmt, (BlockingAssign, NonblockingAssign)):
+            stmt.rhs = hoist(stmt.rhs, before)
+        elif isinstance(stmt, IfStatement):
+            stmt.condition = hoist(stmt.condition, before)
+        elif isinstance(stmt, CaseStatement):
+            stmt.expression = hoist(stmt.expression, before)
+        elif isinstance(stmt, (TaskEnable, SystemTaskCall)):
+            stmt.arguments = [hoist(a, before) for a in stmt.arguments]
+        if not before:
+            return stmt
+        return SeqBlock(statements=[*before, stmt], loc=stmt.loc)
+
+    for always in module.always_blocks:
+        always.body = fix(always.body)  # type: ignore[assignment]
+    for initial in module.initial_blocks:
+        initial.body = fix(initial.body)  # type: ignore[assignment]
+    for task in module.tasks:
+        task.body = fix(task.body)
+    for function in module.functions:
+        function.body = fix(function.body)
+
+
+# cm:7f2c64
+def lower_random(module: Module) -> Module:
+    """Rewrite every ``$random``/``$random(seed)`` in a procedural statement as
+    two pure calls the engines share (``semantics.ieee_random``), in place:
+    before the statement, ``__vf_random<k> = $__vf_random(seed);`` and, for a
+    seed variable, ``seed = $__vf_random_seed(seed);``; the call reads
+    ``__vf_random<k>``. Without an argument the seed is ``__vf_random_seed``
+    (one per design, starting at 0, as in Icarus), so ``$random(s)`` now
+    updates ``s`` and every engine gives Icarus' sequence. An x seed bit
+    reads 0 (as in Icarus). Calls are hoisted left to right, the order Icarus
+    evaluates a ``$display``'s arguments in.
+    """
+    from veriforge.model.statements import Statement  # noqa: PLC0415
+    from veriforge.model.variables import Variable, VariableKind  # noqa: PLC0415
+
+    if not any(isinstance(n, FunctionCall) and n.name.lower() == "$random" for n in module.walk()):
+        return module
+    int32 = Range(Literal(31, width=32), Literal(0, width=32))
+    global_seed = "__vf_random_seed"
+    if not any(v.name == global_seed for v in module.variables):
+        module.variables.append(
+            Variable(
+                global_seed,
+                kind=VariableKind.INTEGER,
+                width=int32,
+                signed=True,
+                initial_value=Literal(0, width=32),
+            )
+        )
+    counter = [sum(1 for v in module.variables if v.name.startswith("__vf_random") and v.name != global_seed)]
+
+    def hoist(expr: Expression, before: list[Statement]) -> Expression:
+        def lower(node: Expression) -> Expression | None:
+            if not isinstance(node, FunctionCall) or node.name.lower() != "$random":
+                return None
+            seed = node.arguments[0] if node.arguments else Identifier(global_seed)
+            counter[0] += 1
+            tmp = f"__vf_random{counter[0]}"
+            module.variables.append(Variable(tmp, kind=VariableKind.INTEGER, width=int32, signed=True))
+            before.append(
+                BlockingAssign(Identifier(tmp), FunctionCall("$__vf_random", [copy.deepcopy(seed)]), loc=node.loc)
+            )
+            if isinstance(seed, (Identifier, BitSelect, RangeSelect, PartSelect)):
+                before.append(
+                    BlockingAssign(
+                        copy.deepcopy(seed), FunctionCall("$__vf_random_seed", [copy.deepcopy(seed)]), loc=node.loc
+                    )
+                )
+            return Identifier(tmp, loc=node.loc)
+
+        holder = _Holder(expr)
+        _rewrite(holder, lower, set())
+        return holder.value
+
+    _hoist_in_statements(module, hoist)
+    return module
+
+
+# cm:3c8a1f
+def lower_array_slices(module: Module) -> Module:
+    """Expand an assignment between slices of unpacked arrays (``b[5:3] =
+    a[2:0];``, ``b[5:3] = a;`` of a 3-element ``a``), or of an assignment
+    pattern to an unpacked array or slice (``m = '{8'h11, 8'h22, 8'h33};``,
+    ``'{1: x, default: y}``), into one assignment per element, left index to
+    left index (IEEE 1800 7.6, 10.9.1), in place -- procedural and continuous.
+    Bounds must be constant, and only an array's first unpacked dimension is
+    expanded (an element that is itself an unpacked array is left alone).
+
+    Every engine read a slice as a bit range of the array (reference and
+    compiled copied one element, vm none; sv-tests 7.4.3), filled a
+    descending array (`[2:0]`) from the wrong end, set only element 0 of a
+    1-bit array, and (reference, compiled) of a `default:` pattern.
+    """
+    from veriforge.model.assignments import ContinuousAssign  # noqa: PLC0415
+    from veriforge.model.statements import NonblockingAssign, SeqBlock, Statement  # noqa: PLC0415
+
+    from .elaborate import _build_param_env  # noqa: PLC0415
+
+    env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
+    decls = _declarations(module, env)
+    arrays = {name: decl[0][0] for name, decl in decls.items() if decl[1] >= 1}
+    if not arrays:
+        return module
+
+    def indices(expr: Expression) -> tuple[str, list[int]] | None:
+        """(array, element indices left to right) of a slice or whole array."""
+        if isinstance(expr, Identifier) and not expr.hierarchy and expr.name in arrays:
+            left, right = arrays[expr.name]
+        elif (
+            isinstance(expr, RangeSelect)
+            and isinstance(expr.target, Identifier)
+            and not expr.target.hierarchy
+            and expr.target.name in arrays
+        ):
+            left_v, right_v = const_int(expr.msb, env), const_int(expr.lsb, env)
+            if left_v is None or right_v is None:
+                return None
+            left, right = left_v, right_v
+        else:
+            return None
+        name = expr.name if isinstance(expr, Identifier) else expr.target.name  # type: ignore[attr-defined]
+        step = 1 if right >= left else -1
+        return name, list(range(left, right + step, step))
+
+    def element(name: str, index: int) -> Expression:
+        return BitSelect(Identifier(name), Literal(index, width=32))
+
+    def pattern_items(pattern: AssignmentPattern, idx: list[int]) -> list[Expression] | None:
+        if pattern.positional:
+            if pattern.named_pairs or pattern.default_value is not None or len(pattern.positional) != len(idx):
+                return None
+            return list(pattern.positional)
+        keyed: dict[int, Expression] = {}
+        for key, value in pattern.named_pairs or ():
+            if not key.isdigit():
+                return None  # (a struct member name)
+            keyed[int(key)] = value
+        if any(i not in keyed for i in idx) and pattern.default_value is None:
+            return None
+        return [keyed.get(i, pattern.default_value) for i in idx]  # type: ignore[misc]
+
+    def expand(lhs: Expression, rhs: Expression) -> list[tuple[Expression, Expression]] | None:
+        if isinstance(rhs, AssignmentPattern):
+            dst = indices(lhs)
+            if dst is None or decls[dst[0]][1] != 1:
+                return None
+            items = pattern_items(rhs, dst[1])
+            if items is None:
+                return None
+            return [(element(dst[0], d), copy.deepcopy(v)) for d, v in zip(dst[1], items, strict=True)]
+        if not isinstance(lhs, RangeSelect) and not isinstance(rhs, RangeSelect):
+            return None  # (a whole-array copy: already handled by the engines)
+        dst, src = indices(lhs), indices(rhs)
+        if dst is None or src is None or len(dst[1]) != len(src[1]):
+            return None
+        return [(element(dst[0], d), element(src[0], s)) for d, s in zip(dst[1], src[1], strict=True)]
+
+    def fix(stmt: Statement | None) -> Statement | None:
+        if stmt is None:
+            return None
+        for slot in ("body", "then_body", "else_body"):
+            if hasattr(stmt, slot) and isinstance(getattr(stmt, slot), Statement):
+                setattr(stmt, slot, fix(getattr(stmt, slot)))
+        if isinstance(stmt, SeqBlock) or type(stmt).__name__ == "ParBlock":
+            stmt.statements = [fix(s) for s in stmt.statements]  # type: ignore[attr-defined]
+        for item in getattr(stmt, "items", None) or ():
+            item.body = fix(item.body)
+        if isinstance(stmt, (BlockingAssign, NonblockingAssign)):
+            pairs = expand(stmt.lhs, stmt.rhs)
+            if pairs is not None:
+                kind = type(stmt)
+                return SeqBlock(statements=[kind(lhs=d, rhs=s, loc=stmt.loc) for d, s in pairs], loc=stmt.loc)
+        return stmt
+
+    for always in module.always_blocks:
+        always.body = fix(always.body)  # type: ignore[assignment]
+    for initial in module.initial_blocks:
+        initial.body = fix(initial.body)  # type: ignore[assignment]
+    for task in module.tasks:
+        task.body = fix(task.body)
+    for function in module.functions:
+        function.body = fix(function.body)
+    # A declaration's initializer (`logic [7:0] m [3] = '{...};`, which did not
+    # parse): its element assignments, in an initial block that runs first.
+    inits: list[Statement] = []
+    for var in module.variables:
+        if isinstance(var.initial_value, AssignmentPattern) and var.name in arrays:
+            pairs = expand(Identifier(var.name), var.initial_value)
+            if pairs is not None:
+                inits.extend(BlockingAssign(lhs=d, rhs=v, loc=var.loc) for d, v in pairs)
+                var.initial_value = None
+    if inits:
+        from veriforge.model.behavioral import InitialBlock  # noqa: PLC0415
+
+        module.initial_blocks.insert(0, InitialBlock(SeqBlock(statements=inits)))
+    assigns: list[ContinuousAssign] = []
+    for assign in module.continuous_assigns:
+        pairs = expand(assign.lhs, assign.rhs)
+        if pairs is None:
+            assigns.append(assign)
+            continue
+        for d, s in pairs:
+            each = copy.copy(assign)
+            each.lhs, each.rhs = d, s
+            assigns.append(each)
+    module.continuous_assigns = assigns
+    return module

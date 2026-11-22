@@ -117,6 +117,7 @@ DEF OP_STREAM_REVERSE = 85
 DEF OP_CLEAR_MASK     = 86
 DEF OP_FUNC_REAL1     = 87
 DEF OP_FUNC_REAL2     = 88
+DEF OP_FUNC_IEEE_RANDOM = 89
 
 include "../compiled/templates/real_ops.pxi"
 
@@ -424,6 +425,36 @@ cdef inline unsigned long long _upow64(unsigned long long base, unsigned long lo
         base = base * base
         exp >>= 1
     return result
+
+cdef inline long long _ieee_random(long long seed, int next_seed) noexcept nogil:
+    """`semantics.ieee_random` (IEEE 1364-2005 17.9.2 rtl_dist_uniform with
+    32-bit longs): the value, or with *next_seed* the next seed, as 32 bits."""
+    cdef unsigned long long low32 = <unsigned long long>4294967295
+    cdef unsigned int us = <unsigned int>(<unsigned long long>seed & low32)
+    cdef unsigned int mult = 69069
+    cdef unsigned int one = 1
+    cdef unsigned int exp_bits = 1065353216  # 0x3F800000
+    cdef float f
+    cdef double c, r
+    cdef long long i
+    if us == 0:
+        us = 259341593
+    us = us * mult + one
+    if next_seed:
+        return <long long>us
+    us = (us >> 9) | exp_bits
+    memcpy(&f, &us, 4)
+    c = <double>f
+    c = c + c * 0.00000011920928955078125
+    r = (2147483647.0 - (-2147483648.0)) * (c - 1.0) + (-2147483648.0)
+    r = (r + 2147483648.0) / 4294967295.0
+    r = r * 4294967296.0 - 2147483648.0
+    if r >= 0:
+        i = <long long>r
+    else:
+        i = <long long>(r - 1)
+    return <long long>(<unsigned long long>i & low32)
+
 
 cdef inline long long mask_for_width(int w) noexcept nogil:
     if w >= 64:
@@ -3765,6 +3796,13 @@ cdef int _execute_core(
                 stack[sp - 1].val = result_val
                 stack[sp - 1].mask = 0
                 stack[sp - 1].width = 32
+            continue
+
+        if op == OP_FUNC_IEEE_RANDOM:
+            # (an x seed bit reads 0, as in Icarus; the seed is 32 bits: RESIZE before)
+            stack[sp - 1].val = _ieee_random(stack[sp - 1].val & ~stack[sp - 1].mask, arg1)
+            stack[sp - 1].mask = 0
+            stack[sp - 1].width = 32
             continue
 
         if op == OP_CMP_CASEX:

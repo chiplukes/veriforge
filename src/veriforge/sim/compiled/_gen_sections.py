@@ -291,9 +291,12 @@ def _emit_no_dirty_check_lines(sorted_sids: list[int], indent: str) -> list[str]
     large RTL module). A flat statement sequence has no such limit: each
     ``if`` is its own shallow statement, however many there are.
     """
+    # (A pending NBA -- staged by a combinational process this iteration,
+    # `always @* q <= d;` -- is committed at the next iteration's start: it
+    # keeps the loop going, or it was committed one settle late.)
     if not sorted_sids:
-        return [f"{indent}break"]
-    lines = [f"{indent}_any_interesting_dirty = 0"]
+        return [f"{indent}if not c.nba_pending:", f"{indent}    break"]
+    lines = [f"{indent}_any_interesting_dirty = c.nba_pending"]
     for s in sorted_sids:
         lines.append(f"{indent}if c.dbit[{s}]:")
         lines.append(f"{indent}    _any_interesting_dirty = 1")
@@ -2278,9 +2281,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _delta_nba_apply_lines(self) -> list[str]:
         """Commit staged NBAs. Iterates only the staged sids (``nba_list``),
         not all N_SIGS; per-sid commits are independent, so the order they're
-        visited in can't affect the result."""
-        if not self._seq_processes:
-            return []
+        visited in can't affect the result.
+
+        Emitted for every design: a nonblocking assignment outside a clocked
+        block (`always @* q <= d;`, `initial q <= 0;`) was never committed in
+        a design without one, so it read x forever (vm and reference commit it)."""
         lines = [
             "        if c.nba_pending:",
             "            for _k in range(c.nba_count):",
@@ -2357,16 +2362,11 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
     def _delta_value_convergence_lines(self) -> list[str]:
         # Value-level convergence check (see the snapshot above): if this
         # iteration changed no signal value, we are at a fixpoint — stop
-        # even though dirty flags may survive.  When the NBA-apply block is
-        # emitted (seq processes exist), skip the check while an NBA is
-        # pending — its application next iteration may still change state.
-        # Without seq processes there is no apply block, so nba_pending can
-        # never clear and must not gate the check.
+        # even though dirty flags may survive.  Skip the check while an NBA
+        # is pending — its application next iteration may still change state
+        # (the NBA-apply block is emitted for every design).
         lines = [""]
-        if self._seq_processes:
-            lines.append("        if it >= DELTA_CONV_CHECK_START and not c.nba_pending:")
-        else:
-            lines.append("        if it >= DELTA_CONV_CHECK_START:")
+        lines.append("        if it >= DELTA_CONV_CHECK_START and not c.nba_pending:")
         # Memory-marker signals are internal bookkeeping — they flip on every
         # memory write within an iteration, even when the same combo process
         # both clears and rewrites the memory (net data unchanged).  Force them
@@ -2437,7 +2437,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            c.boot = 0",
             "            changed = 1",
             "",
-            "        if not changed:",
+            "        if not changed and not c.nba_pending:",
             "            break",
             "",
             *self._delta_conv_snapshot_lines(),
@@ -2670,7 +2670,7 @@ class _GenSectionsMixin(_GenWideSectionsMixin):
             "            _bootstrap = 1",
             "            c.boot = 0",
             "            changed = 1",
-            "        if not changed:",
+            "        if not changed and not c.nba_pending:",
             "            break",
             "",
             *self._delta_conv_snapshot_lines(),

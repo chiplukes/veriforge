@@ -130,6 +130,7 @@ class Trace:
     error: str | None = None  # the run stopped with this exception
     setup_seconds: float = 0.0  # Simulator construction: elaboration, and compiled's build
     run_seconds: float = 0.0  # stimulus and sampling
+    display: list[str] = field(default_factory=list)  # $display/$write output (record_testbench_trace)
 
     def record(self, name: str, time: int, bits: str) -> None:
         ch = self.changes.setdefault(name, [])
@@ -240,6 +241,55 @@ def record_trace(  # noqa: PLR0912
             sample(3 * cycle + 2, f"cycle {cycle} negedge")
     except Exception as exc:  # noqa: BLE001 -- the failure is part of the result
         trace.error = f"{type(exc).__name__}: {exc}"
+    trace.run_seconds = time.perf_counter() - t_run
+    return trace
+
+
+# cm:6a2e8f
+def record_testbench_trace(
+    design: Design,
+    top: str,
+    engine: str,
+    *,
+    max_time: int = 100_000,
+    max_steps: int = 100_000,
+    signals: list[str] | None = None,
+) -> Trace:
+    """Run a closed testbench (a top with no inputs: ``initial`` blocks with
+    delays, clock generators) on *engine* through time, one time step at a
+    time, and record every signal after each step (sample time = simulation
+    time) and the ``$display`` output.
+
+    Stops at ``$finish``, when no events remain, past *max_time*, or after
+    *max_steps* steps. An exception during the run is recorded in
+    ``Trace.error``; elaboration errors propagate, as in ``record_trace``.
+    """
+    from .testbench import Simulator
+
+    module = design.get_module(top)
+    if module is None:
+        raise ValueError(f"no module {top!r} in the design")
+    t_setup = time.perf_counter()
+    sim = Simulator(module, engine=engine, design=design)
+    trace = Trace(source=engine, setup_seconds=time.perf_counter() - t_setup)
+    t_run = time.perf_counter()
+    all_names = sim.signals()
+    names = _traced_names(all_names) if signals is None else [n for n in signals if n in set(all_names)]
+    try:
+        # (Time 0 first: `run_step` alone never starts the `initial` blocks.)
+        sim.run(max_time=0)
+        for n in names:
+            trace.record(n, 0, value_bits(sim.read(n)))
+        for _ in range(max_steps):
+            more = sim.run_step(max_time=max_time)
+            now = sim.time
+            for n in names:
+                trace.record(n, now, value_bits(sim.read(n)))
+            if not more or now >= max_time:
+                break
+    except Exception as exc:  # noqa: BLE001 -- the failure is part of the result
+        trace.error = f"{type(exc).__name__}: {exc}"
+    trace.display = list(sim.display_output)
     trace.run_seconds = time.perf_counter() - t_run
     return trace
 

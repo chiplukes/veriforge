@@ -111,6 +111,35 @@ cdef inline int _xor_reduce(long long v, int w) noexcept nogil:
         result ^= <int>((v >> i) & 1)
     return result
 
+cdef inline long long _vf_ieee_random(long long seed, int next_seed) noexcept nogil:
+    # `semantics.ieee_random` (IEEE 1364-2005 17.9.2 rtl_dist_uniform with
+    # 32-bit longs): the value, or with next_seed the next seed, as 32 bits.
+    cdef unsigned long long low32 = <unsigned long long>4294967295
+    cdef unsigned int us = <unsigned int>(<unsigned long long>seed & low32)
+    cdef unsigned int mult = 69069
+    cdef unsigned int one = 1
+    cdef unsigned int exp_bits = 1065353216
+    cdef float f
+    cdef double c, r
+    cdef long long i
+    if us == 0:
+        us = 259341593
+    us = us * mult + one
+    if next_seed:
+        return <long long>us
+    us = (us >> 9) | exp_bits
+    memcpy(&f, &us, 4)
+    c = <double>f
+    c = c + c * 0.00000011920928955078125
+    r = (2147483647.0 - (-2147483648.0)) * (c - 1.0) + (-2147483648.0)
+    r = (r + 2147483648.0) / 4294967295.0
+    r = r * 4294967296.0 - 2147483648.0
+    if r >= 0:
+        i = <long long>r
+    else:
+        i = <long long>(r - 1)
+    return <long long>(<unsigned long long>i & low32)
+
 cdef inline int _clog2(long long v) noexcept nogil:
     cdef int r = 0
     if v <= 1:

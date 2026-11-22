@@ -25,6 +25,7 @@ from .elaborate import (
     expand_array_concat_operands,
     flatten_module,
     materialize_process_locals,
+    declare_implicit_nets,
     resolve_sv_imports,
     _resolve_typedef_widths,
 )
@@ -34,11 +35,14 @@ from .scheduler import Scheduler
 from .display_format import lower_display_args
 from .reals import from_bits, lower_reals, to_bits
 from .sv_functions import (
+    lower_array_slices,
     is_two_state,
     lower_event_expressions,
+    lower_function_outputs,
     lower_streaming_targets,
     lower_named_arguments,
     lower_parameter_arrays,
+    lower_random,
     lower_struct_array_fields,
     lower_struct_patterns,
     lower_struct_param_fields,
@@ -232,18 +236,26 @@ class Simulator:  # cm:a5c8f4
         self._pre_step_callbacks: list[Callable[[], None]] = []
         self._run_cycles_clock_ready = False
 
-        # Package-qualified values (`p::W`) in every module, before flattening
-        # sizes the children's ports from them -- on a copy of the design, so
-        # the caller's model keeps its `p::W` (resolving rewrites it to `W`).
-        if design is not None and _has_package_qualified_values(design):
+        # Every pass below works on a copy: they rewrite modules in place, so a
+        # second Simulator on the same design (another engine, as `diverge`
+        # runs them) saw the first one's lowering -- `lower_reals` had already
+        # turned its `real` variables into vectors, so `read_real` raised.
+        # (About 0.5 s for ibex, which takes a minute to parse.)
+        if design is not None:
             design = copy.deepcopy(design)
-            module = design.get_module(module.name) or module
+            module = design.get_module(module.name) or copy.deepcopy(module)
+        else:
+            module = copy.deepcopy(module)
+        # Package-qualified values (`p::W`) in every module, before flattening
+        # sizes the children's ports from them (resolving rewrites `p::W` to `W`).
+        if design is not None and _has_package_qualified_values(design):
             for other in design.modules:
                 resolve_sv_imports(other, design)
         # `m[k].f` with a variable index, as an element part-select in every
         # module before flattening renames the index (sv_functions).
         for each in design.modules if design is not None else [module]:
             resolve_sv_imports(each, design)
+            declare_implicit_nets(each)  # (after resolve_sv_imports: package names are declared)
             lower_parameter_arrays(each)  # (before lower_struct_array_fields: `A[i].f` of a parameter)
             lower_struct_array_fields(each)
         # Flatten hierarchy if instances or generate blocks are present
@@ -261,6 +273,9 @@ class Simulator:  # cm:a5c8f4
         resolve_sv_imports(module, design)
         _resolve_typedef_widths(module)
         lower_named_arguments(module)  # (first: every later pass sees positional calls)
+        lower_function_outputs(module)  # (before materialize_task_locals: makes tasks)
+        lower_random(module)  # (after lower_function_outputs: hoists into its tasks too)
+        lower_array_slices(module)  # (before lower_memory_bases: declared indices)
         lower_struct_param_fields(module)
         lower_struct_array_fields(module)  # (before lower_packed_dimensions: makes element selects)
         lower_struct_patterns(module)  # (before lower_width_casts: makes casts)

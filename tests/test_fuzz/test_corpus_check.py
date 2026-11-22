@@ -247,3 +247,47 @@ def test_discover_units_splits_a_project_with_conflicting_definitions(cc, tmp_pa
     assert [u for u in units if cc._selected(u, ["proj"])] == ["corpus/proj/x/one", "corpus/proj/x/two"]
     assert [u for u in units if cc._selected(u, ["two"])] == ["corpus/proj/x/two"]
     assert [u for u in units if cc._selected(u, ["corpus/plain"])] == ["corpus/plain"]
+
+
+def test_discover_test_files_leaves_out_expected_failures(cc, tmp_path):
+    """A test-suite corpus: each file is its own unit; sv-tests' negative and
+    UVM tests and ivtest's non-`normal` entries are left out."""
+    sv = tmp_path / "tests"
+    _write(sv / "chapter-5/ok.sv", "/*\n:name: ok\n:tags: 5.6\n*/\nmodule top; endmodule\n")
+    _write(sv / "chapter-5/bad.sv", "/*\n:should_fail_because: syntax\n*/\nmodule top(; endmodule\n")
+    _write(sv / "uvm/u.sv", "/*\n:tags: uvm uvm-classes\n*/\nmodule top; endmodule\n")
+    assert list(cc.discover_test_files(sv)) == ["tests/chapter-5/ok"]
+
+    iv = tmp_path / "ivtest"
+    _write(iv / "regress-vlg.list", "a  normal  ivltests\nb  CE  ivltests\nc  normal,-g2012  ivltests # note\n")
+    _write(iv / "regress-sv.list", "b  normal,-g2012  ivltests\nd  NI  ivltests\n")
+    for name in "abcde":
+        _write(iv / f"ivltests/{name}.v", "module main; endmodule\n")
+    assert list(cc.discover_test_files(iv)) == ["ivtest/ivltests/a", "ivtest/ivltests/b", "ivtest/ivltests/c"]
+
+
+def test_closed_testbench_is_checked_through_time(cc, tmp_path):
+    """A top with no ports runs as a testbench (`record_testbench_trace`), and a
+    `$display` difference counts as a mismatch."""
+    design = parse_text(
+        'module tb; reg [3:0] c = 0; always #5 c = c + 1; initial #23 $display("c=%0d", c); endmodule\n'
+    )
+    pkl = tmp_path / "d.pkl"
+    pkl.write_bytes(pickle.dumps(design))
+    traces = {}
+    for engine in ("reference", "vm"):
+        job = {
+            "module": "tb",
+            "engine": engine,
+            "seed": 0,
+            "resets": {},
+            "pickle": str(pkl),
+            "cycles": 4,
+            "testbench_time": 100,
+            "trace_out": str(tmp_path / f"{engine}.pkl"),
+        }
+        assert cc.run_engine(job)["status"] == "ok"
+        traces[engine] = job["trace_out"]
+    assert cc.compare({"module": "tb", "pickle": str(pkl), "traces": traces}) == {"mismatches": {}}
+    assert cc._display_difference(["c=4"], ["c=5"]).startswith("$display line 1 differs")
+    assert cc._instantiated_names(parse_text("module a; endmodule\nmodule b; a u(); endmodule\n")) == {"a"}

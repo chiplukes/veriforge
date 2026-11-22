@@ -21,6 +21,15 @@ For every project (a corpus directory's first-level subdirectory, as in
 3. for a mismatch, locate the first divergence (the driver where the runs
    part) and print the ``diverge``/``reduce`` command lines that reproduce it.
 
+``--per-file DIR`` adds a test-suite corpus (sv-tests' ``tests/``, ivtest)
+whose files are independent tests: each file is its own unit, and the suite's
+expected failures are left out (``:should_fail_because:`` and ``uvm`` tags in
+sv-tests; anything but ``normal``/``CO`` in ivtest's ``regress-*.list``).
+
+A top module with no ports (a closed testbench: ``initial`` blocks, clock
+generators) runs through time instead, up to ``--testbench-time``, and its
+``$display`` output is compared too (``diverge.record_testbench_trace``).
+
 ``--param-variants N`` also runs N random overrides of each module's small
 integer parameters (1..64), since parameterization is where many
 elaboration bugs live.
@@ -29,7 +38,7 @@ Outcomes per module and variant: ``agree``, ``mismatch`` (an engine differs
 from reference), ``engine-error`` (an engine raised where reference did
 not), ``error`` (reference itself failed -- usually unsupported syntax or
 semantics), ``timeout``, ``memory`` (over ``--mem-limit-gb``), ``skipped``
-(no ports).
+(no ports and instantiated elsewhere, or ``--testbench-time 0``).
 
 Writes ``results.json`` (every outcome) and ``report.md`` to ``--output``
 (default ``corpus_out/``). See notes/plans/reliability_plan_2026-11.md, step 2c.
@@ -130,6 +139,41 @@ def discover_units(corpus_dirs: list[Path]) -> dict[str, list[tuple[str, list[st
                         continue
                     seen.add(data)
                     entries.append((str(p), [str(p.parent), *headers, *include_dirs]))
+    return out
+
+
+_SV_TESTS_SKIP_RE = re.compile(r"^:should_fail_because:|^:tags:.*\buvm\b", re.M)
+
+
+def _ivtest_expected(corpus: Path) -> set[tuple[str, str]] | None:
+    """``(dir, name)`` of ivtest tests that should compile and run (type
+    ``normal`` or ``CO`` in some ``regress-*.list``), or None without lists."""
+    lists = sorted(corpus.glob("regress-*.list"))
+    if not lists:
+        return None
+    keep: set[tuple[str, str]] = set()
+    for lst in lists:
+        for line in lst.read_text(encoding="utf-8", errors="replace").splitlines():
+            fields = line.split("#", 1)[0].split()
+            if len(fields) >= 3 and fields[1].split(",")[0] in ("normal", "CO"):  # noqa: PLR2004
+                keep.add((fields[2], fields[0]))
+    return keep
+
+
+def discover_test_files(corpus: Path) -> dict[str, list[tuple[str, list[str]]]]:
+    """``{unit: [(path, include_dirs)]}`` with one unit per source file of a
+    test-suite corpus, leaving out the suite's expected failures."""
+    expected = _ivtest_expected(corpus)
+    out: dict[str, list[tuple[str, list[str]]]] = {}
+    for p in sorted(corpus.rglob("*")):
+        rel = p.relative_to(corpus)
+        if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or SKIP_DIRS & set(rel.parts) or ".git" in rel.parts:
+            continue
+        if expected is not None and (rel.parent.as_posix(), p.stem) not in expected:
+            continue
+        if _SV_TESTS_SKIP_RE.search(p.read_text(encoding="utf-8", errors="replace")):
+            continue
+        out[f"{corpus.name}/{rel.with_suffix('').as_posix()}"] = [(str(p), [str(p.parent)])]
     return out
 
 
@@ -334,13 +378,16 @@ def _load_design(job: dict):
 def run_engine(job: dict) -> dict:
     """One engine on one module (one subprocess): record its trace to
     ``job["trace_out"]`` and report time and memory."""
-    from veriforge.sim.diverge import Stimulus, record_trace
+    from veriforge.sim.diverge import Stimulus, record_testbench_trace, record_trace
 
     design = _load_design(job)
     stim = Stimulus(cycles=job["cycles"], seed=job["seed"], resets={k: tuple(v) for k, v in job["resets"].items()})
     t0 = time.time()
     try:
-        tr = record_trace(design, job["module"], job["engine"], stim)
+        if job.get("testbench_time"):
+            tr = record_testbench_trace(design, job["module"], job["engine"], max_time=job["testbench_time"])
+        else:
+            tr = record_trace(design, job["module"], job["engine"], stim)
         error, setup, run = tr.error, tr.setup_seconds, tr.run_seconds
     except Exception as exc:  # noqa: BLE001 -- the failure is the result
         tr, error, setup, run = None, f"{type(exc).__name__}: {exc}", time.time() - t0, 0.0
@@ -373,6 +420,10 @@ def compare(job: dict) -> dict:
     mismatches = {}
     for engine in engines[1:]:
         diffs = first_divergences(ref, traces[engine])
+        display = _display_difference(ref.display, traces[engine].display)
+        if display is not None and not diffs:
+            mismatches[engine] = {"signals": 0, "first_time": None, "report": display}
+            continue
         if not diffs:
             continue
         try:
@@ -380,8 +431,27 @@ def compare(job: dict) -> dict:
         except Exception as exc:  # noqa: BLE001
             report = f"(locator failed: {type(exc).__name__}: {exc})"
         first = min(diffs.values(), key=lambda d: d.time)
+        if display is not None:
+            report = f"{display}\n{report}"
         mismatches[engine] = {"signals": len(diffs), "first_time": first.time, "report": report[:6000]}
     return {"mismatches": mismatches}
+
+
+def _display_difference(ref: list[str], other: list[str]) -> str | None:
+    """The first ``$display`` line where two runs differ, or None."""
+    if ref == other:
+        return None
+    for i, (a, b) in enumerate(zip(ref, other, strict=False)):
+        if a != b:
+            return f"$display line {i + 1} differs:\n  reference: {a!r}\n  this engine: {b!r}"
+    return f"$display output differs in length ({len(ref)} vs {len(other)} lines)"
+
+
+def _instantiated_names(design) -> set[str]:
+    """Names of modules some module of *design* instantiates."""
+    from veriforge.model.instances import Instance
+
+    return {n.module_name for m in design.modules for n in m.walk() if isinstance(n, Instance)}
 
 
 def group_outcome(engines: list[str], runs: dict[str, dict], mismatches: dict) -> tuple[str, dict, str | None]:
@@ -675,6 +745,12 @@ def build_report(results: list[dict], parse_failures: dict[str, dict[str, str]],
 def main() -> int:  # noqa: PLR0912, PLR0915
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--corpus", type=Path, action="append", help="corpus directory (repeatable; default examples/)")
+    ap.add_argument(
+        "--per-file",
+        type=Path,
+        action="append",
+        help="test-suite corpus whose files are independent tests (repeatable; sv-tests/tests, ivtest)",
+    )
     ap.add_argument("--project", action="append", help="only these projects (name or corpus/name; repeatable)")
     ap.add_argument("--module", action="append", help="only these modules (repeatable)")
     ap.add_argument(
@@ -684,6 +760,12 @@ def main() -> int:  # noqa: PLR0912, PLR0915
         help="engines; the first is the oracle",
     )
     ap.add_argument("--cycles", type=int, default=40, help="cycles of random stimulus (default 40)")
+    ap.add_argument(
+        "--testbench-time",
+        type=int,
+        default=100_000,
+        help="simulation time for a top with no ports (default 100000; 0 = skip them)",
+    )
     ap.add_argument("--seeds", type=int, default=1, help="stimulus seeds per module (default 1)")
     ap.add_argument("--param-variants", type=int, default=0, help="random parameter overrides per module (default 0)")
     ap.add_argument("--jobs", type=int, default=4, help="parallel module checks (default 4)")
@@ -711,8 +793,11 @@ def main() -> int:  # noqa: PLR0912, PLR0915
 
     if args.compile_cache:
         os.environ["VERIFORGE_COMPILE_CACHE"] = str(args.compile_cache.resolve())  # (inherited by every job)
-    corpus_dirs = args.corpus or [Path("examples")]
-    by_project = {u: e for u, e in discover_units(corpus_dirs).items() if _selected(u, args.project)}
+    corpus_dirs = args.corpus or ([] if args.per_file else [Path("examples")])
+    units = discover_units(corpus_dirs)
+    for suite in args.per_file or []:
+        units.update(discover_test_files(suite))
+    by_project = {u: e for u, e in units.items() if _selected(u, args.project)}
 
     args.output.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="vf_corpus_"))
@@ -732,11 +817,13 @@ def main() -> int:  # noqa: PLR0912, PLR0915
             pickle.dump(design, f, protocol=pickle.HIGHEST_PROTOCOL)
         rng = random.Random(f"{proj}")  # noqa: S311
         n_mod = 0
+        instantiated = _instantiated_names(design)
         for module in design.modules:
             if args.module and module.name not in args.module:
                 continue
             reason = None
-            if not module.ports:
+            testbench = not module.ports and module.name not in instantiated and args.testbench_time > 0
+            if not module.ports and not testbench:
                 reason = "no ports"
             elif structs := scalar_type_params_used_as_structs(module, design):
                 reason = f"struct fields of type-parameter signals that default to a scalar ({', '.join(structs[:4])})"
@@ -756,9 +843,11 @@ def main() -> int:  # noqa: PLR0912, PLR0915
                 continue
             n_mod += 1
             resets = {k: list(v) for k, v in detect_resets([p.name for p in module.input_ports()]).items()}
-            variants: list[dict | None] = [None, *param_variants(module, args.param_variants, rng)]
+            variants: list[dict | None] = [None]
+            if not testbench:
+                variants += param_variants(module, args.param_variants, rng)
             for params in variants:
-                for seed in range(args.seeds):
+                for seed in range(1 if testbench else args.seeds):
                     jobs.append(
                         {
                             "project": proj,
@@ -768,6 +857,7 @@ def main() -> int:  # noqa: PLR0912, PLR0915
                             "resets": resets,
                             "pickle": str(pkl),
                             "cycles": args.cycles,
+                            **({"testbench_time": args.testbench_time} if testbench else {}),
                         }
                     )
         print(

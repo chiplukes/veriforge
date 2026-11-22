@@ -624,6 +624,9 @@ INTEGER_SYSTEM_FUNCTIONS = frozenset(
         "$unpacked_dimensions",
         "$countones",
         "$countbits",
+        "$random",
+        "$__vf_random",
+        "$__vf_random_seed",
     }
 )
 """System functions that return `integer` or `int`, a signed 32-bit type (IEEE 1800
@@ -659,3 +662,33 @@ def has_impure_call(node: object) -> bool:
     elif isinstance(node, (list, tuple)):
         return any(has_impure_call(item) for item in node)
     return False
+
+
+# cm:8b3e57
+def ieee_random(seed: int) -> tuple[int, int]:
+    """``(value, next seed)`` of ``$random(seed)``: IEEE 1364-2005 17.9.2's
+    ``rtl_dist_uniform(seed, LONG_MIN, LONG_MAX)`` with 32-bit ``long``, which
+    gives Icarus' sequence (``$random`` from seed 0: 303379748, -1064739199,
+    ...). Both are signed 32-bit; *seed* is read modulo 2**32.
+
+    Every engine read ``$random`` from Python's (or C's) own generator, so each
+    gave a different sequence, a new one on every run.
+    """
+    import struct  # noqa: PLC0415
+
+    def s32(x: int) -> int:
+        x &= 0xFFFFFFFF
+        return x - (1 << 32) if x >> 31 else x
+
+    seed = s32(seed)
+    if seed == 0:  # (`uniform`'s own fix-up)
+        seed = 259341593
+    seed = s32(69069 * seed + 1)
+    c = struct.unpack("<f", struct.pack("<I", ((seed & 0xFFFFFFFF) >> 9) | 0x3F800000))[0]
+    c = c + c * 0.00000011920928955078125
+    lo, hi = -2147483648.0, 2147483647.0
+    r = (hi - lo) * (c - 1.0) + lo
+    r = (r + 2147483648.0) / 4294967295.0
+    r = r * 4294967296.0 - 2147483648.0
+    value = int(r) if r >= 0 else int(r - 1)
+    return s32(value), seed

@@ -1990,6 +1990,12 @@ class Compiler:  # cm:8c1e4a
             program.append(instr(Op.FUNC_RANDOM))
             return
 
+        if name in ("$__vf_random", "$__vf_random_seed") and call.arguments:  # (sv_functions.lower_random)
+            self._compile_expr(call.arguments[0], program, 32)
+            program.append(instr(Op.RESIZE, 32))
+            program.append(instr(Op.FUNC_IEEE_RANDOM, 1 if name == "$__vf_random_seed" else 0))
+            return
+
         if name == "$__vf_real" and len(call.arguments) == 3:  # (sim/reals.py)
             from ..reals import ITOR_S, ITOR_U, RTOI, TRUNC  # noqa: PLC0415
 

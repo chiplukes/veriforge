@@ -900,6 +900,16 @@ class CompiledScheduler(EventQueueMixin, CoroutineMixin):  # cm:f8e1c2
             elif self._execute_initial_simple(block):
                 return True
 
+        # The NBA region after them: a timing-free block's nonblocking
+        # assignment (`initial q <= 0;`) stayed in the reference executor's
+        # queue and was never applied (a timed block's is, on each resume).
+        if self._ref_executor.nba_queue:
+            self._sync_ref_ctx()
+            self._sync_mem_to_ref()
+            self._ref_executor.apply_nba(self._ref_ctx)
+            self._sync_from_ref_ctx()
+            self._sync_mem_from_ref()
+
         # Wire VCD callback if $dumpvars was executed in an initial block
         self._wire_vcd_from_ref()
 

@@ -59,8 +59,22 @@ class VerilogParser:
 
     def reconstruct(self, tree: Any = None) -> str:
         """Reconstruct Verilog source text from a parse tree."""
-        new_verilog = Reconstructor(self.parser).reconstruct(tree)
+        new_verilog = Reconstructor(self.parser, term_subs=_FILTERED_TERMINAL_TEXT).reconstruct(tree)
         return new_verilog
+
+
+# Text for the grammar's filtered-out regex terminals, which the reconstructor
+# can't regenerate ("Reconstructing regexps not supported"). It can't tell
+# whether an optional one was there either, so it emits this text wherever
+# one may be: a space (an end label, `timeunit` declarations and a default
+# `unsigned` are dropped; the space keeps `end endmodule` apart), and
+# `logic` after a net type (`wire logic` is a 4-state `wire` either way).
+_FILTERED_TERMINAL_TEXT = {
+    "_END_LABEL": lambda _sym: " ",
+    "_TIMEUNITS": lambda _sym: " ",
+    "_KW_UNSIGNED": lambda _sym: " ",
+    "_KW_LOGIC": lambda _sym: "logic",
+}
 
 
 verilog_parser = VerilogParser
