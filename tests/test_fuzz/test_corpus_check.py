@@ -213,3 +213,37 @@ endmodule
     design = parse_text(src)
     assert cc.scalar_type_params_used_as_structs(design.get_module("parent"), design) == ["u.resp_t"]
     assert cc.scalar_type_params_used_as_structs(design.get_module("parent")) == []  # (no design: own uses only)
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_discover_units_splits_a_project_with_conflicting_definitions(cc, tmp_path):
+    """pulp holds six different `axi_pkg.sv` copies; merged into one design the
+    first won, so the xbar benches got one without their types. A conflicting
+    project splits into units (a directory with an `rtl*` subdirectory), each
+    with its own copy of a file even when another unit's is identical."""
+    corpus = tmp_path / "corpus"
+    pkg_a = "package p;\n  localparam int A = 1;\nendpackage\n"
+    pkg_b = "package p;\n  localparam int A = 1;\n  localparam int B = 2;\nendpackage\n"
+    shared = "module s(input a, output y);\n  assign y = a;\nendmodule\n"
+    _write(corpus / "proj/x/one/rtl/p.sv", pkg_a)
+    _write(corpus / "proj/x/one/rtl/s.sv", shared)
+    _write(corpus / "proj/x/one/tb/tb.sv", "module tb_one; endmodule\n")
+    _write(corpus / "proj/x/two/rtl_flat/p.sv", pkg_b)
+    _write(corpus / "proj/x/two/rtl_flat/s.sv", shared)
+    _write(corpus / "plain/a.v", "module a(input i, output o); assign o = i; endmodule\n")
+    _write(corpus / "plain/sub/rtl/b.v", "module b(input i, output o); assign o = i; endmodule\n")
+
+    units = cc.discover_units([corpus])
+    files = {u: sorted(Path(p).relative_to(corpus).as_posix() for p, _ in e) for u, e in units.items()}
+    assert files == {
+        "corpus/plain": ["plain/a.v", "plain/sub/rtl/b.v"],  # (no conflict: one unit)
+        "corpus/proj/x/one": ["proj/x/one/rtl/p.sv", "proj/x/one/rtl/s.sv", "proj/x/one/tb/tb.sv"],
+        "corpus/proj/x/two": ["proj/x/two/rtl_flat/p.sv", "proj/x/two/rtl_flat/s.sv"],
+    }
+    assert [u for u in units if cc._selected(u, ["proj"])] == ["corpus/proj/x/one", "corpus/proj/x/two"]
+    assert [u for u in units if cc._selected(u, ["two"])] == ["corpus/proj/x/two"]
+    assert [u for u in units if cc._selected(u, ["corpus/plain"])] == ["corpus/plain"]

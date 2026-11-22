@@ -10,7 +10,10 @@ For every project (a corpus directory's first-level subdirectory, as in
 ``tools/construct_census.py``):
 
 1. parse each source once (preprocessed, with the project's include
-   directories) into one design -- the first definition of a module wins;
+   directories) into one design -- the first definition of a module wins.
+   A project whose files define one name two different ways (pulp's six
+   ``axi_pkg.sv`` copies) is split into units, one per directory with an
+   ``rtl*`` subdirectory, each with its own design (``discover_units``);
 2. for every module with ports, in its own subprocess (``--timeout``):
    elaborate it as the top, drive random stimulus (clocks and resets
    detected by name) on every engine with ``veriforge.sim.diverge``, and
@@ -50,12 +53,93 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from construct_census import discover  # noqa: E402
+from construct_census import HEADER_SUFFIXES, SKIP_DIRS, SOURCE_SUFFIXES  # noqa: E402
 
 _RESET_RE = re.compile(
     r"(^|_)(rst|reset|areset|srst|arst)(_?n|_ni|_b|_l)?(_i|_in)?$|^(rstn|resetn|aresetn|rst_ni)$", re.I
 )
 _ACTIVE_LOW_RE = re.compile(r"(n|_n|_ni|_b|_l|_n_i|n_i)$", re.I)
+
+
+# ── Source discovery ─────────────────────────────────────────────────
+
+_DEFINITION_RE = re.compile(r"^\s*(?:module|macromodule|package|interface)\s+(?:automatic\s+|static\s+)?(\w+)", re.M)
+
+
+def _unit_root(path: Path, project_dir: Path) -> Path:
+    """The nearest directory (from *path* up to *project_dir*) with an ``rtl*``
+    subdirectory, else *project_dir*."""
+    for parent in path.parents:
+        if parent == project_dir or project_dir not in parent.parents:
+            break
+        if any(child.is_dir() and child.name.startswith("rtl") for child in parent.iterdir()):
+            return parent
+    return project_dir
+
+
+def _conflicting_names(files: list[Path]) -> set[str]:
+    """Module/package/interface names that *files* define in two different ways."""
+    texts: dict[str, set[str]] = defaultdict(set)
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for name in _DEFINITION_RE.findall(text):
+            texts[name].add(text)
+    return {name for name, variants in texts.items() if len(variants) > 1}
+
+
+# cm:3fa9c1
+def discover_units(corpus_dirs: list[Path]) -> dict[str, list[tuple[str, list[str]]]]:
+    """``{unit: [(path, include_dirs), ...]}`` for every corpus project
+    (``corpus/project``, as in ``tools/construct_census.py``).
+
+    A project whose units disagree on a definition is split into units
+    (``corpus/project/sub/dir``): merged into one design, the first copy of a
+    name won, so pulp's xbar benches got an ``axi_pkg`` without the types
+    they use. An identical file is listed once per unit (the census dedups
+    it across the corpus, which would drop a unit's own copy).
+    """
+    out: dict[str, list[tuple[str, list[str]]]] = {}
+    for root in corpus_dirs:
+        for project_dir in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in SKIP_DIRS):
+            files = [
+                p
+                for p in sorted(project_dir.rglob("*"))
+                if p.is_file() and not (SKIP_DIRS & set(p.relative_to(project_dir).parts))
+            ]
+            sources = [p for p in files if p.suffix in SOURCE_SUFFIXES]
+            if not sources:
+                continue
+            include_dirs = sorted({str(p) for p in project_dir.rglob("include") if p.is_dir()})
+            units: dict[Path, list[Path]] = defaultdict(list)
+            if _conflicting_names(sources):
+                for p in sources:
+                    units[_unit_root(p, project_dir)].append(p)
+            if len(units) < 2:  # noqa: PLR2004
+                units = {project_dir: sources}
+            for unit_dir, unit_files in sorted(units.items()):
+                unit_root = unit_dir if len(units) > 1 else project_dir
+                headers = sorted(
+                    {str(p.parent) for p in files if p.suffix in HEADER_SUFFIXES and unit_root in p.parents}
+                )
+                name = f"{root.name}/{unit_dir.relative_to(root).as_posix()}"
+                seen: set[bytes] = set()
+                entries = out.setdefault(name, [])
+                for p in unit_files:
+                    data = p.read_bytes()
+                    if data in seen:
+                        continue
+                    seen.add(data)
+                    entries.append((str(p), [str(p.parent), *headers, *include_dirs]))
+    return out
+
+
+def _selected(unit: str, wanted: list[str] | None) -> bool:
+    """``--project`` matches a unit by its name, its last component, or a
+    project it belongs to (``pulp`` selects every pulp unit)."""
+    if not wanted:
+        return True
+    parts = unit.split("/")
+    return any(w == unit or w == parts[-1] or unit.startswith(w.rstrip("/") + "/") or w in parts[1:2] for w in wanted)
 
 
 # ── Stimulus detection ───────────────────────────────────────────────
@@ -628,12 +712,7 @@ def main() -> int:  # noqa: PLR0912, PLR0915
     if args.compile_cache:
         os.environ["VERIFORGE_COMPILE_CACHE"] = str(args.compile_cache.resolve())  # (inherited by every job)
     corpus_dirs = args.corpus or [Path("examples")]
-    sources = discover(corpus_dirs)
-    by_project: dict[str, list[tuple[str, list[str]]]] = defaultdict(list)
-    for proj, path, inc in sources:
-        if args.project and proj not in args.project and proj.split("/")[-1] not in args.project:
-            continue
-        by_project[proj].append((path, inc))
+    by_project = {u: e for u, e in discover_units(corpus_dirs).items() if _selected(u, args.project)}
 
     args.output.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="vf_corpus_"))

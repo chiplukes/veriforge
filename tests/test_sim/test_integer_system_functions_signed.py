@@ -122,3 +122,30 @@ endmodule
     sim = Simulator(design.get_module("t"), engine=engine, design=design)
     sim.run(max_time=10)
     assert sim.display_output == ["[          8] [          3] [         -1]"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_dimensions_and_increment_match_icarus(engine):
+    """`$dimensions`, `$unpacked_dimensions` and `$increment` (fixed 2026-11-22):
+    vm/vm-fast raised on `$dimensions`, reference and compiled read x or 0. The
+    expected lines are Icarus 14's."""
+    src = """\
+module t;
+  logic [7:0] a;
+  logic b;
+  logic [3:0] m [4];
+  logic [0:3] u [2:5][1:0];
+  integer k;
+  initial begin
+    $display("dims %0d %0d %0d %0d %0d", $dimensions(a), $dimensions(b), $dimensions(m), $dimensions(u), $dimensions(k));
+    $display("udims %0d %0d %0d %0d", $unpacked_dimensions(a), $unpacked_dimensions(b), $unpacked_dimensions(m),
+             $unpacked_dimensions(u));
+    $display("inc %0d %0d %0d %0d %0d", $increment(a), $increment(m), $increment(u), $increment(u, 3), $increment(m, 2));
+    $display("neg %0d", ($increment(m) - 0) < 0);
+  end
+endmodule
+"""
+    design = parse_text(src)
+    sim = Simulator(design.get_module("t"), engine=engine, design=design)
+    sim.run(max_time=10)
+    assert sim.display_output == ["dims 1 0 2 3 1", "udims 0 0 1 2", "inc 1 -1 -1 -1 1", "neg 1"]

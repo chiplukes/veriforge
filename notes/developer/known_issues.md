@@ -45,12 +45,6 @@ engine's parameter evaluation gives 0: `serv_rf_ram`'s default
 in a width or bound is itself an error, so this probably wants an elaboration
 error naming the parameter rather than an x.
 
-### `$dimensions` and `$increment`
-
-**Status**: Open (2026-11-21). vm and vm-fast raise on `$dimensions`
-("unknown function"); reference reads it as x and compiled as 0. `$increment`
-reads x on reference and compiled. Neither appears in the corpus.
-
 ### Compiled engine: a wide (>64-bit) function argument outside a statement
 
 **Status**: Narrow remaining limit (2026-10-15). Function ports and returns

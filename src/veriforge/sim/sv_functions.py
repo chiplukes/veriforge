@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from veriforge.model.nets import Net
     from veriforge.model.variables import Variable
 
-_RANGE_QUERIES = {"$size", "$high", "$low", "$left", "$right"}
+_RANGE_QUERIES = {"$size", "$high", "$low", "$left", "$right", "$increment", "$dimensions", "$unpacked_dimensions"}
 _BIT_FUNCS = {"$countones", "$onehot", "$onehot0", "$isunknown", "$countbits"}
 _SKIP_SLOTS = {"_parse_tree", "attributes", "comments", "loc", "parent", "drivers", "loads"}
 
@@ -66,6 +66,15 @@ def lower_sv_functions(module: Module) -> Module:
         return module
     env = {k: v for k, v in _build_param_env(module).items() if isinstance(v, int)}
     decls = _declarations(module, env)
+    atoms = {*INTEGER_ATOM_WIDTHS, "time"}
+    all_decls: list[Port | Net | Variable] = [*module.ports, *module.nets, *module.variables]
+    scalars = {
+        d.name
+        for d in all_decls
+        if d.width is None
+        and not d.dimensions
+        and (getattr(getattr(d, "kind", None), "value", None) or getattr(d, "data_type", None)) not in atoms
+    }
 
     def width_of(name: str) -> int:
         d = decls.get(name)
@@ -75,6 +84,8 @@ def lower_sv_functions(module: Module) -> Module:
         if not isinstance(expr, FunctionCall):
             return None
         name = expr.name.lower()
+        if name == "$dimensions" and expr.arguments and _arg_name(expr.arguments[0]) in scalars:
+            return _integer_literal(0)  # (a 1-bit scalar has no dimension, as in Icarus)
         if name in _RANGE_QUERIES:
             return _fold_range_query(name, expr, decls, env)
         if name == "$bits" and len(expr.arguments) == 1:
@@ -987,6 +998,10 @@ def _fold_range_query(name: str, call: FunctionCall, decls, env) -> Expression |
     if decl is None:
         return None
     pairs = decl[0]
+    if name == "$dimensions":  # (packed and unpacked)
+        return _integer_literal(len(pairs))
+    if name == "$unpacked_dimensions":
+        return _integer_literal(decl[1])
     dim = 1
     if len(call.arguments) > 1:
         d = const_int(call.arguments[1], env)
@@ -1002,6 +1017,7 @@ def _fold_range_query(name: str, call: FunctionCall, decls, env) -> Expression |
         "$high": max(left, right),
         "$low": min(left, right),
         "$size": abs(left - right) + 1,
+        "$increment": 1 if left >= right else -1,
     }[name]
     return _integer_literal(value)
 
