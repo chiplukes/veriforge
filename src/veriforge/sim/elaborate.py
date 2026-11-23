@@ -2629,7 +2629,8 @@ def declare_implicit_nets(module: Module) -> None:
         declared.update(m.name for m in getattr(enum, "members", None) or ())
 
     def bare_names(expr: object) -> list[str]:
-        if isinstance(expr, Identifier) and not expr.hierarchy:
+        # (A dotted name -- `bus.data`, a struct field or hierarchical reference -- is never an implicit net.)
+        if isinstance(expr, Identifier) and not expr.hierarchy and not any(c in expr.name for c in ".[("):
             return [expr.name]
         if isinstance(expr, Concatenation):
             return [n for part in expr.parts for n in bare_names(part)]
